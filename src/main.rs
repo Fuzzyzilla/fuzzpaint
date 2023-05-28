@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result as AnyResult;
 
 struct EguiEventAccumulator {
@@ -78,8 +80,7 @@ impl EguiEventAccumulator {
                         };
                     }
                     WinEvent::KeyboardInput { input, .. } => {
-                        // -w- glorious
-                        let Some(Some(key)) = input.virtual_keycode.map(Self::winit_to_egui_key) else {return};
+                        let Some(key) = input.virtual_keycode.and_then(Self::winit_to_egui_key) else {return};
                         let pressed = if let winit::event::ElementState::Pressed = input.state {true} else {false};
 
                         let prev_pressed = {
@@ -317,7 +318,7 @@ fn egui_to_winit_cursor(cursor : egui::CursorIcon) -> Option<winit::window::Curs
 
 pub struct Head {
     event_loop : Option<winit::event_loop::EventLoop<()>>,
-    win : winit::window::Window,
+    win : Arc<winit::window::Window>,
     egui_ctx : egui::Context,
     egui_events : EguiEventAccumulator,
 }
@@ -333,8 +334,11 @@ impl Head {
             egui_ctx,
             egui_events: EguiEventAccumulator::new(),
             event_loop: Some(event_loop),
-            win,
+            win: Arc::new(win),
         })
+    }
+    pub fn window(&self) -> Arc<winit::window::Window> {
+        self.win.clone()
     }
     fn apply_platform_output(&mut self, out: &mut egui::PlatformOutput) {
         //Todo: Copied text
@@ -390,6 +394,317 @@ impl Head {
     }
 }
 
+struct Queue {
+    queue : Arc<vulkano::device::Queue>,
+    family_idx : u32,
+}
+impl Queue {
+    pub fn idx(&self) -> u32 {
+        self.family_idx
+    }
+    pub fn queue(&self) -> &vulkano::device::Queue {
+        &self.queue
+    }
+}
+
+enum QueueSrc {
+    UseGraphics,
+    Queue(Queue),
+}
+
+struct QueueIndices {
+    graphics : u32,
+    present : Option<u32>,
+    compute : u32,
+}
+struct Queues {
+    graphics_queue : Queue,
+    present_queue : Option<QueueSrc>,
+    compute_queue : QueueSrc,
+}
+impl Queues {
+    pub fn present(&self) -> Option<&Queue> {
+        match &self.present_queue {
+            None => None,
+            Some(QueueSrc::UseGraphics) => Some(self.graphics()),
+            Some(QueueSrc::Queue(q)) => Some(q),
+        }
+    }
+    pub fn graphics(&self) -> &Queue {
+        &self.graphics_queue
+    }
+    pub fn compute(&self) -> &Queue {
+        match &self.compute_queue {
+            QueueSrc::UseGraphics => self.graphics(),
+            QueueSrc::Queue(q) => q
+        }
+    }
+    pub fn has_unique_compute(&self) -> bool {
+        match &self.compute_queue {
+            QueueSrc::UseGraphics => false,
+            QueueSrc::Queue(..) => true
+        }
+    }
+}
+
+struct RenderHead {
+    swapchain: vulkano::swapchain::Swapchain,
+    surface: vulkano::swapchain::Surface,
+    /// Some if a different Queue from Graphics, None if the same queue.
+    /// ```present_queue.unwrap_or(graphics_queue)```
+    present_queue: Option<vulkano::device::Queue>,
+}
+
+struct RenderContext {
+    library : vulkano::VulkanLibrary,
+    instance : vulkano::instance::Instance,
+    physical_device : vulkano::device::physical::PhysicalDevice,
+    device : vulkano::device::Device,
+    queues: Queues,
+
+    head: Option<RenderHead>,
+}
+
+
+impl RenderContext {
+    pub fn new_with_head(head: &Head) -> AnyResult<Self> {
+        let library = vulkano::VulkanLibrary::new()?;
+        let required_instance_extensions = vulkano_win::required_extensions(&library);
+
+        let instance = vulkano::instance::Instance::new(
+            library.clone(),
+            vulkano::instance::InstanceCreateInfo{
+                application_name: Some("Fuzzpaint-vk".to_string()),
+                application_version: vulkano::Version { major: 0, minor: 1, patch: 0 },
+                enabled_extensions: required_instance_extensions,
+                ..Default::default()
+            }
+        )?;
+
+        let surface = vulkano_win::create_surface_from_winit(head.window(), instance.clone())?;
+        let required_device_extensions = vulkano::device::DeviceExtensions {
+            khr_swapchain : true,
+            ..Default::default()
+        };
+
+        let Some((physical_device, queue_indices)) =
+            Self::choose_physical_device(instance.clone(), required_device_extensions, Some(surface.clone()))?
+            else {return Err(anyhow::anyhow!("Failed to find a suitable Vulkan device."))};
+
+        println!("Chose physical device {} ({:?})", physical_device.properties().device_name, physical_device.properties().driver_info);
+
+        let (device, queues) = Self::create_device(physical_device.clone(), queue_indices, required_device_extensions)?;
+
+        println!("Got device :3");
+
+        todo!()
+    }
+    fn create_device(physical_device : Arc<vulkano::device::physical::PhysicalDevice>, queue_indices : QueueIndices, extensions: vulkano::device::DeviceExtensions)
+        -> AnyResult<(Arc<vulkano::device::Device>, Queues)>{
+        //Need a graphics queue.
+        let mut graphics_queue_info =
+            vulkano::device::QueueCreateInfo{
+                queue_family_index: queue_indices.graphics,
+                queues: vec![0.5],
+                ..Default::default()
+            };
+        
+        //Todo: what if compute and present end up in the same family, aside from graphics? Unlikely :)
+        let (has_compute_queue, compute_queue_info) = {
+            if queue_indices.compute == queue_indices.graphics {
+                let capacity = physical_device.queue_family_properties()[graphics_queue_info.queue_family_index as usize].queue_count;
+                //Is there room for another queue?
+                if capacity as usize > graphics_queue_info.queues.len() {
+                    graphics_queue_info.queues.push(0.5);
+
+                    //In the graphics queue family. No queue info.
+                    (true, None)
+                } else {
+                    //Share a queue with graphics.
+                    (false, None)
+                }
+            } else {
+                (true, Some(
+                    vulkano::device::QueueCreateInfo{
+                        queue_family_index: queue_indices.compute,
+                        queues: vec![0.5],
+                        ..Default::default()
+                    }
+                ))
+            }
+        };
+
+        let present_queue_info = queue_indices.present.map( |present| {
+            if present == queue_indices.graphics {
+                let capacity = physical_device.queue_family_properties()[graphics_queue_info.queue_family_index as usize].queue_count;
+                //Is there room for another queue?
+                if capacity as usize > graphics_queue_info.queues.len() {
+                    graphics_queue_info.queues.push(0.5);
+
+                    //In the graphics queue family. No queue info.
+                    (true, None)
+                } else {
+                    //Share a queue with graphics.
+                    (false, None)
+                }
+            } else {
+                (true, Some(
+                    vulkano::device::QueueCreateInfo{
+                        queue_family_index: present,
+                        queues: vec![0.5],
+                        ..Default::default()
+                    }
+                ))
+            }
+        });
+
+        let mut create_infos = vec![graphics_queue_info];
+
+        if let Some(compute_create_info) = compute_queue_info {
+            create_infos.push(compute_create_info);
+        }
+        if let Some((_, Some(ref present_create_info))) = present_queue_info {
+            create_infos.push(present_create_info.clone());
+        }
+
+        let (device, mut queues) = vulkano::device::Device::new(
+            physical_device,
+            vulkano::device::DeviceCreateInfo{
+                enabled_extensions: extensions,
+                enabled_features: vulkano::device::Features::empty(),
+                queue_create_infos: create_infos,
+                ..Default::default()
+            }
+        )?;
+
+        let graphics_queue = Queue{
+            queue: queues.next().unwrap(),
+            family_idx: queue_indices.graphics,
+        };
+        //Todo: Are these indices correct?
+        let compute_queue = if has_compute_queue {
+            QueueSrc::Queue(
+                Queue{
+                    queue: queues.next().unwrap(),
+                    family_idx: queue_indices.compute,
+                }
+            )
+        } else {
+            QueueSrc::UseGraphics
+        };
+        let present_queue = present_queue_info.map(|(has_present, _)| {
+            if has_present {
+                QueueSrc::Queue(
+                    Queue{
+                        queue: queues.next().unwrap(),
+                        family_idx: queue_indices.present.unwrap(),
+                    })
+            } else {
+                QueueSrc::UseGraphics
+            }
+        });
+        assert!(queues.next().is_none());
+
+        Ok(
+            (
+                device,
+                Queues{
+                    graphics_queue,
+                    compute_queue,
+                    present_queue
+                }
+            )
+        )
+    }
+    /// Find a device that fits our needs, including the ability to present to the surface if in non-headless mode.
+    /// Horrible signature - Returns Ok(None) if no device found, Ok(Some((device, queue indices))) if suitable device found.
+    fn choose_physical_device(instance: Arc<vulkano::instance::Instance>, required_extensions: vulkano::device::DeviceExtensions, compatible_surface: Option<Arc<vulkano::swapchain::Surface>>)
+        -> AnyResult<Option<(Arc<vulkano::device::physical::PhysicalDevice>, QueueIndices)>> {
+        
+        //TODO: does not respect queue family max queue counts. This will need to be redone in some sort of 
+        //multi-pass shenanigan to properly find a good queue setup. Also requires that graphics and compute queues be transfer as well.
+        let res = instance.enumerate_physical_devices()?
+            .filter_map(|device| {
+                use vulkano::device::QueueFlags;
+
+                //Make sure it has what we need
+                if !device.supported_extensions().contains(&required_extensions) {
+                    return None;
+                }
+
+                let families = device.queue_family_properties();
+
+                //Find a queue that supports the requested surface, if any
+                let present_queue = compatible_surface
+                    .clone()
+                    .and_then(|surface| {
+                        families.iter().enumerate().find(
+                            |(family_idx, _)| {
+                                //Assume error is false. Todo?
+                                device.surface_support(*family_idx as u32, surface.as_ref()).unwrap_or(false)
+                            }
+                        )
+                    });
+                
+                //We needed a present queue, but none was found. Disqualify this device!
+                if compatible_surface.is_some() && present_queue.is_none() {
+                    return None;
+                }
+
+                //We need a graphics queue, always! Otherwise, disqualify.
+                let Some(graphics_queue) = families
+                    .iter()
+                    .enumerate()
+                    .find(|q| {
+                        q.1.queue_flags.contains(QueueFlags::GRAPHICS | QueueFlags::TRANSFER)
+                    }) else {return None};
+                
+                //We need a compute queue. This can be the same as graphics, but preferably not.
+                let graphics_supports_compute = graphics_queue.1.queue_flags.contains(QueueFlags::COMPUTE);
+
+                //Find a different queue that supports compute
+                let compute_queue = families
+                    .iter()
+                    .enumerate()
+                    //Ignore the family we chose for graphics
+                    .filter(|&(idx, _)| idx != graphics_queue.0)
+                    .find(|q| {
+                        q.1.queue_flags.contains(QueueFlags::COMPUTE | QueueFlags::TRANSFER)
+                    });
+                
+                //Failed to find compute queue, shared or otherwise. Disqualify!
+                if !graphics_supports_compute && compute_queue.is_none() {
+                    return None;
+                }
+
+                Some(
+                    (
+                        device.clone(),
+                        QueueIndices {
+                            compute: compute_queue.unwrap_or(graphics_queue).0 as u32,
+                            graphics: graphics_queue.0 as u32,
+                            present: present_queue.map(|(idx, _)| idx as u32),
+
+                        }
+                    )
+                )
+            })
+            .min_by_key(|(device, _)| {
+                use vulkano::device::physical::PhysicalDeviceType;
+                match device.properties().device_type {
+                    PhysicalDeviceType::DiscreteGpu => 0,
+                    PhysicalDeviceType::IntegratedGpu => 1,
+                    PhysicalDeviceType::VirtualGpu => 2,
+
+                    _ => 3
+                }
+            });
+        
+        Ok(res)
+    }
+}
+
 fn main() {
-    Head::new().unwrap().run();
+    let head = Head::new().unwrap();
+    RenderContext::new_with_head(&head);
 }
