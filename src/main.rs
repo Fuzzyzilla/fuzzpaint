@@ -339,9 +339,10 @@ impl WindowSurface {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
     }
-    pub fn with_render_surface(self, render: RenderSurface) -> WindowRenderer {
+    pub fn with_render_surface(self, render_surface: RenderSurface) -> WindowRenderer {
         WindowRenderer {
             win: self.win,
+            render_surface,
             event_loop: Some(self.event_loop),
             egui_ctx: Default::default(),
             egui_events: Default::default(),
@@ -352,6 +353,7 @@ impl WindowSurface {
 pub struct WindowRenderer {
     event_loop : Option<winit::event_loop::EventLoop<()>>,
     win : Arc<winit::window::Window>,
+    render_surface : RenderSurface,
     egui_ctx : egui::Context,
     egui_events : EguiEventAccumulator,
 }
@@ -470,8 +472,26 @@ pub struct RenderSurface {
     swapchain: Arc<vulkano::swapchain::Swapchain>,
     surface: Arc<vulkano::swapchain::Surface>,
     swapchain_images: Vec<Arc<vulkano::image::SwapchainImage>>,
+
+    swapchain_create_info: vulkano::swapchain::SwapchainCreateInfo,
 }
 impl RenderSurface {
+    pub fn recreate(self, new_size: Option<[u32; 2]>) -> AnyResult<Self> {
+        let mut new_info = self.swapchain_create_info;
+        if let Some(new_size) = new_size {
+            new_info.image_extent = new_size;
+        }
+        let (swapchain, swapchain_images) = self.swapchain.recreate(new_info.clone())?;
+
+        Ok(
+            Self {
+                swapchain,
+                swapchain_images,
+                swapchain_create_info: new_info,
+                ..self
+            }
+        )
+    }
     fn new(
         physical_device : Arc<vulkano::device::physical::PhysicalDevice>,
         device : Arc<vulkano::device::Device>,
@@ -506,26 +526,30 @@ impl RenderSurface {
             }
         };
 
+        let swapchain_create_info = 
+            vulkano::swapchain::SwapchainCreateInfo {
+                min_image_count: image_count,
+                image_format: Some(format),
+                image_color_space: color_space,
+                image_extent: size,
+                image_usage: vulkano::image::ImageUsage::COLOR_ATTACHMENT,
+                composite_alpha: vulkano::swapchain::CompositeAlpha::Inherit,
+                present_mode,
+                clipped: true, // We wont read the framebuffer.
+                ..Default::default()
+            };
+
         let (swapchain, images) = vulkano::swapchain::Swapchain::new(
                 device.clone(),
                 surface.clone(),
-                vulkano::swapchain::SwapchainCreateInfo {
-                    min_image_count: image_count,
-                    image_format: Some(format),
-                    image_color_space: color_space,
-                    image_extent: size,
-                    image_usage: vulkano::image::ImageUsage::COLOR_ATTACHMENT,
-                    composite_alpha: vulkano::swapchain::CompositeAlpha::Inherit,
-                    present_mode,
-                    clipped: true, // We wont read the framebuffer.
-                    ..Default::default()
-                }
-            )?;
+                swapchain_create_info.clone(),
+        )?;
 
         Ok(Self {
             swapchain,
             surface: surface.clone(),
-            swapchain_images: images
+            swapchain_images: images,
+            swapchain_create_info,
         })
     }
 }
@@ -800,6 +824,7 @@ impl RenderContext {
 }
 
 //If we return, it was due to an error.
+//convert::Infallible is a quite ironic name for this useage, isn't it? :P
 fn main() -> AnyResult<std::convert::Infallible> {
     let window_surface = WindowSurface::new()?;
     let (render_context, render_surface) = RenderContext::new_with_window_surface(&window_surface)?;
