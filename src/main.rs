@@ -273,6 +273,11 @@ impl EguiEventAccumulator {
         }
     }
 }
+impl Default for EguiEventAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 fn egui_to_winit_cursor(cursor : egui::CursorIcon) -> Option<winit::window::CursorIcon> {
     use egui::CursorIcon as GuiCursor;
@@ -316,27 +321,41 @@ fn egui_to_winit_cursor(cursor : egui::CursorIcon) -> Option<winit::window::Curs
     }
 }
 
-pub struct Head {
-    event_loop : Option<winit::event_loop::EventLoop<()>>,
+pub struct WindowSurface {
+    event_loop : winit::event_loop::EventLoop<()>,
     win : Arc<winit::window::Window>,
-    egui_ctx : egui::Context,
-    egui_events : EguiEventAccumulator,
 }
-impl Head {
+impl WindowSurface {
     pub fn new() -> AnyResult<Self> {
         let event_loop = winit::event_loop::EventLoopBuilder::default().build();
         let win = winit::window::WindowBuilder::default()
             .build(&event_loop)?;
 
-        let egui_ctx = egui::Context::default();
-
         Ok(Self {
-            egui_ctx,
-            egui_events: EguiEventAccumulator::new(),
-            event_loop: Some(event_loop),
+            event_loop: event_loop,
             win: Arc::new(win),
         })
     }
+    pub fn window(&self) -> Arc<winit::window::Window> {
+        self.win.clone()
+    }
+    pub fn with_render_surface(self, render: RenderSurface) -> WindowRenderer {
+        WindowRenderer {
+            win: self.win,
+            event_loop: Some(self.event_loop),
+            egui_ctx: Default::default(),
+            egui_events: Default::default(),
+        }
+    }
+}
+
+pub struct WindowRenderer {
+    event_loop : Option<winit::event_loop::EventLoop<()>>,
+    win : Arc<winit::window::Window>,
+    egui_ctx : egui::Context,
+    egui_events : EguiEventAccumulator,
+}
+impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
     }
@@ -447,12 +466,12 @@ impl Queues {
     }
 }
 
-struct RenderHead {
+pub struct RenderSurface {
     swapchain: Arc<vulkano::swapchain::Swapchain>,
     surface: Arc<vulkano::swapchain::Surface>,
     swapchain_images: Vec<Arc<vulkano::image::SwapchainImage>>,
 }
-impl RenderHead {
+impl RenderSurface {
     fn new(
         physical_device : Arc<vulkano::device::physical::PhysicalDevice>,
         device : Arc<vulkano::device::Device>,
@@ -526,7 +545,7 @@ impl RenderContext {
     pub fn new_headless() -> AnyResult<Self> {
         unimplemented!()
     }
-    pub fn new_with_head(head: &Head) -> AnyResult<(Self, RenderHead)> {
+    pub fn new_with_window_surface(win: &WindowSurface) -> AnyResult<(Self, RenderSurface)> {
         let library = vulkano::VulkanLibrary::new()?;
         let required_instance_extensions = vulkano_win::required_extensions(&library);
 
@@ -540,7 +559,7 @@ impl RenderContext {
             }
         )?;
 
-        let surface = vulkano_win::create_surface_from_winit(head.window(), instance.clone())?;
+        let surface = vulkano_win::create_surface_from_winit(win.window(), instance.clone())?;
         let required_device_extensions = vulkano::device::DeviceExtensions {
             khr_swapchain : true,
             ..Default::default()
@@ -557,9 +576,9 @@ impl RenderContext {
         println!("Got device :3");
 
         // We have a device! Now to create the swapchain..
-        let image_size = head.window().inner_size();
+        let image_size = win.window().inner_size();
 
-        let render_head = RenderHead::new(physical_device.clone(), device.clone(), surface.clone(), image_size.into())?;
+        let render_head = RenderSurface::new(physical_device.clone(), device.clone(), surface.clone(), image_size.into())?;
         Ok(
             (
                 Self {
@@ -782,8 +801,10 @@ impl RenderContext {
 
 //If we return, it was due to an error.
 fn main() -> AnyResult<std::convert::Infallible> {
-    let head = Head::new()?;
-    let (render_context, render_head) = RenderContext::new_with_head(&head)?;
+    let window_surface = WindowSurface::new()?;
+    let (render_context, render_surface) = RenderContext::new_with_window_surface(&window_surface)?;
+    let window_renderer = window_surface.with_render_surface(render_surface);
     println!("Made render context!");
-    head.run()
+
+    window_renderer.run();
 }
