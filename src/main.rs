@@ -452,7 +452,64 @@ struct RenderHead {
     surface: Arc<vulkano::swapchain::Surface>,
     swapchain_images: Vec<Arc<vulkano::image::SwapchainImage>>,
 }
+impl RenderHead {
+    fn new(
+        physical_device : Arc<vulkano::device::physical::PhysicalDevice>,
+        device : Arc<vulkano::device::Device>,
+        surface: Arc<vulkano::swapchain::Surface>,
+        size: [u32; 2],
+    ) -> AnyResult<Self> {
+        
+        let surface_info = vulkano::swapchain::SurfaceInfo::default();
+        let capabilies = physical_device.surface_capabilities(&surface, surface_info.clone())?;
 
+        let Some(&(format, color_space)) = physical_device.surface_formats(&surface, surface_info)?.first()
+            else {return Err(anyhow::anyhow!("Device reported no valid surface formats."))};
+
+        //Use mailbox for low-latency, if supported. Otherwise, FIFO is always supported.
+        let present_mode =
+            physical_device.surface_present_modes(&surface)
+            .map(|mut modes| {
+                if let Some(_) = modes.find(|mode| *mode == vulkano::swapchain::PresentMode::Mailbox) {
+                    vulkano::swapchain::PresentMode::Mailbox
+                } else {
+                    vulkano::swapchain::PresentMode::Fifo
+                }
+            }).unwrap_or(vulkano::swapchain::PresentMode::Fifo);
+
+        let image_count = {
+            //Get one more then minimum, if maximum allows
+            let min_image_count = capabilies.min_image_count + 1;
+            if let Some(max_count) = capabilies.max_image_count {
+                min_image_count.min(max_count)
+            } else {
+                min_image_count
+            }
+        };
+
+        let (swapchain, images) = vulkano::swapchain::Swapchain::new(
+                device.clone(),
+                surface.clone(),
+                vulkano::swapchain::SwapchainCreateInfo {
+                    min_image_count: image_count,
+                    image_format: Some(format),
+                    image_color_space: color_space,
+                    image_extent: size,
+                    image_usage: vulkano::image::ImageUsage::COLOR_ATTACHMENT,
+                    composite_alpha: vulkano::swapchain::CompositeAlpha::Inherit,
+                    present_mode,
+                    clipped: true, // We wont read the framebuffer.
+                    ..Default::default()
+                }
+            )?;
+
+        Ok(Self {
+            swapchain,
+            surface: surface.clone(),
+            swapchain_images: images
+        })
+    }
+}
 struct RenderContext {
     library : Arc<vulkano::VulkanLibrary>,
     instance : Arc<vulkano::instance::Instance>,
@@ -460,12 +517,16 @@ struct RenderContext {
     device : Arc<vulkano::device::Device>,
     queues: Queues,
 
-    head: Option<RenderHead>,
+    command_buffer_alloc : vulkano::command_buffer::allocator::StandardCommandBufferAllocator,
+    memory_alloc: vulkano::memory::allocator::StandardMemoryAllocator,
 }
 
 
 impl RenderContext {
-    pub fn new_with_head(head: &Head) -> AnyResult<Self> {
+    pub fn new_headless() -> AnyResult<Self> {
+        unimplemented!()
+    }
+    pub fn new_with_head(head: &Head) -> AnyResult<(Self, RenderHead)> {
         let library = vulkano::VulkanLibrary::new()?;
         let required_instance_extensions = vulkano_win::required_extensions(&library);
 
@@ -497,75 +558,22 @@ impl RenderContext {
 
         // We have a device! Now to create the swapchain..
         let image_size = head.window().inner_size();
-        let (swapchain, swapchain_images) = Self::create_swapchain(physical_device.clone(), device.clone(), surface.clone(), image_size.into())?;
+
+        let render_head = RenderHead::new(physical_device.clone(), device.clone(), surface.clone(), image_size.into())?;
         Ok(
-            Self {
-                library,
-                instance,
-                device,
-                physical_device,
-                queues,
-                head: Some(
-                    RenderHead {
-                        swapchain,
-                        swapchain_images,
-                        surface,
-                    }
-                )
-            }
+            (
+                Self {
+                    command_buffer_alloc: vulkano::command_buffer::allocator::StandardCommandBufferAllocator::new(device.clone(), Default::default()),
+                    memory_alloc: vulkano::memory::allocator::StandardMemoryAllocator::new_default(device.clone()),
+                    library,
+                    instance,
+                    device,
+                    physical_device,
+                    queues,
+                },
+                render_head
+            )
         )
-    }
-    fn create_swapchain(
-        physical_device : Arc<vulkano::device::physical::PhysicalDevice>,
-        device : Arc<vulkano::device::Device>,
-        surface: Arc<vulkano::swapchain::Surface>,
-        size: [u32; 2],
-    ) -> AnyResult<(Arc<vulkano::swapchain::Swapchain>, Vec<Arc<vulkano::image::SwapchainImage>>)> {
-        
-        let surface_info = vulkano::swapchain::SurfaceInfo::default();
-        let capabilies = physical_device.surface_capabilities(&surface, surface_info.clone())?;
-
-        let Some(&(format, color_space)) = physical_device.surface_formats(&surface, surface_info)?.first()
-            else {return Err(anyhow::anyhow!("Device reported no valid surface formats."))};
-
-        //Use mailbox for low-latency, if supported. Otherwise, FIFO is always supported.
-        let present_mode =
-            physical_device.surface_present_modes(&surface)
-            .map(|mut modes| {
-                if let Some(_) = modes.find(|mode| *mode == vulkano::swapchain::PresentMode::Mailbox) {
-                    vulkano::swapchain::PresentMode::Mailbox
-                } else {
-                    vulkano::swapchain::PresentMode::Fifo
-                }
-            }).unwrap_or(vulkano::swapchain::PresentMode::Fifo);
-
-        let image_count = {
-            //Get one more then minimum, if maximum allows
-            let min_image_count = capabilies.min_image_count + 1;
-            if let Some(max_count) = capabilies.max_image_count {
-                min_image_count.min(max_count)
-            } else {
-                min_image_count
-            }
-        };
-
-        let res = vulkano::swapchain::Swapchain::new(
-                device.clone(),
-                surface.clone(),
-                vulkano::swapchain::SwapchainCreateInfo {
-                    min_image_count: image_count,
-                    image_format: Some(format),
-                    image_color_space: color_space,
-                    image_extent: size,
-                    image_usage: vulkano::image::ImageUsage::COLOR_ATTACHMENT,
-                    composite_alpha: vulkano::swapchain::CompositeAlpha::Inherit,
-                    present_mode,
-                    clipped: true, // We wont read the framebuffer.
-                    ..Default::default()
-                }
-            )?;
-
-        Ok(res)
     }
     fn create_device(physical_device : Arc<vulkano::device::physical::PhysicalDevice>, queue_indices : QueueIndices, extensions: vulkano::device::DeviceExtensions)
         -> AnyResult<(Arc<vulkano::device::Device>, Queues)>{
@@ -775,7 +783,7 @@ impl RenderContext {
 //If we return, it was due to an error.
 fn main() -> AnyResult<std::convert::Infallible> {
     let head = Head::new()?;
-    RenderContext::new_with_head(&head)?;
+    let (render_context, render_head) = RenderContext::new_with_head(&head)?;
     println!("Made render context!");
     head.run()
 }
