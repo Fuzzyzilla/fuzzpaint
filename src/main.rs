@@ -324,19 +324,21 @@ fn egui_to_winit_cursor(cursor : egui::CursorIcon) -> Option<winit::window::Curs
 mod EguiRenderer {
     use std::sync::Arc;
     use anyhow::{Result as AnyResult, Context};
-    use vulkano::{format, pipeline::graphics::vertex_input::Vertex};
+    use vulkano::pipeline::{graphics::vertex_input::Vertex, Pipeline};
     mod fs {
         vulkano_shaders::shader!{
             ty: "fragment",
             src:
             r"#version 460
 
+            layout(binding = 0, set = 0) uniform sampler2D tex;
+
             layout(location = 0) in vec2 uv;
             layout(location = 1) in vec4 vertex_color;
             layout(location = 0) out vec4 out_color;
 
             void main() {
-
+                out_color = vertex_color * texture(tex, uv);
             }",
         }
     }
@@ -354,7 +356,9 @@ mod EguiRenderer {
             layout(location = 1) out vec4 vertex_color;
 
             void main() {
-
+                gl_Position = vec4(pos, 0.0, 1.0); // Todo. Transform matrix. Blegh.
+                out_uv = uv;
+                vertex_color = color;
             }",
         }
     }
@@ -368,10 +372,21 @@ mod EguiRenderer {
         #[format(R32G32_SFLOAT)]
         uv : [f32; 2],
     }
+    impl From<egui::epaint::Vertex> for EguiVertex {
+        fn from(value: egui::epaint::Vertex) -> Self {
+            Self {
+                pos : value.pos.into(),
+                color: value.color.to_array(),
+                uv: value.uv.into()
+            }
+        }
+    }
     struct EguiTexture {
         image : Arc<vulkano::image::StorageImage>,
         view : Arc<vulkano::image::view::ImageView<vulkano::image::StorageImage>>,
         sampler: Arc<vulkano::sampler::Sampler>,
+
+        descriptor_set: Arc<vulkano::descriptor_set::PersistentDescriptorSet>,
     }
     struct EguiRenderer {
         images : std::collections::HashMap<egui::TextureId, EguiTexture>,
@@ -379,6 +394,7 @@ mod EguiRenderer {
 
         render_pass : Arc<vulkano::render_pass::RenderPass>,
         pipeline: Arc<vulkano::pipeline::graphics::GraphicsPipeline>,
+        framebuffers: Vec<Arc<vulkano::render_pass::Framebuffer>>,
     }
     impl EguiRenderer {
         pub fn new(render_context: Arc<super::RenderContext>, head: super::WindowRenderer) -> AnyResult<Self> {
@@ -426,6 +442,13 @@ mod EguiRenderer {
                 .color_blend_state(
                      vulkano::pipeline::graphics::color_blend::ColorBlendState::new(1).blend_alpha()
                 )
+                .viewport_state(
+                    vulkano::pipeline::graphics::viewport::ViewportState::Dynamic {
+                        count: 1,
+                        viewport_count_dynamic: false,
+                        scissor_count_dynamic: false,
+                    }
+                )
                 .build(render_context.device.clone())?;
 
             Ok(
@@ -433,9 +456,185 @@ mod EguiRenderer {
                     images: Default::default(),
                     render_pass: renderpass,
                     pipeline,
-                    render_context: render_context.clone()
+                    render_context: render_context.clone(),
+                    framebuffers: Vec::new(),
                 }
             )
+        }
+        pub fn gen_framebuffers(&mut self, surface: &super::RenderSurface) -> AnyResult<()> {
+            let framebuffers : AnyResult<Vec<_>> =
+                surface.swapchain_images
+                .iter()
+                .map(|image| -> AnyResult<_> {
+                    let fb = vulkano::render_pass::Framebuffer::new(
+                        self.render_pass.clone(),
+                        vulkano::render_pass::FramebufferCreateInfo {
+                            attachments: vec![
+                                vulkano::image::view::ImageView::new_default(image.clone())?
+                            ],
+                            ..Default::default()
+                        }
+                    )?;
+
+                    Ok(fb)
+                }).collect();
+            
+            self.framebuffers = framebuffers?;
+
+            Ok(())
+        }
+        pub fn upload_and_render(
+            &self,
+            framebuffer: Arc<vulkano::render_pass::Framebuffer>,
+            tesselated_geom: &[egui::epaint::ClippedPrimitive],
+        ) -> AnyResult<vulkano::command_buffer::PrimaryAutoCommandBuffer> {
+            let mut vert_buff_size = 0;
+            let mut index_buff_size = 0;
+            for clipped in tesselated_geom {
+                match &clipped.primitive {
+                    egui::epaint::Primitive::Mesh(mesh) => {
+                        vert_buff_size += mesh.vertices.len();
+                        index_buff_size += mesh.indices.len();
+                    },
+                    egui::epaint::Primitive::Callback(..) => {
+                        //Todo. But I'm not sure I mind this feature being unimplemented :P
+                        unimplemented!("Primitive Callback is not supported.");
+                    },
+                }
+            }
+
+            let mut vertex_vec = Vec::with_capacity(vert_buff_size);
+            let mut index_vec = Vec::with_capacity(index_buff_size);
+
+
+            for clipped in tesselated_geom {
+                if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
+                    vertex_vec.extend(
+                        mesh.vertices.iter()
+                        .cloned()
+                        .map(EguiVertex::from)
+                    );
+                    index_vec.extend_from_slice(&mesh.indices);
+                }
+            }
+
+            let vertices = vulkano::buffer::Buffer::from_iter(
+                &self.render_context.memory_alloc,
+                vulkano::buffer::BufferCreateInfo {
+                    usage: vulkano::buffer::BufferUsage::VERTEX_BUFFER,
+                    ..Default::default()
+                },
+                vulkano::memory::allocator::AllocationCreateInfo {
+                    usage: vulkano::memory::allocator::MemoryUsage::Upload,
+                    ..Default::default()
+                },
+                vertex_vec
+            )?;
+            let indices = vulkano::buffer::Buffer::from_iter(
+                &self.render_context.memory_alloc,
+                vulkano::buffer::BufferCreateInfo {
+                    usage: vulkano::buffer::BufferUsage::INDEX_BUFFER,
+                    ..Default::default()
+                },
+                vulkano::memory::allocator::AllocationCreateInfo {
+                    usage: vulkano::memory::allocator::MemoryUsage::Upload,
+                    ..Default::default()
+                },
+                index_vec
+            )?;
+
+            let mut command_buffer_builder = vulkano::command_buffer::AutoCommandBufferBuilder::primary(
+                    &self.render_context.command_buffer_alloc,
+                    self.render_context.queues.graphics().idx(),
+                    vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit
+                )?;
+            command_buffer_builder
+                .begin_render_pass(
+                    vulkano::command_buffer::RenderPassBeginInfo{
+                        clear_values: vec![
+                            Some(
+                                vulkano::format::ClearValue::Float([0.2, 0.2, 0.2, 1.0])
+                            )
+                        ],
+                        ..vulkano::command_buffer::RenderPassBeginInfo::framebuffer(framebuffer.clone())
+                    },
+                    vulkano::command_buffer::SubpassContents::Inline
+                )?
+                .bind_pipeline_graphics(self.pipeline.clone())
+                .bind_vertex_buffers(0, [vertices])
+                .bind_index_buffer(indices)
+                .set_viewport(
+                    0,
+                    [vulkano::pipeline::graphics::viewport::Viewport{
+                        depth_range: 0.0..1.0,
+                        dimensions: framebuffer.extent().map(|dim| dim as f32),
+                        origin: [0.0; 2],
+                    }]
+                );
+
+            let mut start_vertex_buffer_offset : usize = 0;
+            let mut start_index_buffer_offset : usize = 0;
+
+            let (texture_set_idx, _) = self.texture_set_layout();
+            let pipeline_layout = self.pipeline.layout();
+
+            for clipped in tesselated_geom {
+                if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
+                    // *Technically* it wants a float scissor rect. But.. oh well
+                    let origin = clipped.clip_rect.left_top();
+                    let origin = [
+                        origin.x.max(0.0) as u32,
+                        origin.y.max(0.0) as u32
+                    ];
+
+                    let dimensions = clipped.clip_rect.size();
+                    let dimensions = [
+                        dimensions.x as u32,
+                        dimensions.y as u32
+                    ];
+
+                    command_buffer_builder
+                        .set_scissor(
+                            0,
+                            [
+                                vulkano::pipeline::graphics::viewport::Scissor{
+                                    origin,
+                                    dimensions
+                                }
+                            ]
+                        )
+                        //Maybe there's a better way than rebinding every draw.
+                        //shaderSampledImageArrayDynamicIndexing perhaps?
+                        .bind_descriptor_sets(
+                            self.pipeline.bind_point(),
+                            pipeline_layout.clone(),
+                            texture_set_idx,
+                            self.images.get(&mesh.texture_id)
+                                .expect("Egui draw requested non-existent texture")
+                                .descriptor_set.clone()
+                        )
+                        .draw_indexed(
+                            mesh.indices.len() as u32,
+                            1,
+                            start_index_buffer_offset as u32,
+                            start_vertex_buffer_offset as i32,
+                            0
+                        )?;
+                    start_index_buffer_offset += mesh.indices.len();
+                    start_vertex_buffer_offset += mesh.vertices.len();
+                }
+            }
+
+            command_buffer_builder.end_render_pass()?;
+            let command_buffer = command_buffer_builder.build()?;
+
+            Ok(command_buffer)
+        }
+        ///Get the descriptor set layout for the texture uniform. (set_idx, layout)
+        fn texture_set_layout(&self) -> (u32, Arc<vulkano::descriptor_set::layout::DescriptorSetLayout>) {
+            let pipe_layout = self.pipeline.layout();
+            let layout = pipe_layout.set_layouts().get(0).expect("Egui shader needs a sampler!").clone();
+            (0, layout)
         }
         pub fn do_image_deltas(
             &mut self,
@@ -496,6 +695,9 @@ mod EguiRenderer {
                     vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit
                 )?;
             
+            //In case we need to allocate new textures.
+            let (texture_set_idx, texture_set_layout) = self.texture_set_layout();
+
             let mut current_base_offset = 0;
             for (id, delta) in &deltas.set {
                 let entry = self.images.entry(*id);
@@ -534,14 +736,45 @@ mod EguiRenderer {
                             }
                         };
     
-                        let view = vulkano::image::view::ImageView::new_default(image.clone())?;
+                        let mapping = if let egui::ImageData::Font(_) = delta.image {
+                            //Font is one channel, representing percent coverage of white.
+                            vulkano::sampler::ComponentMapping {
+                                a: vulkano::sampler::ComponentSwizzle::Red,
+                                r: vulkano::sampler::ComponentSwizzle::One,
+                                g: vulkano::sampler::ComponentSwizzle::One,
+                                b: vulkano::sampler::ComponentSwizzle::One,
+                            }
+                        } else {
+                            vulkano::sampler::ComponentMapping::identity()
+                        };
+
+                        let view = vulkano::image::view::ImageView::new(
+                            image.clone(),
+                            vulkano::image::view::ImageViewCreateInfo {
+                                component_mapping: mapping,
+                                ..vulkano::image::view::ImageViewCreateInfo::from_image(&image)
+                            }
+                        )?;
+
+                        //Could optimize here, re-using the four possible options of sampler.
                         let sampler = vulkano::sampler::Sampler::new(
                             self.render_context.device.clone(),
                             vulkano::sampler::SamplerCreateInfo {
                                 mag_filter: egui_to_vulkano_filter(delta.options.magnification),
                                 min_filter: egui_to_vulkano_filter(delta.options.minification),
+
                                 ..Default::default()
                             }
+                        )?;
+
+                        let descriptor_set = vulkano::descriptor_set::persistent::PersistentDescriptorSet::new(
+                            &self.render_context.descriptor_set_alloc,
+                            texture_set_layout.clone(), 
+                            [
+                                vulkano::descriptor_set::WriteDescriptorSet::image_view_sampler(
+                                    texture_set_idx, view.clone(), sampler.clone()
+                                )
+                            ]
                         )?;
                         Ok(
                             vacant.insert(         
@@ -549,6 +782,7 @@ mod EguiRenderer {
                                     image,
                                     view,
                                     sampler,
+                                    descriptor_set
                                 }
                             ).image.clone()
                         )
@@ -636,7 +870,6 @@ impl WindowSurface {
             event_loop: Some(self.event_loop),
             egui_ctx: Default::default(),
             egui_events: Default::default(),
-            swapchain_framebuffers: Vec::new(),
         }
     }
 }
@@ -647,13 +880,22 @@ pub struct WindowRenderer {
     render_surface : RenderSurface,
     egui_ctx : egui::Context,
     egui_events : EguiEventAccumulator,
-
-    swapchain_framebuffers: Vec<Arc<vulkano::render_pass::Framebuffer>>,
 }
 impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
     }
+    /*
+    pub fn gen_framebuffers(&mut self) {
+        self.swapchain_framebuffers = Vec::with_capacity(self.render_surface.swapchain_images.len());
+
+        self.swapchain_framebuffers.extend(
+            self.render_surface.swapchain_images.iter()
+                .map(|image| {
+                    vulkano::render_pass::Framebuffer::
+                })
+        )
+    }*/
     pub fn render_surface(&self) -> &RenderSurface {
         &self.render_surface
     }
@@ -876,6 +1118,7 @@ struct RenderContext {
 
     command_buffer_alloc : vulkano::command_buffer::allocator::StandardCommandBufferAllocator,
     memory_alloc: vulkano::memory::allocator::StandardMemoryAllocator,
+    descriptor_set_alloc : vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator,
 }
 
 
@@ -922,6 +1165,7 @@ impl RenderContext {
                 Self {
                     command_buffer_alloc: vulkano::command_buffer::allocator::StandardCommandBufferAllocator::new(device.clone(), Default::default()),
                     memory_alloc: vulkano::memory::allocator::StandardMemoryAllocator::new_default(device.clone()),
+                    descriptor_set_alloc: vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator::new(device.clone()),
                     library,
                     instance,
                     device,
