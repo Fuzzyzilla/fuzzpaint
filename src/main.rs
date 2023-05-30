@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use vulkano::sync::GpuFuture;
 
 use anyhow::Result as AnyResult;
 
@@ -348,6 +349,10 @@ mod EguiRenderer {
             src:
             r"#version 460
 
+            layout(push_constant) uniform Matrix {
+                mat4 ortho;
+            } matrix;
+
             layout(location = 0) in vec2 pos;
             layout(location = 1) in vec4 color;
             layout(location = 2) in vec2 uv;
@@ -356,7 +361,7 @@ mod EguiRenderer {
             layout(location = 1) out vec4 vertex_color;
 
             void main() {
-                gl_Position = vec4(pos, 0.0, 1.0); // Todo. Transform matrix. Blegh.
+                gl_Position = matrix.ortho * vec4(pos, 0.0, 1.0);
                 out_uv = uv;
                 vertex_color = color;
             }",
@@ -388,7 +393,7 @@ mod EguiRenderer {
 
         descriptor_set: Arc<vulkano::descriptor_set::PersistentDescriptorSet>,
     }
-    struct EguiRenderer {
+    pub struct EguiRenderer {
         images : std::collections::HashMap<egui::TextureId, EguiTexture>,
         render_context : Arc<super::RenderContext>,
 
@@ -397,7 +402,7 @@ mod EguiRenderer {
         framebuffers: Vec<Arc<vulkano::render_pass::Framebuffer>>,
     }
     impl EguiRenderer {
-        pub fn new(render_context: Arc<super::RenderContext>, head: super::WindowRenderer) -> AnyResult<Self> {
+        pub fn new(render_context: Arc<super::RenderContext>, surface_format: vulkano::format::Format) -> AnyResult<Self> {
             let device = render_context.device.clone();
             let renderpass = vulkano::single_pass_renderpass!(
                 device.clone(),
@@ -405,7 +410,7 @@ mod EguiRenderer {
                     swapchain_color : {
                         load: Clear,
                         store: Store,
-                        format: head.render_surface().format(),
+                        format: surface_format,
                         samples: 1,
                     },
                 },
@@ -485,7 +490,7 @@ mod EguiRenderer {
         }
         pub fn upload_and_render(
             &self,
-            framebuffer: Arc<vulkano::render_pass::Framebuffer>,
+            present_img_index: u32,
             tesselated_geom: &[egui::epaint::ClippedPrimitive],
         ) -> AnyResult<vulkano::command_buffer::PrimaryAutoCommandBuffer> {
             let mut vert_buff_size = 0;
@@ -543,6 +548,13 @@ mod EguiRenderer {
                 index_vec
             )?;
 
+            let framebuffer = self.framebuffers.get(present_img_index as usize).expect("Present image out-of-bounds.").clone();
+
+            let matrix = cgmath::ortho(0.0, framebuffer.extent()[0] as f32, framebuffer.extent()[1] as f32, 0.0, 0.0, 1.0);
+
+            let (texture_set_idx, _) = self.texture_set_layout();
+            let pipeline_layout = self.pipeline.layout();
+
             let mut command_buffer_builder = vulkano::command_buffer::AutoCommandBufferBuilder::primary(
                     &self.render_context.command_buffer_alloc,
                     self.render_context.queues.graphics().idx(),
@@ -556,7 +568,9 @@ mod EguiRenderer {
                                 vulkano::format::ClearValue::Float([0.2, 0.2, 0.2, 1.0])
                             )
                         ],
-                        ..vulkano::command_buffer::RenderPassBeginInfo::framebuffer(framebuffer.clone())
+                        ..vulkano::command_buffer::RenderPassBeginInfo::framebuffer(
+                            framebuffer.clone()
+                        )
                     },
                     vulkano::command_buffer::SubpassContents::Inline
                 )?
@@ -570,13 +584,14 @@ mod EguiRenderer {
                         dimensions: framebuffer.extent().map(|dim| dim as f32),
                         origin: [0.0; 2],
                     }]
-                );
+                )
+                .push_constants(pipeline_layout.clone(), 0, vs::Matrix{
+                    ortho: matrix.into()
+                });
 
             let mut start_vertex_buffer_offset : usize = 0;
             let mut start_index_buffer_offset : usize = 0;
 
-            let (texture_set_idx, _) = self.texture_set_layout();
-            let pipeline_layout = self.pipeline.layout();
 
             for clipped in tesselated_geom {
                 if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
@@ -636,13 +651,29 @@ mod EguiRenderer {
             let layout = pipe_layout.set_layouts().get(0).expect("Egui shader needs a sampler!").clone();
             (0, layout)
         }
+        /// Apply image deltas, optionally returning a command buffer filled with any
+        /// transfers as needed.
         pub fn do_image_deltas(
+            &mut self,
+            deltas : egui::TexturesDelta
+        )  -> Option<AnyResult<vulkano::command_buffer::PrimaryAutoCommandBuffer>> {
+            for free in deltas.free.iter() {
+                self.images.remove(&free).unwrap();
+            }
+
+            if deltas.set.is_empty() {
+                None
+            } else {
+                Some(
+                    self.do_image_deltas_set(deltas)
+                )
+            }
+        }
+        fn do_image_deltas_set(
             &mut self,
             deltas : egui::TexturesDelta,
         ) -> AnyResult<vulkano::command_buffer::PrimaryAutoCommandBuffer> {
-            for free in deltas.free.into_iter() {
-                self.images.remove(&free).unwrap();
-            }
+            //Free is handled by do_image_deltas
 
             //Pre-allocate on the heap so we don't end up re-allocating a bunch as we populate
             let mut total_delta_size = 0;
@@ -863,23 +894,54 @@ impl WindowSurface {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
     }
-    pub fn with_render_surface(self, render_surface: RenderSurface) -> WindowRenderer {
-        WindowRenderer {
-            win: self.win,
-            render_surface,
-            event_loop: Some(self.event_loop),
-            egui_ctx: Default::default(),
-            egui_events: Default::default(),
-        }
+    pub fn with_render_surface(self, render_surface: RenderSurface, render_context: Arc<RenderContext>)
+        -> AnyResult<WindowRenderer> {
+        
+        let mut egui_renderer = EguiRenderer::EguiRenderer::new(render_context.clone(), render_surface.format().clone())?;
+        egui_renderer.gen_framebuffers(&render_surface)?;
+        Ok(
+            WindowRenderer {
+                egui_renderer,
+                win: self.win,
+                render_surface: Some(render_surface),
+                render_context,
+                event_loop: Some(self.event_loop),
+                egui_ctx: Default::default(),
+                egui_events: Default::default(),
+                requested_redraw_time: Some(std::time::Instant::now())
+            }
+        )
+    }
+}
+
+/// Merge the textures data from one egui output into another. Useful for discarding Egui out geomety
+/// while maintaining it's side-effects.
+pub fn append_textures_delta(into : &mut egui::TexturesDelta, from: egui::TexturesDelta) {
+    into.free.reserve(from.free.len());
+    for free in from.free.into_iter() {
+        into.free.push(free);
+    }
+
+    //Maybe duplicates work. Could optimize to discard redundant updates, but this probably
+    //wont happen frequently
+    into.set.reserve(from.set.len());
+    for set in from.set.into_iter() {
+        into.set.push(set);
     }
 }
 
 pub struct WindowRenderer {
     event_loop : Option<winit::event_loop::EventLoop<()>>,
     win : Arc<winit::window::Window>,
-    render_surface : RenderSurface,
+    /// Always Some. This is to allow it to be take-able to be remade.
+    /// Could None represent a temporary loss of surface that can be recovered from?
+    render_surface : Option<RenderSurface>,
+    render_context: Arc<RenderContext>,
     egui_ctx : egui::Context,
     egui_events : EguiEventAccumulator,
+    egui_renderer: EguiRenderer::EguiRenderer,
+
+    requested_redraw_time : Option<std::time::Instant>,
 }
 impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
@@ -897,7 +959,22 @@ impl WindowRenderer {
         )
     }*/
     pub fn render_surface(&self) -> &RenderSurface {
-        &self.render_surface
+        //this will ALWAYS be Some. The option is for taking from a mutable reference for recreation.
+        &self.render_surface.as_ref().unwrap()
+    }
+    /// Recreate surface after loss or out-of-date. Todo: This only handles out-of-date and resize.
+    pub fn recreate_surface(&mut self) -> AnyResult<()> {
+        self.render_surface =
+            Some(
+                self.render_surface
+                .take()
+                .unwrap()
+                .recreate(Some(self.window().inner_size().into()))?
+            );
+
+        self.egui_renderer.gen_framebuffers(self.render_surface.as_ref().unwrap())?;
+
+        Ok(())
     }
     fn apply_platform_output(&mut self, out: &mut egui::PlatformOutput) {
         //Todo: Copied text
@@ -919,6 +996,8 @@ impl WindowRenderer {
     pub fn run(mut self) -> ! {
         //There WILL be an event loop if we got here
         let event_loop = self.event_loop.take().unwrap();
+        let mut egui_out = None::<egui::FullOutput>;
+
         event_loop.run(move |event, _, control_flow|{
             use winit::event::{Event, WindowEvent};
 
@@ -945,7 +1024,88 @@ impl WindowRenderer {
 
                     //Mutable so that we can take from it
                     let mut out = self.egui_ctx.end_frame();
+                    if out.repaint_after.is_zero() {
+                        //Repaint immediately!
+                        self.requested_redraw_time = None;
+
+                        self.window().request_redraw()
+                    } else {
+                        let requested_instant = std::time::Instant::now() + out.repaint_after;
+                        //Choose the minimum of the current and the requested.
+                        //Should we queue all requests instead?
+                        self.requested_redraw_time = self.requested_redraw_time
+                            .map_or_else(
+                                || Some(requested_instant),
+                                |time| Some(time.min(requested_instant))
+                            );
+                    }
+
+                    //Requested time period is up, redraw!
+                    if let Some(time) = self.requested_redraw_time {
+                        if time <= std::time::Instant::now() {
+                            self.window().request_redraw();
+                            self.requested_redraw_time = None
+                        }
+                    }
+
                     self.apply_platform_output(&mut out.platform_output);
+
+                    //There was old data, make sure we don't lose the texture updates when we replace it.
+                    if let Some(old_output) = egui_out.take() {
+                        append_textures_delta(&mut out.textures_delta, old_output.textures_delta);
+                    }
+                    egui_out = Some(out);
+                }
+                Event::RedrawRequested(..) => {
+                    //Ensure there is actually data for us to draw
+                    let Some(out) = egui_out.take() else {return};
+
+                    let (idx, suboptimal, image_future) =
+                        match vulkano::swapchain::acquire_next_image(
+                            self.render_surface().swapchain.clone(),
+                            None
+                        ) {
+                            Err(vulkano::swapchain::AcquireError::OutOfDate) => {
+                                eprintln!("Swapchain unusable.. Recreating");
+                                //We cannot draw on this surface as-is. Recreate and request another try next frame.
+                                self.recreate_surface().expect("Failed to recreate render surface after it went out-of-date.");
+                                self.window().request_redraw();
+                                return;
+                            }
+                            Err(_) => {
+                                //Todo. Many of these errors are recoverable!
+                                panic!("Surface image acquire failed!");
+                            }
+                            Ok(r) => r
+                        };
+                    let res : AnyResult<()> = try_block::try_block! {
+                        let transfer_commands = self.egui_renderer.do_image_deltas(out.textures_delta);
+
+                        let transfer_queue = self.render_context.queues.transfer().queue();
+                        let render_queue = self.render_context.queues.graphics().queue();
+                        let mut future : Box<dyn vulkano::sync::GpuFuture> = self.render_context.now().boxed();
+                        if let Some(transfer_commands) = transfer_commands {
+                            let buffer = transfer_commands?;
+    
+                            //Flush transfer commands, while we tesselate Egui output.
+                            future = future.then_execute(transfer_queue.clone(), buffer)?
+                                .boxed();
+                        }
+                        let tess_geom = self.egui_ctx.tessellate(out.shapes);
+                        let draw_commands = self.egui_renderer.upload_and_render(idx, &tess_geom)?;
+                        drop(tess_geom);
+
+                        future.then_execute(render_queue.clone(),draw_commands)?
+                            .join(image_future)
+                            .then_signal_fence_and_flush()?
+                            .wait(None)?;
+
+                       // let draw_commands = self.egui_renderer.upload_and_render(idx, tesselated_geom);
+                        Ok(())
+                    };
+                    if suboptimal {
+                        self.recreate_surface().expect("Recreating suboptimal swapchain failed spectacularly");
+                    }
                 }
                 _ => ()
             }
@@ -961,7 +1121,7 @@ impl Queue {
     pub fn idx(&self) -> u32 {
         self.family_idx
     }
-    pub fn queue(&self) -> &vulkano::device::Queue {
+    pub fn queue(&self) -> &Arc<vulkano::device::Queue> {
         &self.queue
     }
 }
@@ -1109,7 +1269,7 @@ impl RenderSurface {
             });
     }
 }
-struct RenderContext {
+pub struct RenderContext {
     library : Arc<vulkano::VulkanLibrary>,
     instance : Arc<vulkano::instance::Instance>,
     physical_device : Arc<vulkano::device::physical::PhysicalDevice>,
@@ -1379,6 +1539,9 @@ impl RenderContext {
         
         Ok(res)
     }
+    pub fn now(&self) -> vulkano::sync::future::NowFuture {
+        vulkano::sync::now(self.device.clone())
+    }
 }
 
 //If we return, it was due to an error.
@@ -1386,7 +1549,8 @@ impl RenderContext {
 fn main() -> AnyResult<std::convert::Infallible> {
     let window_surface = WindowSurface::new()?;
     let (render_context, render_surface) = RenderContext::new_with_window_surface(&window_surface)?;
-    let window_renderer = window_surface.with_render_surface(render_surface);
+    let render_context = Arc::new(render_context);
+    let window_renderer = window_surface.with_render_surface(render_surface, render_context)?;
     println!("Made render context!");
 
     window_renderer.run();

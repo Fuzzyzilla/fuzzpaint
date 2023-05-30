@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.71"
 bytemuck = "1.13.1"
+cgmath = "0.18.0"
 egui = {version = "0.22.0", features = ["bytemuck"]}
 image = "0.24.6"
 smallvec = "1.10.0"
