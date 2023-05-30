@@ -355,6 +355,9 @@ name = "ecolor"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e479a7fa3f23d4e794f8b2f8b3568dd4e47886ad1b12c9c095e141cb591eb63"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "egui"
@@ -378,6 +381,9 @@ name = "emath"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3857d743a6e0741cdd60b622a74c7a36ea75f5f8f11b793b41d905d2c9721a4b"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "epaint"
@@ -388,6 +394,7 @@ dependencies = [
  "ab_glyph",
  "ahash",
  "atomic_refcell",
+ "bytemuck",
  "ecolor",
  "emath",
  "nohash-hasher",
@@ -474,8 +481,11 @@ name = "fuzzpaint-vk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "egui",
  "image",
+ "smallvec",
+ "try-block",
  "vulkano",
  "vulkano-shaders",
  "vulkano-win",
@@ -1357,6 +1367,12 @@ dependencies = [
  "toml_datetime",
  "winnow",
 ]
+
+[[package]]
+name = "try-block"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f568ed684112efae02e996f1320d284bacea7a106e3383a22b3ea198d8f2b11c"
 
 [[package]]
 name = "ttf-parser"

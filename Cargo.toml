@@ -7,8 +7,11 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.71"
-egui = "0.22.0"
+bytemuck = "1.13.1"
+egui = {version = "0.22.0", features = ["bytemuck"]}
 image = "0.24.6"
+smallvec = "1.10.0"
+try-block = "0.1.0"
 vulkano = "0.33.0"
 vulkano-shaders = "0.33.0"
 vulkano-win = "0.33.0"
