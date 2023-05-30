@@ -324,6 +324,7 @@ fn egui_to_winit_cursor(cursor : egui::CursorIcon) -> Option<winit::window::Curs
 mod EguiRenderer {
     use std::sync::Arc;
     use anyhow::{Result as AnyResult, Context};
+    use vulkano::{format, pipeline::graphics::vertex_input::Vertex};
     mod fs {
         vulkano_shaders::shader!{
             ty: "fragment",
@@ -345,16 +346,27 @@ mod EguiRenderer {
             src:
             r"#version 460
 
-            layout(location = 0) in vec4 in_pos;
-            layout(location = 1) in vec2 in_uv;
+            layout(location = 0) in vec2 pos;
+            layout(location = 1) in vec4 color;
+            layout(location = 2) in vec2 uv;
 
-            layout(location = 0) out vec2 uv;
+            layout(location = 0) out vec2 out_uv;
             layout(location = 1) out vec4 vertex_color;
 
             void main() {
 
             }",
         }
+    }
+    #[derive(vulkano::buffer::BufferContents, vulkano::pipeline::graphics::vertex_input::Vertex)]
+    #[repr(C)]
+    struct EguiVertex {
+        #[format(R32G32_SFLOAT)]
+        pos : [f32; 2],
+        #[format(R8G8B8A8_UNORM)]
+        color : [u8; 4],
+        #[format(R32G32_SFLOAT)]
+        uv : [f32; 2],
     }
     struct EguiTexture {
         image : Arc<vulkano::image::StorageImage>,
@@ -363,22 +375,72 @@ mod EguiRenderer {
     }
     struct EguiRenderer {
         images : std::collections::HashMap<egui::TextureId, EguiTexture>,
+        render_context : Arc<super::RenderContext>,
+
+        render_pass : Arc<vulkano::render_pass::RenderPass>,
+        pipeline: Arc<vulkano::pipeline::graphics::GraphicsPipeline>,
     }
     impl EguiRenderer {
-        pub fn new() {
+        pub fn new(render_context: Arc<super::RenderContext>, head: super::WindowRenderer) -> AnyResult<Self> {
+            let device = render_context.device.clone();
             let renderpass = vulkano::single_pass_renderpass!(
+                device.clone(),
+                attachments : {
+                    swapchain_color : {
+                        load: Clear,
+                        store: Store,
+                        format: head.render_surface().format(),
+                        samples: 1,
+                    },
+                },
+                pass: {
+                    color: [swapchain_color],
+                    depth_stencil: {},
+                },
+            )?;
 
+            let fragment = fs::load(device.clone())?;
+            let vertex = vs::load(device.clone())?;
+
+            let fragment_entry = fragment.entry_point("main").unwrap();
+            let vertex_entry = vertex.entry_point("main").unwrap();
+
+            let pipeline = vulkano::pipeline::graphics::GraphicsPipeline::start()
+                .vertex_shader(vertex_entry, vs::SpecializationConstants::default())
+                .fragment_shader(fragment_entry, fs::SpecializationConstants::default())
+                .vertex_input_state(EguiVertex::per_vertex())
+                .render_pass(vulkano::render_pass::Subpass::from(renderpass.clone(), 0).unwrap())
+                .rasterization_state(
+                    vulkano::pipeline::graphics::rasterization::RasterizationState{
+                        cull_mode: vulkano::pipeline::StateMode::Fixed(vulkano::pipeline::graphics::rasterization::CullMode::None),
+                        polygon_mode: vulkano::pipeline::graphics::rasterization::PolygonMode::Fill,
+                        ..Default::default()
+                    }
+                )
+                .input_assembly_state(
+                    vulkano::pipeline::graphics::input_assembly::InputAssemblyState {
+                        topology: vulkano::pipeline::PartialStateMode::Fixed(vulkano::pipeline::graphics::input_assembly::PrimitiveTopology::TriangleList),
+                        primitive_restart_enable: vulkano::pipeline::StateMode::Fixed(false),
+                    }
+                )
+                .color_blend_state(
+                     vulkano::pipeline::graphics::color_blend::ColorBlendState::new(1).blend_alpha()
+                )
+                .build(render_context.device.clone())?;
+
+            Ok(
+                Self {
+                    images: Default::default(),
+                    render_pass: renderpass,
+                    pipeline,
+                    render_context: render_context.clone()
+                }
             )
         }
-        pub fn do_image_deltas<CommandAlloc : vulkano::command_buffer::allocator::CommandBufferAllocator>(
+        pub fn do_image_deltas(
             &mut self,
-            //Temporary arg types. Needs fixing lol
-            device: Arc<vulkano::device::Device>,
             deltas : egui::TexturesDelta,
-            memory_alloc : &impl vulkano::memory::allocator::MemoryAllocator,
-            command_buffer_alloc : &CommandAlloc,
-            transfer_queue_idx : u32,
-        ) -> AnyResult<vulkano::command_buffer::PrimaryAutoCommandBuffer<CommandAlloc::Alloc>> {
+        ) -> AnyResult<vulkano::command_buffer::PrimaryAutoCommandBuffer> {
             for free in deltas.free.into_iter() {
                 self.images.remove(&free).unwrap();
             }
@@ -386,7 +448,7 @@ mod EguiRenderer {
             //Pre-allocate on the heap so we don't end up re-allocating a bunch as we populate
             let mut total_delta_size = 0;
             for (_, delta) in &deltas.set {
-                total_delta_size += match delta.image {
+                total_delta_size += match &delta.image {
                     egui::ImageData::Color(color) => color.width() * color.height() * 4,
                     //We'll covert to 8bpp on upload
                     egui::ImageData::Font(grey) => grey.width() * grey.height() * 1,
@@ -395,7 +457,7 @@ mod EguiRenderer {
 
             let mut data_vec = Vec::with_capacity(total_delta_size);
             for (_, delta) in &deltas.set {
-                match delta.image {
+                match &delta.image {
                     egui::ImageData::Color(data) => {
                         data_vec.extend_from_slice(bytemuck::cast_slice(&data.pixels[..]));
                     }
@@ -414,7 +476,7 @@ mod EguiRenderer {
             //This is  dumb. Why can't i use the data directly? It's a slice of [u8]. Maybe (hopefully) it optimizes out?
             //TODO: Maybe mnually implement unsafe trait BufferContents to allow this without byte-by-byte iterator copying.
             let staging_buffer = vulkano::buffer::Buffer::from_iter(
-                memory_alloc,
+                &self.render_context.memory_alloc,
                 vulkano::buffer::BufferCreateInfo {
                     sharing: vulkano::sync::Sharing::Exclusive,
                     usage: vulkano::buffer::BufferUsage::TRANSFER_SRC,
@@ -429,14 +491,14 @@ mod EguiRenderer {
 
             let mut command_buffer =
                 vulkano::command_buffer::AutoCommandBufferBuilder::primary(
-                    command_buffer_alloc,
-                    transfer_queue_idx,
+                    &self.render_context.command_buffer_alloc,
+                    self.render_context.queues.transfer().idx(),
                     vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit
                 )?;
             
             let mut current_base_offset = 0;
-            for (id, delta) in deltas.set {
-                let entry = self.images.entry(id);
+            for (id, delta) in &deltas.set {
+                let entry = self.images.entry(*id);
                 //Generate if non-existent yet!
                 let image : AnyResult<_> = match entry {
                     std::collections::hash_map::Entry::Vacant(vacant) => {
@@ -456,7 +518,7 @@ mod EguiRenderer {
                             }
                         };
                         let image = vulkano::image::StorageImage::with_usage(
-                            memory_alloc,
+                            &self.render_context.memory_alloc,
                             dimensions,
                             format,
                             //We will not be using this StorageImage for storage :P
@@ -472,9 +534,9 @@ mod EguiRenderer {
                             }
                         };
     
-                        let view = vulkano::image::view::ImageView::new_default(image)?;
+                        let view = vulkano::image::view::ImageView::new_default(image.clone())?;
                         let sampler = vulkano::sampler::Sampler::new(
-                            device.clone(),
+                            self.render_context.device.clone(),
                             vulkano::sampler::SamplerCreateInfo {
                                 mag_filter: egui_to_vulkano_filter(delta.options.magnification),
                                 min_filter: egui_to_vulkano_filter(delta.options.minification),
@@ -488,16 +550,16 @@ mod EguiRenderer {
                                     view,
                                     sampler,
                                 }
-                            ).image
+                            ).image.clone()
                         )
                     },
                     std::collections::hash_map::Entry::Occupied(occupied) => {
-                        Ok(occupied.get().image)
+                        Ok(occupied.get().image.clone())
                     }
                 };
                 let image = image.context("Failed to allocate Egui texture")?;
 
-                let size = match delta.image {
+                let size = match &delta.image {
                     egui::ImageData::Color(color) => color.width() * color.height() * 4,
                     egui::ImageData::Font(grey) => grey.width() * grey.height() * 1,
                 };
@@ -508,7 +570,7 @@ mod EguiRenderer {
                 //we need to redo many of the fields however.
                 let transfer_info = 
                     vulkano::command_buffer::CopyBufferToImageInfo::buffer_image(
-                        staging_buffer,
+                        staging_buffer.clone(),
                         image
                     );
                 
@@ -533,7 +595,7 @@ mod EguiRenderer {
                                         delta.image.height() as u32,
                                         1
                                     ],
-                                    ..transfer_info.regions[0]
+                                    ..transfer_info.regions[0].clone()
                                 }
                             ],
                             ..transfer_info
@@ -592,8 +654,8 @@ impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
     }
-    fn gen_framebuffers() {
-
+    pub fn render_surface(&self) -> &RenderSurface {
+        &self.render_surface
     }
     fn apply_platform_output(&mut self, out: &mut egui::PlatformOutput) {
         //Todo: Copied text
@@ -641,7 +703,6 @@ impl WindowRenderer {
 
                     //Mutable so that we can take from it
                     let mut out = self.egui_ctx.end_frame();
-                    egui::epaint::tessellate_shapes(pixels_per_point, options, font_tex_size, prepared_discs, shapes)
                     self.apply_platform_output(&mut out.platform_output);
                 }
                 _ => ()
@@ -695,6 +756,10 @@ impl Queues {
             QueueSrc::Queue(q) => q
         }
     }
+    //No transfer queues yet, just use Graphics.
+    pub fn transfer(&self) -> &Queue {
+        self.graphics()
+    }
     pub fn has_unique_compute(&self) -> bool {
         match &self.compute_queue {
             QueueSrc::UseGraphics => false,
@@ -713,6 +778,9 @@ pub struct RenderSurface {
     swapchain_create_info: vulkano::swapchain::SwapchainCreateInfo,
 }
 impl RenderSurface {
+    pub fn format(&self) -> vulkano::format::Format {
+        self.swapchain_create_info.image_format.unwrap()
+    }
     fn new(
         physical_device : Arc<vulkano::device::physical::PhysicalDevice>,
         device : Arc<vulkano::device::Device>,
@@ -771,6 +839,7 @@ impl RenderSurface {
             surface: surface.clone(),
             swapchain_images: images,
             swapchain_create_info,
+            fences: Vec::new(),
         })
     }
     pub fn recreate(self, new_size: Option<[u32; 2]>) -> AnyResult<Self> {
