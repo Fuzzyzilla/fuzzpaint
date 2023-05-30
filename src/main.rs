@@ -14,6 +14,8 @@ struct EguiEventAccumulator {
     dropped_files : Vec<egui::DroppedFile>,
     screen_rect : Option<egui::Rect>,
     pixels_per_point: f32,
+
+    is_empty: bool,
 }
 impl EguiEventAccumulator {
     pub fn new() -> Self {
@@ -27,6 +29,7 @@ impl EguiEventAccumulator {
             dropped_files: Vec::new(),
             screen_rect: None,
             pixels_per_point: 1.0,
+            is_empty: false,
         }
     }
     pub fn accumulate(&mut self, event : &winit::event::Event<()>) {
@@ -42,15 +45,18 @@ impl EguiEventAccumulator {
                             min: egui::pos2(0.0, 0.0),
                             max: egui::pos2(size.width as f32, size.height as f32),
                         });
+                        self.is_empty = false;
                     }
                     WinEvent::ScaleFactorChanged { scale_factor, .. } => {
                         self.pixels_per_point = *scale_factor as f32;
+                        self.is_empty = false;
                     }
                     WinEvent::CursorLeft { .. } => {
                         self.last_mouse_pos = None;
                         self.events.push(
                             GuiEvent::PointerGone
                         );
+                        self.is_empty = false;
                     }
                     WinEvent::CursorMoved { position, .. } => {
                         let position = egui::pos2(position.x as f32, position.y as f32);
@@ -58,6 +64,7 @@ impl EguiEventAccumulator {
                         self.events.push(
                             GuiEvent::PointerMoved(position)
                         );
+                        self.is_empty = false;
                     }
                     WinEvent::MouseInput { state, button, .. } => {
                         let Some(pos) = self.last_mouse_pos else {return};
@@ -70,6 +77,7 @@ impl EguiEventAccumulator {
                                 modifiers: self.last_modifiers,
                             }
                         );
+                        self.is_empty = false;
                     }
                     WinEvent::ModifiersChanged(state) => {
                         self.last_modifiers = egui::Modifiers{
@@ -79,6 +87,7 @@ impl EguiEventAccumulator {
                             mac_cmd: false,
                             shift: state.shift(),
                         };
+                        self.is_empty = false;
                     }
                     WinEvent::KeyboardInput { input, .. } => {
                         let Some(key) = input.virtual_keycode.and_then(Self::winit_to_egui_key) else {return};
@@ -99,6 +108,7 @@ impl EguiEventAccumulator {
                                 modifiers: self.last_modifiers,
                             }
                         );
+                        self.is_empty = false;
                     }
                     WinEvent::MouseWheel { delta, .. } => {
                         let (unit, delta) = match delta {
@@ -114,17 +124,20 @@ impl EguiEventAccumulator {
                                 modifiers: self.last_modifiers,
                             }
                         );
+                        self.is_empty = false;
                     }
                     WinEvent::TouchpadMagnify { delta, .. } => {
                         self.events.push(
                             GuiEvent::Zoom(*delta as f32)
                         );
+                        self.is_empty = false;
                     }
                     WinEvent::Focused( has_focus ) => {
                         self.has_focus = *has_focus;
                         self.events.push(
                             GuiEvent::WindowFocused(self.has_focus)
                         );
+                        self.is_empty = false;
                     }
                     WinEvent::HoveredFile(path) => {
                         self.hovered_files.push(
@@ -132,7 +145,8 @@ impl EguiEventAccumulator {
                                 mime: String::new(),
                                 path: Some(path.clone()),
                             }
-                        )
+                        );
+                        self.is_empty = false;
                     }
                     WinEvent::DroppedFile(path) => {
                         use std::io::Read;
@@ -162,7 +176,8 @@ impl EguiEventAccumulator {
                                 last_modified,
                                 path: Some(path.clone()),
                             }
-                        )
+                        );
+                        self.is_empty = false;
                     }
                     _ => ()
                 }
@@ -258,7 +273,11 @@ impl EguiEventAccumulator {
             },
         }
     }
+    fn is_empty(&self) -> bool {
+        self.is_empty
+    }
     fn take_raw_input(&mut self) -> egui::RawInput {
+        self.is_empty = true;
         egui::RawInput {
             modifiers : self.last_modifiers,
             events: std::mem::take(&mut self.events),
@@ -1028,12 +1047,17 @@ impl WindowRenderer {
                     }
                 }
                 Event::MainEventsCleared => {
+                    //No inputs, redraw (if any) is in the future. Skip!
+                    if self.egui_events.is_empty() && self.requested_redraw_time.map_or(true, |time| time > std::time::Instant::now()) {
+                        return;
+                    }
+
                     let raw_input = self.egui_events.take_raw_input();
                     self.egui_ctx.begin_frame(raw_input);
 
                     egui::Window::new("🐑 Baa")
                         .show(&self.egui_ctx, |ui| {
-                            ui.label("It is soup time I think");
+                            ui.label("Thing's wrong with it wha'ya mean");
                         });
 
                     //Mutable so that we can take from it
@@ -1042,6 +1066,7 @@ impl WindowRenderer {
                         //Repaint immediately!
                         self.requested_redraw_time = None;
 
+                        println!("Immediate redraw.");
                         self.window().request_redraw()
                     } else {
                         //Egui returns astronomically large number if it doesn't want a redraw - triggers overflow lol
@@ -1232,6 +1257,10 @@ impl RenderSurface {
             }
         };
 
+        // We don't care!
+        let alpha_mode = capabilies.supported_composite_alpha.clone().into_iter().next()
+            .expect("Device provided no alpha modes");
+
         let swapchain_create_info = 
             vulkano::swapchain::SwapchainCreateInfo {
                 min_image_count: image_count,
@@ -1239,7 +1268,7 @@ impl RenderSurface {
                 image_color_space: color_space,
                 image_extent: size,
                 image_usage: vulkano::image::ImageUsage::COLOR_ATTACHMENT,
-                composite_alpha: vulkano::swapchain::CompositeAlpha::Inherit,
+                composite_alpha: alpha_mode,
                 present_mode,
                 clipped: true, // We wont read the framebuffer.
                 ..Default::default()
