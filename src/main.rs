@@ -508,6 +508,17 @@ mod EguiRenderer {
                 }
             }
 
+            if vert_buff_size == 0 || index_buff_size == 0 {
+                let builder = vulkano::command_buffer::AutoCommandBufferBuilder::primary(
+                    &self.render_context.command_buffer_alloc,
+                    self.render_context.queues.graphics().idx(),
+                    vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit
+                )?;
+                return Ok(
+                    builder.build()?
+                )
+            }
+
             let mut vertex_vec = Vec::with_capacity(vert_buff_size);
             let mut index_vec = Vec::with_capacity(index_buff_size);
 
@@ -550,7 +561,7 @@ mod EguiRenderer {
 
             let framebuffer = self.framebuffers.get(present_img_index as usize).expect("Present image out-of-bounds.").clone();
 
-            let matrix = cgmath::ortho(0.0, framebuffer.extent()[0] as f32, framebuffer.extent()[1] as f32, 0.0, 0.0, 1.0);
+            let matrix = cgmath::ortho(0.0, framebuffer.extent()[0] as f32, 0.0, framebuffer.extent()[1] as f32, -1.0, 1.0);
 
             let (texture_set_idx, _) = self.texture_set_layout();
             let pipeline_layout = self.pipeline.layout();
@@ -1010,6 +1021,9 @@ impl WindowRenderer {
                             *control_flow = winit::event_loop::ControlFlow::Exit;
                             return;
                         }
+                        WindowEvent::Resized(size) => {
+                            self.recreate_surface().expect("Failed to rebuild surface");
+                        }
                         _ => ()
                     }
                 }
@@ -1017,9 +1031,9 @@ impl WindowRenderer {
                     let raw_input = self.egui_events.take_raw_input();
                     self.egui_ctx.begin_frame(raw_input);
 
-                    egui::CentralPanel::default()
+                    egui::Window::new("🐑 Baa")
                         .show(&self.egui_ctx, |ui| {
-                            ui.hyperlink("https://www.youtube.com/");
+                            ui.label("It is soup time I think");
                         });
 
                     //Mutable so that we can take from it
@@ -1030,14 +1044,11 @@ impl WindowRenderer {
 
                         self.window().request_redraw()
                     } else {
-                        let requested_instant = std::time::Instant::now() + out.repaint_after;
+                        //Egui returns astronomically large number if it doesn't want a redraw - triggers overflow lol
+                        let requested_instant = std::time::Instant::now().checked_add(out.repaint_after);
                         //Choose the minimum of the current and the requested.
                         //Should we queue all requests instead?
-                        self.requested_redraw_time = self.requested_redraw_time
-                            .map_or_else(
-                                || Some(requested_instant),
-                                |time| Some(time.min(requested_instant))
-                            );
+                        self.requested_redraw_time = self.requested_redraw_time.min(requested_instant);
                     }
 
                     //Requested time period is up, redraw!
@@ -1097,6 +1108,10 @@ impl WindowRenderer {
 
                         future.then_execute(render_queue.clone(),draw_commands)?
                             .join(image_future)
+                            .then_swapchain_present(
+                                self.render_context.queues.present().unwrap().queue().clone(),
+                                vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain.clone(), idx),
+                            )
                             .then_signal_fence_and_flush()?
                             .wait(None)?;
 
