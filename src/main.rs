@@ -309,6 +309,7 @@ impl EguiEventAccumulator {
 
             screen_rect: self.screen_rect,
             pixels_per_point: Some(self.pixels_per_point),
+            max_texture_side: Some(4096),
             //We cannot know yet!
             ..Default::default()
         }
@@ -403,7 +404,8 @@ mod EguiRenderer {
             void main() {
                 gl_Position = matrix.ortho * vec4(pos, 0.0, 1.0);
                 out_uv = uv;
-                vertex_color = color;
+                //Color is premultiplied. Undo that
+                vertex_color = color.a == 0 ? vec4(0.0) : vec4(color.rgb/color.a, color.a);
             }",
         }
     }
