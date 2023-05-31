@@ -3,12 +3,18 @@ use vulkano::sync::GpuFuture;
 
 use anyhow::Result as AnyResult;
 
+enum RemoteResource {
+    Resident,
+    Recoverable,
+    Gone,
+}
+
 struct EguiEventAccumulator {
     events: Vec<egui::Event>,
     last_mouse_pos : Option<egui::Pos2>,
     last_modifiers : egui::Modifiers,
-    //TODO: Probably a much more efficient datastructure can be used here ;)
-    held_keys : std::collections::BTreeMap<egui::Key, bool>,
+    //egui keys are 8-bit, so allocate 256 bools.
+    held_keys : bitvec::array::BitArray<[u64; 4]>,
     has_focus : bool,
     hovered_files : Vec<egui::HoveredFile>,
     dropped_files : Vec<egui::DroppedFile>,
@@ -22,7 +28,7 @@ impl EguiEventAccumulator {
         Self {
             events: Vec::new(),
             last_mouse_pos: None,
-            held_keys: Default::default(),
+            held_keys: bitvec::array::BitArray::ZERO,
             last_modifiers: egui::Modifiers::NONE,
             has_focus: true,
             hovered_files: Vec::new(),
@@ -94,9 +100,9 @@ impl EguiEventAccumulator {
                         let pressed = if let winit::event::ElementState::Pressed = input.state {true} else {false};
 
                         let prev_pressed = {
-                            let retained_pressed = self.held_keys.entry(key).or_insert(false);
-                            let prev_pressed = retained_pressed.clone();
-                            *retained_pressed = pressed;
+                            let mut key_state = self.held_keys.get_mut(key as u8 as usize).unwrap();
+                            let prev_pressed = key_state.clone();
+                            *key_state = pressed;
                             prev_pressed
                         };
 
@@ -285,6 +291,9 @@ impl EguiEventAccumulator {
             //Unclear whether this should be taken or cloned.
             hovered_files: std::mem::take(&mut self.hovered_files),
             dropped_files: std::mem::take(&mut self.dropped_files),
+
+            predicted_dt: 1.0 / 60.0,
+            time: None,
 
             screen_rect: self.screen_rect,
             pixels_per_point: Some(self.pixels_per_point),
@@ -1041,14 +1050,18 @@ impl WindowRenderer {
                             *control_flow = winit::event_loop::ControlFlow::Exit;
                             return;
                         }
-                        WindowEvent::Resized(size) => {
+                        WindowEvent::Resized(..) => {
                             self.recreate_surface().expect("Failed to rebuild surface");
+                        }
+                        WindowEvent::ThemeChanged(t) => {
+                            println!("Theme :0")
                         }
                         _ => ()
                     }
                 }
                 Event::MainEventsCleared => {
                     //No inputs, redraw (if any) is in the future. Skip!
+                    //This doesn't work!
                     if self.egui_events.is_empty() && self.requested_redraw_time.map_or(true, |time| time > std::time::Instant::now()) {
                         return;
                     }
@@ -1056,7 +1069,7 @@ impl WindowRenderer {
                     let raw_input = self.egui_events.take_raw_input();
                     self.egui_ctx.begin_frame(raw_input);
 
-                    egui::Window::new("🐑 Baa")
+                    egui::Window::new("🦈 Baa")
                         .show(&self.egui_ctx, |ui| {
                             ui.label("Thing's wrong with it wha'ya mean");
                         });
@@ -1067,7 +1080,6 @@ impl WindowRenderer {
                         //Repaint immediately!
                         self.requested_redraw_time = None;
 
-                        println!("Immediate redraw.");
                         self.window().request_redraw()
                     } else {
                         //Egui returns astronomically large number if it doesn't want a redraw - triggers overflow lol
@@ -1238,6 +1250,7 @@ impl RenderSurface {
             else {return Err(anyhow::anyhow!("Device reported no valid surface formats."))};
 
         //Use mailbox for low-latency, if supported. Otherwise, FIFO is always supported.
+        /*
         let present_mode =
             physical_device.surface_present_modes(&surface)
             .map(|mut modes| {
@@ -1247,7 +1260,8 @@ impl RenderSurface {
                     vulkano::swapchain::PresentMode::Fifo
                 }
             }).unwrap_or(vulkano::swapchain::PresentMode::Fifo);
-
+        */
+        let present_mode = vulkano::swapchain::PresentMode::Fifo;
         let image_count = {
             //Get one more then minimum, if maximum allows
             let min_image_count = capabilies.min_image_count + 1;
