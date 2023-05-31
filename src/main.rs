@@ -914,6 +914,7 @@ impl WindowSurface {
     pub fn new() -> AnyResult<Self> {
         let event_loop = winit::event_loop::EventLoopBuilder::default().build();
         let win = winit::window::WindowBuilder::default()
+            .with_transparent(false)
             .build(&event_loop)?;
 
         Ok(Self {
