@@ -1,5 +1,7 @@
 use std::sync::Arc;
-use vulkano::sync::GpuFuture;
+
+mod vulkano_prelude;
+use vulkano_prelude::*;
 
 use anyhow::Result as AnyResult;
 
@@ -365,8 +367,8 @@ fn egui_to_winit_cursor(cursor : egui::CursorIcon) -> Option<winit::window::Curs
 
 mod EguiRenderer {
     use std::sync::Arc;
+    use super::vulkano_prelude::*;
     use anyhow::{Result as AnyResult, Context};
-    use vulkano::pipeline::{graphics::vertex_input::Vertex, Pipeline};
     mod fs {
         vulkano_shaders::shader!{
             ty: "fragment",
@@ -409,7 +411,7 @@ mod EguiRenderer {
             }",
         }
     }
-    #[derive(vulkano::buffer::BufferContents, vulkano::pipeline::graphics::vertex_input::Vertex)]
+    #[derive(vk::BufferContents, vk::Vertex)]
     #[repr(C)]
     struct EguiVertex {
         #[format(R32G32_SFLOAT)]
@@ -429,22 +431,22 @@ mod EguiRenderer {
         }
     }
     struct EguiTexture {
-        image : Arc<vulkano::image::StorageImage>,
-        view : Arc<vulkano::image::view::ImageView<vulkano::image::StorageImage>>,
-        sampler: Arc<vulkano::sampler::Sampler>,
+        image : Arc<vk::StorageImage>,
+        view : Arc<vk::ImageView<vk::StorageImage>>,
+        sampler: Arc<vk::Sampler>,
 
-        descriptor_set: Arc<vulkano::descriptor_set::PersistentDescriptorSet>,
+        descriptor_set: Arc<vk::PersistentDescriptorSet>,
     }
     pub struct EguiRenderer {
         images : std::collections::HashMap<egui::TextureId, EguiTexture>,
         render_context : Arc<super::RenderContext>,
 
-        render_pass : Arc<vulkano::render_pass::RenderPass>,
-        pipeline: Arc<vulkano::pipeline::graphics::GraphicsPipeline>,
-        framebuffers: Vec<Arc<vulkano::render_pass::Framebuffer>>,
+        render_pass : Arc<vk::RenderPass>,
+        pipeline: Arc<vk::GraphicsPipeline>,
+        framebuffers: Vec<Arc<vk::Framebuffer>>,
     }
     impl EguiRenderer {
-        pub fn new(render_context: Arc<super::RenderContext>, surface_format: vulkano::format::Format) -> AnyResult<Self> {
+        pub fn new(render_context: Arc<super::RenderContext>, surface_format: vk::Format) -> AnyResult<Self> {
             let device = render_context.device.clone();
             let renderpass = vulkano::single_pass_renderpass!(
                 device.clone(),
@@ -468,29 +470,28 @@ mod EguiRenderer {
             let fragment_entry = fragment.entry_point("main").unwrap();
             let vertex_entry = vertex.entry_point("main").unwrap();
 
-            let pipeline = vulkano::pipeline::graphics::GraphicsPipeline::start()
+            let pipeline = vk::GraphicsPipeline::start()
                 .vertex_shader(vertex_entry, vs::SpecializationConstants::default())
                 .fragment_shader(fragment_entry, fs::SpecializationConstants::default())
                 .vertex_input_state(EguiVertex::per_vertex())
-                .render_pass(vulkano::render_pass::Subpass::from(renderpass.clone(), 0).unwrap())
+                .render_pass(vk::Subpass::from(renderpass.clone(), 0).unwrap())
                 .rasterization_state(
-                    vulkano::pipeline::graphics::rasterization::RasterizationState{
-                        cull_mode: vulkano::pipeline::StateMode::Fixed(vulkano::pipeline::graphics::rasterization::CullMode::None),
-                        polygon_mode: vulkano::pipeline::graphics::rasterization::PolygonMode::Fill,
+                    vk::RasterizationState{
+                        cull_mode: vk::StateMode::Fixed(vk::CullMode::None),
                         ..Default::default()
                     }
                 )
                 .input_assembly_state(
-                    vulkano::pipeline::graphics::input_assembly::InputAssemblyState {
-                        topology: vulkano::pipeline::PartialStateMode::Fixed(vulkano::pipeline::graphics::input_assembly::PrimitiveTopology::TriangleList),
-                        primitive_restart_enable: vulkano::pipeline::StateMode::Fixed(false),
+                    vk::InputAssemblyState {
+                        topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::TriangleList),
+                        primitive_restart_enable: vk::StateMode::Fixed(false),
                     }
                 )
                 .color_blend_state(
-                     vulkano::pipeline::graphics::color_blend::ColorBlendState::new(1).blend_alpha()
+                    vk::ColorBlendState::new(1).blend_alpha()
                 )
                 .viewport_state(
-                    vulkano::pipeline::graphics::viewport::ViewportState::Dynamic {
+                    vk::ViewportState::Dynamic {
                         count: 1,
                         viewport_count_dynamic: false,
                         scissor_count_dynamic: false,
@@ -513,11 +514,11 @@ mod EguiRenderer {
                 surface.swapchain_images
                 .iter()
                 .map(|image| -> AnyResult<_> {
-                    let fb = vulkano::render_pass::Framebuffer::new(
+                    let fb = vk::Framebuffer::new(
                         self.render_pass.clone(),
-                        vulkano::render_pass::FramebufferCreateInfo {
+                        vk::FramebufferCreateInfo {
                             attachments: vec![
-                                vulkano::image::view::ImageView::new_default(image.clone())?
+                                vk::ImageView::new_default(image.clone())?
                             ],
                             ..Default::default()
                         }
@@ -534,7 +535,7 @@ mod EguiRenderer {
             &self,
             present_img_index: u32,
             tesselated_geom: &[egui::epaint::ClippedPrimitive],
-        ) -> AnyResult<vulkano::command_buffer::PrimaryAutoCommandBuffer> {
+        ) -> AnyResult<vk::PrimaryAutoCommandBuffer> {
             let mut vert_buff_size = 0;
             let mut index_buff_size = 0;
             for clipped in tesselated_geom {
@@ -551,10 +552,10 @@ mod EguiRenderer {
             }
 
             if vert_buff_size == 0 || index_buff_size == 0 {
-                let builder = vulkano::command_buffer::AutoCommandBufferBuilder::primary(
+                let builder = vk::AutoCommandBufferBuilder::primary(
                     &self.render_context.command_buffer_alloc,
                     self.render_context.queues.graphics().idx(),
-                    vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit
+                    vk::CommandBufferUsage::OneTimeSubmit
                 )?;
                 return Ok(
                     builder.build()?
@@ -575,27 +576,26 @@ mod EguiRenderer {
                     index_vec.extend_from_slice(&mesh.indices);
                 }
             }
-
-            let vertices = vulkano::buffer::Buffer::from_iter(
+            let vertices = vk::Buffer::from_iter(
                 &self.render_context.memory_alloc,
-                vulkano::buffer::BufferCreateInfo {
-                    usage: vulkano::buffer::BufferUsage::VERTEX_BUFFER,
+                vk::BufferCreateInfo {
+                    usage: vk::BufferUsage::VERTEX_BUFFER,
                     ..Default::default()
                 },
-                vulkano::memory::allocator::AllocationCreateInfo {
-                    usage: vulkano::memory::allocator::MemoryUsage::Upload,
+                vk::AllocationCreateInfo {
+                    usage: vk::MemoryUsage::Upload,
                     ..Default::default()
                 },
                 vertex_vec
             )?;
-            let indices = vulkano::buffer::Buffer::from_iter(
+            let indices = vk::Buffer::from_iter(
                 &self.render_context.memory_alloc,
-                vulkano::buffer::BufferCreateInfo {
-                    usage: vulkano::buffer::BufferUsage::INDEX_BUFFER,
+                vk::BufferCreateInfo {
+                    usage: vk::BufferUsage::INDEX_BUFFER,
                     ..Default::default()
                 },
-                vulkano::memory::allocator::AllocationCreateInfo {
-                    usage: vulkano::memory::allocator::MemoryUsage::Upload,
+                vk::AllocationCreateInfo {
+                    usage: vk::MemoryUsage::Upload,
                     ..Default::default()
                 },
                 index_vec
@@ -608,31 +608,31 @@ mod EguiRenderer {
             let (texture_set_idx, _) = self.texture_set_layout();
             let pipeline_layout = self.pipeline.layout();
 
-            let mut command_buffer_builder = vulkano::command_buffer::AutoCommandBufferBuilder::primary(
+            let mut command_buffer_builder = vk::AutoCommandBufferBuilder::primary(
                     &self.render_context.command_buffer_alloc,
                     self.render_context.queues.graphics().idx(),
-                    vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit
+                    vk::CommandBufferUsage::OneTimeSubmit
                 )?;
             command_buffer_builder
                 .begin_render_pass(
-                    vulkano::command_buffer::RenderPassBeginInfo{
+                    vk::RenderPassBeginInfo{
                         clear_values: vec![
                             Some(
-                                vulkano::format::ClearValue::Float([0.2, 0.2, 0.2, 1.0])
+                                vk::ClearValue::Float([0.2, 0.2, 0.2, 1.0])
                             )
                         ],
-                        ..vulkano::command_buffer::RenderPassBeginInfo::framebuffer(
+                        ..vk::RenderPassBeginInfo::framebuffer(
                             framebuffer.clone()
                         )
                     },
-                    vulkano::command_buffer::SubpassContents::Inline
+                    vk::SubpassContents::Inline
                 )?
                 .bind_pipeline_graphics(self.pipeline.clone())
                 .bind_vertex_buffers(0, [vertices])
                 .bind_index_buffer(indices)
                 .set_viewport(
                     0,
-                    [vulkano::pipeline::graphics::viewport::Viewport{
+                    [vk::Viewport{
                         depth_range: 0.0..1.0,
                         dimensions: framebuffer.extent().map(|dim| dim as f32),
                         origin: [0.0; 2],
@@ -665,7 +665,7 @@ mod EguiRenderer {
                         .set_scissor(
                             0,
                             [
-                                vulkano::pipeline::graphics::viewport::Scissor{
+                                vk::Scissor{
                                     origin,
                                     dimensions
                                 }
@@ -699,7 +699,7 @@ mod EguiRenderer {
             Ok(command_buffer)
         }
         ///Get the descriptor set layout for the texture uniform. (set_idx, layout)
-        fn texture_set_layout(&self) -> (u32, Arc<vulkano::descriptor_set::layout::DescriptorSetLayout>) {
+        fn texture_set_layout(&self) -> (u32, Arc<vk::DescriptorSetLayout>) {
             let pipe_layout = self.pipeline.layout();
             let layout = pipe_layout.set_layouts().get(0).expect("Egui shader needs a sampler!").clone();
             (0, layout)
@@ -709,7 +709,7 @@ mod EguiRenderer {
         pub fn do_image_deltas(
             &mut self,
             deltas : egui::TexturesDelta
-        )  -> Option<AnyResult<vulkano::command_buffer::PrimaryAutoCommandBuffer>> {
+        )  -> Option<AnyResult<vk::PrimaryAutoCommandBuffer>> {
             for free in deltas.free.iter() {
                 self.images.remove(&free).unwrap();
             }
@@ -725,7 +725,7 @@ mod EguiRenderer {
         fn do_image_deltas_set(
             &mut self,
             deltas : egui::TexturesDelta,
-        ) -> AnyResult<vulkano::command_buffer::PrimaryAutoCommandBuffer> {
+        ) -> AnyResult<vk::PrimaryAutoCommandBuffer> {
             //Free is handled by do_image_deltas
 
             //Pre-allocate on the heap so we don't end up re-allocating a bunch as we populate
@@ -758,25 +758,25 @@ mod EguiRenderer {
 
             //This is  dumb. Why can't i use the data directly? It's a slice of [u8]. Maybe (hopefully) it optimizes out?
             //TODO: Maybe mnually implement unsafe trait BufferContents to allow this without byte-by-byte iterator copying.
-            let staging_buffer = vulkano::buffer::Buffer::from_iter(
+            let staging_buffer = vk::Buffer::from_iter(
                 &self.render_context.memory_alloc,
-                vulkano::buffer::BufferCreateInfo {
-                    sharing: vulkano::sync::Sharing::Exclusive,
-                    usage: vulkano::buffer::BufferUsage::TRANSFER_SRC,
+                vk::BufferCreateInfo {
+                    sharing: vk::Sharing::Exclusive,
+                    usage: vk::BufferUsage::TRANSFER_SRC,
                     ..Default::default()
                 },
-                vulkano::memory::allocator::AllocationCreateInfo {
-                    usage: vulkano::memory::allocator::MemoryUsage::Upload,
+                vk::AllocationCreateInfo {
+                    usage: vk::MemoryUsage::Upload,
                     ..Default::default()
                 },
                 data_vec.into_iter()
             )?;
 
             let mut command_buffer =
-                vulkano::command_buffer::AutoCommandBufferBuilder::primary(
+                vk::AutoCommandBufferBuilder::primary(
                     &self.render_context.command_buffer_alloc,
                     self.render_context.queues.transfer().idx(),
-                    vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit
+                    vk::CommandBufferUsage::OneTimeSubmit
                 )?;
             
             //In case we need to allocate new textures.
@@ -789,73 +789,73 @@ mod EguiRenderer {
                 let image : AnyResult<_> = match entry {
                     std::collections::hash_map::Entry::Vacant(vacant) => {
                         let format = match delta.image {
-                            egui::ImageData::Color(_) => vulkano::format::Format::R8G8B8A8_UNORM,
-                            egui::ImageData::Font(_) => vulkano::format::Format::R8_UNORM,
+                            egui::ImageData::Color(_) => vk::Format::R8G8B8A8_UNORM,
+                            egui::ImageData::Font(_) => vk::Format::R8_UNORM,
                         };
                         let dimensions = {
                             let mut dimensions = delta.pos.unwrap_or([0, 0]);
                             dimensions[0] += delta.image.width();
                             dimensions[1] += delta.image.height();
     
-                            vulkano::image::ImageDimensions::Dim2d {
+                            vk::ImageDimensions::Dim2d {
                                 width: dimensions[0] as u32,
                                 height: dimensions[1] as u32,
                                 array_layers: 1
                             }
                         };
-                        let image = vulkano::image::StorageImage::with_usage(
+                        let image = vk::StorageImage::with_usage(
                             &self.render_context.memory_alloc,
                             dimensions,
                             format,
                             //We will not be using this StorageImage for storage :P
-                            vulkano::image::ImageUsage::TRANSFER_DST | vulkano::image::ImageUsage::SAMPLED,
-                            vulkano::image::ImageCreateFlags::empty(),
+                            vk::ImageUsage::TRANSFER_DST | vk::ImageUsage::SAMPLED,
+                            vk::ImageCreateFlags::empty(),
                             std::iter::empty() //A puzzling difference in API from buffers - this just means Exclusive access.
                         )?;
     
-                        let egui_to_vulkano_filter = |egui_filter : egui::epaint::textures::TextureFilter| {
+                        let egui_to_vk_filter = |egui_filter : egui::epaint::textures::TextureFilter| {
                             match egui_filter {
-                                egui::TextureFilter::Linear => vulkano::sampler::Filter::Linear,
-                                egui::TextureFilter::Nearest => vulkano::sampler::Filter::Nearest,
+                                egui::TextureFilter::Linear => vk::Filter::Linear,
+                                egui::TextureFilter::Nearest => vk::Filter::Nearest,
                             }
                         };
-    
+                        
                         let mapping = if let egui::ImageData::Font(_) = delta.image {
                             //Font is one channel, representing percent coverage of white.
-                            vulkano::sampler::ComponentMapping {
-                                a: vulkano::sampler::ComponentSwizzle::Red,
-                                r: vulkano::sampler::ComponentSwizzle::One,
-                                g: vulkano::sampler::ComponentSwizzle::One,
-                                b: vulkano::sampler::ComponentSwizzle::One,
+                            vk::ComponentMapping {
+                                a: vk::ComponentSwizzle::Red,
+                                r: vk::ComponentSwizzle::One,
+                                g: vk::ComponentSwizzle::One,
+                                b: vk::ComponentSwizzle::One,
                             }
                         } else {
-                            vulkano::sampler::ComponentMapping::identity()
+                            vk::ComponentMapping::identity()
                         };
 
-                        let view = vulkano::image::view::ImageView::new(
+                        let view = vk::ImageView::new(
                             image.clone(),
-                            vulkano::image::view::ImageViewCreateInfo {
+                            vk::ImageViewCreateInfo {
                                 component_mapping: mapping,
-                                ..vulkano::image::view::ImageViewCreateInfo::from_image(&image)
+                                ..vk::ImageViewCreateInfo::from_image(&image)
                             }
                         )?;
 
                         //Could optimize here, re-using the four possible options of sampler.
-                        let sampler = vulkano::sampler::Sampler::new(
+                        let sampler = vk::Sampler::new(
                             self.render_context.device.clone(),
-                            vulkano::sampler::SamplerCreateInfo {
-                                mag_filter: egui_to_vulkano_filter(delta.options.magnification),
-                                min_filter: egui_to_vulkano_filter(delta.options.minification),
+                            vk::SamplerCreateInfo {
+                                mag_filter: egui_to_vk_filter(delta.options.magnification),
+                                min_filter: egui_to_vk_filter(delta.options.minification),
 
                                 ..Default::default()
                             }
                         )?;
 
-                        let descriptor_set = vulkano::descriptor_set::persistent::PersistentDescriptorSet::new(
+                        let descriptor_set = vk::PersistentDescriptorSet::new(
                             &self.render_context.descriptor_set_alloc,
                             texture_set_layout.clone(), 
                             [
-                                vulkano::descriptor_set::WriteDescriptorSet::image_view_sampler(
+                                vk::WriteDescriptorSet::image_view_sampler(
                                     texture_set_idx, view.clone(), sampler.clone()
                                 )
                             ]
@@ -887,7 +887,7 @@ mod EguiRenderer {
                 //The only way to get a struct of this is to call this method -
                 //we need to redo many of the fields however.
                 let transfer_info = 
-                    vulkano::command_buffer::CopyBufferToImageInfo::buffer_image(
+                    vk::CopyBufferToImageInfo::buffer_image(
                         staging_buffer.clone(),
                         image
                     );
@@ -896,10 +896,10 @@ mod EguiRenderer {
 
                 command_buffer
                     .copy_buffer_to_image(
-                        vulkano::command_buffer::CopyBufferToImageInfo {
+                        vk::CopyBufferToImageInfo {
                             //Update regions according to delta
                             regions: smallvec::smallvec![
-                                vulkano::command_buffer::BufferImageCopy {
+                                vk::BufferImageCopy {
                                     buffer_offset: start_offset,
                                     image_offset: [
                                         transfer_offset[0] as u32,
@@ -1125,7 +1125,7 @@ impl WindowRenderer {
                     let Some(out) = egui_out.take() else {return};
 
                     let (idx, suboptimal, image_future) =
-                        match vulkano::swapchain::acquire_next_image(
+                        match vk::acquire_next_image(
                             self.render_surface().swapchain.clone(),
                             None
                         ) {
@@ -1147,7 +1147,7 @@ impl WindowRenderer {
 
                         let transfer_queue = self.render_context.queues.transfer().queue();
                         let render_queue = self.render_context.queues.graphics().queue();
-                        let mut future : Box<dyn vulkano::sync::GpuFuture> = self.render_context.now().boxed();
+                        let mut future : Box<dyn vk::sync::GpuFuture> = self.render_context.now().boxed();
                         if let Some(transfer_commands) = transfer_commands {
                             let buffer = transfer_commands?;
     
@@ -1163,7 +1163,7 @@ impl WindowRenderer {
                             .join(image_future)
                             .then_swapchain_present(
                                 self.render_context.queues.present().unwrap().queue().clone(),
-                                vulkano::swapchain::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain.clone(), idx),
+                                vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain.clone(), idx),
                             )
                             .then_signal_fence_and_flush()?
                             .wait(None)?;
@@ -1182,14 +1182,14 @@ impl WindowRenderer {
 }
 
 struct Queue {
-    queue : Arc<vulkano::device::Queue>,
+    queue : Arc<vk::Queue>,
     family_idx : u32,
 }
 impl Queue {
     pub fn idx(&self) -> u32 {
         self.family_idx
     }
-    pub fn queue(&self) -> &Arc<vulkano::device::Queue> {
+    pub fn queue(&self) -> &Arc<vk::Queue> {
         &self.queue
     }
 }
@@ -1239,26 +1239,26 @@ impl Queues {
 }
 
 pub struct RenderSurface {
-    swapchain: Arc<vulkano::swapchain::Swapchain>,
-    surface: Arc<vulkano::swapchain::Surface>,
-    swapchain_images: Vec<Arc<vulkano::image::SwapchainImage>>,
+    swapchain: Arc<vk::Swapchain>,
+    surface: Arc<vk::Surface>,
+    swapchain_images: Vec<Arc<vk::SwapchainImage>>,
     //A future for each image, representing the time at which it has been presented and can start to be redrawn.
-    fences: Vec<Option<Box<dyn vulkano::sync::GpuFuture>>>,
+    fences: Vec<Option<Box<dyn vk::sync::GpuFuture>>>,
 
-    swapchain_create_info: vulkano::swapchain::SwapchainCreateInfo,
+    swapchain_create_info: vk::SwapchainCreateInfo,
 }
 impl RenderSurface {
-    pub fn format(&self) -> vulkano::format::Format {
+    pub fn format(&self) -> vk::Format {
         self.swapchain_create_info.image_format.unwrap()
     }
     fn new(
-        physical_device : Arc<vulkano::device::physical::PhysicalDevice>,
-        device : Arc<vulkano::device::Device>,
-        surface: Arc<vulkano::swapchain::Surface>,
+        physical_device : Arc<vk::PhysicalDevice>,
+        device : Arc<vk::Device>,
+        surface: Arc<vk::Surface>,
         size: [u32; 2],
     ) -> AnyResult<Self> {
         
-        let surface_info = vulkano::swapchain::SurfaceInfo::default();
+        let surface_info = vk::SurfaceInfo::default();
         let capabilies = physical_device.surface_capabilities(&surface, surface_info.clone())?;
 
         let Some(&(format, color_space)) = physical_device.surface_formats(&surface, surface_info)?.first()
@@ -1270,12 +1270,12 @@ impl RenderSurface {
         let present_mode =
             physical_device.surface_present_modes(&surface)
             .map(|mut modes| {
-                if let Some(_) = modes.find(|mode| *mode == vulkano::swapchain::PresentMode::Mailbox) {
-                    vulkano::swapchain::PresentMode::Mailbox
+                if let Some(_) = modes.find(|mode| *mode == vk::PresentMode::Mailbox) {
+                    vk::PresentMode::Mailbox
                 } else {
-                    vulkano::swapchain::PresentMode::Fifo
+                    vk::PresentMode::Fifo
                 }
-            }).unwrap_or(vulkano::swapchain::PresentMode::Fifo);
+            }).unwrap_or(vk::PresentMode::Fifo);
         let image_count = {
             //Get one more then minimum, if maximum allows
             let min_image_count = capabilies.min_image_count + 1;
@@ -1291,19 +1291,19 @@ impl RenderSurface {
             .expect("Device provided no alpha modes");
 
         let swapchain_create_info = 
-            vulkano::swapchain::SwapchainCreateInfo {
+            vk::SwapchainCreateInfo {
                 min_image_count: image_count,
                 image_format: Some(format),
                 image_color_space: color_space,
                 image_extent: size,
-                image_usage: vulkano::image::ImageUsage::COLOR_ATTACHMENT,
+                image_usage: vk::ImageUsage::COLOR_ATTACHMENT,
                 composite_alpha: alpha_mode,
                 present_mode,
                 clipped: true, // We wont read the framebuffer.
                 ..Default::default()
             };
 
-        let (swapchain, images) = vulkano::swapchain::Swapchain::new(
+        let (swapchain, images) = vk::Swapchain::new(
                 device.clone(),
                 surface.clone(),
                 swapchain_create_info.clone(),
@@ -1343,15 +1343,15 @@ impl RenderSurface {
     }
 }
 pub struct RenderContext {
-    library : Arc<vulkano::VulkanLibrary>,
-    instance : Arc<vulkano::instance::Instance>,
-    physical_device : Arc<vulkano::device::physical::PhysicalDevice>,
-    device : Arc<vulkano::device::Device>,
+    library : Arc<vk::VulkanLibrary>,
+    instance : Arc<vk::Instance>,
+    physical_device : Arc<vk::PhysicalDevice>,
+    device : Arc<vk::Device>,
     queues: Queues,
 
-    command_buffer_alloc : vulkano::command_buffer::allocator::StandardCommandBufferAllocator,
-    memory_alloc: vulkano::memory::allocator::StandardMemoryAllocator,
-    descriptor_set_alloc : vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator,
+    command_buffer_alloc : vk::StandardCommandBufferAllocator,
+    memory_alloc: vk::StandardMemoryAllocator,
+    descriptor_set_alloc : vk::StandardDescriptorSetAllocator,
 }
 
 
@@ -1360,21 +1360,21 @@ impl RenderContext {
         unimplemented!()
     }
     pub fn new_with_window_surface(win: &WindowSurface) -> AnyResult<(Self, RenderSurface)> {
-        let library = vulkano::VulkanLibrary::new()?;
+        let library = vk::VulkanLibrary::new()?;
         let required_instance_extensions = vulkano_win::required_extensions(&library);
 
-        let instance = vulkano::instance::Instance::new(
+        let instance = vk::Instance::new(
             library.clone(),
-            vulkano::instance::InstanceCreateInfo{
+            vk::InstanceCreateInfo{
                 application_name: Some("Fuzzpaint-vk".to_string()),
-                application_version: vulkano::Version { major: 0, minor: 1, patch: 0 },
+                application_version: vk::Version { major: 0, minor: 1, patch: 0 },
                 enabled_extensions: required_instance_extensions,
                 ..Default::default()
             }
         )?;
 
         let surface = vulkano_win::create_surface_from_winit(win.window(), instance.clone())?;
-        let required_device_extensions = vulkano::device::DeviceExtensions {
+        let required_device_extensions = vk::DeviceExtensions {
             khr_swapchain : true,
             ..Default::default()
         };
@@ -1396,9 +1396,9 @@ impl RenderContext {
         Ok(
             (
                 Self {
-                    command_buffer_alloc: vulkano::command_buffer::allocator::StandardCommandBufferAllocator::new(device.clone(), Default::default()),
-                    memory_alloc: vulkano::memory::allocator::StandardMemoryAllocator::new_default(device.clone()),
-                    descriptor_set_alloc: vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator::new(device.clone()),
+                    command_buffer_alloc: vk::StandardCommandBufferAllocator::new(device.clone(), Default::default()),
+                    memory_alloc: vk::StandardMemoryAllocator::new_default(device.clone()),
+                    descriptor_set_alloc: vk::StandardDescriptorSetAllocator::new(device.clone()),
                     library,
                     instance,
                     device,
@@ -1409,11 +1409,11 @@ impl RenderContext {
             )
         )
     }
-    fn create_device(physical_device : Arc<vulkano::device::physical::PhysicalDevice>, queue_indices : QueueIndices, extensions: vulkano::device::DeviceExtensions)
-        -> AnyResult<(Arc<vulkano::device::Device>, Queues)>{
+    fn create_device(physical_device : Arc<vk::PhysicalDevice>, queue_indices : QueueIndices, extensions: vk::DeviceExtensions)
+        -> AnyResult<(Arc<vk::Device>, Queues)>{
         //Need a graphics queue.
         let mut graphics_queue_info =
-            vulkano::device::QueueCreateInfo{
+            vk::QueueCreateInfo{
                 queue_family_index: queue_indices.graphics,
                 queues: vec![0.5],
                 ..Default::default()
@@ -1435,7 +1435,7 @@ impl RenderContext {
                 }
             } else {
                 (true, Some(
-                    vulkano::device::QueueCreateInfo{
+                    vk::QueueCreateInfo{
                         queue_family_index: queue_indices.compute,
                         queues: vec![0.5],
                         ..Default::default()
@@ -1459,7 +1459,7 @@ impl RenderContext {
                 }
             } else {
                 (true, Some(
-                    vulkano::device::QueueCreateInfo{
+                    vk::QueueCreateInfo{
                         queue_family_index: present,
                         queues: vec![0.5],
                         ..Default::default()
@@ -1477,11 +1477,11 @@ impl RenderContext {
             create_infos.push(present_create_info.clone());
         }
 
-        let (device, mut queues) = vulkano::device::Device::new(
+        let (device, mut queues) = vk::Device::new(
             physical_device,
-            vulkano::device::DeviceCreateInfo{
+            vk::DeviceCreateInfo{
                 enabled_extensions: extensions,
-                enabled_features: vulkano::device::Features::empty(),
+                enabled_features: vk::Features::empty(),
                 queue_create_infos: create_infos,
                 ..Default::default()
             }
@@ -1528,14 +1528,14 @@ impl RenderContext {
     }
     /// Find a device that fits our needs, including the ability to present to the surface if in non-headless mode.
     /// Horrible signature - Returns Ok(None) if no device found, Ok(Some((device, queue indices))) if suitable device found.
-    fn choose_physical_device(instance: Arc<vulkano::instance::Instance>, required_extensions: vulkano::device::DeviceExtensions, compatible_surface: Option<Arc<vulkano::swapchain::Surface>>)
-        -> AnyResult<Option<(Arc<vulkano::device::physical::PhysicalDevice>, QueueIndices)>> {
+    fn choose_physical_device(instance: Arc<vk::Instance>, required_extensions: vk::DeviceExtensions, compatible_surface: Option<Arc<vk::Surface>>)
+        -> AnyResult<Option<(Arc<vk::PhysicalDevice>, QueueIndices)>> {
         
         //TODO: does not respect queue family max queue counts. This will need to be redone in some sort of 
         //multi-pass shenanigan to properly find a good queue setup. Also requires that graphics and compute queues be transfer as well.
         let res = instance.enumerate_physical_devices()?
             .filter_map(|device| {
-                use vulkano::device::QueueFlags;
+                use vk::QueueFlags;
 
                 //Make sure it has what we need
                 if !device.supported_extensions().contains(&required_extensions) {
@@ -1600,7 +1600,7 @@ impl RenderContext {
                 )
             })
             .min_by_key(|(device, _)| {
-                use vulkano::device::physical::PhysicalDeviceType;
+                use vk::PhysicalDeviceType;
                 match device.properties().device_type {
                     PhysicalDeviceType::DiscreteGpu => 0,
                     PhysicalDeviceType::IntegratedGpu => 1,
@@ -1612,8 +1612,8 @@ impl RenderContext {
         
         Ok(res)
     }
-    pub fn now(&self) -> vulkano::sync::future::NowFuture {
-        vulkano::sync::now(self.device.clone())
+    pub fn now(&self) -> vk::NowFuture {
+        vk::sync::now(self.device.clone())
     }
 }
 
