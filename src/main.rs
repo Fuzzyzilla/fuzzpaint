@@ -966,8 +966,8 @@ impl WindowSurface {
     }
 }
 
-/// Merge the textures data from one egui output into another. Useful for discarding Egui out geomety
-/// while maintaining it's side-effects.
+/// Merge the textures data from one egui output into another. Useful for discarding Egui geomety
+/// while maintaining its side-effects.
 pub fn prepend_textures_delta(into : &mut egui::TexturesDelta, mut from: egui::TexturesDelta) {
     //Append into's data onto from, then copy the data back.
     //There is no convinient way to efficiently prepend a chunk of data, so this'll do :3
@@ -1263,7 +1263,8 @@ impl RenderSurface {
             else {return Err(anyhow::anyhow!("Device reported no valid surface formats."))};
 
         //Use mailbox for low-latency, if supported. Otherwise, FIFO is always supported.
-        /*
+        //Bug: This results in unreasonably high CPU usage. Unsure why, we're not presenting particularly frequently.
+        
         let present_mode =
             physical_device.surface_present_modes(&surface)
             .map(|mut modes| {
@@ -1273,8 +1274,6 @@ impl RenderSurface {
                     vulkano::swapchain::PresentMode::Fifo
                 }
             }).unwrap_or(vulkano::swapchain::PresentMode::Fifo);
-        */
-        let present_mode = vulkano::swapchain::PresentMode::Fifo;
         let image_count = {
             //Get one more then minimum, if maximum allows
             let min_image_count = capabilies.min_image_count + 1;
