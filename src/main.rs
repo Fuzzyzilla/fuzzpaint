@@ -968,18 +968,19 @@ impl WindowSurface {
 
 /// Merge the textures data from one egui output into another. Useful for discarding Egui out geomety
 /// while maintaining it's side-effects.
-pub fn append_textures_delta(into : &mut egui::TexturesDelta, from: egui::TexturesDelta) {
-    into.free.reserve(from.free.len());
-    for free in from.free.into_iter() {
-        into.free.push(free);
-    }
+pub fn prepend_textures_delta(into : &mut egui::TexturesDelta, mut from: egui::TexturesDelta) {
+    //Append into's data onto from, then copy the data back.
+    //There is no convinient way to efficiently prepend a chunk of data, so this'll do :3
+    from.free.reserve(into.free.len());
+    from.free.extend(std::mem::take(&mut into.free).into_iter());
+    into.free = std::mem::take(&mut from.free);
+
 
     //Maybe duplicates work. Could optimize to discard redundant updates, but this probably
     //wont happen frequently
-    into.set.reserve(from.set.len());
-    for set in from.set.into_iter() {
-        into.set.push(set);
-    }
+    from.set.reserve(into.set.len());
+    from.set.extend(std::mem::take(&mut into.set).into_iter());
+    into.set = std::mem::take(&mut from.set);
 }
 
 pub struct WindowRenderer {
@@ -1067,9 +1068,6 @@ impl WindowRenderer {
                         WindowEvent::Resized(..) => {
                             self.recreate_surface().expect("Failed to rebuild surface");
                         }
-                        WindowEvent::ThemeChanged(t) => {
-                            println!("Theme :0")
-                        }
                         _ => ()
                     }
                 }
@@ -1083,9 +1081,9 @@ impl WindowRenderer {
                     let raw_input = self.egui_events.take_raw_input();
                     self.egui_ctx.begin_frame(raw_input);
 
-                    egui::Window::new("🦈 Baa")
+                    egui::Window::new("🐑 Baa")
                         .show(&self.egui_ctx, |ui| {
-                            ui.label("Thing's wrong with it wha'ya mean");
+                            ui.label("Testing testing 123!!");
                             ui.text_edit_multiline(&mut edit_str);
                         });
 
@@ -1116,7 +1114,7 @@ impl WindowRenderer {
 
                     //There was old data, make sure we don't lose the texture updates when we replace it.
                     if let Some(old_output) = egui_out.take() {
-                        append_textures_delta(&mut out.textures_delta, old_output.textures_delta);
+                        prepend_textures_delta(&mut out.textures_delta, old_output.textures_delta);
                     }
                     egui_out = Some(out);
                 }
