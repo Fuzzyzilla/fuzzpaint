@@ -96,8 +96,20 @@ impl EguiEventAccumulator {
                         self.is_empty = false;
                     }
                     WinEvent::KeyboardInput { input, .. } => {
-                        let Some(key) = input.virtual_keycode.and_then(Self::winit_to_egui_key) else {return};
+                        let Some(key) = input.virtual_keycode else {return};
                         let pressed = if let winit::event::ElementState::Pressed = input.state {true} else {false};
+                        //Send a text event
+                        if pressed {
+                            if let Some(string) = Self::winit_key_to_text(key) {
+                                self.events.push(
+                                    GuiEvent::Text(string.to_string())
+                                );
+                            }
+                            self.is_empty = false;
+                        }
+
+                        //If this is a key egui cares about, send it a key message as well.
+                        let Some(key) = Self::winit_to_egui_key(key) else {return};
 
                         let prev_pressed = {
                             let mut key_state = self.held_keys.get_mut(key as u8 as usize).unwrap();
@@ -206,6 +218,68 @@ impl EguiEventAccumulator {
                 }
             }
         }
+    }
+    pub fn winit_key_to_text(winit_key : winit::event::VirtualKeyCode) -> Option<&'static str> {
+        use winit::event::VirtualKeyCode as Key;
+        let char = match winit_key {
+            Key::A => "A",
+            Key::Apostrophe => "'",
+            Key::At => "@",
+            Key::B => "B",
+            Key::Backslash => "\\",
+            Key::C => "C",
+            Key::Caret => "^",
+            Key::Colon => ":",
+            Key::D => "D",
+            Key::E => "E",
+            Key::F => "F",
+            Key::G => "G",
+            Key::Grave => "`",
+            Key::H => "H",
+            Key::I => "I",
+            Key::J => "J",
+            Key::K => "K",
+            Key::L => "L",
+            Key::LBracket => "[",
+            Key::M => "M",
+            Key::N => "N",
+            Key::Key0 | Key::Numpad0 => "0",
+            Key::Key1 | Key::Numpad1 => "1",
+            Key::Key2 | Key::Numpad2 => "2",
+            Key::Key3 | Key::Numpad3 => "3",
+            Key::Key4 | Key::Numpad4 => "4",
+            Key::Key5 | Key::Numpad5 => "5",
+            Key::Key6 | Key::Numpad6 => "6",
+            Key::Key7 | Key::Numpad7 => "7",
+            Key::Key8 | Key::Numpad8 => "8",
+            Key::Key9 | Key::Numpad9 => "9",
+            Key::NumpadAdd | Key::Plus => "+",
+            Key::NumpadMultiply | Key::Asterisk => "*",
+            Key::NumpadSubtract | Key::Minus => "-",
+            Key::NumpadDivide | Key::Slash => "/",
+            Key::NumpadDecimal | Key::Period => ".",
+            Key::Equals | Key::NumpadEquals => "=",
+            Key::NumpadComma | Key::Comma => ",",
+            Key::O => "O",
+            Key::P => "P",
+            Key::Q => "Q",
+            Key::R => "R",
+            Key::RBracket => "]",
+            Key::S => "S",
+            Key::Semicolon => ";",
+            Key::Space => " ",
+            Key::T => "T",
+            Key::Tab => "\t",
+            Key::U => "U",
+            Key::V => "V",
+            Key::W => "W",
+            Key::X => "X",
+            Key::Y => "Y",
+            Key::Yen => "¥",
+            Key::Z => "Z",
+            _ => return None
+        };
+        Some(char)
     }
     pub fn winit_to_egui_key(winit_button : winit::event::VirtualKeyCode) -> Option<egui::Key> {
         use winit::event::VirtualKeyCode as winit_key;
@@ -1038,6 +1112,8 @@ impl WindowRenderer {
         let event_loop = self.event_loop.take().unwrap();
         let mut egui_out = None::<egui::FullOutput>;
 
+        let mut edit_str = String::new();
+
         event_loop.run(move |event, _, control_flow|{
             use winit::event::{Event, WindowEvent};
 
@@ -1072,6 +1148,7 @@ impl WindowRenderer {
                     egui::Window::new("🦈 Baa")
                         .show(&self.egui_ctx, |ui| {
                             ui.label("Thing's wrong with it wha'ya mean");
+                            ui.text_edit_multiline(&mut edit_str);
                         });
 
                     //Mutable so that we can take from it
