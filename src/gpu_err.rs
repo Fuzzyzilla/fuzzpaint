@@ -11,25 +11,7 @@ pub struct GpuError {
     /// The underlying source of the error
     pub source : Box<dyn std::error::Error>,
 }
-pub trait GpuResult {
-    type OkTy;
-    type ErrTy : std::error::Error;
-    fn fatal(self) -> Result<Self::OkTy, GpuError>;
-}
 
-impl<OkTy> GpuResult for Result<OkTy, vulkano::OomError> {
-    type OkTy = OkTy;
-    type ErrTy = vulkano::OomError;
-    fn fatal(self) -> Result<Self::OkTy, GpuError> {
-        self.map_err(
-            |err| GpuError{
-                remedy: GpuRemedy::Oom(err.clone()),
-                resource_lost: true,
-                source: Box::new(err)
-            }
-        )
-    }
-}
 /// The steps needed to recover from a catastrophic failure.
 /// There is an implicit hierarchy here, higher enums imply the ones below.
 #[derive(Debug)]
@@ -43,8 +25,134 @@ pub enum GpuRemedy {
     /// The swapchain was out-of-date or otherwise unusable.
     RecreateSwapchain,
 
-    /// An impossible operation was attempted, like bad shader. Nothing can be done but blame me.
-    None,
+    /// A required feature/extension/version/etc was expected but not met.
+    RequirementNotMet(vulkano::RequiresOneOf),
+
+    /// An impossible operation was attempted, like bad shader, or double-used sync primitive. Nothing can be done but blame me.
+    /// Really means that debugging should be performed, and in practice the renderer should be restarted.
+    BlameTheDev,
     /// Out of memory.
     Oom(vulkano::OomError),
+}
+
+pub trait DefaultRemedy: std::error::Error {
+    fn default_remedy(&self) -> GpuRemedy;
+}
+impl DefaultRemedy for vulkano::OomError {
+    fn default_remedy(&self) -> GpuRemedy {
+        GpuRemedy::Oom(self.clone())
+    }
+}
+impl DefaultRemedy for vulkano::swapchain::AcquireError {
+    fn default_remedy(&self) -> GpuRemedy {
+        match self {
+            Self::DeviceLost => GpuRemedy::RecreateDevice,
+            //Todo: Speculative solution here
+            Self::FullScreenExclusiveModeLost => GpuRemedy::RecreateSurface,
+            Self::SurfaceLost => GpuRemedy::RecreateSurface,
+            Self::OutOfDate => GpuRemedy::RecreateSurface,
+
+            //Less of an error and more of a notification. Use map_gpu_err to deal with this weirdness :3
+            Self::Timeout => GpuRemedy::BlameTheDev,
+
+            Self::FenceError(fence_err) => fence_err.default_remedy(),
+            Self::SemaphoreError(sem_err) => sem_err.default_remedy(),
+
+            Self::OomError(oom) => oom.default_remedy(),
+        }
+    }
+}
+impl DefaultRemedy for vulkano::sync::fence::FenceError {
+    fn default_remedy(&self) -> GpuRemedy {
+        match self {
+            Self::DeviceLost => GpuRemedy::RecreateDevice,
+            Self::InQueue => GpuRemedy::BlameTheDev,
+            Self::ImportedForSwapchainAcquire => GpuRemedy::BlameTheDev,
+            Self::OomError(oom) => oom.default_remedy(),
+            Self::RequirementNotMet { requires_one_of, ..} => GpuRemedy::RequirementNotMet(requires_one_of.clone()),
+
+            _ => {
+                //Platform specific operations which may fail. Not using any in this codebase :3
+                eprintln!("Err {self:?} encountered without a default remedy.");
+                GpuRemedy::BlameTheDev
+            }
+        }
+    }
+}
+impl DefaultRemedy for vulkano::sync::semaphore::SemaphoreError {
+    fn default_remedy(&self) -> GpuRemedy {
+        match self {
+            Self::InQueue => GpuRemedy::BlameTheDev,
+            Self::ImportedForSwapchainAcquire => GpuRemedy::BlameTheDev,
+            Self::OomError(oom) => oom.default_remedy(),
+            Self::RequirementNotMet { requires_one_of, ..} => GpuRemedy::RequirementNotMet(requires_one_of.clone()),
+            Self::QueueIsWaiting => GpuRemedy::BlameTheDev,
+            _ => {
+                //Platform specific operations which may fail. Not using any in this codebase :3
+                eprintln!("Err {self:?} encountered without a default remedy.");
+                GpuRemedy::BlameTheDev
+            }
+        }
+    }
+}
+
+/// Trait to add functionality to vulkano errors, allowing marking as fatal/recoverable
+/// and deriving a default plan-of-action for recovery
+pub trait GpuResult: Sized {
+    type OkTy;
+    type ErrTy : std::error::Error;
+
+    /// Provide a function to inspect the underlying error, and determine 
+    /// if it's fatal and what remedy should be taken (or None for default remedy for that error)
+    fn map_gpu_err(self, f: impl FnOnce(&Self::ErrTy) -> (bool, Option<GpuRemedy>)) -> Result<Self::OkTy, GpuError>;
+
+    /// Provide a boolean indicating if an Err result is fatal or not
+    fn with_fatality(self, fatal: bool) -> Result<Self::OkTy, GpuError> {
+        if fatal {
+            GpuResult::fatal(self)
+        } else {
+            GpuResult::recoverable(self)
+        }
+    }
+    /// Convert this error to one indicating resource loss. Use this when a failure
+    /// means loss of the calling resource.
+    fn fatal(self) -> Result<Self::OkTy, GpuError>;
+
+    /// Convert this error to one indicating the resource is not lost.
+    fn recoverable(self) -> Result<Self::OkTy, GpuError> {
+        GpuResult::fatal(self).map_err(
+            |err| {
+                GpuError {
+                    resource_lost: false,
+                    ..err
+                }
+            }
+        )
+    }
+}
+
+/// Implement these functions on all errors for which a default remedy is provided.
+impl<OkTy, ErrTy : DefaultRemedy + 'static> GpuResult for Result<OkTy, ErrTy> {
+    type OkTy = OkTy;
+    type ErrTy = ErrTy;
+    fn map_gpu_err(self, f: impl FnOnce(&Self::ErrTy) -> (bool, Option<GpuRemedy>)) -> Result<Self::OkTy, GpuError> {
+        self.map_err(|err| {
+            let (fatal, remedy) = f(&err);
+
+            GpuError {
+                remedy: remedy.unwrap_or_else(|| err.default_remedy()),
+                resource_lost: fatal,
+                source: Box::new(err)
+            }
+        })
+    }
+    fn fatal(self) -> Result<Self::OkTy, GpuError> {
+        self.map_err(
+            |err| GpuError{
+                remedy: err.default_remedy(),
+                resource_lost: true,
+                source: Box::new(err)
+            }
+        )
+    }
 }
