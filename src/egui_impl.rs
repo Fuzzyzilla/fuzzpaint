@@ -516,7 +516,10 @@ impl EguiRenderer {
                 Ok(fb)
             }).collect();
         
-        self.framebuffers = framebuffers.map_gpu_err()?;
+        //Treat error as fatal
+        self.framebuffers = framebuffers.map_gpu_err(|err| {
+            (true, GpuRemedy::BlameTheDev)
+        })?;
 
         Ok(())
     }
@@ -545,9 +548,9 @@ impl EguiRenderer {
                 &self.render_context.command_buffer_alloc,
                 self.render_context.queues.graphics().idx(),
                 vk::CommandBufferUsage::OneTimeSubmit
-            )?;
+            ).fatal()?;
             return Ok(
-                builder.build()?
+                builder.build().fatal()?
             )
         }
 
@@ -576,7 +579,7 @@ impl EguiRenderer {
                 ..Default::default()
             },
             vertex_vec
-        )?;
+        ).fatal()?;
         let indices = vk::Buffer::from_iter(
             &self.render_context.memory_alloc,
             vk::BufferCreateInfo {
@@ -588,7 +591,7 @@ impl EguiRenderer {
                 ..Default::default()
             },
             index_vec
-        )?;
+        ).fatal()?;
 
         let framebuffer = self.framebuffers.get(present_img_index as usize).expect("Present image out-of-bounds.").clone();
 

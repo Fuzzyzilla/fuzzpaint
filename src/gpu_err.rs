@@ -9,7 +9,7 @@ pub struct GpuError {
     /// Whether the resource that returned this error died as a result of the error.
     pub resource_lost : bool,
     /// The underlying source of the error
-    pub source : Box<dyn std::error::Error>,
+    pub source : Option<Box<dyn std::error::Error>>,
 }
 
 /// The steps needed to recover from a catastrophic failure.
@@ -123,6 +123,27 @@ impl DefaultRemedy for vulkano::pipeline::graphics::GraphicsPipelineCreationErro
         }
     }
 }
+impl DefaultRemedy for vulkano::command_buffer::BuildError {
+    fn default_remedy(&self) -> GpuRemedy {
+        match self {
+            Self::OomError(oom) => oom.default_remedy(),
+            //The syntax on the builder was wrong...
+            Self::QueryActive | Self::RenderPassActive => {
+                GpuRemedy::BlameTheDev
+            }
+        }
+    }
+}
+impl DefaultRemedy for vulkano::command_buffer::CommandBufferBeginError {
+    fn default_remedy(&self) -> GpuRemedy {
+        match self {
+            Self::OomError(oom) => oom.default_remedy(),
+            Self::RequirementNotMet { requires_one_of, ..} => GpuRemedy::RequirementNotMet(requires_one_of.clone()),
+            //Todo. This is starting to feel like a bad solution x,3
+            _ => GpuRemedy::BlameTheDev,
+        }
+    }
+}
 pub type GpuResult<T> = Result<T, GpuError>;
 
 pub trait MapGpuErrOrDefault {
@@ -134,7 +155,7 @@ pub trait MapGpuErrOrDefault {
 }
 pub trait MapGpuErr {
     type OkTy;
-    type ErrTy : std::error::Error;
+    type ErrTy;
     /// Provide a function to inspect the underlying error, and determine 
     /// if it's fatal and what remedy should be taken (or None for default remedy for that error)
     fn map_gpu_err(self, f: impl FnOnce(&Self::ErrTy) -> (bool, GpuRemedy)) -> GpuResult<Self::OkTy>;
@@ -151,7 +172,9 @@ impl<T: MapGpuErrOrDefault> MapGpuErr for T {
     }
 }
 
-impl<OkTy, ErrTy : std::error::Error> MapGpuErr for std::result::Result<OkTy, ErrTy> {
+///This blanket Impl doesn't work in practice. Not sure what type ErrTy should be to allow this to work for
+///all Result. (Maybe it cant?)
+impl<OkTy, ErrTy> MapGpuErr for std::result::Result<OkTy, ErrTy> {
     type OkTy = OkTy;
     type ErrTy = ErrTy;
     fn map_gpu_err(self, f: impl FnOnce(&Self::ErrTy) -> (bool, GpuRemedy)) -> Result<Self::OkTy, GpuError> {
@@ -161,7 +184,7 @@ impl<OkTy, ErrTy : std::error::Error> MapGpuErr for std::result::Result<OkTy, Er
             GpuError {
                 remedy,
                 resource_lost: fatal,
-                source: Box::new(err)
+                source: None
             }
         })
     }
@@ -207,7 +230,7 @@ impl<OkTy, ErrTy : DefaultRemedy + 'static> VulkanoResult for Result<OkTy, ErrTy
             |err| GpuError{
                 remedy: err.default_remedy(),
                 resource_lost: true,
-                source: Box::new(err)
+                source: Some(Box::new(err))
             }
         )
     }
