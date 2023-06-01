@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 pub mod vulkano_prelude;
+pub mod gpu_err;
 mod egui_impl;
 use vulkano_prelude::*;
 
