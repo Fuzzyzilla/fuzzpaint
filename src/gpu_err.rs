@@ -3,29 +3,29 @@
 /// the error destroyed the resource it was returned by.
 #[derive(thiserror::Error, Debug)]
 #[error("{} GpuError: {source:?}", if *.resource_lost {"[Lost]"} else {"[Recoverable]"})]
-pub struct GpuError<Source : std::error::Error> {
+pub struct GpuError {
     /// Possible actions needed to fix this error state.
     pub remedy : GpuRemedy,
     /// Whether the resource that returned this error died as a result of the error.
     pub resource_lost : bool,
     /// The underlying source of the error
-    pub source : Source,
+    pub source : Box<dyn std::error::Error>,
 }
 pub trait GpuResult {
     type OkTy;
     type ErrTy : std::error::Error;
-    fn fatal(self) -> Result<Self::OkTy, GpuError<Self::ErrTy>>;
+    fn fatal(self) -> Result<Self::OkTy, GpuError>;
 }
 
 impl<OkTy> GpuResult for Result<OkTy, vulkano::OomError> {
     type OkTy = OkTy;
     type ErrTy = vulkano::OomError;
-    fn fatal(self) -> Result<Self::OkTy, GpuError<Self::ErrTy>> {
+    fn fatal(self) -> Result<Self::OkTy, GpuError> {
         self.map_err(
             |err| GpuError{
                 remedy: GpuRemedy::Oom(err.clone()),
                 resource_lost: true,
-                source: err
+                source: Box::new(err)
             }
         )
     }
