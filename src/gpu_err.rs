@@ -95,23 +95,90 @@ impl DefaultRemedy for vulkano::sync::semaphore::SemaphoreError {
         }
     }
 }
+impl DefaultRemedy for vulkano::shader::ShaderCreationError {
+    fn default_remedy(&self) -> GpuRemedy {
+        match self {
+            Self::OomError(oom) => oom.default_remedy(),
+            //Todo!
+            _ => GpuRemedy::BlameTheDev,
+        }
+    }
+}
+impl DefaultRemedy for vulkano::render_pass::RenderPassCreationError {
+    fn default_remedy(&self) -> GpuRemedy {
+        match self {
+            Self::OomError(oom) => oom.default_remedy(),
+            //Todo!
+            _ => GpuRemedy::BlameTheDev
+        }
+    }
+}
+impl DefaultRemedy for vulkano::pipeline::graphics::GraphicsPipelineCreationError {
+    fn default_remedy(&self) -> GpuRemedy {
+        match self {
+            Self::OomError(oom) => oom.default_remedy(),
+            Self::RequirementNotMet { requires_one_of, .. } => GpuRemedy::RequirementNotMet(requires_one_of.clone()),
+            //Todo! Many of these errors are regarding exceeded device limits.
+            _ => GpuRemedy::BlameTheDev
+        }
+    }
+}
+pub type GpuResult<T> = Result<T, GpuError>;
+
+pub trait MapGpuErrOrDefault {
+    type OkTy;
+    type ErrTy : DefaultRemedy;
+    /// Provide a function to inspect the underlying error, and determine 
+    /// if it's fatal and what remedy should be taken (or None for default remedy for that error)
+    fn map_gpu_err_or_default(self, f: impl FnOnce(&Self::ErrTy) -> (bool, Option<GpuRemedy>)) -> GpuResult<Self::OkTy>;
+}
+pub trait MapGpuErr {
+    type OkTy;
+    type ErrTy : std::error::Error;
+    /// Provide a function to inspect the underlying error, and determine 
+    /// if it's fatal and what remedy should be taken (or None for default remedy for that error)
+    fn map_gpu_err(self, f: impl FnOnce(&Self::ErrTy) -> (bool, GpuRemedy)) -> GpuResult<Self::OkTy>;
+}
+
+impl<T: MapGpuErrOrDefault> MapGpuErr for T {
+    type OkTy = T::OkTy;
+    type ErrTy = T::ErrTy;
+    fn map_gpu_err(self, f: impl FnOnce(&Self::ErrTy) -> (bool, GpuRemedy)) -> GpuResult<Self::OkTy> {
+        self.map_gpu_err_or_default(|err| {
+            let (fatal, remedy) = f(err);
+            (fatal, Some(remedy))
+        })
+    }
+}
+
+impl<OkTy, ErrTy : std::error::Error> MapGpuErr for std::result::Result<OkTy, ErrTy> {
+    type OkTy = OkTy;
+    type ErrTy = ErrTy;
+    fn map_gpu_err(self, f: impl FnOnce(&Self::ErrTy) -> (bool, GpuRemedy)) -> Result<Self::OkTy, GpuError> {
+        self.map_err(|err| {
+            let (fatal, remedy) = f(&err);
+
+            GpuError {
+                remedy,
+                resource_lost: fatal,
+                source: Box::new(err)
+            }
+        })
+    }
+}
 
 /// Trait to add functionality to vulkano errors, allowing marking as fatal/recoverable
 /// and deriving a default plan-of-action for recovery
-pub trait GpuResult: Sized {
+pub trait VulkanoResult: Sized {
     type OkTy;
     type ErrTy : std::error::Error;
-
-    /// Provide a function to inspect the underlying error, and determine 
-    /// if it's fatal and what remedy should be taken (or None for default remedy for that error)
-    fn map_gpu_err(self, f: impl FnOnce(&Self::ErrTy) -> (bool, Option<GpuRemedy>)) -> Result<Self::OkTy, GpuError>;
 
     /// Provide a boolean indicating if an Err result is fatal or not
     fn with_fatality(self, fatal: bool) -> Result<Self::OkTy, GpuError> {
         if fatal {
-            GpuResult::fatal(self)
+            VulkanoResult::fatal(self)
         } else {
-            GpuResult::recoverable(self)
+            VulkanoResult::recoverable(self)
         }
     }
     /// Convert this error to one indicating resource loss. Use this when a failure
@@ -120,7 +187,7 @@ pub trait GpuResult: Sized {
 
     /// Convert this error to one indicating the resource is not lost.
     fn recoverable(self) -> Result<Self::OkTy, GpuError> {
-        GpuResult::fatal(self).map_err(
+        VulkanoResult::fatal(self).map_err(
             |err| {
                 GpuError {
                     resource_lost: false,
@@ -132,20 +199,9 @@ pub trait GpuResult: Sized {
 }
 
 /// Implement these functions on all errors for which a default remedy is provided.
-impl<OkTy, ErrTy : DefaultRemedy + 'static> GpuResult for Result<OkTy, ErrTy> {
+impl<OkTy, ErrTy : DefaultRemedy + 'static> VulkanoResult for Result<OkTy, ErrTy> {
     type OkTy = OkTy;
     type ErrTy = ErrTy;
-    fn map_gpu_err(self, f: impl FnOnce(&Self::ErrTy) -> (bool, Option<GpuRemedy>)) -> Result<Self::OkTy, GpuError> {
-        self.map_err(|err| {
-            let (fatal, remedy) = f(&err);
-
-            GpuError {
-                remedy: remedy.unwrap_or_else(|| err.default_remedy()),
-                resource_lost: fatal,
-                source: Box::new(err)
-            }
-        })
-    }
     fn fatal(self) -> Result<Self::OkTy, GpuError> {
         self.map_err(
             |err| GpuError{

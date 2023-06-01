@@ -1,5 +1,6 @@
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
+use crate::gpu_err::*;
 
 pub struct EguiEventAccumulator {
     events: Vec<egui::Event>,
@@ -433,7 +434,7 @@ pub struct EguiRenderer {
     framebuffers: Vec<Arc<vk::Framebuffer>>,
 }
 impl EguiRenderer {
-    pub fn new(render_context: Arc<super::RenderContext>, surface_format: vk::Format) -> AnyResult<Self> {
+    pub fn new(render_context: Arc<super::RenderContext>, surface_format: vk::Format) -> GpuResult<Self> {
         let device = render_context.device.clone();
         let renderpass = vulkano::single_pass_renderpass!(
             device.clone(),
@@ -449,10 +450,10 @@ impl EguiRenderer {
                 color: [swapchain_color],
                 depth_stencil: {},
             },
-        )?;
+        ).fatal()?;
 
-        let fragment = fs::load(device.clone())?;
-        let vertex = vs::load(device.clone())?;
+        let fragment = fs::load(device.clone()).fatal()?;
+        let vertex = vs::load(device.clone()).fatal()?;
 
         let fragment_entry = fragment.entry_point("main").unwrap();
         let vertex_entry = vertex.entry_point("main").unwrap();
@@ -484,7 +485,8 @@ impl EguiRenderer {
                     scissor_count_dynamic: false,
                 }
             )
-            .build(render_context.device.clone())?;
+            .build(render_context.device.clone())
+            .fatal()?;
 
         Ok(
             Self {
@@ -496,7 +498,7 @@ impl EguiRenderer {
             }
         )
     }
-    pub fn gen_framebuffers(&mut self, surface: &super::RenderSurface) -> AnyResult<()> {
+    pub fn gen_framebuffers(&mut self, surface: &super::RenderSurface) -> GpuResult<()> {
         let framebuffers : AnyResult<Vec<_>> =
             surface.swapchain_images
             .iter()
@@ -514,7 +516,7 @@ impl EguiRenderer {
                 Ok(fb)
             }).collect();
         
-        self.framebuffers = framebuffers?;
+        self.framebuffers = framebuffers.map_gpu_err()?;
 
         Ok(())
     }
@@ -522,7 +524,7 @@ impl EguiRenderer {
         &self,
         present_img_index: u32,
         tesselated_geom: &[egui::epaint::ClippedPrimitive],
-    ) -> AnyResult<vk::PrimaryAutoCommandBuffer> {
+    ) -> GpuResult<vk::PrimaryAutoCommandBuffer> {
         let mut vert_buff_size = 0;
         let mut index_buff_size = 0;
         for clipped in tesselated_geom {
@@ -696,7 +698,7 @@ impl EguiRenderer {
     pub fn do_image_deltas(
         &mut self,
         deltas : egui::TexturesDelta
-    )  -> Option<AnyResult<vk::PrimaryAutoCommandBuffer>> {
+    )  -> Option<GpuResult<vk::PrimaryAutoCommandBuffer>> {
         for free in deltas.free.iter() {
             self.images.remove(&free).unwrap();
         }
@@ -712,7 +714,7 @@ impl EguiRenderer {
     fn do_image_deltas_set(
         &mut self,
         deltas : egui::TexturesDelta,
-    ) -> AnyResult<vk::PrimaryAutoCommandBuffer> {
+    ) -> GpuResult<vk::PrimaryAutoCommandBuffer> {
         //Free is handled by do_image_deltas
 
         //Pre-allocate on the heap so we don't end up re-allocating a bunch as we populate
