@@ -12,6 +12,14 @@ pub struct GpuError {
     /// The underlying source of the error
     pub source : GpuErrorSource,
 }
+impl GpuError {
+    fn default_with_source(source : GpuErrorSource) -> Self {
+        Self {
+            source,
+            fatal: true,
+        }
+    }
+}
 
 pub type GpuResult<OkTy> = ::std::result::Result<OkTy, GpuError>;
 
@@ -43,7 +51,7 @@ pub enum GpuErrorSource {
 impl<ErrTy> HasDeviceLoss for ErrTy
     where ErrTy : Into<GpuErrorSource> {
     fn device_lost(&self) -> bool {
-        let err_source = self.into();
+        let err_source = Into::<GpuErrorSource>::into(*self);
 
         GpuErrorSource::DeviceLost == err_source
     }
@@ -51,10 +59,10 @@ impl<ErrTy> HasDeviceLoss for ErrTy
 impl<ErrTy> HasOom for ErrTy
     where ErrTy : Into<GpuErrorSource>  {
     fn oom(&self) -> Option<vulkano::OomError> {
-        let err_source = self.into();
+        let err_source = Into::<GpuErrorSource>::into(*self);
 
         if let GpuErrorSource::OomError(oom) = err_source {
-            Some(*oom)
+            Some(oom)
         } else {
             None
         }
@@ -108,11 +116,9 @@ impl From<vulkano::sync::semaphore::SemaphoreError> for GpuErrorSource{
     fn from(value: vulkano::sync::semaphore::SemaphoreError) -> Self {
         use vulkano::sync::semaphore::SemaphoreError;
         match value {
-            SemaphoreError::DeviceLost => Self::DeviceLost,
             SemaphoreError::OomError(oom) => oom.into(),
             SemaphoreError::RequirementNotMet { required_for, requires_one_of }
                 => Self::RequirementNotMet { required_for, requires_one_of },
-            SemaphoreError::Timeout => Self::Timeout,
             SemaphoreError::InQueue => Self::ResourceInUse,
             SemaphoreError::QueueIsWaiting => Self::ResourceInUse,
             _ => {
@@ -127,17 +133,31 @@ pub trait IntoGpuResult {
     fn into_gpu_err(self) -> GpuResult<Self::OkTy>;
 }
 
-impl<OkTy, ErrTy> IntoGpuErr for ::std::result::Result<OkTy, ErrTy>
+impl<OkTy, ErrTy> IntoGpuResult for ::std::result::Result<OkTy, ErrTy>
     where ErrTy : Into<GpuErrorSource>
 {
     type OkTy = OkTy;
     fn into_gpu_err(self) -> GpuResult<OkTy> {
-        value
-            .map_err(|err| err.into())
+        self
+            .map_err(|err|
+                GpuError::default_with_source(err.into())
+            )
     }
 }
-
-
+impl<OkTy> IntoGpuResult for GpuResult<OkTy> {
+    type OkTy = OkTy;
+    fn into_gpu_err(self) -> GpuResult<OkTy> {
+        self
+    }
+}
+impl IntoGpuResult for GpuErrorSource {
+    type OkTy = std::convert::Infallible; // !
+    fn into_gpu_err(self) -> GpuResult<Self::OkTy> {
+        Err(
+            GpuError::default_with_source(self.into())
+        )
+    }
+}
 
 impl<OkTy, ErrTy : HasDeviceLoss> HasDeviceLoss for ::std::result::Result<OkTy, ErrTy> {
     fn device_lost(&self) -> bool {
@@ -152,20 +172,5 @@ impl<OkTy, ErrTy : HasOom> HasOom for ::std::result::Result<OkTy, ErrTy> {
             .err()
             .map(|err| err.oom())
             .unwrap_or(None)
-    }
-}
-
-trait OnDeviceLoss {
-    type OkTy;
-    type ErrTy;
-    fn die_on_device_loss(self) -> ::std::result::Result<Self::OkTy, GpuError>;
-}
-impl<OkTy, ErrTy : HasDeviceLoss> OnDeviceLoss for ::std::result::Result<OkTy, ErrTy> {
-    type OkTy = OkTy;
-    type ErrTy = ErrTy;
-    fn die_on_device_loss(self) -> ::std::result::Result<Self::OkTy, GpuError> {
-        self.map_err(|err| {
-
-        })
     }
 }
