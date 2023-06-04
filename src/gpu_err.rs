@@ -112,7 +112,7 @@ impl From<vulkano::sync::semaphore::SemaphoreError> for GpuErrorSource{
             SemaphoreError::OomError(oom) => oom.into(),
             SemaphoreError::RequirementNotMet { required_for, requires_one_of }
                 => Self::RequirementNotMet { required_for, requires_one_of },
-                SemaphoreError::Timeout => Self::Timeout,
+            SemaphoreError::Timeout => Self::Timeout,
             SemaphoreError::InQueue => Self::ResourceInUse,
             SemaphoreError::QueueIsWaiting => Self::ResourceInUse,
             _ => {
@@ -122,10 +122,16 @@ impl From<vulkano::sync::semaphore::SemaphoreError> for GpuErrorSource{
     }
 }
 
-impl<OkTy, ErrTy> From<::std::result::Result<OkTy, ErrTy>> for GpuResult<OkTy>
+pub trait IntoGpuResult {
+    type OkTy;
+    fn into_gpu_err(self) -> GpuResult<Self::OkTy>;
+}
+
+impl<OkTy, ErrTy> IntoGpuErr for ::std::result::Result<OkTy, ErrTy>
     where ErrTy : Into<GpuErrorSource>
 {
-    fn from(value: ::std::result::Result<OkTy, ErrTy>) -> Self {
+    type OkTy = OkTy;
+    fn into_gpu_err(self) -> GpuResult<OkTy> {
         value
             .map_err(|err| err.into())
     }
