@@ -94,7 +94,7 @@ impl WindowRenderer {
 
         Ok(())
     }
-    fn apply_platform_output(&mut self, out: &mut egui::PlatformOutput) {
+    fn apply_platform_output(&mut self, out: egui::PlatformOutput) {
         //Todo: Copied text
         if let Some(url) = out.open_url.take() {
             //Todo: x-platform lol
@@ -138,35 +138,9 @@ impl WindowRenderer {
                 }
                 Event::MainEventsCleared => {
                     //Draw!
-                    let raw_input = self.egui_events.take_raw_input();
-                    let mut out = self.do_ui(raw_input);
-
-                    if out.repaint_after.is_zero() {
-                        //Immediate redraw requested
-                        //Don't need to worry about double-request, Winit will coalesce them
-                        self.window().request_redraw()
-                    } else {
-                        //Egui returns astronomically large number if it doesn't want a redraw - triggers overflow lol
-                        let requested_instant = std::time::Instant::now().checked_add(out.repaint_after);
-
-                        println!("Requested time {requested_instant:?}");
-
-                        if let Some(instant) = requested_instant {
-                            //Insert sorted
-                            match self.requested_redraw_times.binary_search(&instant) {
-                                Ok(..) => (), //A redraw is already scheduled for this exact instant
-                                Err(pos) => self.requested_redraw_times.insert(pos, instant)
-                            }
-                        }
-                    }
-
-                    self.apply_platform_output(&mut out.platform_output);
-
-                    //There was old data, make sure we don't lose the texture updates when we replace it.
-                    if let Some(old_output) = egui_out.take() {
-                        prepend_textures_delta(&mut out.textures_delta, old_output.textures_delta);
-                    }
-                    egui_out = Some(out);
+                    if let Some(output) = self.do_ui() {
+                        self.apply_platform_output(output);
+                    };
                 }
                 Event::RedrawRequested(..) => {
                     //Ensure there is actually data for us to draw
@@ -178,21 +152,18 @@ impl WindowRenderer {
             }
         });
     }
-    fn do_ui(&mut self, input : egui::RawInput) -> egui::FullOutput {
-        self.egui_ctx.begin_frame(input);
-
-        egui::Window::new("🐑 Baa")
-            .show(&self.egui_ctx, |ui| {
+    fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
+        self.egui_ctx.update(|ctx| {
+            egui::Window::new("🐑 Baa")
+            .show(&ctx, |ui| {
                 ui.label("Testing testing 123!!");
             });
 
         egui::Window::new("Beep boop")
-            .show(&self.egui_ctx, |ui| {
+            .show(&ctx, |ui| {
                 ui.label("Testing testing 345!!");
             });
-    
-        //Return platform output and shapes.
-        self.egui_ctx.end_frame()
+        })
     }
     fn paint(&mut self, egui_data : egui::FullOutput) {
         let (idx, suboptimal, image_future) =

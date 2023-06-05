@@ -26,6 +26,7 @@ pub struct EguiCtx {
     renderer: EguiRenderer,
 
     requested_redraw_times: std::collections::VecDeque<std::time::Instant>,
+    immediate_redraw: bool,
     full_output: Option<egui::FullOutput>,
 }
 impl EguiCtx {
@@ -37,6 +38,7 @@ impl EguiCtx {
             ctx: Default::default(),
             events: Default::default(),
             renderer,
+            immediate_redraw: true,
             requested_redraw_times: std::collections::VecDeque::from_iter(std::iter::once(std::time::Instant::now())),
             full_output: None,
         })
@@ -50,25 +52,44 @@ impl EguiCtx {
     pub fn ctx_mut(&mut self) -> &mut egui::Context {
         &mut self.ctx
     }
-    /// 
     pub fn update(&'_ mut self, f: impl FnOnce(&'_ egui::Context) -> ()) -> Option<egui::PlatformOutput> {
         if self.needs_refresh() {
+            //Call into user code to draw
             self.ctx.begin_frame(self.events.take_raw_input());
-            
             f(&self.ctx);
-
             let mut output = self.ctx.end_frame();
 
+            //If there were outstanding deltas, accumulate those
             if let Some(old) = self.full_output.take() {
                 prepend_textures_delta(&mut output.textures_delta, old.textures_delta);
             }
 
+            // handle repaint time
+            if output.repaint_after.is_zero() {
+                self.immediate_redraw = true;
+            } else {
+                //Egui returns astronomically large number if it doesn't want a redraw - triggers overflow lol
+                let requested_instant = std::time::Instant::now().checked_add(output.repaint_after);
+
+                if let Some(instant) = requested_instant {
+                    //Insert sorted
+                    match self.requested_redraw_times.binary_search(&instant) {
+                        Ok(..) => (), //A redraw is already scheduled for this exact instant
+                        Err(pos) => self.requested_redraw_times.insert(pos, instant)
+                    }
+                }
+            }
+
+            //return platform outputs
             let platform_output = output.platform_output.take();
             self.full_output = Some(output);
             Some(platform_output)
         } else {
             None
         }
+    }
+    pub fn needs_redraw(&self) -> bool {
+        self.immediate_redraw || self.requested_redraw_times.front().map_or(false, |&time| time < std::time::Instant::now())
     }
     pub fn needs_refresh(&self) -> bool {
         let redraw_is_past = self.requested_redraw_times.front().map_or(false, |&time| time < std::time::Instant::now());
