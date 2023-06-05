@@ -50,7 +50,7 @@ impl WindowSurface {
                 event_loop: Some(self.event_loop),
                 egui_ctx: Default::default(),
                 egui_events: Default::default(),
-                requested_redraw_time: Some(std::time::Instant::now())
+                requested_redraw_times: std::collections::VecDeque::from_iter(std::iter::once(std::time::Instant::now()))
             }
         )
     }
@@ -84,7 +84,7 @@ pub struct WindowRenderer {
     egui_events : egui_impl::EguiEventAccumulator,
     egui_renderer: egui_impl::EguiRenderer,
 
-    requested_redraw_time : Option<std::time::Instant>,
+    requested_redraw_times: std::collections::VecDeque<std::time::Instant>,
 }
 impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
@@ -162,49 +162,43 @@ impl WindowRenderer {
                     }
                 }
                 Event::MainEventsCleared => {
-                    //No inputs, redraw time (if any) is in the future. Skip!
-                    //This doesn't work!
-                    if self.egui_events.is_empty() && self.requested_redraw_time.map_or(true, |time| time > std::time::Instant::now()) {
+                    //Observe first element in queue - if in the past, a redraw is needed.
+                    let redraw_time_passed = self.requested_redraw_times.front().map_or(false, |&time| time <= std::time::Instant::now()) ;
+
+                    //No inputs, next redraw time (if any) is in the future. Skip!
+                    if self.egui_events.is_empty() && ! redraw_time_passed {
                         return;
                     }
 
+                    //Unqueue the front time if passed
+                    //Todo: recurse?
+                    if redraw_time_passed {
+                        self.requested_redraw_times.pop_front();
+                        self.window().request_redraw()
+                    }
+
+                    self.egui_ctx.request_repaint_after(std::time::Duration::from_secs(2));
+
+                    //Draw!
                     let raw_input = self.egui_events.take_raw_input();
-                    self.egui_ctx.begin_frame(raw_input);
+                    let mut out = self.do_ui(raw_input);
 
-                    let requests_mouse = self.egui_ctx.wants_pointer_input();
-
-                    egui::Window::new("🐑 Baa")
-                        .show(&self.egui_ctx, |ui| {
-                            ui.label("Testing testing 123!!");
-                            ui.label(format!("Wants mouse? {requests_mouse}"));
-                            ui.text_edit_multiline(&mut edit_str);
-                        });
-
-                    egui::Window::new("Beep boop")
-                        .show(&self.egui_ctx, |ui| {
-                            ui.label("Testing testing 345!!");
-                        });
-                    
-                    //Mutable so that we can take from it
-                    let mut out = self.egui_ctx.end_frame();
                     if out.repaint_after.is_zero() {
-                        //Repaint immediately!
-                        self.requested_redraw_time = None;
-
+                        //Immediate redraw requested
+                        //Don't need to worry about double-request, Winit will coalesce them
                         self.window().request_redraw()
                     } else {
                         //Egui returns astronomically large number if it doesn't want a redraw - triggers overflow lol
                         let requested_instant = std::time::Instant::now().checked_add(out.repaint_after);
-                        //Choose the minimum of the current and the requested.
-                        //Should we queue all requests instead?
-                        self.requested_redraw_time = self.requested_redraw_time.min(requested_instant);
-                    }
 
-                    //Requested time period is up, redraw!
-                    if let Some(time) = self.requested_redraw_time {
-                        if time <= std::time::Instant::now() {
-                            self.window().request_redraw();
-                            self.requested_redraw_time = None
+                        println!("Requested time {requested_instant:?}");
+
+                        if let Some(instant) = requested_instant {
+                            //Insert sorted
+                            match self.requested_redraw_times.binary_search(&instant) {
+                                Ok(..) => (), //A redraw is already scheduled for this exact instant
+                                Err(pos) => self.requested_redraw_times.insert(pos, instant)
+                            }
                         }
                     }
 
@@ -218,62 +212,81 @@ impl WindowRenderer {
                 }
                 Event::RedrawRequested(..) => {
                     //Ensure there is actually data for us to draw
-                    let Some(out) = egui_out.take() else {return};
-
-                    let (idx, suboptimal, image_future) =
-                        match vk::acquire_next_image(
-                            self.render_surface().swapchain().clone(),
-                            None
-                        ) {
-                            Err(vulkano::swapchain::AcquireError::OutOfDate) => {
-                                eprintln!("Swapchain unusable.. Recreating");
-                                //We cannot draw on this surface as-is. Recreate and request another try next frame.
-                                self.recreate_surface().expect("Failed to recreate render surface after it went out-of-date.");
-                                self.window().request_redraw();
-                                return;
-                            }
-                            Err(_) => {
-                                //Todo. Many of these errors are recoverable!
-                                panic!("Surface image acquire failed!");
-                            }
-                            Ok(r) => r
-                        };
-                    let res : AnyResult<()> = try_block::try_block! {
-                        let transfer_commands = self.egui_renderer.do_image_deltas(out.textures_delta);
-
-                        let transfer_queue = self.render_context.queues().transfer().queue();
-                        let render_queue = self.render_context.queues().graphics().queue();
-                        let mut future : Box<dyn vk::sync::GpuFuture> = self.render_context.now().boxed();
-                        if let Some(transfer_commands) = transfer_commands {
-                            let buffer = transfer_commands?;
-    
-                            //Flush transfer commands, while we tesselate Egui output.
-                            future = future.then_execute(transfer_queue.clone(), buffer)?
-                                .boxed();
-                        }
-                        let tess_geom = self.egui_ctx.tessellate(out.shapes);
-                        let draw_commands = self.egui_renderer.upload_and_render(idx, &tess_geom)?;
-                        drop(tess_geom);
-
-                        future.then_execute(render_queue.clone(),draw_commands)?
-                            .join(image_future)
-                            .then_swapchain_present(
-                                self.render_context.queues().present().unwrap().queue().clone(),
-                                vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain().clone(), idx),
-                            )
-                            .then_signal_fence_and_flush()?
-                            .wait(None)?;
-
-                       // let draw_commands = self.egui_renderer.upload_and_render(idx, tesselated_geom);
-                        Ok(())
-                    };
-                    if suboptimal {
-                        self.recreate_surface().expect("Recreating suboptimal swapchain failed spectacularly");
+                    if let Some(out) = egui_out.take() {
+                        self.paint(out);
                     }
                 }
                 _ => ()
             }
         });
+    }
+    fn do_ui(&mut self, input : egui::RawInput) -> egui::FullOutput {
+        self.egui_ctx.begin_frame(input);
+
+        egui::Window::new("🐑 Baa")
+            .show(&self.egui_ctx, |ui| {
+                ui.label("Testing testing 123!!");
+            });
+
+        egui::Window::new("Beep boop")
+            .show(&self.egui_ctx, |ui| {
+                ui.label("Testing testing 345!!");
+            });
+    
+        //Return platform output and shapes.
+        self.egui_ctx.end_frame()
+    }
+    fn paint(&mut self, egui_data : egui::FullOutput) {
+        let (idx, suboptimal, image_future) =
+            match vk::acquire_next_image(
+                self.render_surface().swapchain().clone(),
+                None
+            ) {
+                Err(vulkano::swapchain::AcquireError::OutOfDate) => {
+                    eprintln!("Swapchain unusable.. Recreating");
+                    //We cannot draw on this surface as-is. Recreate and request another try next frame.
+                    self.recreate_surface().expect("Failed to recreate render surface after it went out-of-date.");
+                    self.window().request_redraw();
+                    return;
+                }
+                Err(_) => {
+                    //Todo. Many of these errors are recoverable!
+                    panic!("Surface image acquire failed!");
+                }
+                Ok(r) => r
+            };
+        let res : AnyResult<()> = try_block::try_block! {
+            let transfer_commands = self.egui_renderer.do_image_deltas(egui_data.textures_delta);
+
+            let transfer_queue = self.render_context.queues().transfer().queue();
+            let render_queue = self.render_context.queues().graphics().queue();
+            let mut future : Box<dyn vk::sync::GpuFuture> = self.render_context.now().boxed();
+            if let Some(transfer_commands) = transfer_commands {
+                let buffer = transfer_commands?;
+
+                //Flush transfer commands, while we tesselate Egui output.
+                future = future.then_execute(transfer_queue.clone(), buffer)?
+                    .boxed();
+            }
+            let tess_geom = self.egui_ctx.tessellate(egui_data.shapes);
+            let draw_commands = self.egui_renderer.upload_and_render(idx, &tess_geom)?;
+            drop(tess_geom);
+
+            future.then_execute(render_queue.clone(),draw_commands)?
+                .join(image_future)
+                .then_swapchain_present(
+                    self.render_context.queues().present().unwrap().queue().clone(),
+                    vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain().clone(), idx),
+                )
+                .then_signal_fence_and_flush()?
+                .wait(None)?;
+
+           // let draw_commands = self.egui_renderer.upload_and_render(idx, tesselated_geom);
+            Ok(())
+        };
+        if suboptimal {
+            self.recreate_surface().expect("Recreating suboptimal swapchain failed spectacularly");
+        }
     }
 }
 
