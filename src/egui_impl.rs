@@ -450,10 +450,10 @@ impl EguiRenderer {
                 color: [swapchain_color],
                 depth_stencil: {},
             },
-        ).fatal().into()?;
+        ).fatal().result()?;
 
-        let fragment = fs::load(device.clone()).fatal().into()?;
-        let vertex = vs::load(device.clone()).fatal().into()?;
+        let fragment = fs::load(device.clone()).fatal().result()?;
+        let vertex = vs::load(device.clone()).fatal().result()?;
 
         let fragment_entry = fragment.entry_point("main").unwrap();
         let vertex_entry = vertex.entry_point("main").unwrap();
@@ -486,7 +486,7 @@ impl EguiRenderer {
                 }
             )
             .build(render_context.device.clone())
-            .fatal().into()?;
+            .fatal().result()?;
 
         Ok(
             Self {
@@ -548,9 +548,9 @@ impl EguiRenderer {
                 &self.render_context.command_buffer_alloc,
                 self.render_context.queues.graphics().idx(),
                 vk::CommandBufferUsage::OneTimeSubmit
-            ).fatal()?;
+            ).fatal().result()?;
             return Ok(
-                builder.build().fatal()?
+                builder.build().fatal().result()?
             )
         }
 
@@ -579,7 +579,7 @@ impl EguiRenderer {
                 ..Default::default()
             },
             vertex_vec
-        ).fatal()?;
+        ).fatal().result()?;
         let indices = vk::Buffer::from_iter(
             &self.render_context.memory_alloc,
             vk::BufferCreateInfo {
@@ -591,7 +591,7 @@ impl EguiRenderer {
                 ..Default::default()
             },
             index_vec
-        ).fatal()?;
+        ).fatal().result()?;
 
         let framebuffer = self.framebuffers.get(present_img_index as usize).expect("Present image out-of-bounds.").clone();
 
@@ -604,7 +604,7 @@ impl EguiRenderer {
                 &self.render_context.command_buffer_alloc,
                 self.render_context.queues.graphics().idx(),
                 vk::CommandBufferUsage::OneTimeSubmit
-            )?;
+            ).fatal().result()?;
         command_buffer_builder
             .begin_render_pass(
                 vk::RenderPassBeginInfo{
@@ -618,7 +618,7 @@ impl EguiRenderer {
                     )
                 },
                 vk::SubpassContents::Inline
-            )?
+            ).fatal().result()?
             .bind_pipeline_graphics(self.pipeline.clone())
             .bind_vertex_buffers(0, [vertices])
             .bind_index_buffer(indices)
@@ -679,14 +679,14 @@ impl EguiRenderer {
                         start_index_buffer_offset as u32,
                         start_vertex_buffer_offset as i32,
                         0
-                    )?;
+                    ).fatal().result()?;
                 start_index_buffer_offset += mesh.indices.len();
                 start_vertex_buffer_offset += mesh.vertices.len();
             }
         }
 
-        command_buffer_builder.end_render_pass()?;
-        let command_buffer = command_buffer_builder.build()?;
+        command_buffer_builder.end_render_pass().fatal().result()?;
+        let command_buffer = command_buffer_builder.build().fatal().result()?;
 
         Ok(command_buffer)
     }
@@ -762,14 +762,14 @@ impl EguiRenderer {
                 ..Default::default()
             },
             data_vec.into_iter()
-        )?;
+        ).fatal().result()?;
 
         let mut command_buffer =
             vk::AutoCommandBufferBuilder::primary(
                 &self.render_context.command_buffer_alloc,
                 self.render_context.queues.transfer().idx(),
                 vk::CommandBufferUsage::OneTimeSubmit
-            )?;
+            ).fatal().result()?;
         
         //In case we need to allocate new textures.
         let (texture_set_idx, texture_set_layout) = self.texture_set_layout();
@@ -803,7 +803,7 @@ impl EguiRenderer {
                         vk::ImageUsage::TRANSFER_DST | vk::ImageUsage::SAMPLED,
                         vk::ImageCreateFlags::empty(),
                         std::iter::empty() //A puzzling difference in API from buffers - this just means Exclusive access.
-                    )?;
+                    ).fatal().result()?;
 
                     let egui_to_vk_filter = |egui_filter : egui::epaint::textures::TextureFilter| {
                         match egui_filter {
@@ -830,7 +830,7 @@ impl EguiRenderer {
                             component_mapping: mapping,
                             ..vk::ImageViewCreateInfo::from_image(&image)
                         }
-                    )?;
+                    ).fatal().result()?;
 
                     //Could optimize here, re-using the four possible options of sampler.
                     let sampler = vk::Sampler::new(
@@ -841,7 +841,7 @@ impl EguiRenderer {
 
                             ..Default::default()
                         }
-                    )?;
+                    ).fatal().result()?;
 
                     let descriptor_set = vk::PersistentDescriptorSet::new(
                         &self.render_context.descriptor_set_alloc,
@@ -851,7 +851,7 @@ impl EguiRenderer {
                                 texture_set_idx, view.clone(), sampler.clone()
                             )
                         ]
-                    )?;
+                    ).fatal().result()?;
                     Ok(
                         vacant.insert(         
                             EguiTexture {
@@ -867,7 +867,7 @@ impl EguiRenderer {
                     Ok(occupied.get().image.clone())
                 }
             };
-            let image = image.context("Failed to allocate Egui texture")?;
+            let image = image?;
 
             let size = match &delta.image {
                 egui::ImageData::Color(color) => color.width() * color.height() * 4,
@@ -910,11 +910,11 @@ impl EguiRenderer {
                         ],
                         ..transfer_info
                     }
-                )?;
+                ).fatal().result()?;
         }
 
         Ok(
-            command_buffer.build()?
+            command_buffer.build().fatal().result()?
         )
     }
 }

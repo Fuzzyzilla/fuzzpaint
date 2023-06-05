@@ -50,7 +50,7 @@ impl GpuResultInspection for GpuError {
     }
 }
 
-#[derive(thiserror::Error, Debug, Eq, PartialEq, Clone)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum GpuErrorSource {
     #[error("Connection to device was lost.")]
     DeviceLost,
@@ -69,7 +69,12 @@ pub enum GpuErrorSource {
     #[error("Requested resource already in use")]
     ResourceInUse,
     #[error("{0:?}")]
-    RenderpassCreationError(vulkano::render_pass::RenderPassCreationError)
+    RenderpassCreationError(vulkano::render_pass::RenderPassCreationError),
+    #[error("{0:?}")]
+    ShaderCreationError(vulkano::shader::ShaderCreationError),
+    #[error("{0:?}")]
+    GraphicsPipelineCreationError(vulkano::pipeline::graphics::GraphicsPipelineCreationError),
+
 }
 
 // Traits for all GPU errors, to detect major faults.
@@ -91,6 +96,25 @@ pub trait HasOom {
     fn is_device_oom(&self) -> bool {
         self.oom()
             .is_some_and(|oom| oom == vulkano::OomError::OutOfDeviceMemory)
+    }
+}
+
+impl HasDeviceLoss for GpuError {
+    fn device_lost(&self) -> bool {
+        if let GpuErrorSource::DeviceLost = self.source {
+            true
+        } else {
+            false
+        }
+    }
+}
+impl HasOom for GpuError {
+    fn oom(&self) -> Option<vulkano::OomError> {
+        if let GpuErrorSource::OomError(oom) = self.source {
+            Some(oom)
+        } else {
+            None
+        }
     }
 }
 pub trait IntoGpuResultBuilder {

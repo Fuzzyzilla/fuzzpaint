@@ -16,6 +16,19 @@ impl<OkTy, ErrTy: Into<GpuErrorSource>> GpuResultBuilder<OkTy,ErrTy> {
             fatal_if_err: false,
         }
     }
+    pub fn result(self) -> super::GpuResult<OkTy> {
+        match self.result {
+            Ok(ok) => Ok(ok),
+            Err(err) => {
+                Err(
+                    GpuError{
+                        fatal: self.fatal_if_err,
+                        source: err.into()
+                    }
+                )
+            }
+        }
+    }
 }
 
 impl<OkyTy, ErrTy> HasDeviceLoss for GpuResultBuilder<OkyTy, ErrTy>
@@ -53,22 +66,6 @@ impl<OkTy, ErrTy> GpuResultInspection for GpuResultBuilder<OkTy, ErrTy>
                     fatal_if_err: new_fatal,
                     ..self
                 }
-            }
-        }
-    }
-}
-
-impl<OkTy, ErrTy : Into<GpuErrorSource>> Into<GpuResult<OkTy>> for GpuResultBuilder<OkTy, ErrTy> {
-    fn into(self) -> GpuResult<OkTy> {
-        match self.result {
-            Ok(ok) => Ok(ok),
-            Err(err) => {
-                Err(
-                    GpuError{
-                        fatal: self.fatal_if_err,
-                        source: err.into()
-                    }
-                )
             }
         }
     }
