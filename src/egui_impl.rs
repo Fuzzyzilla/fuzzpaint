@@ -1,15 +1,79 @@
-use crate::vulkano_prelude::*;
+use crate::{vulkano_prelude::*};
 use std::sync::Arc;
 use crate::gpu_err::*;
+use crate::render_device::*;
+
+/// Merge the textures data from one egui output into another. Useful for discarding Egui geomety
+/// while maintaining its side-effects.
+pub fn prepend_textures_delta(into : &mut egui::TexturesDelta, mut from: egui::TexturesDelta) {
+    //Append into's data onto from, then copy the data back.
+    //There is no convinient way to efficiently prepend a chunk of data, so this'll do :3
+    from.free.reserve(into.free.len());
+    from.free.extend(std::mem::take(&mut into.free).into_iter());
+    into.free = std::mem::take(&mut from.free);
+
+
+    //Maybe duplicates work. Could optimize to discard redundant updates, but this probably
+    //wont happen frequently
+    from.set.reserve(into.set.len());
+    from.set.extend(std::mem::take(&mut into.set).into_iter());
+    into.set = std::mem::take(&mut from.set);
+}
 
 pub struct EguiCtx {
     ctx: egui::Context,
     events: EguiEventAccumulator,
     renderer: EguiRenderer,
+
+    requested_redraw_times: std::collections::VecDeque<std::time::Instant>,
+    full_output: Option<egui::FullOutput>,
 }
 impl EguiCtx {
-    pub fn new() -> Self {
-        
+    pub fn new(render_surface: &RenderSurface) -> GpuResult<Self> {
+        let mut renderer = EguiRenderer::new(render_surface.context(), render_surface.format())?;
+        renderer.gen_framebuffers(&render_surface)?;
+
+        Ok(Self {
+            ctx: Default::default(),
+            events: Default::default(),
+            renderer,
+            requested_redraw_times: std::collections::VecDeque::from_iter(std::iter::once(std::time::Instant::now())),
+            full_output: None,
+        })
+    }
+    pub fn replace_surface(&mut self, surface: &RenderSurface) -> GpuResult<()> {
+        self.renderer.gen_framebuffers(surface)
+    }
+    pub fn push_winit_event(&mut self, winit_event : &winit::event::Event<'static, ()>) {
+        self.events.accumulate(winit_event)
+    }
+    pub fn ctx_mut(&mut self) -> &mut egui::Context {
+        &mut self.ctx
+    }
+    /// 
+    pub fn update(&'_ mut self, f: impl FnOnce(&'_ egui::Context) -> ()) -> Option<egui::PlatformOutput> {
+        if self.needs_refresh() {
+            self.ctx.begin_frame(self.events.take_raw_input());
+            
+            f(&self.ctx);
+
+            let mut output = self.ctx.end_frame();
+
+            if let Some(old) = self.full_output.take() {
+                prepend_textures_delta(&mut output.textures_delta, old.textures_delta);
+            }
+
+            let platform_output = output.platform_output.take();
+            self.full_output = Some(output);
+            Some(platform_output)
+        } else {
+            None
+        }
+    }
+    pub fn needs_refresh(&self) -> bool {
+        let redraw_is_past = self.requested_redraw_times.front().map_or(false, |&time| time < std::time::Instant::now());
+
+        !self.events.is_empty() || redraw_is_past
     }
 }
 
@@ -445,7 +509,7 @@ struct EguiRenderer {
     framebuffers: Vec<Arc<vk::Framebuffer>>,
 }
 impl EguiRenderer {
-    pub fn new(render_context: Arc<crate::render_device::RenderContext>, surface_format: vk::Format) -> GpuResult<Self> {
+    pub fn new(render_context: &Arc<crate::render_device::RenderContext>, surface_format: vk::Format) -> GpuResult<Self> {
         let device = render_context.device().clone();
         let renderpass = vulkano::single_pass_renderpass!(
             device.clone(),

@@ -3,6 +3,7 @@ use std::sync::Arc;
 pub mod vulkano_prelude;
 pub mod gpu_err;
 mod egui_impl;
+use gpu_err::GpuResult;
 use vulkano_prelude::*;
 pub mod render_device;
 
@@ -37,40 +38,19 @@ impl WindowSurface {
         self.win.clone()
     }
     pub fn with_render_surface(self, render_surface: render_device::RenderSurface, render_context: Arc<render_device::RenderContext>)
-        -> AnyResult<WindowRenderer> {
+        -> GpuResult<WindowRenderer> {
         
-        let mut egui_renderer = egui_impl::EguiRenderer::new(render_context.clone(), render_surface.format().clone())?;
-        egui_renderer.gen_framebuffers(&render_surface)?;
+        let mut egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
         Ok(
             WindowRenderer {
-                egui_renderer,
                 win: self.win,
                 render_surface: Some(render_surface),
                 render_context,
                 event_loop: Some(self.event_loop),
-                egui_ctx: Default::default(),
-                egui_events: Default::default(),
-                requested_redraw_times: std::collections::VecDeque::from_iter(std::iter::once(std::time::Instant::now()))
+                egui_ctx,
             }
         )
     }
-}
-
-/// Merge the textures data from one egui output into another. Useful for discarding Egui geomety
-/// while maintaining its side-effects.
-pub fn prepend_textures_delta(into : &mut egui::TexturesDelta, mut from: egui::TexturesDelta) {
-    //Append into's data onto from, then copy the data back.
-    //There is no convinient way to efficiently prepend a chunk of data, so this'll do :3
-    from.free.reserve(into.free.len());
-    from.free.extend(std::mem::take(&mut into.free).into_iter());
-    into.free = std::mem::take(&mut from.free);
-
-
-    //Maybe duplicates work. Could optimize to discard redundant updates, but this probably
-    //wont happen frequently
-    from.set.reserve(into.set.len());
-    from.set.extend(std::mem::take(&mut into.set).into_iter());
-    into.set = std::mem::take(&mut from.set);
 }
 
 pub struct WindowRenderer {
@@ -80,11 +60,7 @@ pub struct WindowRenderer {
     /// Could None represent a temporary loss of surface that can be recovered from?
     render_surface : Option<render_device::RenderSurface>,
     render_context: Arc<render_device::RenderContext>,
-    egui_ctx : egui::Context,
-    egui_events : egui_impl::EguiEventAccumulator,
-    egui_renderer: egui_impl::EguiRenderer,
-
-    requested_redraw_times: std::collections::VecDeque<std::time::Instant>,
+    egui_ctx: egui_impl::EguiCtx,
 }
 impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
@@ -107,15 +83,14 @@ impl WindowRenderer {
     }
     /// Recreate surface after loss or out-of-date. Todo: This only handles out-of-date and resize.
     pub fn recreate_surface(&mut self) -> AnyResult<()> {
-        self.render_surface =
-            Some(
-                self.render_surface
-                .take()
-                .unwrap()
-                .recreate(Some(self.window().inner_size().into()))?
-            );
+        let new_surface = self.render_surface
+            .take()
+            .unwrap()
+            .recreate(Some(self.window().inner_size().into()))?;
 
-        self.egui_renderer.gen_framebuffers(self.render_surface.as_ref().unwrap())?;
+        self.egui_ctx.replace_surface(&new_surface);
+
+        self.render_surface = Some(new_surface);
 
         Ok(())
     }
@@ -146,7 +121,7 @@ impl WindowRenderer {
         event_loop.run(move |event, _, control_flow|{
             use winit::event::{Event, WindowEvent};
 
-            self.egui_events.accumulate(&event);
+            self.egui_ctx.push_winit_event(&event);
 
             match event {
                 Event::WindowEvent { event, .. } => {
@@ -162,23 +137,6 @@ impl WindowRenderer {
                     }
                 }
                 Event::MainEventsCleared => {
-                    //Observe first element in queue - if in the past, a redraw is needed.
-                    let redraw_time_passed = self.requested_redraw_times.front().map_or(false, |&time| time <= std::time::Instant::now()) ;
-
-                    //No inputs, next redraw time (if any) is in the future. Skip!
-                    if self.egui_events.is_empty() && ! redraw_time_passed {
-                        return;
-                    }
-
-                    //Unqueue the front time if passed
-                    //Todo: recurse?
-                    if redraw_time_passed {
-                        self.requested_redraw_times.pop_front();
-                        self.window().request_redraw()
-                    }
-
-                    self.egui_ctx.request_repaint_after(std::time::Duration::from_secs(2));
-
                     //Draw!
                     let raw_input = self.egui_events.take_raw_input();
                     let mut out = self.do_ui(raw_input);

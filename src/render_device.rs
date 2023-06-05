@@ -79,6 +79,9 @@ impl RenderSurface {
     pub fn swapchain_images(&self) -> &[Arc<vk::SwapchainImage>] {
         &self.swapchain_images
     }
+    pub fn context(&self) -> &Arc<RenderContext> {
+        &self.context
+    }
     fn new(
         context: Arc<RenderContext>,
         surface: Arc<vk::Surface>,
