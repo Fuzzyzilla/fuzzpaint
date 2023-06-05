@@ -11,6 +11,15 @@ impl From<vulkano::render_pass::RenderPassCreationError> for GpuErrorSource {
         }
     }
 }
+impl HasOom for vulkano::render_pass::RenderPassCreationError {
+    fn oom(&self) -> Option<vulkano::OomError> {
+        use vulkano::render_pass::RenderPassCreationError;
+        match self {
+            RenderPassCreationError::OomError(oom) => Some(*oom),
+            _ => None
+        }
+    }
+}
 impl From<vulkano::OomError> for GpuErrorSource{
     fn from(value: vulkano::OomError) -> Self {
         Self::OomError(value)

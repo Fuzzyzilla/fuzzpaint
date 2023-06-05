@@ -450,10 +450,10 @@ impl EguiRenderer {
                 color: [swapchain_color],
                 depth_stencil: {},
             },
-        ).fatal()?;
+        ).fatal().into()?;
 
-        let fragment = fs::load(device.clone()).fatal()?;
-        let vertex = vs::load(device.clone()).fatal()?;
+        let fragment = fs::load(device.clone()).fatal().into()?;
+        let vertex = vs::load(device.clone()).fatal().into()?;
 
         let fragment_entry = fragment.entry_point("main").unwrap();
         let vertex_entry = vertex.entry_point("main").unwrap();
@@ -486,7 +486,7 @@ impl EguiRenderer {
                 }
             )
             .build(render_context.device.clone())
-            .fatal()?;
+            .fatal().into()?;
 
         Ok(
             Self {
