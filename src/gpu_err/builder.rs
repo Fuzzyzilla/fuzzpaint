@@ -58,13 +58,13 @@ impl<OkTy, ErrTy> GpuResultInspection for GpuResultBuilder<OkTy, ErrTy>
         match self.result {
             Ok(..) => self,
             Err(err) => {
-                let unless = p(err);
+                let unless = p(err.clone());
 
                 let new_fatal = self.fatal_if_err ^ unless;
 
                 Self {
                     fatal_if_err: new_fatal,
-                    ..self
+                    result: Err(err),
                 }
             }
         }

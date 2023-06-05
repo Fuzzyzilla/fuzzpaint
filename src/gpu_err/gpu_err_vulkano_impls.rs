@@ -293,3 +293,24 @@ impl From<vulkano::command_buffer::CopyError> for GpuErrorSource{
         }
     }
 } 
+
+impl From<vulkano::render_pass::FramebufferCreationError> for GpuErrorSource{
+    fn from(value: vulkano::render_pass::FramebufferCreationError) -> Self {
+        use vulkano::render_pass::FramebufferCreationError;
+        match value {
+            FramebufferCreationError::OomError(oom) => Self::OomError(oom),
+            _ => {
+                todo!("FramebufferCreationError source")
+            }
+        }
+    }
+}
+impl HasOom for vulkano::render_pass::FramebufferCreationError {
+    fn oom(&self) -> Option<vulkano::OomError> {
+        if let vulkano::render_pass::FramebufferCreationError::OomError(oom) = self {
+            Some(*oom)
+        } else {
+            None
+        }
+    }
+}

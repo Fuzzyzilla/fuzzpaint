@@ -499,27 +499,25 @@ impl EguiRenderer {
         )
     }
     pub fn gen_framebuffers(&mut self, surface: &super::RenderSurface) -> GpuResult<()> {
-        let framebuffers : AnyResult<Vec<_>> =
+        let framebuffers : GpuResult<Vec<_>> =
             surface.swapchain_images
             .iter()
-            .map(|image| -> AnyResult<_> {
+            .map(|image| -> GpuResult<_> {
                 let fb = vk::Framebuffer::new(
                     self.render_pass.clone(),
                     vk::FramebufferCreateInfo {
                         attachments: vec![
-                            vk::ImageView::new_default(image.clone())?
+                            vk::ImageView::new_default(image.clone()).fatal().result()?
                         ],
                         ..Default::default()
                     }
-                )?;
+                ).fatal().result()?;
 
                 Ok(fb)
             }).collect();
         
         //Treat error as fatal
-        self.framebuffers = framebuffers.map_gpu_err(|err| {
-            (true, GpuRemedy::BlameTheDev)
-        })?;
+        self.framebuffers = framebuffers?;
 
         Ok(())
     }
@@ -778,7 +776,7 @@ impl EguiRenderer {
         for (id, delta) in &deltas.set {
             let entry = self.images.entry(*id);
             //Generate if non-existent yet!
-            let image : AnyResult<_> = match entry {
+            let image : GpuResult<_> = match entry {
                 std::collections::hash_map::Entry::Vacant(vacant) => {
                     let format = match delta.image {
                         egui::ImageData::Color(_) => vk::Format::R8G8B8A8_UNORM,
