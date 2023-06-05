@@ -297,7 +297,6 @@ fn main() -> AnyResult<std::convert::Infallible> {
 
     let window_surface = WindowSurface::new()?;
     let (render_context, render_surface) = render_device::RenderContext::new_with_window_surface(&window_surface)?;
-    let render_context = Arc::new(render_context);
     let window_renderer = window_surface.with_render_surface(render_surface, render_context)?;
     println!("Made render context!");
 

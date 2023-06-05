@@ -2,7 +2,18 @@ use crate::vulkano_prelude::*;
 use std::sync::Arc;
 use crate::gpu_err::*;
 
-pub struct EguiEventAccumulator {
+pub struct EguiCtx {
+    ctx: egui::Context,
+    events: EguiEventAccumulator,
+    renderer: EguiRenderer,
+}
+impl EguiCtx {
+    pub fn new() -> Self {
+        
+    }
+}
+
+struct EguiEventAccumulator {
     events: Vec<egui::Event>,
     last_mouse_pos : Option<egui::Pos2>,
     last_modifiers : egui::Modifiers,
@@ -425,7 +436,7 @@ struct EguiTexture {
 
     descriptor_set: Arc<vk::PersistentDescriptorSet>,
 }
-pub struct EguiRenderer {
+struct EguiRenderer {
     images : std::collections::HashMap<egui::TextureId, EguiTexture>,
     render_context : Arc<crate::render_device::RenderContext>,
 

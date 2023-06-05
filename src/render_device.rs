@@ -60,6 +60,7 @@ impl Queues {
 }
 
 pub struct RenderSurface {
+    context: Arc<RenderContext>,
     swapchain: Arc<vk::Swapchain>,
     surface: Arc<vk::Surface>,
     swapchain_images: Vec<Arc<vk::SwapchainImage>>,
@@ -79,11 +80,11 @@ impl RenderSurface {
         &self.swapchain_images
     }
     fn new(
-        physical_device : Arc<vk::PhysicalDevice>,
-        device : Arc<vk::Device>,
+        context: Arc<RenderContext>,
         surface: Arc<vk::Surface>,
         size: [u32; 2],
     ) -> AnyResult<Self> {
+        let physical_device = context.physical_device();
         
         let surface_info = vk::SurfaceInfo::default();
         let capabilies = physical_device.surface_capabilities(&surface, surface_info.clone())?;
@@ -131,12 +132,13 @@ impl RenderSurface {
             };
 
         let (swapchain, images) = vk::Swapchain::new(
-                device.clone(),
+                context.device().clone(),
                 surface.clone(),
                 swapchain_create_info.clone(),
         )?;
 
         Ok(Self {
+            context: context,
             swapchain,
             surface: surface.clone(),
             swapchain_images: images,
@@ -203,7 +205,7 @@ impl RenderContext {
     pub fn new_headless() -> AnyResult<Self> {
         unimplemented!()
     }
-    pub fn new_with_window_surface(win: &crate::WindowSurface) -> AnyResult<(Self, RenderSurface)> {
+    pub fn new_with_window_surface(win: &crate::WindowSurface) -> AnyResult<(Arc<Self>, RenderSurface)> {
         let library = vk::VulkanLibrary::new()?;
         let required_instance_extensions = vulkano_win::required_extensions(&library);
 
@@ -236,10 +238,7 @@ impl RenderContext {
         // We have a device! Now to create the swapchain..
         let image_size = win.window().inner_size();
 
-        let render_head = RenderSurface::new(physical_device.clone(), device.clone(), surface.clone(), image_size.into())?;
-        Ok(
-            (
-                Self {
+        let context = Arc::new(Self {
                     allocators: Allocators {
                         command_buffer_alloc: vk::StandardCommandBufferAllocator::new(device.clone(), Default::default()),
                         memory_alloc: vk::StandardMemoryAllocator::new_default(device.clone()),
@@ -250,8 +249,13 @@ impl RenderContext {
                     device,
                     physical_device,
                     queues,
-                },
-                render_head
+                });
+        let render_surface = RenderSurface::new(context.clone(), surface.clone(), image_size.into())?;
+
+        Ok(
+            (
+                context,
+                render_surface
             )
         )
     }
@@ -460,6 +464,9 @@ impl RenderContext {
     }
     pub fn now(&self) -> vk::NowFuture {
         vk::sync::now(self.device.clone())
+    }
+    pub fn physical_device(&self) -> &Arc<vk::PhysicalDevice> {
+        &self.physical_device
     }
     pub fn queues(&self) -> &Queues {
         &self.queues
