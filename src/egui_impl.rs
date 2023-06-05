@@ -427,15 +427,15 @@ struct EguiTexture {
 }
 pub struct EguiRenderer {
     images : std::collections::HashMap<egui::TextureId, EguiTexture>,
-    render_context : Arc<super::RenderContext>,
+    render_context : Arc<crate::render_device::RenderContext>,
 
     render_pass : Arc<vk::RenderPass>,
     pipeline: Arc<vk::GraphicsPipeline>,
     framebuffers: Vec<Arc<vk::Framebuffer>>,
 }
 impl EguiRenderer {
-    pub fn new(render_context: Arc<super::RenderContext>, surface_format: vk::Format) -> GpuResult<Self> {
-        let device = render_context.device.clone();
+    pub fn new(render_context: Arc<crate::render_device::RenderContext>, surface_format: vk::Format) -> GpuResult<Self> {
+        let device = render_context.device().clone();
         let renderpass = vulkano::single_pass_renderpass!(
             device.clone(),
             attachments : {
@@ -485,7 +485,7 @@ impl EguiRenderer {
                     scissor_count_dynamic: false,
                 }
             )
-            .build(render_context.device.clone())
+            .build(render_context.device().clone())
             .fatal().result()?;
 
         Ok(
@@ -498,9 +498,9 @@ impl EguiRenderer {
             }
         )
     }
-    pub fn gen_framebuffers(&mut self, surface: &super::RenderSurface) -> GpuResult<()> {
+    pub fn gen_framebuffers(&mut self, surface: &crate::render_device::RenderSurface) -> GpuResult<()> {
         let framebuffers : GpuResult<Vec<_>> =
-            surface.swapchain_images
+            surface.swapchain_images()
             .iter()
             .map(|image| -> GpuResult<_> {
                 let fb = vk::Framebuffer::new(
@@ -543,8 +543,8 @@ impl EguiRenderer {
 
         if vert_buff_size == 0 || index_buff_size == 0 {
             let builder = vk::AutoCommandBufferBuilder::primary(
-                &self.render_context.command_buffer_alloc,
-                self.render_context.queues.graphics().idx(),
+                self.render_context.allocators().command_buffer(),
+                self.render_context.queues().graphics().idx(),
                 vk::CommandBufferUsage::OneTimeSubmit
             ).fatal().result()?;
             return Ok(
@@ -567,7 +567,7 @@ impl EguiRenderer {
             }
         }
         let vertices = vk::Buffer::from_iter(
-            &self.render_context.memory_alloc,
+            self.render_context.allocators().memory(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::VERTEX_BUFFER,
                 ..Default::default()
@@ -579,7 +579,7 @@ impl EguiRenderer {
             vertex_vec
         ).fatal().result()?;
         let indices = vk::Buffer::from_iter(
-            &self.render_context.memory_alloc,
+            self.render_context.allocators().memory(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::INDEX_BUFFER,
                 ..Default::default()
@@ -599,8 +599,8 @@ impl EguiRenderer {
         let pipeline_layout = self.pipeline.layout();
 
         let mut command_buffer_builder = vk::AutoCommandBufferBuilder::primary(
-                &self.render_context.command_buffer_alloc,
-                self.render_context.queues.graphics().idx(),
+                self.render_context.allocators().command_buffer(),
+                self.render_context.queues().graphics().idx(),
                 vk::CommandBufferUsage::OneTimeSubmit
             ).fatal().result()?;
         command_buffer_builder
@@ -749,7 +749,7 @@ impl EguiRenderer {
         //This is  dumb. Why can't i use the data directly? It's a slice of [u8]. Maybe (hopefully) it optimizes out?
         //TODO: Maybe mnually implement unsafe trait BufferContents to allow this without byte-by-byte iterator copying.
         let staging_buffer = vk::Buffer::from_iter(
-            &self.render_context.memory_alloc,
+            self.render_context.allocators().memory(),
             vk::BufferCreateInfo {
                 sharing: vk::Sharing::Exclusive,
                 usage: vk::BufferUsage::TRANSFER_SRC,
@@ -764,8 +764,8 @@ impl EguiRenderer {
 
         let mut command_buffer =
             vk::AutoCommandBufferBuilder::primary(
-                &self.render_context.command_buffer_alloc,
-                self.render_context.queues.transfer().idx(),
+                self.render_context.allocators().command_buffer(),
+                self.render_context.queues().transfer().idx(),
                 vk::CommandBufferUsage::OneTimeSubmit
             ).fatal().result()?;
         
@@ -794,7 +794,7 @@ impl EguiRenderer {
                         }
                     };
                     let image = vk::StorageImage::with_usage(
-                        &self.render_context.memory_alloc,
+                        self.render_context.allocators().memory(),
                         dimensions,
                         format,
                         //We will not be using this StorageImage for storage :P
@@ -832,7 +832,7 @@ impl EguiRenderer {
 
                     //Could optimize here, re-using the four possible options of sampler.
                     let sampler = vk::Sampler::new(
-                        self.render_context.device.clone(),
+                        self.render_context.device().clone(),
                         vk::SamplerCreateInfo {
                             mag_filter: egui_to_vk_filter(delta.options.magnification),
                             min_filter: egui_to_vk_filter(delta.options.minification),
@@ -842,7 +842,7 @@ impl EguiRenderer {
                     ).fatal().result()?;
 
                     let descriptor_set = vk::PersistentDescriptorSet::new(
-                        &self.render_context.descriptor_set_alloc,
+                        self.render_context.allocators().descriptor_set(),
                         texture_set_layout.clone(), 
                         [
                             vk::WriteDescriptorSet::image_view_sampler(
