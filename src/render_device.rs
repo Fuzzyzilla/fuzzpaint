@@ -208,7 +208,7 @@ impl RenderContext {
         unimplemented!()
     }
     pub fn new_with_window_surface(
-        win: &crate::WindowSurface,
+        win: &crate::window::WindowSurface,
     ) -> AnyResult<(Arc<Self>, RenderSurface)> {
         let library = vk::VulkanLibrary::new()?;
         let required_instance_extensions = vulkano_win::required_extensions(&library);
