@@ -192,24 +192,20 @@ impl WindowRenderer {
             let now = self.render_context.now();
             if let Some((transfer, draw)) = commands {
                 if let Some(transfer) = transfer {
+                    //Transfer + Draw
                     now
                         .then_execute(self.render_context.queues().transfer().queue().clone(), transfer).unwrap()
                         .join(image_future)
                         .then_execute(self.render_context.queues().graphics().queue().clone(), draw).unwrap()
-                        .then_swapchain_present(
-                            self.render_context.queues().present().unwrap().queue().clone(),
-                            vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain().clone(), idx)
-                        ).boxed()
+                        .boxed()
                 } else {
+                    //Just draw
                     now
                         .join(image_future)
-                        .then_execute(self.render_context.queues().graphics().queue().clone(), draw).unwrap()
-                        .then_swapchain_present(
-                            self.render_context.queues().present().unwrap().queue().clone(),
-                            vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain().clone(), idx)
-                        ).boxed()
+                        .then_execute(self.render_context.queues().graphics().queue().clone(), draw).unwrap().boxed()
                 }
             } else {
+                //Nothing to do
                 now
                     .join(image_future)
                     .boxed()
