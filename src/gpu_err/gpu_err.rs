@@ -1,7 +1,6 @@
 ///Implement some kind of builder pattern around GPU errors, to allow concise
 /// inline error coersion into a more useful form than a big enum of doom.
 
-
 pub type GpuResult<OkTy> = ::std::result::Result<OkTy, GpuError>;
 
 /// Wrapper around vulkano errors, to be returned by APIs that work
@@ -9,6 +8,8 @@ pub type GpuResult<OkTy> = ::std::result::Result<OkTy, GpuError>;
 /// the error destroyed the resource it was returned by.
 #[derive(thiserror::Error, Debug, Clone)]
 #[error("{} GpuError: {source:?}", if *.fatal {"[Lost]"} else {"[Recoverable]"})]
+//Interestingly this is needed for unused Result lints, but the text is not used x3
+#[must_use = "GpuError may indicate fatal errors and should not be ignored."]
 pub struct GpuError {
     /// Whether the resource that returned this error died as a result of the error.
     pub fatal : bool,
