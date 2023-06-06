@@ -538,8 +538,6 @@ impl From<egui::epaint::Vertex> for EguiVertex {
 }
 struct EguiTexture {
     image : Arc<vk::StorageImage>,
-    view : Arc<vk::ImageView<vk::StorageImage>>,
-    sampler: Arc<vk::Sampler>,
 
     descriptor_set: Arc<vk::PersistentDescriptorSet>,
 }
@@ -972,8 +970,6 @@ impl EguiRenderer {
                         vacant.insert(         
                             EguiTexture {
                                 image,
-                                view,
-                                sampler,
                                 descriptor_set
                             }
                         ).image.clone()

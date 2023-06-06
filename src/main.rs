@@ -203,7 +203,8 @@ impl WindowRenderer {
                     //Just draw
                     now
                         .join(image_future)
-                        .then_execute(self.render_context.queues().graphics().queue().clone(), draw).unwrap().boxed()
+                        .then_execute(self.render_context.queues().graphics().queue().clone(), draw).unwrap()
+                        .boxed()
                 }
             } else {
                 //Nothing to do
