@@ -1,115 +1,68 @@
 //Traits
 pub use vulkano::{
-    pipeline::{
-        Pipeline,
-        graphics::vertex_input::Vertex,
-    },
+    pipeline::{graphics::vertex_input::Vertex, Pipeline},
     sync::GpuFuture,
 };
 
 //Types and such
 pub mod vk {
     pub use vulkano::{
-        library::{
-            VulkanLibrary
-        },
-        Version,
         buffer::{
-            Buffer, BufferUsage, BufferCreateInfo, BufferContents,
-            view::{
-                BufferView, BufferViewCreateInfo
-            }
+            view::{BufferView, BufferViewCreateInfo},
+            Buffer, BufferContents, BufferCreateInfo, BufferUsage,
         },
         command_buffer::{
+            allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
+            AutoCommandBufferBuilder,
+            BufferImageCopy,
             CommandBufferUsage,
-            AutoCommandBufferBuilder, PrimaryAutoCommandBuffer, SecondaryAutoCommandBuffer,
-            allocator::{
-                CommandBufferAllocator, StandardCommandBufferAllocator
-            },
-            SubpassContents,
             //Image ops
             CopyBufferToImageInfo,
-            BufferImageCopy,
+            PrimaryAutoCommandBuffer,
             //Renderpass
             RenderPassBeginInfo,
+            SecondaryAutoCommandBuffer,
+            SubpassContents,
         },
         descriptor_set::{
+            allocator::StandardDescriptorSetAllocator, layout::DescriptorSetLayout,
             PersistentDescriptorSet, WriteDescriptorSet,
-            allocator::StandardDescriptorSetAllocator,
-            layout::DescriptorSetLayout,
         },
         device::{
-            Device, DeviceCreateInfo, Queue,
-            Features, QueueFlags, DeviceExtensions,
-            QueueCreateInfo,
-            physical::{
-                PhysicalDeviceType,
-                PhysicalDevice
-            },
+            physical::{PhysicalDevice, PhysicalDeviceType},
+            Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo,
+            QueueFlags,
         },
-        format::{
-            Format, ClearValue
-        },
+        format::{ClearValue, Format},
         image::{
-            ImageCreateFlags, AttachmentImage, ImmutableImage, StorageImage, SwapchainImage,
-            ImageDimensions, ImageUsage,
-            view::{
-                ImageView, ImageViewCreateInfo,
-            },
+            view::{ImageView, ImageViewCreateInfo},
+            AttachmentImage, ImageCreateFlags, ImageDimensions, ImageUsage, ImmutableImage,
+            StorageImage, SwapchainImage,
         },
-        instance::{
-            Instance, InstanceCreateInfo
-        },
-        memory::{
-            allocator::{
-                StandardMemoryAllocator,
-                AllocationCreateInfo,
-                MemoryUsage,
-            },
-        },
+        instance::{Instance, InstanceCreateInfo},
+        library::VulkanLibrary,
+        memory::allocator::{AllocationCreateInfo, MemoryUsage, StandardMemoryAllocator},
         pipeline::{
-            StateMode, PartialStateMode,
-            compute::{
-                ComputePipeline
-            },
+            compute::ComputePipeline,
             graphics::{
-                GraphicsPipeline,
-                GraphicsPipelineBuilder,
-                color_blend::{
-                    ColorBlendState,
-                    AttachmentBlend,
-                },
-                input_assembly::{
-                    PrimitiveTopology,
-                    InputAssemblyState,
-                },
-                rasterization::{
-                    RasterizationState, CullMode,
-                },
-                vertex_input::{
-                    Vertex,
-                },
-                viewport::{
-                    Scissor, Viewport, ViewportState,
-                }
+                color_blend::{AttachmentBlend, ColorBlendState},
+                input_assembly::{InputAssemblyState, PrimitiveTopology},
+                rasterization::{CullMode, RasterizationState},
+                vertex_input::Vertex,
+                viewport::{Scissor, Viewport, ViewportState},
+                GraphicsPipeline, GraphicsPipelineBuilder,
             },
-            layout::PipelineLayout
+            layout::PipelineLayout,
+            PartialStateMode, StateMode,
         },
-        render_pass::{
-            Subpass, RenderPass,
-            Framebuffer, FramebufferCreateInfo,
-        },
-        sampler::{
-            Sampler, Filter, ComponentMapping, ComponentSwizzle, SamplerCreateInfo,
-        },
+        render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
+        sampler::{ComponentMapping, ComponentSwizzle, Filter, Sampler, SamplerCreateInfo},
         swapchain::{
-            Surface, Swapchain, SwapchainPresentInfo, acquire_next_image,
-            PresentMode, SwapchainCreateInfo, SurfaceInfo, PresentInfo,
-        },
-        sync::{
-            Sharing,
-            future::NowFuture,
+            acquire_next_image, PresentInfo, PresentMode, Surface, SurfaceInfo, Swapchain,
+            SwapchainCreateInfo, SwapchainPresentInfo,
         },
         sync,
+        sync::{future::NowFuture, Sharing},
+        Version,
     };
 }

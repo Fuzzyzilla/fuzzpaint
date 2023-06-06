@@ -1,17 +1,16 @@
-use crate::{vulkano_prelude::*};
-use std::sync::Arc;
 use crate::gpu_err::*;
 use crate::render_device::*;
+use crate::vulkano_prelude::*;
+use std::sync::Arc;
 
 /// Merge the textures data from one egui output into another. Useful for discarding Egui geomety
 /// while maintaining its side-effects.
-pub fn prepend_textures_delta(into : &mut egui::TexturesDelta, mut from: egui::TexturesDelta) {
+pub fn prepend_textures_delta(into: &mut egui::TexturesDelta, mut from: egui::TexturesDelta) {
     //Append into's data onto from, then copy the data back.
     //There is no convinient way to efficiently prepend a chunk of data, so this'll do :3
     from.free.reserve(into.free.len());
     from.free.extend(std::mem::take(&mut into.free).into_iter());
     into.free = std::mem::take(&mut from.free);
-
 
     //Maybe duplicates work. Could optimize to discard redundant updates, but this probably
     //wont happen frequently
@@ -41,20 +40,22 @@ impl EguiCtx {
             renderer,
             render_ctx: render_surface.context().clone(),
             immediate_redraw: true,
-            requested_redraw_times: std::collections::VecDeque::from_iter(std::iter::once(std::time::Instant::now())),
+            requested_redraw_times: std::collections::VecDeque::from_iter(std::iter::once(
+                std::time::Instant::now(),
+            )),
             full_output: None,
         })
     }
     pub fn replace_surface(&mut self, surface: &RenderSurface) -> GpuResult<()> {
         self.renderer.gen_framebuffers(surface)
     }
-    pub fn push_winit_event(&mut self, winit_event : &winit::event::Event<'static, ()>) {
+    pub fn push_winit_event(&mut self, winit_event: &winit::event::Event<'static, ()>) {
         self.events.accumulate(winit_event)
     }
-    pub fn ctx_mut(&mut self) -> &mut egui::Context {
-        &mut self.ctx
-    }
-    pub fn update(&'_ mut self, f: impl FnOnce(&'_ egui::Context) -> ()) -> Option<egui::PlatformOutput> {
+    pub fn update(
+        &'_ mut self,
+        f: impl FnOnce(&'_ egui::Context) -> (),
+    ) -> Option<egui::PlatformOutput> {
         if self.needs_refresh() {
             //Call into user code to draw
             self.ctx.begin_frame(self.events.take_raw_input());
@@ -77,7 +78,7 @@ impl EguiCtx {
                     //Insert sorted
                     match self.requested_redraw_times.binary_search(&instant) {
                         Ok(..) => (), //A redraw is already scheduled for this exact instant
-                        Err(pos) => self.requested_redraw_times.insert(pos, instant)
+                        Err(pos) => self.requested_redraw_times.insert(pos, instant),
                     }
                 }
             }
@@ -91,14 +92,27 @@ impl EguiCtx {
         }
     }
     pub fn needs_redraw(&self) -> bool {
-        self.immediate_redraw || self.requested_redraw_times.front().map_or(false, |&time| time < std::time::Instant::now())
+        self.immediate_redraw
+            || self
+                .requested_redraw_times
+                .front()
+                .map_or(false, |&time| time < std::time::Instant::now())
     }
     pub fn needs_refresh(&self) -> bool {
-        let redraw_is_past = self.requested_redraw_times.front().map_or(false, |&time| time < std::time::Instant::now());
+        let redraw_is_past = self
+            .requested_redraw_times
+            .front()
+            .map_or(false, |&time| time < std::time::Instant::now());
 
         !self.events.is_empty() || redraw_is_past
     }
-    pub fn build_commands(&mut self, swapchain_idx : u32) -> Option<(Option<vk::PrimaryAutoCommandBuffer>, vk::PrimaryAutoCommandBuffer)> {
+    pub fn build_commands(
+        &mut self,
+        swapchain_idx: u32,
+    ) -> Option<(
+        Option<vk::PrimaryAutoCommandBuffer>,
+        vk::PrimaryAutoCommandBuffer,
+    )> {
         self.immediate_redraw = false;
         let now = std::time::Instant::now();
         //Remove past redraw requests.
@@ -107,7 +121,7 @@ impl EguiCtx {
         // Check if there's anything to draw!
         let Some(output) = self.full_output.take() else {return None};
 
-        let res : AnyResult<_> = try_block::try_block! {
+        let res: AnyResult<_> = try_block::try_block! {
             let transfer_commands = self.renderer.do_image_deltas(output.textures_delta).transpose()?;
             let tess_geom = self.ctx.tessellate(output.shapes);
             let draw_commands = self.renderer.upload_and_render(swapchain_idx, &tess_geom)?;
@@ -122,14 +136,14 @@ impl EguiCtx {
 
 struct EguiEventAccumulator {
     events: Vec<egui::Event>,
-    last_mouse_pos : Option<egui::Pos2>,
-    last_modifiers : egui::Modifiers,
+    last_mouse_pos: Option<egui::Pos2>,
+    last_modifiers: egui::Modifiers,
     //egui keys are 8-bit, so allocate 256 bools.
-    held_keys : bitvec::array::BitArray<[u64; 4]>,
-    has_focus : bool,
-    hovered_files : Vec<egui::HoveredFile>,
-    dropped_files : Vec<egui::DroppedFile>,
-    screen_rect : Option<egui::Rect>,
+    held_keys: bitvec::array::BitArray<[u64; 4]>,
+    has_focus: bool,
+    hovered_files: Vec<egui::HoveredFile>,
+    dropped_files: Vec<egui::DroppedFile>,
+    screen_rect: Option<egui::Rect>,
     pixels_per_point: f32,
 
     is_empty: bool,
@@ -149,7 +163,7 @@ impl EguiEventAccumulator {
             is_empty: false,
         }
     }
-    pub fn accumulate(&mut self, event : &winit::event::Event<()>) {
+    pub fn accumulate(&mut self, event: &winit::event::Event<()>) {
         use egui::Event as GuiEvent;
         use winit::event::Event as SysEvent;
         //TODOS: Copy/Cut/Paste, IME, and Scroll + Zoom + MouseWheel confusion, Touch, AssistKit.
@@ -158,7 +172,7 @@ impl EguiEventAccumulator {
                 use winit::event::WindowEvent as WinEvent;
                 match event {
                     WinEvent::Resized(size) => {
-                        self.screen_rect = Some(egui::Rect{
+                        self.screen_rect = Some(egui::Rect {
                             min: egui::pos2(0.0, 0.0),
                             max: egui::pos2(size.width as f32, size.height as f32),
                         });
@@ -170,34 +184,32 @@ impl EguiEventAccumulator {
                     }
                     WinEvent::CursorLeft { .. } => {
                         self.last_mouse_pos = None;
-                        self.events.push(
-                            GuiEvent::PointerGone
-                        );
+                        self.events.push(GuiEvent::PointerGone);
                         self.is_empty = false;
                     }
                     WinEvent::CursorMoved { position, .. } => {
                         let position = egui::pos2(position.x as f32, position.y as f32);
                         self.last_mouse_pos = Some(position);
-                        self.events.push(
-                            GuiEvent::PointerMoved(position)
-                        );
+                        self.events.push(GuiEvent::PointerMoved(position));
                         self.is_empty = false;
                     }
                     WinEvent::MouseInput { state, button, .. } => {
                         let Some(pos) = self.last_mouse_pos else {return};
                         let Some(button) = Self::winit_to_egui_mouse_button(*button) else {return};
-                        self.events.push(
-                            GuiEvent::PointerButton {
-                                pos,
-                                button,
-                                pressed: if let winit::event::ElementState::Pressed = state {true} else {false},
-                                modifiers: self.last_modifiers,
-                            }
-                        );
+                        self.events.push(GuiEvent::PointerButton {
+                            pos,
+                            button,
+                            pressed: if let winit::event::ElementState::Pressed = state {
+                                true
+                            } else {
+                                false
+                            },
+                            modifiers: self.last_modifiers,
+                        });
                         self.is_empty = false;
                     }
                     WinEvent::ModifiersChanged(state) => {
-                        self.last_modifiers = egui::Modifiers{
+                        self.last_modifiers = egui::Modifiers {
                             alt: state.alt(),
                             command: state.ctrl(),
                             ctrl: state.ctrl(),
@@ -211,16 +223,16 @@ impl EguiEventAccumulator {
                         if ('\x00'..'\x20').contains(ch) || *ch == '\x7F' {
                             return;
                         };
-                        self.events.push(
-                            GuiEvent::Text(
-                                ch.to_string()
-                            )
-                        );
+                        self.events.push(GuiEvent::Text(ch.to_string()));
                         self.is_empty = false;
                     }
                     WinEvent::KeyboardInput { input, .. } => {
                         let Some(key) = input.virtual_keycode.and_then(Self::winit_to_egui_key) else {return};
-                        let pressed = if let winit::event::ElementState::Pressed = input.state {true} else {false};
+                        let pressed = if let winit::event::ElementState::Pressed = input.state {
+                            true
+                        } else {
+                            false
+                        };
 
                         let prev_pressed = {
                             let mut key_state = self.held_keys.get_mut(key as u8 as usize).unwrap();
@@ -229,65 +241,59 @@ impl EguiEventAccumulator {
                             prev_pressed
                         };
 
-                        self.events.push(
-                            GuiEvent::Key {
-                                key,
-                                pressed,
-                                repeat: prev_pressed && pressed,
-                                modifiers: self.last_modifiers,
-                            }
-                        );
+                        self.events.push(GuiEvent::Key {
+                            key,
+                            pressed,
+                            repeat: prev_pressed && pressed,
+                            modifiers: self.last_modifiers,
+                        });
                         self.is_empty = false;
                     }
                     WinEvent::MouseWheel { delta, .. } => {
                         let (unit, delta) = match delta {
-                            winit::event::MouseScrollDelta::LineDelta(x, y)
-                                => (egui::MouseWheelUnit::Line, egui::vec2(*x, *y)),
-                            winit::event::MouseScrollDelta::PixelDelta(delta)
-                                => (egui::MouseWheelUnit::Point, egui::vec2(delta.x as f32, delta.y as f32)),
-                        };
-                        self.events.push(
-                            GuiEvent::MouseWheel {
-                                unit,
-                                delta,
-                                modifiers: self.last_modifiers,
+                            winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                                (egui::MouseWheelUnit::Line, egui::vec2(*x, *y))
                             }
-                        );
+                            winit::event::MouseScrollDelta::PixelDelta(delta) => (
+                                egui::MouseWheelUnit::Point,
+                                egui::vec2(delta.x as f32, delta.y as f32),
+                            ),
+                        };
+                        self.events.push(GuiEvent::MouseWheel {
+                            unit,
+                            delta,
+                            modifiers: self.last_modifiers,
+                        });
                         self.is_empty = false;
                     }
                     WinEvent::TouchpadMagnify { delta, .. } => {
-                        self.events.push(
-                            GuiEvent::Zoom(*delta as f32)
-                        );
+                        self.events.push(GuiEvent::Zoom(*delta as f32));
                         self.is_empty = false;
                     }
-                    WinEvent::Focused( has_focus ) => {
+                    WinEvent::Focused(has_focus) => {
                         self.has_focus = *has_focus;
-                        self.events.push(
-                            GuiEvent::WindowFocused(self.has_focus)
-                        );
+                        self.events.push(GuiEvent::WindowFocused(self.has_focus));
                         self.is_empty = false;
                     }
                     WinEvent::HoveredFile(path) => {
-                        self.hovered_files.push(
-                            egui::HoveredFile{
-                                mime: String::new(),
-                                path: Some(path.clone()),
-                            }
-                        );
+                        self.hovered_files.push(egui::HoveredFile {
+                            mime: String::new(),
+                            path: Some(path.clone()),
+                        });
                         self.is_empty = false;
                     }
                     WinEvent::DroppedFile(path) => {
                         use std::io::Read;
                         let Ok(file) = std::fs::File::open(path) else {return};
                         //Surely there's a better way
-                        let last_modified = if let Ok(Ok(modified)) = file.metadata().map(|md| md.modified()) {
-                            Some(modified)
-                        } else {
-                            None
-                        };
+                        let last_modified =
+                            if let Ok(Ok(modified)) = file.metadata().map(|md| md.modified()) {
+                                Some(modified)
+                            } else {
+                                None
+                            };
 
-                        let bytes : Option<std::sync::Arc<[u8]>> = {
+                        let bytes: Option<std::sync::Arc<[u8]>> = {
                             let mut reader = std::io::BufReader::new(file);
                             let mut data = Vec::new();
 
@@ -298,41 +304,43 @@ impl EguiEventAccumulator {
                             }
                         };
 
-                        self.dropped_files.push(
-                            egui::DroppedFile{
-                                name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
-                                bytes,
-                                last_modified,
-                                path: Some(path.clone()),
-                            }
-                        );
+                        self.dropped_files.push(egui::DroppedFile {
+                            name: path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
+                            bytes,
+                            last_modified,
+                            path: Some(path.clone()),
+                        });
                         self.is_empty = false;
                     }
-                    _ => ()
+                    _ => (),
                 }
             }
-            _ => ()
+            _ => (),
         }
     }
-    pub fn winit_to_egui_mouse_button(winit_button : winit::event::MouseButton) -> Option<egui::PointerButton> {
-        use winit::event::MouseButton as WinitButton;
+    pub fn winit_to_egui_mouse_button(
+        winit_button: winit::event::MouseButton,
+    ) -> Option<egui::PointerButton> {
         use egui::PointerButton as EguiButton;
+        use winit::event::MouseButton as WinitButton;
         match winit_button {
             WinitButton::Left => Some(EguiButton::Primary),
             WinitButton::Right => Some(EguiButton::Secondary),
             WinitButton::Middle => Some(EguiButton::Middle),
-            WinitButton::Other(id) => {
-                match id {
-                    0 => Some(EguiButton::Extra1),
-                    1 => Some(EguiButton::Extra2),
-                    _ => None,
-                }
-            }
+            WinitButton::Other(id) => match id {
+                0 => Some(EguiButton::Extra1),
+                1 => Some(EguiButton::Extra2),
+                _ => None,
+            },
         }
     }
-    pub fn winit_to_egui_key(winit_button : winit::event::VirtualKeyCode) -> Option<egui::Key> {
-        use winit::event::VirtualKeyCode as winit_key;
+    pub fn winit_to_egui_key(winit_button: winit::event::VirtualKeyCode) -> Option<egui::Key> {
         use egui::Key as egui_key;
+        use winit::event::VirtualKeyCode as winit_key;
         match winit_button {
             winit_key::Key0 | winit_key::Numpad0 => Some(egui_key::Num0),
             winit_key::Key1 | winit_key::Numpad1 => Some(egui_key::Num1),
@@ -395,11 +403,11 @@ impl EguiEventAccumulator {
             winit_key::X => Some(egui_key::X),
             winit_key::Y => Some(egui_key::Y),
             winit_key::Z => Some(egui_key::Z),
-            
+
             _ => {
                 eprintln!("Unimplemented Key {winit_button:?}");
                 None
-            },
+            }
         }
     }
     pub fn is_empty(&self) -> bool {
@@ -408,7 +416,7 @@ impl EguiEventAccumulator {
     pub fn take_raw_input(&mut self) -> egui::RawInput {
         self.is_empty = true;
         egui::RawInput {
-            modifiers : self.last_modifiers,
+            modifiers: self.last_modifiers,
             events: std::mem::take(&mut self.events),
             focused: self.has_focus,
             //Unclear whether this should be taken or cloned.
@@ -432,7 +440,7 @@ impl Default for EguiEventAccumulator {
     }
 }
 
-pub fn egui_to_winit_cursor(cursor : egui::CursorIcon) -> Option<winit::window::CursorIcon> {
+pub fn egui_to_winit_cursor(cursor: egui::CursorIcon) -> Option<winit::window::CursorIcon> {
     use egui::CursorIcon as GuiCursor;
     use winit::window::CursorIcon as WinCursor;
     match cursor {
@@ -474,9 +482,9 @@ pub fn egui_to_winit_cursor(cursor : egui::CursorIcon) -> Option<winit::window::
     }
 }
 
-use anyhow::{Result as AnyResult, Context};
+use anyhow::Result as AnyResult;
 mod fs {
-    vulkano_shaders::shader!{
+    vulkano_shaders::shader! {
         ty: "fragment",
         src:
         r"#version 460
@@ -493,7 +501,7 @@ mod fs {
     }
 }
 mod vs {
-    vulkano_shaders::shader!{
+    vulkano_shaders::shader! {
         ty: "vertex",
         src:
         r"#version 460
@@ -521,36 +529,39 @@ mod vs {
 #[repr(C)]
 struct EguiVertex {
     #[format(R32G32_SFLOAT)]
-    pos : [f32; 2],
+    pos: [f32; 2],
     #[format(R8G8B8A8_UNORM)]
-    color : [u8; 4],
+    color: [u8; 4],
     #[format(R32G32_SFLOAT)]
-    uv : [f32; 2],
+    uv: [f32; 2],
 }
 impl From<egui::epaint::Vertex> for EguiVertex {
     fn from(value: egui::epaint::Vertex) -> Self {
         Self {
-            pos : value.pos.into(),
+            pos: value.pos.into(),
             color: value.color.to_array(),
-            uv: value.uv.into()
+            uv: value.uv.into(),
         }
     }
 }
 struct EguiTexture {
-    image : Arc<vk::StorageImage>,
+    image: Arc<vk::StorageImage>,
 
     descriptor_set: Arc<vk::PersistentDescriptorSet>,
 }
 struct EguiRenderer {
-    images : std::collections::HashMap<egui::TextureId, EguiTexture>,
-    render_context : Arc<crate::render_device::RenderContext>,
+    images: std::collections::HashMap<egui::TextureId, EguiTexture>,
+    render_context: Arc<crate::render_device::RenderContext>,
 
-    render_pass : Arc<vk::RenderPass>,
+    render_pass: Arc<vk::RenderPass>,
     pipeline: Arc<vk::GraphicsPipeline>,
     framebuffers: Vec<Arc<vk::Framebuffer>>,
 }
 impl EguiRenderer {
-    pub fn new(render_context: &Arc<crate::render_device::RenderContext>, surface_format: vk::Format) -> GpuResult<Self> {
+    pub fn new(
+        render_context: &Arc<crate::render_device::RenderContext>,
+        surface_format: vk::Format,
+    ) -> GpuResult<Self> {
         let device = render_context.device().clone();
         let renderpass = vulkano::single_pass_renderpass!(
             device.clone(),
@@ -566,7 +577,9 @@ impl EguiRenderer {
                 color: [swapchain_color],
                 depth_stencil: {},
             },
-        ).fatal().result()?;
+        )
+        .fatal()
+        .result()?;
 
         let fragment = fs::load(device.clone()).fatal().result()?;
         let vertex = vs::load(device.clone()).fatal().result()?;
@@ -579,59 +592,56 @@ impl EguiRenderer {
             .fragment_shader(fragment_entry, fs::SpecializationConstants::default())
             .vertex_input_state(EguiVertex::per_vertex())
             .render_pass(vk::Subpass::from(renderpass.clone(), 0).unwrap())
-            .rasterization_state(
-                vk::RasterizationState{
-                    cull_mode: vk::StateMode::Fixed(vk::CullMode::None),
-                    ..Default::default()
-                }
-            )
-            .input_assembly_state(
-                vk::InputAssemblyState {
-                    topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::TriangleList),
-                    primitive_restart_enable: vk::StateMode::Fixed(false),
-                }
-            )
-            .color_blend_state(
-                vk::ColorBlendState::new(1).blend_alpha()
-            )
-            .viewport_state(
-                vk::ViewportState::Dynamic {
-                    count: 1,
-                    viewport_count_dynamic: false,
-                    scissor_count_dynamic: false,
-                }
-            )
+            .rasterization_state(vk::RasterizationState {
+                cull_mode: vk::StateMode::Fixed(vk::CullMode::None),
+                ..Default::default()
+            })
+            .input_assembly_state(vk::InputAssemblyState {
+                topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::TriangleList),
+                primitive_restart_enable: vk::StateMode::Fixed(false),
+            })
+            .color_blend_state(vk::ColorBlendState::new(1).blend_alpha())
+            .viewport_state(vk::ViewportState::Dynamic {
+                count: 1,
+                viewport_count_dynamic: false,
+                scissor_count_dynamic: false,
+            })
             .build(render_context.device().clone())
-            .fatal().result()?;
+            .fatal()
+            .result()?;
 
-        Ok(
-            Self {
-                images: Default::default(),
-                render_pass: renderpass,
-                pipeline,
-                render_context: render_context.clone(),
-                framebuffers: Vec::new(),
-            }
-        )
+        Ok(Self {
+            images: Default::default(),
+            render_pass: renderpass,
+            pipeline,
+            render_context: render_context.clone(),
+            framebuffers: Vec::new(),
+        })
     }
-    pub fn gen_framebuffers(&mut self, surface: &crate::render_device::RenderSurface) -> GpuResult<()> {
-        let framebuffers : GpuResult<Vec<_>> =
-            surface.swapchain_images()
+    pub fn gen_framebuffers(
+        &mut self,
+        surface: &crate::render_device::RenderSurface,
+    ) -> GpuResult<()> {
+        let framebuffers: GpuResult<Vec<_>> = surface
+            .swapchain_images()
             .iter()
             .map(|image| -> GpuResult<_> {
                 let fb = vk::Framebuffer::new(
                     self.render_pass.clone(),
                     vk::FramebufferCreateInfo {
-                        attachments: vec![
-                            vk::ImageView::new_default(image.clone()).fatal().result()?
-                        ],
+                        attachments: vec![vk::ImageView::new_default(image.clone())
+                            .fatal()
+                            .result()?],
                         ..Default::default()
-                    }
-                ).fatal().result()?;
+                    },
+                )
+                .fatal()
+                .result()?;
 
                 Ok(fb)
-            }).collect();
-        
+            })
+            .collect();
+
         //Treat error as fatal
         self.framebuffers = framebuffers?;
 
@@ -649,11 +659,11 @@ impl EguiRenderer {
                 egui::epaint::Primitive::Mesh(mesh) => {
                     vert_buff_size += mesh.vertices.len();
                     index_buff_size += mesh.indices.len();
-                },
+                }
                 egui::epaint::Primitive::Callback(..) => {
                     //Todo. But I'm not sure I mind this feature being unimplemented :P
                     unimplemented!("Primitive Callback is not supported.");
-                },
+                }
             }
         }
 
@@ -661,24 +671,19 @@ impl EguiRenderer {
             let builder = vk::AutoCommandBufferBuilder::primary(
                 self.render_context.allocators().command_buffer(),
                 self.render_context.queues().graphics().idx(),
-                vk::CommandBufferUsage::OneTimeSubmit
-            ).fatal().result()?;
-            return Ok(
-                builder.build().fatal().result()?
+                vk::CommandBufferUsage::OneTimeSubmit,
             )
+            .fatal()
+            .result()?;
+            return Ok(builder.build().fatal().result()?);
         }
 
         let mut vertex_vec = Vec::with_capacity(vert_buff_size);
         let mut index_vec = Vec::with_capacity(index_buff_size);
 
-
         for clipped in tesselated_geom {
             if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
-                vertex_vec.extend(
-                    mesh.vertices.iter()
-                    .cloned()
-                    .map(EguiVertex::from)
-                );
+                vertex_vec.extend(mesh.vertices.iter().cloned().map(EguiVertex::from));
                 index_vec.extend_from_slice(&mesh.indices);
             }
         }
@@ -692,8 +697,10 @@ impl EguiRenderer {
                 usage: vk::MemoryUsage::Upload,
                 ..Default::default()
             },
-            vertex_vec
-        ).fatal().result()?;
+            vertex_vec,
+        )
+        .fatal()
+        .result()?;
         let indices = vk::Buffer::from_iter(
             self.render_context.allocators().memory(),
             vk::BufferCreateInfo {
@@ -704,96 +711,100 @@ impl EguiRenderer {
                 usage: vk::MemoryUsage::Upload,
                 ..Default::default()
             },
-            index_vec
-        ).fatal().result()?;
+            index_vec,
+        )
+        .fatal()
+        .result()?;
 
-        let framebuffer = self.framebuffers.get(present_img_index as usize).expect("Present image out-of-bounds.").clone();
+        let framebuffer = self
+            .framebuffers
+            .get(present_img_index as usize)
+            .expect("Present image out-of-bounds.")
+            .clone();
 
-        let matrix = cgmath::ortho(0.0, framebuffer.extent()[0] as f32, 0.0, framebuffer.extent()[1] as f32, -1.0, 1.0);
+        let matrix = cgmath::ortho(
+            0.0,
+            framebuffer.extent()[0] as f32,
+            0.0,
+            framebuffer.extent()[1] as f32,
+            -1.0,
+            1.0,
+        );
 
         let (texture_set_idx, _) = self.texture_set_layout();
         let pipeline_layout = self.pipeline.layout();
 
         let mut command_buffer_builder = vk::AutoCommandBufferBuilder::primary(
-                self.render_context.allocators().command_buffer(),
-                self.render_context.queues().graphics().idx(),
-                vk::CommandBufferUsage::OneTimeSubmit
-            ).fatal().result()?;
+            self.render_context.allocators().command_buffer(),
+            self.render_context.queues().graphics().idx(),
+            vk::CommandBufferUsage::OneTimeSubmit,
+        )
+        .fatal()
+        .result()?;
         command_buffer_builder
             .begin_render_pass(
-                vk::RenderPassBeginInfo{
-                    clear_values: vec![
-                        Some(
-                            vk::ClearValue::Float([0.2, 0.2, 0.2, 1.0])
-                        )
-                    ],
-                    ..vk::RenderPassBeginInfo::framebuffer(
-                        framebuffer.clone()
-                    )
+                vk::RenderPassBeginInfo {
+                    clear_values: vec![Some(vk::ClearValue::Float([0.2, 0.2, 0.2, 1.0]))],
+                    ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
                 },
-                vk::SubpassContents::Inline
-            ).fatal().result()?
+                vk::SubpassContents::Inline,
+            )
+            .fatal()
+            .result()?
             .bind_pipeline_graphics(self.pipeline.clone())
             .bind_vertex_buffers(0, [vertices])
             .bind_index_buffer(indices)
             .set_viewport(
                 0,
-                [vk::Viewport{
+                [vk::Viewport {
                     depth_range: 0.0..1.0,
                     dimensions: framebuffer.extent().map(|dim| dim as f32),
                     origin: [0.0; 2],
-                }]
+                }],
             )
-            .push_constants(pipeline_layout.clone(), 0, vs::Matrix{
-                ortho: matrix.into()
-            });
+            .push_constants(
+                pipeline_layout.clone(),
+                0,
+                vs::Matrix {
+                    ortho: matrix.into(),
+                },
+            );
 
-        let mut start_vertex_buffer_offset : usize = 0;
-        let mut start_index_buffer_offset : usize = 0;
-
+        let mut start_vertex_buffer_offset: usize = 0;
+        let mut start_index_buffer_offset: usize = 0;
 
         for clipped in tesselated_geom {
             if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
                 // *Technically* it wants a float scissor rect. But.. oh well
                 let origin = clipped.clip_rect.left_top();
-                let origin = [
-                    origin.x.max(0.0) as u32,
-                    origin.y.max(0.0) as u32
-                ];
+                let origin = [origin.x.max(0.0) as u32, origin.y.max(0.0) as u32];
 
                 let dimensions = clipped.clip_rect.size();
-                let dimensions = [
-                    dimensions.x as u32,
-                    dimensions.y as u32
-                ];
+                let dimensions = [dimensions.x as u32, dimensions.y as u32];
 
                 command_buffer_builder
-                    .set_scissor(
-                        0,
-                        [
-                            vk::Scissor{
-                                origin,
-                                dimensions
-                            }
-                        ]
-                    )
+                    .set_scissor(0, [vk::Scissor { origin, dimensions }])
                     //Maybe there's a better way than rebinding every draw.
                     //shaderSampledImageArrayDynamicIndexing perhaps?
                     .bind_descriptor_sets(
                         self.pipeline.bind_point(),
                         pipeline_layout.clone(),
                         texture_set_idx,
-                        self.images.get(&mesh.texture_id)
+                        self.images
+                            .get(&mesh.texture_id)
                             .expect("Egui draw requested non-existent texture")
-                            .descriptor_set.clone()
+                            .descriptor_set
+                            .clone(),
                     )
                     .draw_indexed(
                         mesh.indices.len() as u32,
                         1,
                         start_index_buffer_offset as u32,
                         start_vertex_buffer_offset as i32,
-                        0
-                    ).fatal().result()?;
+                        0,
+                    )
+                    .fatal()
+                    .result()?;
                 start_index_buffer_offset += mesh.indices.len();
                 start_vertex_buffer_offset += mesh.vertices.len();
             }
@@ -807,15 +818,19 @@ impl EguiRenderer {
     ///Get the descriptor set layout for the texture uniform. (set_idx, layout)
     fn texture_set_layout(&self) -> (u32, Arc<vk::DescriptorSetLayout>) {
         let pipe_layout = self.pipeline.layout();
-        let layout = pipe_layout.set_layouts().get(0).expect("Egui shader needs a sampler!").clone();
+        let layout = pipe_layout
+            .set_layouts()
+            .get(0)
+            .expect("Egui shader needs a sampler!")
+            .clone();
         (0, layout)
     }
     /// Apply image deltas, optionally returning a command buffer filled with any
     /// transfers as needed.
     pub fn do_image_deltas(
         &mut self,
-        deltas : egui::TexturesDelta
-    )  -> Option<GpuResult<vk::PrimaryAutoCommandBuffer>> {
+        deltas: egui::TexturesDelta,
+    ) -> Option<GpuResult<vk::PrimaryAutoCommandBuffer>> {
         for free in deltas.free.iter() {
             self.images.remove(&free).unwrap();
         }
@@ -823,14 +838,12 @@ impl EguiRenderer {
         if deltas.set.is_empty() {
             None
         } else {
-            Some(
-                self.do_image_deltas_set(deltas)
-            )
+            Some(self.do_image_deltas_set(deltas))
         }
     }
     fn do_image_deltas_set(
         &mut self,
-        deltas : egui::TexturesDelta,
+        deltas: egui::TexturesDelta,
     ) -> GpuResult<vk::PrimaryAutoCommandBuffer> {
         //Free is handled by do_image_deltas
 
@@ -853,10 +866,9 @@ impl EguiRenderer {
                 egui::ImageData::Font(data) => {
                     //Convert f32 image to u8 norm image
                     data_vec.extend(
-                        data.pixels.iter()
-                            .map(|&f| {
-                                (f * 255.0).clamp(0.0, 255.0) as u8
-                            })
+                        data.pixels
+                            .iter()
+                            .map(|&f| (f * 255.0).clamp(0.0, 255.0) as u8),
                     );
                 }
             }
@@ -875,16 +887,19 @@ impl EguiRenderer {
                 usage: vk::MemoryUsage::Upload,
                 ..Default::default()
             },
-            data_vec.into_iter()
-        ).fatal().result()?;
+            data_vec.into_iter(),
+        )
+        .fatal()
+        .result()?;
 
-        let mut command_buffer =
-            vk::AutoCommandBufferBuilder::primary(
-                self.render_context.allocators().command_buffer(),
-                self.render_context.queues().transfer().idx(),
-                vk::CommandBufferUsage::OneTimeSubmit
-            ).fatal().result()?;
-        
+        let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
+            self.render_context.allocators().command_buffer(),
+            self.render_context.queues().transfer().idx(),
+            vk::CommandBufferUsage::OneTimeSubmit,
+        )
+        .fatal()
+        .result()?;
+
         //In case we need to allocate new textures.
         let (texture_set_idx, texture_set_layout) = self.texture_set_layout();
 
@@ -892,7 +907,7 @@ impl EguiRenderer {
         for (id, delta) in &deltas.set {
             let entry = self.images.entry(*id);
             //Generate if non-existent yet!
-            let image : GpuResult<_> = match entry {
+            let image: GpuResult<_> = match entry {
                 std::collections::hash_map::Entry::Vacant(vacant) => {
                     let format = match delta.image {
                         egui::ImageData::Color(_) => vk::Format::R8G8B8A8_UNORM,
@@ -906,7 +921,7 @@ impl EguiRenderer {
                         vk::ImageDimensions::Dim2d {
                             width: dimensions[0] as u32,
                             height: dimensions[1] as u32,
-                            array_layers: 1
+                            array_layers: 1,
                         }
                     };
                     let image = vk::StorageImage::with_usage(
@@ -916,16 +931,17 @@ impl EguiRenderer {
                         //We will not be using this StorageImage for storage :P
                         vk::ImageUsage::TRANSFER_DST | vk::ImageUsage::SAMPLED,
                         vk::ImageCreateFlags::empty(),
-                        std::iter::empty() //A puzzling difference in API from buffers - this just means Exclusive access.
-                    ).fatal().result()?;
+                        std::iter::empty(), //A puzzling difference in API from buffers - this just means Exclusive access.
+                    )
+                    .fatal()
+                    .result()?;
 
-                    let egui_to_vk_filter = |egui_filter : egui::epaint::textures::TextureFilter| {
-                        match egui_filter {
+                    let egui_to_vk_filter =
+                        |egui_filter: egui::epaint::textures::TextureFilter| match egui_filter {
                             egui::TextureFilter::Linear => vk::Filter::Linear,
                             egui::TextureFilter::Nearest => vk::Filter::Nearest,
-                        }
-                    };
-                    
+                        };
+
                     let mapping = if let egui::ImageData::Font(_) = delta.image {
                         //Font is one channel, representing percent coverage of white.
                         vk::ComponentMapping {
@@ -943,8 +959,10 @@ impl EguiRenderer {
                         vk::ImageViewCreateInfo {
                             component_mapping: mapping,
                             ..vk::ImageViewCreateInfo::from_image(&image)
-                        }
-                    ).fatal().result()?;
+                        },
+                    )
+                    .fatal()
+                    .result()?;
 
                     //Could optimize here, re-using the four possible options of sampler.
                     let sampler = vk::Sampler::new(
@@ -954,27 +972,30 @@ impl EguiRenderer {
                             min_filter: egui_to_vk_filter(delta.options.minification),
 
                             ..Default::default()
-                        }
-                    ).fatal().result()?;
+                        },
+                    )
+                    .fatal()
+                    .result()?;
 
                     let descriptor_set = vk::PersistentDescriptorSet::new(
                         self.render_context.allocators().descriptor_set(),
-                        texture_set_layout.clone(), 
-                        [
-                            vk::WriteDescriptorSet::image_view_sampler(
-                                texture_set_idx, view.clone(), sampler.clone()
-                            )
-                        ]
-                    ).fatal().result()?;
-                    Ok(
-                        vacant.insert(         
-                            EguiTexture {
-                                image,
-                                descriptor_set
-                            }
-                        ).image.clone()
+                        texture_set_layout.clone(),
+                        [vk::WriteDescriptorSet::image_view_sampler(
+                            texture_set_idx,
+                            view.clone(),
+                            sampler.clone(),
+                        )],
                     )
-                },
+                    .fatal()
+                    .result()?;
+                    Ok(vacant
+                        .insert(EguiTexture {
+                            image,
+                            descriptor_set,
+                        })
+                        .image
+                        .clone())
+                }
                 std::collections::hash_map::Entry::Occupied(occupied) => {
                     Ok(occupied.get().image.clone())
                 }
@@ -990,43 +1011,28 @@ impl EguiRenderer {
 
             //The only way to get a struct of this is to call this method -
             //we need to redo many of the fields however.
-            let transfer_info = 
-                vk::CopyBufferToImageInfo::buffer_image(
-                    staging_buffer.clone(),
-                    image
-                );
-            
+            let transfer_info =
+                vk::CopyBufferToImageInfo::buffer_image(staging_buffer.clone(), image);
+
             let transfer_offset = delta.pos.unwrap_or([0, 0]);
 
             command_buffer
-                .copy_buffer_to_image(
-                    vk::CopyBufferToImageInfo {
-                        //Update regions according to delta
-                        regions: smallvec::smallvec![
-                            vk::BufferImageCopy {
-                                buffer_offset: start_offset,
-                                image_offset: [
-                                    transfer_offset[0] as u32,
-                                    transfer_offset[1] as u32,
-                                    0
-                                ],
-                                buffer_image_height: delta.image.height() as u32,
-                                buffer_row_length: delta.image.width() as u32,
-                                image_extent: [
-                                    delta.image.width() as u32,
-                                    delta.image.height() as u32,
-                                    1
-                                ],
-                                ..transfer_info.regions[0].clone()
-                            }
-                        ],
-                        ..transfer_info
-                    }
-                ).fatal().result()?;
+                .copy_buffer_to_image(vk::CopyBufferToImageInfo {
+                    //Update regions according to delta
+                    regions: smallvec::smallvec![vk::BufferImageCopy {
+                        buffer_offset: start_offset,
+                        image_offset: [transfer_offset[0] as u32, transfer_offset[1] as u32, 0],
+                        buffer_image_height: delta.image.height() as u32,
+                        buffer_row_length: delta.image.width() as u32,
+                        image_extent: [delta.image.width() as u32, delta.image.height() as u32, 1],
+                        ..transfer_info.regions[0].clone()
+                    }],
+                    ..transfer_info
+                })
+                .fatal()
+                .result()?;
         }
 
-        Ok(
-            command_buffer.build().fatal().result()?
-        )
+        Ok(command_buffer.build().fatal().result()?)
     }
 }

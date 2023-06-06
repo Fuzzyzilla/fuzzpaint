@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-pub mod vulkano_prelude;
-pub mod gpu_err;
 mod egui_impl;
+pub mod gpu_err;
+pub mod vulkano_prelude;
 use gpu_err::GpuResult;
 use vulkano_prelude::*;
 pub mod render_device;
@@ -15,12 +15,9 @@ enum RemoteResource {
     Gone,
 }
 
-
-
-
 pub struct WindowSurface {
-    event_loop : winit::event_loop::EventLoop<()>,
-    win : Arc<winit::window::Window>,
+    event_loop: winit::event_loop::EventLoop<()>,
+    win: Arc<winit::window::Window>,
 }
 impl WindowSurface {
     pub fn new() -> AnyResult<Self> {
@@ -37,28 +34,28 @@ impl WindowSurface {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
     }
-    pub fn with_render_surface(self, render_surface: render_device::RenderSurface, render_context: Arc<render_device::RenderContext>)
-        -> GpuResult<WindowRenderer> {
-        
+    pub fn with_render_surface(
+        self,
+        render_surface: render_device::RenderSurface,
+        render_context: Arc<render_device::RenderContext>,
+    ) -> GpuResult<WindowRenderer> {
         let mut egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
-        Ok(
-            WindowRenderer {
-                win: self.win,
-                render_surface: Some(render_surface),
-                render_context,
-                event_loop: Some(self.event_loop),
-                egui_ctx,
-            }
-        )
+        Ok(WindowRenderer {
+            win: self.win,
+            render_surface: Some(render_surface),
+            render_context,
+            event_loop: Some(self.event_loop),
+            egui_ctx,
+        })
     }
 }
 
 pub struct WindowRenderer {
-    event_loop : Option<winit::event_loop::EventLoop<()>>,
-    win : Arc<winit::window::Window>,
+    event_loop: Option<winit::event_loop::EventLoop<()>>,
+    win: Arc<winit::window::Window>,
     /// Always Some. This is to allow it to be take-able to be remade.
     /// Could None represent a temporary loss of surface that can be recovered from?
-    render_surface : Option<render_device::RenderSurface>,
+    render_surface: Option<render_device::RenderSurface>,
     render_context: Arc<render_device::RenderContext>,
     egui_ctx: egui_impl::EguiCtx,
 }
@@ -83,7 +80,8 @@ impl WindowRenderer {
     }
     /// Recreate surface after loss or out-of-date. Todo: This only handles out-of-date and resize.
     pub fn recreate_surface(&mut self) -> AnyResult<()> {
-        let new_surface = self.render_surface
+        let new_surface = self
+            .render_surface
             .take()
             .unwrap()
             .recreate(Some(self.window().inner_size().into()))?;
@@ -115,7 +113,7 @@ impl WindowRenderer {
         //There WILL be an event loop if we got here
         let event_loop = self.event_loop.take().unwrap();
 
-        event_loop.run(move |event, _, control_flow|{
+        event_loop.run(move |event, _, control_flow| {
             use winit::event::{Event, WindowEvent};
 
             //Weird ownership problems here.
@@ -123,18 +121,16 @@ impl WindowRenderer {
             self.egui_ctx.push_winit_event(&event);
 
             match event {
-                Event::WindowEvent { event, .. } => {
-                    match event {
-                        WindowEvent::CloseRequested => {
-                            *control_flow = winit::event_loop::ControlFlow::Exit;
-                            return;
-                        }
-                        WindowEvent::Resized(..) => {
-                            self.recreate_surface().expect("Failed to rebuild surface");
-                        }
-                        _ => ()
+                Event::WindowEvent { event, .. } => match event {
+                    WindowEvent::CloseRequested => {
+                        *control_flow = winit::event_loop::ControlFlow::Exit;
+                        return;
                     }
-                }
+                    WindowEvent::Resized(..) => {
+                        self.recreate_surface().expect("Failed to rebuild surface");
+                    }
+                    _ => (),
+                },
                 Event::MainEventsCleared => {
                     //Draw!
                     if let Some(output) = self.do_ui() {
@@ -148,33 +144,29 @@ impl WindowRenderer {
                 Event::RedrawRequested(..) => {
                     self.paint();
                 }
-                _ => ()
+                _ => (),
             }
         });
     }
     fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
         self.egui_ctx.update(|ctx| {
-            egui::Window::new("🐑 Baa")
-            .show(&ctx, |ui| {
+            egui::Window::new("🐑 Baa").show(&ctx, |ui| {
                 ui.label("Testing testing 123!!");
             });
 
-        egui::Window::new("Beep boop")
-            .show(&ctx, |ui| {
+            egui::Window::new("Beep boop").show(&ctx, |ui| {
                 ui.label("Testing testing 345!!");
             });
         })
     }
     fn paint(&mut self) {
         let (idx, suboptimal, image_future) =
-            match vk::acquire_next_image(
-                self.render_surface().swapchain().clone(),
-                None
-            ) {
+            match vk::acquire_next_image(self.render_surface().swapchain().clone(), None) {
                 Err(vulkano::swapchain::AcquireError::OutOfDate) => {
                     eprintln!("Swapchain unusable.. Recreating");
                     //We cannot draw on this surface as-is. Recreate and request another try next frame.
-                    self.recreate_surface().expect("Failed to recreate render surface after it went out-of-date.");
+                    self.recreate_surface()
+                        .expect("Failed to recreate render surface after it went out-of-date.");
                     self.window().request_redraw();
                     return;
                 }
@@ -182,10 +174,12 @@ impl WindowRenderer {
                     //Todo. Many of these errors are recoverable!
                     panic!("Surface image acquire failed!");
                 }
-                Ok(r) => r
+                Ok(r) => r,
             };
         let commands = self.egui_ctx.build_commands(idx);
-        if let None= commands { return }
+        if let None = commands {
+            return;
+        }
 
         //Minimize heap allocs (by using excessive code duplication)
         {
@@ -193,37 +187,55 @@ impl WindowRenderer {
             if let Some((transfer, draw)) = commands {
                 if let Some(transfer) = transfer {
                     //Transfer + Draw
-                    now
-                        .then_execute(self.render_context.queues().transfer().queue().clone(), transfer).unwrap()
-                        .join(image_future)
-                        .then_signal_semaphore()
-                        .then_execute(self.render_context.queues().graphics().queue().clone(), draw).unwrap()
-                        .boxed()
+                    now.then_execute(
+                        self.render_context.queues().transfer().queue().clone(),
+                        transfer,
+                    )
+                    .unwrap()
+                    .join(image_future)
+                    .then_signal_semaphore()
+                    .then_execute(
+                        self.render_context.queues().graphics().queue().clone(),
+                        draw,
+                    )
+                    .unwrap()
+                    .boxed()
                 } else {
                     //Just draw
-                    now
-                        .join(image_future)
-                        .then_execute(self.render_context.queues().graphics().queue().clone(), draw).unwrap()
+                    now.join(image_future)
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            draw,
+                        )
+                        .unwrap()
                         .boxed()
                 }
             } else {
-                //Nothing to do
-                now
-                    .join(image_future)
-                    .boxed()
+                //Nothing to do - shouldn't happen (Egui won't request a redraw without anything to draw)
+                //but we've already acquired the image, we have to present it when it becomes ready.
+                now.join(image_future).boxed()
             }
         }
-            .then_swapchain_present(
-                self.render_context.queues().present().unwrap().queue().clone(),
-                vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain().clone(), idx)
-            )
-            .then_signal_fence_and_flush()
-            .unwrap()
-            .wait(None)
-            .unwrap();
+        .then_swapchain_present(
+            self.render_context
+                .queues()
+                .present()
+                .unwrap()
+                .queue()
+                .clone(),
+            vk::SwapchainPresentInfo::swapchain_image_index(
+                self.render_surface().swapchain().clone(),
+                idx,
+            ),
+        )
+        .then_signal_fence_and_flush()
+        .unwrap()
+        .wait(None)
+        .unwrap();
 
         if suboptimal {
-            self.recreate_surface().expect("Recreating suboptimal swapchain failed spectacularly");
+            self.recreate_surface()
+                .expect("Recreating suboptimal swapchain failed spectacularly");
         }
     }
 }
@@ -234,7 +246,8 @@ fn main() -> AnyResult<std::convert::Infallible> {
     env_logger::init();
 
     let window_surface = WindowSurface::new()?;
-    let (render_context, render_surface) = render_device::RenderContext::new_with_window_surface(&window_surface)?;
+    let (render_context, render_surface) =
+        render_device::RenderContext::new_with_window_surface(&window_surface)?;
     let window_renderer = window_surface.with_render_surface(render_surface, render_context)?;
     println!("Made render context!");
 

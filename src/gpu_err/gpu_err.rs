@@ -12,19 +12,19 @@ pub type GpuResult<OkTy> = ::std::result::Result<OkTy, GpuError>;
 #[must_use = "GpuError may indicate fatal errors and should not be ignored."]
 pub struct GpuError {
     /// Whether the resource that returned this error died as a result of the error.
-    pub fatal : bool,
+    pub fatal: bool,
     /// The underlying source of the error
-    pub source : GpuErrorSource,
+    pub source: GpuErrorSource,
 }
 //Private API for construction by conversions below
 impl GpuError {
-    fn fatal_with_source(source : GpuErrorSource) -> Self {
+    fn fatal_with_source(source: GpuErrorSource) -> Self {
         Self {
             source,
             fatal: true,
         }
     }
-    fn recoverable_with_source(source : GpuErrorSource) -> Self {
+    fn recoverable_with_source(source: GpuErrorSource) -> Self {
         Self {
             source,
             fatal: false,
@@ -33,12 +33,12 @@ impl GpuError {
 }
 // Public API
 pub trait GpuResultInspection {
-    type ErrTy : Clone;
-    fn unless(self, p : impl FnOnce(Self::ErrTy) -> bool) -> Self;
+    type ErrTy: Clone;
+    fn unless(self, p: impl FnOnce(Self::ErrTy) -> bool) -> Self;
 }
 impl GpuResultInspection for GpuError {
     type ErrTy = Self;
-    fn unless(self, p : impl FnOnce(Self::ErrTy) -> bool) -> Self {
+    fn unless(self, p: impl FnOnce(Self::ErrTy) -> bool) -> Self {
         let predicate_value = p(self.clone());
         //XOR - toggle fatal if predicate passed
         let new_fatal = self.fatal ^ predicate_value;
@@ -47,7 +47,6 @@ impl GpuResultInspection for GpuError {
             fatal: new_fatal,
             ..self
         }
-
     }
 }
 
@@ -64,7 +63,10 @@ pub enum GpuErrorSource {
     #[error("{0:?}")]
     SemaphoreError(vulkano::sync::semaphore::SemaphoreError),
     #[error("Requirement not met: {requires_one_of:?} required for {required_for}")]
-    RequirementNotMet{required_for : &'static str, requires_one_of: vulkano::RequiresOneOf},
+    RequirementNotMet {
+        required_for: &'static str,
+        requires_one_of: vulkano::RequiresOneOf,
+    },
     #[error("Wait Timeout")]
     Timeout,
     #[error("Requested resource already in use")]
@@ -75,7 +77,6 @@ pub enum GpuErrorSource {
     ShaderCreationError(vulkano::shader::ShaderCreationError),
     #[error("{0:?}")]
     GraphicsPipelineCreationError(vulkano::pipeline::graphics::GraphicsPipelineCreationError),
-
 }
 
 // Traits for all GPU errors, to detect major faults.
@@ -120,36 +121,32 @@ impl HasOom for GpuError {
 }
 pub trait IntoGpuResultBuilder {
     type OkTy;
-    type ErrTy : Into<GpuErrorSource>;
+    type ErrTy: Into<GpuErrorSource>;
     fn fatal(self) -> super::GpuResultBuilder<Self::OkTy, Self::ErrTy>;
     fn recoverable(self) -> super::GpuResultBuilder<Self::OkTy, Self::ErrTy>;
 }
 
 impl<OkTy, ErrTy> IntoGpuResultBuilder for ::std::result::Result<OkTy, ErrTy>
-    where ErrTy : Into<GpuErrorSource>
+where
+    ErrTy: Into<GpuErrorSource>,
 {
     type OkTy = OkTy;
     type ErrTy = ErrTy;
     fn fatal(self) -> super::GpuResultBuilder<OkTy, ErrTy> {
         super::GpuResultBuilder::new_fatal(self)
     }
-    fn recoverable(self) -> super::GpuResultBuilder<OkTy, ErrTy>  {
+    fn recoverable(self) -> super::GpuResultBuilder<OkTy, ErrTy> {
         super::GpuResultBuilder::new_recoverable(self)
     }
 }
 
-impl<OkTy, ErrTy : HasDeviceLoss> HasDeviceLoss for ::std::result::Result<OkTy, ErrTy> {
+impl<OkTy, ErrTy: HasDeviceLoss> HasDeviceLoss for ::std::result::Result<OkTy, ErrTy> {
     fn device_lost(&self) -> bool {
-        self.as_ref()
-            .err()
-            .is_some_and(|err| err.device_lost())
+        self.as_ref().err().is_some_and(|err| err.device_lost())
     }
 }
-impl<OkTy, ErrTy : HasOom> HasOom for ::std::result::Result<OkTy, ErrTy> {
+impl<OkTy, ErrTy: HasOom> HasOom for ::std::result::Result<OkTy, ErrTy> {
     fn oom(&self) -> Option<vulkano::OomError> {
-        self.as_ref()
-            .err()
-            .map(|err| err.oom())
-            .unwrap_or(None)
+        self.as_ref().err().map(|err| err.oom()).unwrap_or(None)
     }
 }
