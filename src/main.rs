@@ -196,6 +196,7 @@ impl WindowRenderer {
                     now
                         .then_execute(self.render_context.queues().transfer().queue().clone(), transfer).unwrap()
                         .join(image_future)
+                        .then_signal_semaphore()
                         .then_execute(self.render_context.queues().graphics().queue().clone(), draw).unwrap()
                         .boxed()
                 } else {
