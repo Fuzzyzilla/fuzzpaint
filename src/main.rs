@@ -96,7 +96,7 @@ impl WindowRenderer {
     }
     fn apply_platform_output(&mut self, out: egui::PlatformOutput) {
         //Todo: Copied text
-        if let Some(url) = out.open_url.take() {
+        if let Some(url) = out.open_url {
             //Todo: x-platform lol
             let out = std::process::Command::new("xdg-open").arg(url.url).spawn();
             if let Err(e) = out {
@@ -114,13 +114,12 @@ impl WindowRenderer {
     pub fn run(mut self) -> ! {
         //There WILL be an event loop if we got here
         let event_loop = self.event_loop.take().unwrap();
-        let mut egui_out = None::<egui::FullOutput>;
-
-        let mut edit_str = String::new();
 
         event_loop.run(move |event, _, control_flow|{
             use winit::event::{Event, WindowEvent};
 
+            //Weird ownership problems here.
+            let Some(event) = event.to_static() else {return};
             self.egui_ctx.push_winit_event(&event);
 
             match event {
@@ -141,12 +140,13 @@ impl WindowRenderer {
                     if let Some(output) = self.do_ui() {
                         self.apply_platform_output(output);
                     };
+
+                    if self.egui_ctx.needs_redraw() {
+                        self.window().request_redraw()
+                    }
                 }
                 Event::RedrawRequested(..) => {
-                    //Ensure there is actually data for us to draw
-                    if let Some(out) = egui_out.take() {
-                        self.paint(out);
-                    }
+                    self.paint();
                 }
                 _ => ()
             }
@@ -165,7 +165,7 @@ impl WindowRenderer {
             });
         })
     }
-    fn paint(&mut self, egui_data : egui::FullOutput) {
+    fn paint(&mut self) {
         let (idx, suboptimal, image_future) =
             match vk::acquire_next_image(
                 self.render_surface().swapchain().clone(),
@@ -184,35 +184,46 @@ impl WindowRenderer {
                 }
                 Ok(r) => r
             };
-        let res : AnyResult<()> = try_block::try_block! {
-            let transfer_commands = self.egui_renderer.do_image_deltas(egui_data.textures_delta);
+        let commands = self.egui_ctx.build_commands(idx);
+        if let None= commands { return }
 
-            let transfer_queue = self.render_context.queues().transfer().queue();
-            let render_queue = self.render_context.queues().graphics().queue();
-            let mut future : Box<dyn vk::sync::GpuFuture> = self.render_context.now().boxed();
-            if let Some(transfer_commands) = transfer_commands {
-                let buffer = transfer_commands?;
-
-                //Flush transfer commands, while we tesselate Egui output.
-                future = future.then_execute(transfer_queue.clone(), buffer)?
-                    .boxed();
+        //Minimize heap allocs (by using excessive code duplication)
+        {
+            let now = self.render_context.now();
+            if let Some((transfer, draw)) = commands {
+                if let Some(transfer) = transfer {
+                    now
+                        .then_execute(self.render_context.queues().transfer().queue().clone(), transfer).unwrap()
+                        .join(image_future)
+                        .then_execute(self.render_context.queues().graphics().queue().clone(), draw).unwrap()
+                        .then_swapchain_present(
+                            self.render_context.queues().present().unwrap().queue().clone(),
+                            vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain().clone(), idx)
+                        ).boxed()
+                } else {
+                    now
+                        .join(image_future)
+                        .then_execute(self.render_context.queues().graphics().queue().clone(), draw).unwrap()
+                        .then_swapchain_present(
+                            self.render_context.queues().present().unwrap().queue().clone(),
+                            vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain().clone(), idx)
+                        ).boxed()
+                }
+            } else {
+                now
+                    .join(image_future)
+                    .boxed()
             }
-            let tess_geom = self.egui_ctx.tessellate(egui_data.shapes);
-            let draw_commands = self.egui_renderer.upload_and_render(idx, &tess_geom)?;
-            drop(tess_geom);
+        }
+            .then_swapchain_present(
+                self.render_context.queues().present().unwrap().queue().clone(),
+                vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain().clone(), idx)
+            )
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
 
-            future.then_execute(render_queue.clone(),draw_commands)?
-                .join(image_future)
-                .then_swapchain_present(
-                    self.render_context.queues().present().unwrap().queue().clone(),
-                    vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface().swapchain().clone(), idx),
-                )
-                .then_signal_fence_and_flush()?
-                .wait(None)?;
-
-           // let draw_commands = self.egui_renderer.upload_and_render(idx, tesselated_geom);
-            Ok(())
-        };
         if suboptimal {
             self.recreate_surface().expect("Recreating suboptimal swapchain failed spectacularly");
         }

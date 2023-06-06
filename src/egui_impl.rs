@@ -24,6 +24,7 @@ pub struct EguiCtx {
     ctx: egui::Context,
     events: EguiEventAccumulator,
     renderer: EguiRenderer,
+    render_ctx: Arc<crate::render_device::RenderContext>,
 
     requested_redraw_times: std::collections::VecDeque<std::time::Instant>,
     immediate_redraw: bool,
@@ -38,6 +39,7 @@ impl EguiCtx {
             ctx: Default::default(),
             events: Default::default(),
             renderer,
+            render_ctx: render_surface.context().clone(),
             immediate_redraw: true,
             requested_redraw_times: std::collections::VecDeque::from_iter(std::iter::once(std::time::Instant::now())),
             full_output: None,
@@ -95,6 +97,26 @@ impl EguiCtx {
         let redraw_is_past = self.requested_redraw_times.front().map_or(false, |&time| time < std::time::Instant::now());
 
         !self.events.is_empty() || redraw_is_past
+    }
+    pub fn build_commands(&mut self, swapchain_idx : u32) -> Option<(Option<vk::PrimaryAutoCommandBuffer>, vk::PrimaryAutoCommandBuffer)> {
+        self.immediate_redraw = false;
+        let now = std::time::Instant::now();
+        //Remove past redraw requests.
+        self.requested_redraw_times.retain(|&time| time > now);
+
+        // Check if there's anything to draw!
+        let Some(output) = self.full_output.take() else {return None};
+
+        let res : AnyResult<_> = try_block::try_block! {
+            let transfer_commands = self.renderer.do_image_deltas(output.textures_delta).transpose()?;
+            let tess_geom = self.ctx.tessellate(output.shapes);
+            let draw_commands = self.renderer.upload_and_render(swapchain_idx, &tess_geom)?;
+            drop(tess_geom);
+
+            Ok((transfer_commands, draw_commands))
+        };
+
+        Some(res.unwrap()) //also stinky
     }
 }
 
