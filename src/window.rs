@@ -5,6 +5,7 @@ use crate::egui_impl;
 use crate::gpu_err::*;
 
 use anyhow::Result as AnyResult;
+
 pub struct WindowSurface {
     event_loop: winit::event_loop::EventLoop<()>,
     win: Arc<winit::window::Window>,

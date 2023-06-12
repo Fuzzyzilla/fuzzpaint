@@ -7,6 +7,7 @@ pub mod window;
 use gpu_err::GpuResult;
 use vulkano_prelude::*;
 pub mod render_device;
+pub mod stylus_events;
 
 use anyhow::Result as AnyResult;
 
