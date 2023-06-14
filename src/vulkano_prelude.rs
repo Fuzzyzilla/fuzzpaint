@@ -23,6 +23,7 @@ pub mod vk {
             RenderPassBeginInfo,
             SecondaryAutoCommandBuffer,
             SubpassContents,
+            ClearColorImageInfo,
         },
         descriptor_set::{
             allocator::StandardDescriptorSetAllocator, layout::DescriptorSetLayout,
@@ -38,6 +39,7 @@ pub mod vk {
             view::{ImageView, ImageViewCreateInfo},
             AttachmentImage, ImageCreateFlags, ImageDimensions, ImageUsage, ImmutableImage,
             StorageImage, SwapchainImage,
+            ImageSubresourceRange, ImageAspects, ImageAccess
         },
         instance::{Instance, InstanceCreateInfo},
         library::VulkanLibrary,

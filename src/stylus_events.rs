@@ -113,7 +113,7 @@ impl TryFrom<PartialStylusEvent> for StylusEvent {
     fn try_from(value: PartialStylusEvent) -> Result<Self, Self::Error> {
         //Required fields - short circuit None to Err(())
         let pos = value.pos_x.zip(value.pos_y).ok_or(())?;
-        let pressed = value.pressed.ok_or(())?;
+        let pressed = value.pressed.unwrap_or(false);
 
         // None if both none, Some with defaults if either or both are set.
         // Feels like there should be a more concise way :P

@@ -120,8 +120,30 @@ impl WindowRenderer {
                     WindowEvent::Resized(..) => {
                         self.recreate_surface().expect("Failed to rebuild surface");
                     }
+                    WindowEvent::AxisMotion { device_id, axis, value } => {
+                        println!("{event:?}")
+                    }
                     _ => (),
                 },
+                Event::DeviceEvent { device_id, event } => {
+                    //println!("{device_id:?}\n\t{event:?}");
+                    return;
+                    match event {
+                        winit::event::DeviceEvent::Added => {
+                            println!("add")
+                        }
+                        winit::event::DeviceEvent::Motion { axis, value } => {
+                            println!("{device_id:?} {axis:?} {value:?}")
+                            // 0 -> x in display space
+                            // 1 -> y in display space
+                            // 2 -> pressure out of 65535, 0 if not pressed
+                            // 3 -> Tilt X, degrees from vertical, + to the right
+                            // 4 -> Tilt Y, degrees from vertical, + towards user
+                            // 5 -> unknown, always zero (rotation?)
+                        }
+                        _ => ()
+                    }
+                }
                 Event::MainEventsCleared => {
                     //Draw!
                     if let Some(output) = self.do_ui() {
