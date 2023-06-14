@@ -62,8 +62,8 @@ mod dist_field_comp {
         ty: "compute",
         src: r"
         #version 460
-        layout(set = 0, binding = 0, rg16ui) uniform restrict readonly uimage2D inBuffer;
-        layout(set = 1, binding = 0, rg16ui) uniform restrict writeonly uimage2D outBuffer;
+        layout(set = 0, binding = 0, rgba16ui) uniform restrict readonly uimage2D inBuffer;
+        layout(set = 1, binding = 0, rgba16ui) uniform restrict writeonly uimage2D outBuffer;
         
         layout(constant_id = 0) const uint step_size = 1;
 
@@ -86,51 +86,68 @@ mod dist_field_comp {
             // work to do, so probably a better thread partitioning scheme is needed...
             //if (all(notEqual(self_value, uvec2(65535)))) return;
 
-            uvec2 self_value = SENTINAL;
+            uvec4 self_value = uvec4(SENTINAL, SENTINAL);
 
             for (int i = -1; i <= 1; ++i) {
                 for (int j = -1; j <= 1; ++j) {
                     ivec2 sample_pos = ivec2(i, j) * int(step_size) + ivec2(self_position);
-                    uvec2 sample_value;
+                    uvec4 sample_value;
 
                     /// Outside image bounds, fill with sentenal value
-                    if (any(lessThan(sample_pos, ivec2(0)))) sample_value = SENTINAL;
-                    else if (any(greaterThanEqual(sample_pos, ivec2(size)))) sample_value = SENTINAL;
+                    if (any(lessThan(sample_pos, ivec2(0)))) sample_value = uvec4(SENTINAL, SENTINAL);
+                    else if (any(greaterThanEqual(sample_pos, ivec2(size)))) sample_value = uvec4(SENTINAL, SENTINAL);
                     // Perform sample!
                     else {
-                        sample_value = imageLoad(inBuffer, sample_pos).xy;
+                        sample_value = imageLoad(inBuffer, sample_pos);
                     }
 
-                    // We found a pixel! Compare with stored value, choose the closest one.
-                    if (!is_sentinal(sample_value)) {
+                    // We found an inner pixel! Compare with stored value, choose the closest one.
+                    if (!is_sentinal(sample_value.rg)) {
                         // There wasn't a pixel before, so take this one.
-                        if (is_sentinal(self_value)) {
-                            self_value = sample_value;
+                        if (is_sentinal(self_value.rg)) {
+                            self_value.rg = sample_value.rg;
                         } else {
                             //Compare distances - both are non-sentinal so we must choose closest:
-                            ivec2 to_self = ivec2(self_position) - ivec2(self_value);
-                            ivec2 to_sample = ivec2(self_position) - ivec2(sample_value);
+                            ivec2 to_self = ivec2(self_position) - ivec2(self_value.rg);
+                            ivec2 to_sample = ivec2(self_position) - ivec2(sample_value.rg);
 
                             // Fast dist compare - is sample closer than self?
                             if (dot(to_sample, to_sample) < dot(to_self, to_self)) {
-                                self_value = sample_value;
+                                self_value.rg = sample_value.rg;
+                            }
+                        }
+                    }
+
+                    // We found an outer pixel! Compare with stored value, choose the closest one.
+                    if (!is_sentinal(sample_value.ba)) {
+                        // There wasn't a pixel before, so take this one.
+                        if (is_sentinal(self_value.ba)) {
+                            self_value.ba = sample_value.ba;
+                        } else {
+                            //Compare distances - both are non-sentinal so we must choose closest:
+                            ivec2 to_self = ivec2(self_position) - ivec2(self_value.ba);
+                            ivec2 to_sample = ivec2(self_position) - ivec2(sample_value.ba);
+
+                            // Fast dist compare - is sample closer than self?
+                            if (dot(to_sample, to_sample) < dot(to_self, to_self)) {
+                                self_value.ba = sample_value.ba;
                             }
                         }
                     }
                 }
             }
 
-            imageStore(outBuffer, ivec2(self_position), uvec4(self_value, 0.0, 0.0));
+            imageStore(outBuffer, ivec2(self_position), uvec4(self_value));
         }
         "
     }
 }mod dist_field_init {
     vulkano_shaders::shader!{
         ty: "compute",
-        src: r"
+        src: r#"
         #version 460
         layout(set = 0, binding = 0, rgba16f) uniform restrict readonly image2D inBuffer;
-        layout(set = 1, binding = 0, rg16ui) uniform restrict writeonly uimage2D outBuffer;
+        layout(set = 1, binding = 0, rgba16ui) uniform restrict writeonly uimage2D outBuffer;
         const uvec2 SENTINAL = uvec2(65535);
 
         layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
@@ -144,14 +161,16 @@ mod dist_field_comp {
             // except for where the color image is opaque.
             // There, initialize with pixel coords.
 
-            uvec2 self_value = SENTINAL;
             float self_alpha = imageLoad(inBuffer, ivec2(self_position)).a;
+            bool is_inside = self_alpha > 0.1;
 
-            if (self_alpha > 0.1) self_value = self_position;
+            //RG -> coords of the Nearest "Inside" pixel
+            //BA -> coords of the Nearest "Outside" pixel
+            uvec4 value = is_inside ? uvec4(self_position, SENTINAL) : uvec4(SENTINAL, self_position);
 
-            imageStore(outBuffer, ivec2(self_position), uvec4(self_value, 0.0, 0.0));
+            imageStore(outBuffer, ivec2(self_position), value);
         }
-        "
+        "#
     }
 }
 
@@ -162,14 +181,14 @@ fn make_voronoi(
     future: vk::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>
 ) -> AnyResult<(Arc<vk::ImageView<impl vk::ImageAccess>>, vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>)> {
     //dimensions of color image must be strictly less than 65535
-    let voronoi_format = vk::Format::R16G16_UINT;
+    let voronoi_format = vk::Format::R16G16B16A16_UINT;
     const KERNEL_SIZE : [u16; 2] = [16u16; 2];
 
     let pingpong_buffers_array = 
         vk::StorageImage::with_usage(
             render_context.allocators().memory(),
             vulkano::image::ImageDimensions::Dim2d { width: DOCUMENT_DIMENSION, height: DOCUMENT_DIMENSION, array_layers: 2 },
-            vk::Format::R16G16_UINT,
+            voronoi_format,
             //TRANSFER_DST required for vkCmdClearColorImage
             vk::ImageUsage::STORAGE | vk::ImageUsage::TRANSFER_DST,
             vk::ImageCreateFlags::empty(),
@@ -709,7 +728,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
     //let (image, future) = make_test_image(render_context.clone())?;
-    let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("test-data/tode.png"))?;
+    let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("test-data/orbs.png"))?;
     let (voronoi, future) = make_voronoi(render_context.clone(), image, future)?;
 
     let window_renderer = window_surface.with_render_surface(render_surface, render_context.clone())?;
