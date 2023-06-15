@@ -66,33 +66,33 @@ mod dist_field_comp {
         layout(set = 1, binding = 0, rgba16ui) uniform restrict writeonly uimage2D outBuffer;
         
         layout(constant_id = 0) const uint step_size = 1;
-
+        
         #define SENTINAL (uint(65535))
         const uvec2 SENTINAL2 = uvec2(SENTINAL);
-
+        
         layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
         void main() {
             ivec2 self_position = ivec2(gl_GlobalInvocationID.xy);
             uvec2 size = imageSize(inBuffer).xy;
-
+        
             //Self is outside of the image, skip!
             if (any(greaterThanEqual(self_position, size))) return;
-
+        
             uvec4 self_value = uvec4(SENTINAL2, SENTINAL2);
-
+        
             for (int i = -1; i <= 1; ++i) {
                 for (int j = -1; j <= 1; ++j) {
                     ivec2 sample_pos = ivec2(i, j) * int(step_size) + self_position;
-                    uvec4 sample_value;
-
-                    /// Outside image bounds, fill with sentenal value
-                    if (any(lessThan(sample_pos, ivec2(0)))) sample_value = uvec4(SENTINAL2, SENTINAL2);
-                    else if (any(greaterThanEqual(sample_pos, ivec2(size)))) sample_value = uvec4(SENTINAL2, SENTINAL2);
+                    uvec4 sample_value = uvec4(SENTINAL2, SENTINAL2);
+        
                     // Perform sample!
-                    else {
+                    if (
+                        all(greaterThanEqual(sample_pos, ivec2(0)))
+                        && all(lessThan(sample_pos, ivec2(size)))
+                    ){
                         sample_value = imageLoad(inBuffer, sample_pos);
                     }
-
+        
                     // We found an inner pixel! Compare with stored value, choose the closest one.
                     if (sample_value.r != SENTINAL) {
                         // There wasn't a pixel before, so take this one.
@@ -102,14 +102,14 @@ mod dist_field_comp {
                             //Compare distances - both are non-sentinal so we must choose closest:
                             ivec2 to_self = self_position - ivec2(self_value.rg);
                             ivec2 to_sample = self_position - ivec2(sample_value.rg);
-
+        
                             // Fast dist compare - is sample closer than self?
                             if (dot(to_sample, to_sample) < dot(to_self, to_self)) {
                                 self_value.rg = sample_value.rg;
                             }
                         }
                     }
-
+        
                     // We found an outer pixel! Compare with stored value, choose the closest one.
                     if (sample_value.b != SENTINAL) {
                         // There wasn't a pixel before, so take this one.
@@ -119,7 +119,7 @@ mod dist_field_comp {
                             //Compare distances - both are non-sentinal so we must choose closest:
                             ivec2 to_self = self_position - ivec2(self_value.ba);
                             ivec2 to_sample = self_position - ivec2(sample_value.ba);
-
+        
                             // Fast dist compare - is sample closer than self?
                             if (dot(to_sample, to_sample) < dot(to_self, to_self)) {
                                 self_value.ba = sample_value.ba;
@@ -128,7 +128,7 @@ mod dist_field_comp {
                     }
                 }
             }
-
+        
             imageStore(outBuffer, self_position, uvec4(self_value));
         }
         "
@@ -399,7 +399,7 @@ fn make_voronoi(
     let div_ciel = |num : u32, denom : u32| -> u32 {
         (num + denom - 1) / denom
     };
-    let dispatch_size_from_step_size = |size: u32| -> [u32; 3] {
+    let dispatch_size = {
         [
             div_ciel(DOCUMENT_DIMENSION, KERNEL_SIZE[0] as u32),
             div_ciel(DOCUMENT_DIMENSION, KERNEL_SIZE[1] as u32),
@@ -418,7 +418,7 @@ fn make_voronoi(
     let performance_queries = vulkano::query::QueryPool::new(
         render_context.device().clone(),
         vulkano::query::QueryPoolCreateInfo {
-            query_count: 2,
+            query_count: 3,
             ..vulkano::query::QueryPoolCreateInfo::query_type(vulkano::query::QueryType::Timestamp)
         }
     )?;
@@ -439,7 +439,7 @@ fn make_voronoi(
                 output_pingpong_descriptors[0].clone()
             ]
         )
-        .dispatch(dispatch_size_from_step_size(1))?
+        .dispatch(dispatch_size)?
         //Clear the second buffer to all sentinal values.
         //Can't clear an ImageView, so clear the region corresponding to that view.
         .clear_color_image(vk::ClearColorImageInfo{
@@ -447,6 +447,12 @@ fn make_voronoi(
             regions: smallvec::smallvec![second_view_region],
             ..vk::ClearColorImageInfo::image(pingpong_buffers_array.clone())
         })?;
+
+    //Safety: query 1 is not accessed anywhere but here.
+    unsafe {
+        command_buffer.write_timestamp(performance_queries.clone(), 1, vulkano::sync::PipelineStage::AllCommands)?;
+    }
+
 
     for (size, pipeline) in pingpong_pipelines {
         let (in_desc, out_desc) = if previous_output_pingpong == 0 {
@@ -476,12 +482,12 @@ fn make_voronoi(
                     out_desc,
                 ],
             )
-            .dispatch(dispatch_size_from_step_size(size))?;
+            .dispatch(dispatch_size)?;
     }
 
-    //Safety: query 1 is not accessed anywhere but here.
+    //Safety: query 2 is not accessed anywhere but here.
     unsafe {
-        command_buffer.write_timestamp(performance_queries.clone(), 1, vulkano::sync::PipelineStage::BottomOfPipe)?;
+        command_buffer.write_timestamp(performance_queries.clone(), 2, vulkano::sync::PipelineStage::BottomOfPipe)?;
     }
 
     let command_buffer = command_buffer.build()?;
@@ -750,15 +756,17 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let mut results = [0u64; 3];
 
     //Timeline queries will be done now!
-    timeline_queries.queries_range(0..2).unwrap()
+    timeline_queries.queries_range(0..3).unwrap()
         .get_results(&mut results, vulkano::query::QueryResultFlags::WAIT)?;
 
-    let time_delta = results[1] - results[0];
+    let init_time = results[1] - results[0];
+    let pass_time = results[2] - results[1];
 
     let nanos_per_tick = render_context.physical_device().properties().timestamp_period;
-    let nanos = time_delta as f32 * nanos_per_tick;
+    let init_nanos = init_time as f32 * nanos_per_tick;
+    let pass_nanos = pass_time as f32 * nanos_per_tick;
 
-    println!("Took {}us", nanos / 1000.0);
+    println!("Init took {}us, passes took {}us", init_nanos / 1000.0, pass_nanos / 1000.0);
 
     window_renderer.run();
 }
