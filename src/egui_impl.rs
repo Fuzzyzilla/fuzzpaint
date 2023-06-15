@@ -493,10 +493,16 @@ mod fs {
 
         layout(location = 0) in vec2 uv;
         layout(location = 1) in vec4 vertex_color;
+        
         layout(location = 0) out vec4 out_color;
 
         void main() {
-            out_color = vertex_color * texture(tex, uv);
+            //Texture is NOT premul, fix that!
+            vec4 t = texture(tex, uv);
+            t.rgb *= t.a;
+
+            //Vertex color is premultiplied already
+            out_color = vertex_color * t;
         }",
     }
 }
@@ -520,8 +526,8 @@ mod vs {
         void main() {
             gl_Position = matrix.ortho * vec4(pos, 0.0, 1.0);
             out_uv = uv;
-            //Color is premultiplied. Undo that
-            vertex_color = color.a == 0 ? vec4(0.0) : vec4(color.rgb/color.a, color.a);
+            //Color is premultiplied already
+            vertex_color = color;
         }",
     }
 }
@@ -587,6 +593,16 @@ impl EguiRenderer {
         let fragment_entry = fragment.entry_point("main").unwrap();
         let vertex_entry = vertex.entry_point("main").unwrap();
 
+        let mut blend_premul = vk::ColorBlendState::new(1);
+        blend_premul.attachments[0].blend = Some(vk::AttachmentBlend{
+            alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+            color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+            alpha_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+            color_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+            alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+            color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+        });
+
         let pipeline = vk::GraphicsPipeline::start()
             .vertex_shader(vertex_entry, vs::SpecializationConstants::default())
             .fragment_shader(fragment_entry, fs::SpecializationConstants::default())
@@ -600,7 +616,7 @@ impl EguiRenderer {
                 topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::TriangleList),
                 primitive_restart_enable: vk::StateMode::Fixed(false),
             })
-            .color_blend_state(vk::ColorBlendState::new(1).blend_alpha())
+            .color_blend_state(blend_premul)
             .viewport_state(vk::ViewportState::Dynamic {
                 count: 1,
                 viewport_count_dynamic: false,

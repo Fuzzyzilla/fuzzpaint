@@ -67,49 +67,41 @@ mod dist_field_comp {
         
         layout(constant_id = 0) const uint step_size = 1;
 
-        const uvec2 SENTINAL = uvec2(65535);
-        bool is_sentinal(in uvec2 value) {
-            return all(equal(value, SENTINAL));
-        }
+        #define SENTINAL (uint(65535))
+        const uvec2 SENTINAL2 = uvec2(SENTINAL);
 
         layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
         void main() {
-            uvec2 self_position = gl_GlobalInvocationID.xy;
+            ivec2 self_position = ivec2(gl_GlobalInvocationID.xy);
             uvec2 size = imageSize(inBuffer).xy;
 
             //Self is outside of the image, skip!
             if (any(greaterThanEqual(self_position, size))) return;
 
-            // Potential optimization - texels that are filled from last pass
-            // will have all other tests miss.
-            // However these threads will be intermixed with threads that have
-            // work to do, so probably a better thread partitioning scheme is needed...
-            //if (all(notEqual(self_value, uvec2(65535)))) return;
-
-            uvec4 self_value = uvec4(SENTINAL, SENTINAL);
+            uvec4 self_value = uvec4(SENTINAL2, SENTINAL2);
 
             for (int i = -1; i <= 1; ++i) {
                 for (int j = -1; j <= 1; ++j) {
-                    ivec2 sample_pos = ivec2(i, j) * int(step_size) + ivec2(self_position);
+                    ivec2 sample_pos = ivec2(i, j) * int(step_size) + self_position;
                     uvec4 sample_value;
 
                     /// Outside image bounds, fill with sentenal value
-                    if (any(lessThan(sample_pos, ivec2(0)))) sample_value = uvec4(SENTINAL, SENTINAL);
-                    else if (any(greaterThanEqual(sample_pos, ivec2(size)))) sample_value = uvec4(SENTINAL, SENTINAL);
+                    if (any(lessThan(sample_pos, ivec2(0)))) sample_value = uvec4(SENTINAL2, SENTINAL2);
+                    else if (any(greaterThanEqual(sample_pos, ivec2(size)))) sample_value = uvec4(SENTINAL2, SENTINAL2);
                     // Perform sample!
                     else {
                         sample_value = imageLoad(inBuffer, sample_pos);
                     }
 
                     // We found an inner pixel! Compare with stored value, choose the closest one.
-                    if (!is_sentinal(sample_value.rg)) {
+                    if (sample_value.r != SENTINAL) {
                         // There wasn't a pixel before, so take this one.
-                        if (is_sentinal(self_value.rg)) {
+                        if (sample_value.r == SENTINAL) {
                             self_value.rg = sample_value.rg;
                         } else {
                             //Compare distances - both are non-sentinal so we must choose closest:
-                            ivec2 to_self = ivec2(self_position) - ivec2(self_value.rg);
-                            ivec2 to_sample = ivec2(self_position) - ivec2(sample_value.rg);
+                            ivec2 to_self = self_position - ivec2(self_value.rg);
+                            ivec2 to_sample = self_position - ivec2(sample_value.rg);
 
                             // Fast dist compare - is sample closer than self?
                             if (dot(to_sample, to_sample) < dot(to_self, to_self)) {
@@ -119,14 +111,14 @@ mod dist_field_comp {
                     }
 
                     // We found an outer pixel! Compare with stored value, choose the closest one.
-                    if (!is_sentinal(sample_value.ba)) {
+                    if (sample_value.b != SENTINAL) {
                         // There wasn't a pixel before, so take this one.
-                        if (is_sentinal(self_value.ba)) {
+                        if (sample_value.b == SENTINAL) {
                             self_value.ba = sample_value.ba;
                         } else {
                             //Compare distances - both are non-sentinal so we must choose closest:
-                            ivec2 to_self = ivec2(self_position) - ivec2(self_value.ba);
-                            ivec2 to_sample = ivec2(self_position) - ivec2(sample_value.ba);
+                            ivec2 to_self = self_position - ivec2(self_value.ba);
+                            ivec2 to_sample = self_position - ivec2(sample_value.ba);
 
                             // Fast dist compare - is sample closer than self?
                             if (dot(to_sample, to_sample) < dot(to_self, to_self)) {
@@ -137,7 +129,7 @@ mod dist_field_comp {
                 }
             }
 
-            imageStore(outBuffer, ivec2(self_position), uvec4(self_value));
+            imageStore(outBuffer, self_position, uvec4(self_value));
         }
         "
     }
@@ -746,8 +738,8 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
-    let (image, future) = make_test_image(render_context.clone())?;
-    //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("test-data/orbs.png"))?;
+    //let (image, future) = make_test_image(render_context.clone())?;
+    let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("test-data/orbs.png"))?;
     let (voronoi, future, timeline_queries) = make_voronoi(render_context.clone(), image, future)?;
 
     let window_renderer = window_surface.with_render_surface(render_surface, render_context.clone())?;
