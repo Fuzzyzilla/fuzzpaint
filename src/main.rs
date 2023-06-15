@@ -65,7 +65,9 @@ mod dist_field_comp {
         layout(set = 0, binding = 0, rgba16ui) uniform restrict readonly uimage2D inBuffer;
         layout(set = 1, binding = 0, rgba16ui) uniform restrict writeonly uimage2D outBuffer;
         
-        layout(constant_id = 0) const uint step_size = 1;
+        layout(push_constant) uniform Pass {
+            uint step_size;
+        } pass;
         
         #define SENTINAL (uint(65535))
         const uvec2 SENTINAL2 = uvec2(SENTINAL);
@@ -82,7 +84,7 @@ mod dist_field_comp {
         
             for (int i = -1; i <= 1; ++i) {
                 for (int j = -1; j <= 1; ++j) {
-                    ivec2 sample_pos = ivec2(i, j) * int(step_size) + self_position;
+                    ivec2 sample_pos = ivec2(i, j) * int(pass.step_size) + self_position;
                     uvec4 sample_value = uvec4(SENTINAL2, SENTINAL2);
         
                     // Perform sample!
@@ -262,11 +264,19 @@ fn make_voronoi(
         }
     )?;
 
+    let step_size_push_constant = vulkano::pipeline::layout::PushConstantRange {
+        offset: 0,
+        size: 4,
+        stages: vulkano::shader::ShaderStages::COMPUTE,
+    };
+
     // Full layout
     let pingpong_layout = vulkano::pipeline::layout::PipelineLayout::new(
         render_context.device().clone(),
         vulkano::pipeline::layout::PipelineLayoutCreateInfo{
-            push_constant_ranges: Vec::new(), // empty!
+            push_constant_ranges: vec![
+                step_size_push_constant
+            ], 
             set_layouts: vec![
                 input_pingpong_layout.clone(),
                 output_pingpong_layout.clone()
@@ -323,6 +333,15 @@ fn make_voronoi(
     let step_shader = dist_field_comp::load(render_context.device().clone())?;
     let step_shader_entry = step_shader.entry_point("main").unwrap();
 
+    let pingpong_pipeline = vk::ComputePipeline::with_pipeline_layout(
+        render_context.device().clone(),
+        step_shader_entry.clone(),
+        &dist_field_comp::SpecializationConstants::default(),
+        pingpong_layout.clone(),
+        //No cache yet
+        None
+    )?;
+/*
     let pingpong_pipelines : AnyResult<Vec<_>> = step_sizes.into_iter()
         .map(|size| -> AnyResult<(u32, Arc<vk::ComputePipeline>)> {
             Ok(
@@ -340,9 +359,9 @@ fn make_voronoi(
                     )?
                 )
             )
-        }).collect();
+        }).collect();*/
     
-    let pingpong_pipelines = pingpong_pipelines?;
+    //let pingpong_pipelines = pingpong_pipelines?;
 
     // Descriptors with explicit layout
     let input_color_descriptor = vk::PersistentDescriptorSet::new(
@@ -399,13 +418,11 @@ fn make_voronoi(
     let div_ciel = |num : u32, denom : u32| -> u32 {
         (num + denom - 1) / denom
     };
-    let dispatch_size = {
-        [
+    let dispatch_size = [
             div_ciel(DOCUMENT_DIMENSION, KERNEL_SIZE[0] as u32),
             div_ciel(DOCUMENT_DIMENSION, KERNEL_SIZE[1] as u32),
             1
-        ]
-    };
+        ];
 
     let mut previous_output_pingpong = 0;
     
@@ -429,7 +446,15 @@ fn make_voronoi(
     }
 
     //Weirdly, there are no barrier commands available - are they automagically inserted?
-    command_buffer.bind_pipeline_compute(init_pipeline)
+    command_buffer
+        //Clear the second buffer to all sentinal values.
+        //Can't clear an ImageView, so clear the region corresponding to that view.
+        .clear_color_image(vk::ClearColorImageInfo{
+            clear_value: vulkano::format::ClearColorValue::Uint([u16::MAX as u32; 4]),
+            regions: smallvec::smallvec![second_view_region],
+            ..vk::ClearColorImageInfo::image(pingpong_buffers_array.clone())
+        })?
+        .bind_pipeline_compute(init_pipeline)
         .bind_descriptor_sets(
             vulkano::pipeline::PipelineBindPoint::Compute,
             init_layout.clone(),
@@ -439,22 +464,17 @@ fn make_voronoi(
                 output_pingpong_descriptors[0].clone()
             ]
         )
-        .dispatch(dispatch_size)?
-        //Clear the second buffer to all sentinal values.
-        //Can't clear an ImageView, so clear the region corresponding to that view.
-        .clear_color_image(vk::ClearColorImageInfo{
-            clear_value: vulkano::format::ClearColorValue::Uint([u16::MAX as u32; 4]),
-            regions: smallvec::smallvec![second_view_region],
-            ..vk::ClearColorImageInfo::image(pingpong_buffers_array.clone())
-        })?;
+        .dispatch(dispatch_size)?;
 
     //Safety: query 1 is not accessed anywhere but here.
     unsafe {
         command_buffer.write_timestamp(performance_queries.clone(), 1, vulkano::sync::PipelineStage::AllCommands)?;
     }
 
+    command_buffer
+        .bind_pipeline_compute(pingpong_pipeline);
 
-    for (size, pipeline) in pingpong_pipelines {
+    for size in step_sizes.into_iter() {
         let (in_desc, out_desc) = if previous_output_pingpong == 0 {
             // First pingpong was output, now is input!
             previous_output_pingpong = 1;
@@ -472,7 +492,6 @@ fn make_voronoi(
         };
 
         command_buffer
-            .bind_pipeline_compute(pipeline)
             .bind_descriptor_sets(
                 vulkano::pipeline::PipelineBindPoint::Compute,
                 pingpong_layout.clone(),
@@ -482,6 +501,7 @@ fn make_voronoi(
                     out_desc,
                 ],
             )
+            .push_constants(pingpong_layout.clone(), 0, dist_field_comp::Pass{step_size: size})
             .dispatch(dispatch_size)?;
     }
 
