@@ -72,7 +72,7 @@ mod dist_field_comp {
             return all(equal(value, SENTINAL));
         }
 
-        layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+        layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
         void main() {
             uvec2 self_position = gl_GlobalInvocationID.xy;
             uvec2 size = imageSize(inBuffer).xy;
@@ -150,7 +150,7 @@ mod dist_field_comp {
         layout(set = 1, binding = 0, rgba16ui) uniform restrict writeonly uimage2D outBuffer;
         const uvec2 SENTINAL = uvec2(65535);
 
-        layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+        layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
         void main() {
             uvec2 self_position = gl_GlobalInvocationID.xy;
             uvec2 size = imageSize(inBuffer).xy;
@@ -179,10 +179,10 @@ fn make_voronoi(
     render_context: Arc<render_device::RenderContext>,
     color_image: Arc<vk::StorageImage>,
     future: vk::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>
-) -> AnyResult<(Arc<vk::ImageView<impl vk::ImageAccess>>, vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>)> {
+) -> AnyResult<(Arc<vk::ImageView<impl vk::ImageAccess>>, vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>, Arc<vulkano::query::QueryPool>)> {
     //dimensions of color image must be strictly less than 65535
     let voronoi_format = vk::Format::R16G16B16A16_UINT;
-    const KERNEL_SIZE : [u16; 2] = [16u16; 2];
+    const KERNEL_SIZE : [u16; 2] = [8u16; 2];
 
     let pingpong_buffers_array = 
         vk::StorageImage::with_usage(
@@ -409,8 +409,8 @@ fn make_voronoi(
     };
     let dispatch_size_from_step_size = |size: u32| -> [u32; 3] {
         [
-            div_ciel(div_ciel(DOCUMENT_DIMENSION, 1), KERNEL_SIZE[0] as u32),
-            div_ciel(div_ciel(DOCUMENT_DIMENSION, 1), KERNEL_SIZE[1] as u32),
+            div_ciel(DOCUMENT_DIMENSION, KERNEL_SIZE[0] as u32),
+            div_ciel(DOCUMENT_DIMENSION, KERNEL_SIZE[1] as u32),
             1
         ]
     };
@@ -422,6 +422,19 @@ fn make_voronoi(
         aspects: vk::ImageAspects::COLOR,
         mip_levels: 0..1,
     };
+
+    let performance_queries = vulkano::query::QueryPool::new(
+        render_context.device().clone(),
+        vulkano::query::QueryPoolCreateInfo {
+            query_count: 2,
+            ..vulkano::query::QueryPoolCreateInfo::query_type(vulkano::query::QueryType::Timestamp)
+        }
+    )?;
+
+    //Safety: query 0 is not accessed anywhere but here.
+    unsafe {
+        command_buffer.write_timestamp(performance_queries.clone(), 0, vulkano::sync::PipelineStage::TopOfPipe)?;
+    }
 
     //Weirdly, there are no barrier commands available - are they automagically inserted?
     command_buffer.bind_pipeline_compute(init_pipeline)
@@ -474,6 +487,11 @@ fn make_voronoi(
             .dispatch(dispatch_size_from_step_size(size))?;
     }
 
+    //Safety: query 1 is not accessed anywhere but here.
+    unsafe {
+        command_buffer.write_timestamp(performance_queries.clone(), 1, vulkano::sync::PipelineStage::BottomOfPipe)?;
+    }
+
     let command_buffer = command_buffer.build()?;
 
     let fence = future
@@ -483,7 +501,8 @@ fn make_voronoi(
     Ok(
         (
             pingpong_views[previous_output_pingpong].clone(),
-            fence
+            fence,
+            performance_queries
         )
     )
 }
@@ -727,14 +746,27 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
-    //let (image, future) = make_test_image(render_context.clone())?;
-    let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("test-data/orbs.png"))?;
-    let (voronoi, future) = make_voronoi(render_context.clone(), image, future)?;
+    let (image, future) = make_test_image(render_context.clone())?;
+    //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("test-data/orbs.png"))?;
+    let (voronoi, future, timeline_queries) = make_voronoi(render_context.clone(), image, future)?;
 
     let window_renderer = window_surface.with_render_surface(render_surface, render_context.clone())?;
     println!("Made render context!");
 
     future.wait(None)?;
+
+    let mut results = [0u64; 3];
+
+    //Timeline queries will be done now!
+    timeline_queries.queries_range(0..2).unwrap()
+        .get_results(&mut results, vulkano::query::QueryResultFlags::WAIT)?;
+
+    let time_delta = results[1] - results[0];
+
+    let nanos_per_tick = render_context.physical_device().properties().timestamp_period;
+    let nanos = time_delta as f32 * nanos_per_tick;
+
+    println!("Took {}us", nanos / 1000.0);
 
     window_renderer.run();
 }
