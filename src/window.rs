@@ -29,6 +29,7 @@ impl WindowSurface {
         self,
         render_surface: render_device::RenderSurface,
         render_context: Arc<render_device::RenderContext>,
+        preview_renderer : Box<dyn crate::PreviewRenderProxy>,
     ) -> GpuResult<WindowRenderer> {
         let mut egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
         Ok(WindowRenderer {
@@ -37,6 +38,7 @@ impl WindowSurface {
             render_context,
             event_loop: Some(self.event_loop),
             egui_ctx,
+            preview_renderer,
         })
     }
 }
@@ -49,6 +51,8 @@ pub struct WindowRenderer {
     render_surface: Option<render_device::RenderSurface>,
     render_context: Arc<render_device::RenderContext>,
     egui_ctx: egui_impl::EguiCtx,
+
+    preview_renderer: Box<dyn crate::PreviewRenderProxy>,
 }
 impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
@@ -80,6 +84,8 @@ impl WindowRenderer {
         self.egui_ctx.replace_surface(&new_surface);
 
         self.render_surface = Some(new_surface);
+
+        self.preview_renderer.surface_changed(self.render_surface.as_ref().unwrap());
 
         Ok(())
     }
@@ -121,28 +127,18 @@ impl WindowRenderer {
                         self.recreate_surface().expect("Failed to rebuild surface");
                     }
                     WindowEvent::AxisMotion { device_id, axis, value } => {
-                        println!("{event:?}")
                     }
                     _ => (),
                 },
                 Event::DeviceEvent { device_id, event } => {
                     //println!("{device_id:?}\n\t{event:?}");
                     return;
-                    match event {
-                        winit::event::DeviceEvent::Added => {
-                            println!("add")
-                        }
-                        winit::event::DeviceEvent::Motion { axis, value } => {
-                            println!("{device_id:?} {axis:?} {value:?}")
-                            // 0 -> x in display space
-                            // 1 -> y in display space
-                            // 2 -> pressure out of 65535, 0 if not pressed
-                            // 3 -> Tilt X, degrees from vertical, + to the right
-                            // 4 -> Tilt Y, degrees from vertical, + towards user
-                            // 5 -> unknown, always zero (rotation?)
-                        }
-                        _ => ()
-                    }
+                    // 0 -> x in display space
+                    // 1 -> y in display space
+                    // 2 -> pressure out of 65535, 0 if not pressed
+                    // 3 -> Tilt X, degrees from vertical, + to the right
+                    // 4 -> Tilt Y, degrees from vertical, + towards user
+                    // 5 -> unknown, always zero (rotation?)
                 }
                 Event::MainEventsCleared => {
                     //Draw!
@@ -172,61 +168,68 @@ impl WindowRenderer {
             });
         })
     }
-    fn paint(&mut self) {
+    fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =
             match vk::acquire_next_image(self.render_surface().swapchain().clone(), None) {
                 Err(vulkano::swapchain::AcquireError::OutOfDate) => {
                     eprintln!("Swapchain unusable.. Recreating");
                     //We cannot draw on this surface as-is. Recreate and request another try next frame.
-                    self.recreate_surface()
-                        .expect("Failed to recreate render surface after it went out-of-date.");
+                    self.recreate_surface()?;
                     self.window().request_redraw();
-                    return;
+                    return Ok(())
                 }
                 Err(_) => {
                     //Todo. Many of these errors are recoverable!
-                    panic!("Surface image acquire failed!");
+                    anyhow::bail!("Surface image acquire failed!");
                 }
                 Ok(r) => r,
             };
+
+        let preview_commands = self.preview_renderer.render(idx)?;
         let commands = self.egui_ctx.build_commands(idx);
-        if let None = commands {
-            return;
-        }
 
         //Minimize heap allocs (by using excessive code duplication)
         {
             let now = self.render_context.now();
-            if let Some((transfer, draw)) = commands {
-                if let Some(transfer) = transfer {
+            if let Some((egui_transfer, egui_draw)) = commands {
+                if let Some(egui_transfer) = egui_transfer {
                     //Transfer + Draw
                     now.then_execute(
                         self.render_context.queues().transfer().queue().clone(),
-                        transfer,
-                    )
-                    .unwrap()
+                        egui_transfer,
+                    )?
                     .join(image_future)
+                    .then_execute(
+                        self.render_context.queues().graphics().queue().clone(),
+                        preview_commands
+                    )?
                     .then_signal_semaphore()
                     .then_execute(
                         self.render_context.queues().graphics().queue().clone(),
-                        draw,
-                    )
-                    .unwrap()
+                        egui_draw,
+                    )?
                     .boxed()
                 } else {
                     //Just draw
                     now.join(image_future)
                         .then_execute(
                             self.render_context.queues().graphics().queue().clone(),
-                            draw,
+                            preview_commands
+                        )?
+                        .then_signal_semaphore()
+                        .then_execute_same_queue(
+                            egui_draw,
                         )
                         .unwrap()
                         .boxed()
                 }
             } else {
-                //Nothing to do - shouldn't happen (Egui won't request a redraw without anything to draw)
-                //but we've already acquired the image, we have to present it when it becomes ready.
-                now.join(image_future).boxed()
+                now.join(image_future)
+                    .then_execute(
+                        self.render_context.queues().graphics().queue().clone(),
+                        preview_commands
+                    )?
+                    .boxed()
             }
         }
         .then_swapchain_present(
@@ -247,8 +250,9 @@ impl WindowRenderer {
         .unwrap();
 
         if suboptimal {
-            self.recreate_surface()
-                .expect("Recreating suboptimal swapchain failed spectacularly");
+            self.recreate_surface()?
         }
+
+        Ok(())
     }
 }

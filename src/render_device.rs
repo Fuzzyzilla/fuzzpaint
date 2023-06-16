@@ -70,6 +70,9 @@ pub struct RenderSurface {
     swapchain_create_info: vk::SwapchainCreateInfo,
 }
 impl RenderSurface {
+    pub fn extent(&self) -> [u32; 2] {
+        self.swapchain_create_info.image_extent
+    }
     pub fn format(&self) -> vk::Format {
         self.swapchain_create_info.image_format.unwrap()
     }

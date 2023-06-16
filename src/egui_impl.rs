@@ -573,7 +573,7 @@ impl EguiRenderer {
             device.clone(),
             attachments : {
                 swapchain_color : {
-                    load: Clear,
+                    load: Load,
                     store: Store,
                     format: surface_format,
                     samples: 1,
@@ -760,7 +760,7 @@ impl EguiRenderer {
         command_buffer_builder
             .begin_render_pass(
                 vk::RenderPassBeginInfo {
-                    clear_values: vec![Some(vk::ClearValue::Float([0.2, 0.2, 0.2, 1.0]))],
+                    clear_values: vec![None],
                     ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
                 },
                 vk::SubpassContents::Inline,
