@@ -25,6 +25,11 @@ pub struct StylusEvent {
     tilt: Option<(f32, f32)>,
     dist: Option<f32>,
 }
+impl StylusEvent {
+    pub fn empty() -> Self {
+        Self { pos: (0.0, 0.0), pressed: false, pressure: None, tilt: None, dist: None }
+    }
+}
 impl StylusAxes for StylusEvent {
     fn get_axis(&self, axis: StylusAxis) -> Option<f32> {
         match axis {
@@ -56,158 +61,30 @@ impl StylusAxes for StylusEvent {
         Ok(())
     }
 }
-#[derive(Debug, Clone, Copy)]
-pub struct PartialStylusEvent {
-    pos_x: Option<f32>,
-    pos_y: Option<f32>,
-    pressed: Option<bool>,
-    pressure: Option<f32>,
-    tilt_x: Option<f32>,
-    tilt_y: Option<f32>,
-    dist: Option<f32>,
-}
-impl PartialStylusEvent {
-    pub fn none() -> Self {
-        Self {
-            dist: None,
-            pos_x: None,
-            pos_y: None,
-            pressed: None,
-            pressure: None,
-            tilt_x: None,
-            tilt_y: None,
-        }
-    }
-    pub fn is_pos_complete(&self) -> bool {
-        self.pos_x.is_some() && self.pos_y.is_some()
-    }
-}
-impl StylusAxes for PartialStylusEvent {
-    fn get_axis(&self, axis: StylusAxis) -> Option<f32> {
-        match axis {
-            StylusAxis::Dist => self.dist,
-            StylusAxis::PosX => self.pos_x,
-            StylusAxis::PosY => self.pos_y,
-            StylusAxis::Pressure => self.pressure,
-            StylusAxis::TiltX => self.tilt_x,
-            StylusAxis::TiltY => self.tilt_y,
-            _ => None,
-        }
-    }
-    fn set_axis(&mut self, axis: StylusAxis, value: f32) -> Result<(), ()> {
-        match axis {
-            StylusAxis::Dist => self.dist = Some(value),
-            StylusAxis::PosX => self.pos_x = Some(value),
-            StylusAxis::PosY => self.pos_y = Some(value),
-            StylusAxis::Pressure => self.pressure = Some(value),
-            StylusAxis::TiltX => self.tilt_x = Some(value),
-            StylusAxis::TiltY => self.tilt_y = Some(value),
-            _ => return Err(()),
-        }
-        Ok(())
-    }
-}
-impl TryFrom<PartialStylusEvent> for StylusEvent {
-    //There's only one error, and that is the event is incomplete.
-    type Error = ();
-    fn try_from(value: PartialStylusEvent) -> Result<Self, Self::Error> {
-        //Required fields - short circuit None to Err(())
-        let pos = value.pos_x.zip(value.pos_y).ok_or(())?;
-        let pressed = value.pressed.unwrap_or(false);
-
-        // None if both none, Some with defaults if either or both are set.
-        // Feels like there should be a more concise way :P
-        let tilt = if value.tilt_x.is_some() || value.tilt_y.is_some() {
-            let tilt_x = value.tilt_x.unwrap_or(0.0);
-            let tilt_y = value.tilt_y.unwrap_or(0.0);
-            Some((tilt_x, tilt_y))
-        } else {
-            None
-        };
-
-        Ok(Self{
-            pos,
-            pressed,
-            pressure: value.pressure,
-            tilt,
-            dist: value.dist
-        })
-    }
-}
-
 
 pub struct WinitStylusEventCollector {
-    cur_event: Option<PartialStylusEvent>,
+    mouse_pressed: bool,
     events: Vec<StylusEvent>,
 
     frame_channel: tokio::sync::broadcast::Sender<StylusEventFrame>,
 }
 impl WinitStylusEventCollector {
     pub fn push_position(&mut self, pos: (f32, f32)) {
-        if let Some(mut event) = self.cur_event.take() {
-            // We are adding a position, but the previous already has one!
-            // must be a new event.
-            if event.is_pos_complete() {
-                if let Ok(event) = event.try_into() {
-                    self.events.push(event)
-                } else {
-                    //Failed to complete event. Will fallthrough to
-                    //create a new one from this pos.
-                    log::warn!("Incomplete event pushed: {event:?}");
-                }
-            } else {
-                //Add pos and return uwu
-                event.pos_x = Some(pos.0);
-                event.pos_y = Some(pos.1);
-
-                self.cur_event = Some(event);
-                return;
-            }
-        }
-        // There was no current event, build a new one.
-        let event = PartialStylusEvent {
-            pos_x: Some(pos.0),
-            pos_y: Some(pos.1),
-            ..PartialStylusEvent::none()
+        let event = StylusEvent {
+            pos,
+            pressed: self.mouse_pressed,
+            pressure: Some(if self.mouse_pressed {1.0} else {0.0}),
+            ..StylusEvent::empty()
         };
-        self.cur_event = Some(event);
+
+        self.events.push(event);
     }
-    pub fn push_axis(&mut self, axis: StylusAxis, value: f32) {
-        if let Some(mut event) = self.cur_event.take() {
-            //Trying to add this axis, but it already had it- must be a new event!
-            if event.has_axis(axis) {
-                if let Ok(event) = event.try_into() {
-                    self.events.push(event)
-                } else {
-                    //Failed to complete event. Will fallthrough to
-                    //create a new one from this axis.
-                    log::warn!("Incomplete event pushed: {event:?}");
-                }
-            } else {
-                //Add and return
-                //Dont care if invalid axis.
-                let _ = event.set_axis(axis, value);
-                self.cur_event = Some(event);
-            }
-        }
-        let mut event = PartialStylusEvent::none();
-        //Dont care if invalid axis.
-        let _ = event.set_axis(axis, value);
-        self.cur_event = Some(event);
+    pub fn set_mouse_pressed(&mut self, pressed: bool) {
+        self.mouse_pressed = pressed;
     }
     /// This frame is complete, and no more axis events will occur until next frame.
     /// Finish the current event.
     pub fn finish(&mut self) {
-        //Take the event-in-progress
-        let Some(event) = self.cur_event.take() else {return};
-
-        //finish it!
-        if let Ok(event) = event.try_into() {
-            self.events.push(event);
-        } else {
-            log::warn!("Incomplete stylus event at end-of-frame! {event:?}");
-        }
-
         //Notify listeners
         self.broadcast()
     }
