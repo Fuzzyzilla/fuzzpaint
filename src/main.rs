@@ -694,8 +694,8 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
 //If we return, it was due to an error.
 //convert::Infallible is a quite ironic name for this useage, isn't it? :P
 fn main() -> AnyResult<std::convert::Infallible> {
-    env_logger::init();
-
+    env_logger::builder().filter_level(log::LevelFilter::max()).init();
+    
     let window_surface = window::WindowSurface::new()?;
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
@@ -707,7 +707,6 @@ fn main() -> AnyResult<std::convert::Infallible> {
 
     let document_view = Box::new(DocumentViewportPreviewProxy::new(&render_surface, image)?);
     let window_renderer = window_surface.with_render_surface(render_surface, render_context.clone(), document_view)?;
-    println!("Made render context!");
 
     window_renderer.run();
 }

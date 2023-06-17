@@ -237,7 +237,7 @@ impl RenderContext {
             Self::choose_physical_device(instance.clone(), required_device_extensions, Some(surface.clone()))?
             else {return Err(anyhow::anyhow!("Failed to find a suitable Vulkan device."))};
 
-        println!(
+        log::info!(
             "Chose physical device {} ({:?})",
             physical_device.properties().device_name,
             physical_device.properties().driver_info
@@ -248,9 +248,7 @@ impl RenderContext {
             queue_indices,
             required_device_extensions,
         )?;
-
-        println!("Got device :3");
-
+        
         // We have a device! Now to create the swapchain..
         let image_size = win.window().inner_size();
 

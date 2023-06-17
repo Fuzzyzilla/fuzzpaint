@@ -98,7 +98,7 @@ impl WindowRenderer {
             //Todo: x-platform lol
             let out = std::process::Command::new("xdg-open").arg(url.url).spawn();
             if let Err(e) = out {
-                eprintln!("Failed to open url: {e:?}");
+                log::error!("Failed to open url: {e:?}");
             }
         }
 
@@ -130,13 +130,9 @@ impl WindowRenderer {
                     WindowEvent::Resized(..) => {
                         self.recreate_surface().expect("Failed to rebuild surface");
                     }
-                    WindowEvent::AxisMotion { device_id, axis, value } => {
-                    }
                     _ => (),
                 },
-                Event::DeviceEvent { device_id, event } => {
-                    //println!("{device_id:?}\n\t{event:?}");
-                    return;
+                Event::DeviceEvent { .. } => {
                     // 0 -> x in display space
                     // 1 -> y in display space
                     // 2 -> pressure out of 65535, 0 if not pressed
@@ -185,15 +181,15 @@ impl WindowRenderer {
         let (idx, suboptimal, image_future) =
             match vk::acquire_next_image(self.render_surface().swapchain().clone(), None) {
                 Err(vulkano::swapchain::AcquireError::OutOfDate) => {
-                    eprintln!("Swapchain unusable.. Recreating");
+                    log::info!("Swapchain unusable. Recreating");
                     //We cannot draw on this surface as-is. Recreate and request another try next frame.
                     self.recreate_surface()?;
                     self.window().request_redraw();
                     return Ok(())
                 }
-                Err(_) => {
+                Err(e) => {
                     //Todo. Many of these errors are recoverable!
-                    anyhow::bail!("Surface image acquire failed!");
+                    anyhow::bail!("Surface image acquire failed! {e:?}");
                 }
                 Ok(r) => r,
             };

@@ -404,10 +404,7 @@ impl EguiEventAccumulator {
             winit_key::Y => Some(egui_key::Y),
             winit_key::Z => Some(egui_key::Z),
 
-            _ => {
-                eprintln!("Unimplemented Key {winit_button:?}");
-                None
-            }
+            _ => None
         }
     }
     pub fn is_empty(&self) -> bool {
