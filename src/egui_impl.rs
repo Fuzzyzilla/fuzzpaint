@@ -575,6 +575,7 @@ struct EguiTexture {
     descriptor_set: Arc<vk::PersistentDescriptorSet>,
 }
 struct EguiRenderer {
+    remove_next_frame: Vec<egui::TextureId>,
     images: std::collections::HashMap<egui::TextureId, EguiTexture>,
     render_context: Arc<crate::render_device::RenderContext>,
 
@@ -646,6 +647,7 @@ impl EguiRenderer {
             .result()?;
 
         Ok(Self {
+            remove_next_frame: Vec::new(),
             images: Default::default(),
             render_pass: renderpass,
             pipeline,
@@ -860,16 +862,30 @@ impl EguiRenderer {
             .clone();
         (0, layout)
     }
+    fn cleanup_textures(&mut self) {
+        // Pending removals - clean up after last frame
+        for texture in self.remove_next_frame.drain(..) {
+            let _ = self.images.remove(&texture);
+        }
+    }
     /// Apply image deltas, optionally returning a command buffer filled with any
     /// transfers as needed.
     pub fn do_image_deltas(
         &mut self,
         deltas: egui::TexturesDelta,
     ) -> Option<GpuResult<vk::PrimaryAutoCommandBuffer>> {
-        for free in deltas.free.iter() {
-            self.images.remove(&free).unwrap();
+        // Deltas order of operations:
+        // Set -> Draw -> Free
+        
+        // Clean up from last frame
+        if !self.remove_next_frame.is_empty() {
+            self.cleanup_textures();
         }
 
+        // Queue up removals for next frame
+        self.remove_next_frame.extend_from_slice(&deltas.free);
+
+        // Perform changes
         if deltas.set.is_empty() {
             None
         } else {
