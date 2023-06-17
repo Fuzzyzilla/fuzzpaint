@@ -496,13 +496,33 @@ mod fs {
         
         layout(location = 0) out vec4 out_color;
 
+        vec3 toLinear(vec3 sRGB)
+        {
+            bvec3 cutoff = lessThan(sRGB, vec3(0.04045));
+            vec3 higher = pow((sRGB + vec3(0.055))/vec3(1.055), vec3(2.4));
+            vec3 lower = sRGB/vec3(12.92);
+        
+            return mix(higher, lower, cutoff);
+        }
+
         void main() {
-            //Texture is NOT premul, fix that!
+            //Texture is straight linear
             vec4 t = texture(tex, uv);
+
+            //Color is premultiplied sRGB already, convert to straight linear
+            vec3 c = vertex_color.a > 0.0 ? (vertex_color.rgb / vertex_color.a) : vec3(0.0);
+
+            //sRGB to linear (needs to be slow + precise for color picker, unfortunately)
+            //May be incorrect to do this in vertex shader,
+            // due to linear interpolation for fragments. It is intuitively correct to do this here, but Egui
+            // does not list the expected behavior.
+            vec4 straight_vertex_color = vec4(toLinear(c), vertex_color.a);
+            t *= straight_vertex_color;
+
+            //Convert to premul linear
             t.rgb *= t.a;
 
-            //Vertex color is premultiplied already
-            out_color = vertex_color * t;
+            out_color = t;
         }",
     }
 }
@@ -526,7 +546,6 @@ mod vs {
         void main() {
             gl_Position = matrix.ortho * vec4(pos, 0.0, 1.0);
             out_uv = uv;
-            //Color is premultiplied already
             vertex_color = color;
         }",
     }

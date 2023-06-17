@@ -37,6 +37,7 @@ impl WindowSurface {
             render_surface: Some(render_surface),
             render_context,
             event_loop: Some(self.event_loop),
+            last_frame: None,
             egui_ctx,
             preview_renderer,
         })
@@ -51,6 +52,8 @@ pub struct WindowRenderer {
     render_surface: Option<render_device::RenderSurface>,
     render_context: Arc<render_device::RenderContext>,
     egui_ctx: egui_impl::EguiCtx,
+
+    last_frame: Option<Box<dyn GpuFuture>>,
 
     preview_renderer: Box<dyn crate::PreviewRenderProxy>,
 }
@@ -109,6 +112,7 @@ impl WindowRenderer {
     pub fn run(mut self) -> ! {
         //There WILL be an event loop if we got here
         let event_loop = self.event_loop.take().unwrap();
+        self.window().request_redraw();
 
         event_loop.run(move |event, _, control_flow| {
             use winit::event::{Event, WindowEvent};
@@ -151,13 +155,19 @@ impl WindowRenderer {
                     }
                 }
                 Event::RedrawRequested(..) => {
-                    self.paint();
+                    if let Err(e) = self.paint() {
+                        log::error!("{e:?}")
+                    };
+                }
+                Event::RedrawEventsCleared => {
+                    *control_flow = winit::event_loop::ControlFlow::Wait;
                 }
                 _ => (),
             }
         });
     }
     fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
+        static mut color : [f32; 4] = [1.0; 4];
         self.egui_ctx.update(|ctx| {
             egui::Window::new("🐑 Baa").show(&ctx, |ui| {
                 ui.label("Testing testing 123!!");
@@ -165,6 +175,9 @@ impl WindowRenderer {
 
             egui::Window::new("Beep boop").show(&ctx, |ui| {
                 ui.label("Testing testing 345!!");
+                //Safety - we do not call `do_ui` in a multi-threaded context.
+                // Dirty, but this is for testing ;)
+                ui.color_edit_button_rgba_premultiplied(unsafe{ &mut color }).clicked();
             });
         })
     }
@@ -188,43 +201,121 @@ impl WindowRenderer {
         let preview_commands = self.preview_renderer.render(idx)?;
         let commands = self.egui_ctx.build_commands(idx);
 
-        //Minimize heap allocs (by using excessive code duplication)
-        {
-            let now = self.render_context.now();
-            if let Some((egui_transfer, egui_draw)) = commands {
-                if let Some(egui_transfer) = egui_transfer {
-                    //Transfer + Draw
-                    now.then_execute(
-                        self.render_context.queues().transfer().queue().clone(),
-                        egui_transfer,
-                    )?
-                    .join(image_future)
+        let render_complete = match commands {
+            Some((Some(transfer), draw)) => {
+                let transfer_future = match self.last_frame.take() {
+                    Some(last_frame) => {
+                        last_frame
+                            .then_execute(
+                                self.render_context.queues().transfer().queue().clone(),
+                                transfer
+                            )?
+                            .boxed()
+                            .then_signal_fence_and_flush()?
+                    }
+                    None => {
+                        self.render_context.now()
+                            .then_execute(
+                                self.render_context.queues().transfer().queue().clone(),
+                                transfer
+                            )?
+                            .boxed()
+                            .then_signal_fence_and_flush()?
+                    }
+                };
+
+                // Todo: no matter what I do, i cannot seem to get semaphores
+                // to work. Ideally, the only thing that needs to wait is the
+                // egui render commands, however it simply refuses to actually
+                // wait for the semaphore. For now, I just stall the thread.
+                transfer_future.wait(None)?;
+
+                image_future
                     .then_execute(
                         self.render_context.queues().graphics().queue().clone(),
                         preview_commands
                     )?
-                    .then_signal_semaphore()
                     .then_execute(
                         self.render_context.queues().graphics().queue().clone(),
-                        egui_draw,
+                        draw
                     )?
                     .boxed()
-                } else {
-                    //Just draw
-                    now.join(image_future)
+            }
+            Some((None, draw)) => {
+                image_future
+                    .then_execute(
+                        self.render_context.queues().graphics().queue().clone(),
+                        preview_commands
+                    )?
+                    .then_execute_same_queue(draw)?
+                    .boxed()
+            }
+            None => {
+                image_future
+                    .then_execute(
+                        self.render_context.queues().graphics().queue().clone(),
+                        preview_commands
+                    )?
+                    .boxed()
+            }
+        };
+
+        let next_frame_future = render_complete
+            .then_swapchain_present(
+                self.render_context.queues().present().unwrap().queue().clone(),
+                vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface.as_ref().unwrap().swapchain().clone(), idx)
+            )
+            .then_signal_semaphore_and_flush()?;
+
+        self.last_frame = Some(next_frame_future.boxed());
+
+        //Minimize heap allocs (by using excessive code duplication)
+        /*let next_frame_semaphore = {
+            if let Some((egui_transfer, egui_draw)) = commands {
+                if let Some(egui_transfer) = egui_transfer {
+
+                    let transfer_complete = if let Some(last_frame_complete) = self.last_frame.take() {
+                        last_frame_complete
+                            .then_execute(
+                                self.render_context.queues().transfer().queue().clone(),
+                                egui_transfer,
+                            )?
+                            .then_signal_semaphore_and_flush()?
+                            .boxed()
+                    } else {
+                        self.render_context.now()
+                            .then_execute(
+                                self.render_context.queues().transfer().queue().clone(),
+                                egui_transfer,
+                            )?
+                            .then_signal_semaphore_and_flush()?
+                            .boxed()
+                    };
+                    image_future
                         .then_execute(
                             self.render_context.queues().graphics().queue().clone(),
                             preview_commands
                         )?
-                        .then_signal_semaphore()
+                        .join(transfer_complete)
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            egui_draw,
+                        )?
+                        .boxed()
+                } else {
+                    //Just draw
+                    image_future
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            preview_commands
+                        )?
                         .then_execute_same_queue(
                             egui_draw,
-                        )
-                        .unwrap()
+                        )?
                         .boxed()
                 }
             } else {
-                now.join(image_future)
+                image_future
                     .then_execute(
                         self.render_context.queues().graphics().queue().clone(),
                         preview_commands
@@ -244,10 +335,7 @@ impl WindowRenderer {
                 idx,
             ),
         )
-        .then_signal_fence_and_flush()
-        .unwrap()
-        .wait(None)
-        .unwrap();
+        .then_signal_semaphore_and_flush()?;*/
 
         if suboptimal {
             self.recreate_surface()?

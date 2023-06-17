@@ -99,8 +99,6 @@ impl RenderSurface {
             else {return Err(anyhow::anyhow!("Device reported no valid surface formats."))};
 
         //Use mailbox for low-latency, if supported. Otherwise, FIFO is always supported.
-        //Bug: This results in unreasonably high CPU usage. Unsure why, we're not presenting particularly frequently.
-
         let present_mode = physical_device
             .surface_present_modes(&surface)
             .map(|mut modes| {
@@ -124,7 +122,6 @@ impl RenderSurface {
         // We don't care!
         let alpha_mode = capabilies
             .supported_composite_alpha
-            .clone()
             .into_iter()
             .next()
             .expect("Device provided no alpha modes");

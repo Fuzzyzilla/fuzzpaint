@@ -1,5 +1,6 @@
-use std::{sync::Arc, ops::Deref};
+#![feature(array_chunks)]
 
+use std::{sync::Arc, ops::Deref};
 mod egui_impl;
 pub mod gpu_err;
 pub mod vulkano_prelude;
@@ -242,6 +243,23 @@ fn load_document_image(
     }
     let image = image.into_rgba8();
 
+    let image_data : Vec<_> = 
+        image.into_vec()
+            .array_chunks::<4>()
+            .flat_map(|&[r, g, b, a]| {
+                // Lol algebraic optimization
+                let a = a as f32 / 255.0 / 255.0;
+                let rgba = [
+                    r as f32 * a,
+                    g as f32 * a,
+                    b as f32 * a,
+                    a * 255.0,
+                ];
+                rgba
+            })
+            .map(vulkano::half::f16::from_f32)
+            .collect();
+
     let image_buffer = vk::Buffer::from_iter(
         render_context.allocators().memory(),
         vk::BufferCreateInfo {
@@ -252,10 +270,7 @@ fn load_document_image(
             usage: vk::MemoryUsage::Upload,
             ..Default::default()
         },
-        image.into_raw().iter()
-            .map(|&component| {
-                vulkano::half::f16::from_f32(component as f32 / 255.0)
-            })
+        image_data.into_iter()
     )?;
 
     let image = vk::StorageImage::new(
@@ -339,7 +354,10 @@ mod document_preview_shaders{
             layout(location = 0) out vec4 color;
 
             void main() {
-                color = texture(image, uv);
+                vec4 col = texture(image, uv);
+                col.rgb *= col.rgb;
+                col.rgb *= col.a;
+                color = col;
             }"
         }
     }
@@ -522,21 +540,25 @@ impl DocumentViewportPreviewProxy {
             cgmath::ortho(0.0, size[0] as f32, size[1] as f32, 0.0, -1.0, 1.0) *
             Matrix4::from_translation(cgmath::Vector3 { x, y, z: 0.0 }) *
             Matrix4::from_scale(image_size_px as f32);
-        Ok(
-            Self {
-                render_context: render_surface.context().clone(),
-                framebuffers: Vec::new(),
-                prerecorded_command_buffers: Vec::new(),
-                index_buffer: index_staging_buf,
-                vertex_buffer: vertex_staging_buf,
-                pipeline,
-                transparency_pipeline,
-                render_pass,
-                transform_matrix: xform.into(),
-                viewport_dimensions: size,
-                test_image_binding,
-            }
-        )
+
+        let mut s = Self {
+            render_context: render_surface.context().clone(),
+            framebuffers: Vec::new(),
+            prerecorded_command_buffers: Vec::new(),
+            index_buffer: index_staging_buf,
+            vertex_buffer: vertex_staging_buf,
+            pipeline,
+            transparency_pipeline,
+            render_pass,
+            transform_matrix: xform.into(),
+            viewport_dimensions: size,
+            test_image_binding,
+        };
+        s.surface_changed(
+            render_surface
+        );
+
+        Ok(s)
     }
     fn recalc_matrix(&mut self) {
         let size = self.viewport_dimensions;
@@ -557,7 +579,7 @@ impl DocumentViewportPreviewProxy {
         self.prerecorded_command_buffers = Vec::new();
 
         if self.framebuffers.is_empty() {
-            log::warn!("Cannot record commandbuffers with no framebuffers");
+            log::error!("Cannot record commandbuffers with no framebuffers");
         }
         let command_buffers : AnyResult<Vec<_>> = self.framebuffers.iter()
             .map(|framebuffer| -> AnyResult<vk::PrimaryAutoCommandBuffer> {
@@ -619,7 +641,7 @@ impl DocumentViewportPreviewProxy {
                 .map(Arc::new)
                 .collect();
         } else {
-            log::warn!("Failed to record preview command buffers");
+            log::error!("Failed to record preview command buffers");
         }
     }
 }
@@ -679,7 +701,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
     //let (image, future) = make_test_image(render_context.clone())?;
-    let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("test-data/orbs.png"))?;
+    let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("./test-data/sit.png"))?;
 
     future.wait(None)?;
 
