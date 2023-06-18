@@ -46,6 +46,9 @@ impl EguiCtx {
             full_output: None,
         })
     }
+    pub fn wants_pointer_input(&self) -> bool {
+        self.ctx.wants_pointer_input()
+    }
     pub fn replace_surface(&mut self, surface: &RenderSurface) -> GpuResult<()> {
         self.renderer.gen_framebuffers(surface)
     }

@@ -18,6 +18,7 @@ trait StylusAxes {
         self.get_axis(axis).is_some()
     }
 }
+#[derive(Debug, Clone, Copy)]
 pub struct StylusEvent {
     pos: (f32, f32),
     pressed: bool,
@@ -64,23 +65,43 @@ impl StylusAxes for StylusEvent {
 
 pub struct WinitStylusEventCollector {
     mouse_pressed: bool,
+    pressure: Option<f32>,
     events: Vec<StylusEvent>,
 
     frame_channel: tokio::sync::broadcast::Sender<StylusEventFrame>,
+}
+impl Default for WinitStylusEventCollector {
+    fn default() -> Self {
+        let (sender, _) = tokio::sync::broadcast::channel(32);
+        Self {
+            mouse_pressed: false,
+            events: Vec::new(),
+            frame_channel: sender,
+            pressure: None,
+        }
+    }
 }
 impl WinitStylusEventCollector {
     pub fn push_position(&mut self, pos: (f32, f32)) {
         let event = StylusEvent {
             pos,
             pressed: self.mouse_pressed,
-            pressure: Some(if self.mouse_pressed {1.0} else {0.0}),
+            pressure: Some(self.pressure.unwrap_or(if self.mouse_pressed {1.0} else {0.0})),
             ..StylusEvent::empty()
         };
 
+        self.pressure = None;
+
         self.events.push(event);
     }
+    pub fn set_pressure(&mut self, pressure: f32) {
+        self.pressure = Some(pressure);
+    } 
     pub fn set_mouse_pressed(&mut self, pressed: bool) {
         self.mouse_pressed = pressed;
+        if !pressed {
+            self.pressure = None;
+        }
     }
     /// This frame is complete, and no more axis events will occur until next frame.
     /// Finish the current event.
@@ -123,3 +144,10 @@ pub struct StylusEventFrameInner {
 
 #[derive(Clone)]
 pub struct StylusEventFrame(std::sync::Arc<StylusEventFrameInner>);
+
+impl std::ops::Deref for StylusEventFrame {
+    type Target = [StylusEvent];
+    fn deref(&'_ self) -> &'_ Self::Target {
+        &self.0.events
+    }
+}

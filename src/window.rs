@@ -31,7 +31,7 @@ impl WindowSurface {
         render_context: Arc<render_device::RenderContext>,
         preview_renderer : Box<dyn crate::PreviewRenderProxy>,
     ) -> GpuResult<WindowRenderer> {
-        let mut egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
+        let egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
         Ok(WindowRenderer {
             win: self.win,
             render_surface: Some(render_surface),
@@ -40,6 +40,7 @@ impl WindowSurface {
             last_frame: None,
             egui_ctx,
             preview_renderer,
+            stylus_events: Default::default(),
         })
     }
 }
@@ -53,6 +54,8 @@ pub struct WindowRenderer {
     render_context: Arc<render_device::RenderContext>,
     egui_ctx: egui_impl::EguiCtx,
 
+    stylus_events: crate::stylus_events::WinitStylusEventCollector,
+
     last_frame: Option<Box<dyn GpuFuture>>,
 
     preview_renderer: Box<dyn crate::PreviewRenderProxy>,
@@ -60,6 +63,9 @@ pub struct WindowRenderer {
 impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
+    }
+    pub fn stylus_events(&self) -> tokio::sync::broadcast::Receiver<crate::stylus_events::StylusEventFrame> {
+        self.stylus_events.frame_receiver()
     }
     /*
     pub fn gen_framebuffers(&mut self) {
@@ -84,7 +90,7 @@ impl WindowRenderer {
             .unwrap()
             .recreate(Some(self.window().inner_size().into()))?;
 
-        self.egui_ctx.replace_surface(&new_surface);
+        self.egui_ctx.replace_surface(&new_surface)?;
 
         self.render_surface = Some(new_surface);
 
@@ -130,9 +136,39 @@ impl WindowRenderer {
                     WindowEvent::Resized(..) => {
                         self.recreate_surface().expect("Failed to rebuild surface");
                     }
+                    WindowEvent::CursorLeft { .. } => {
+                        self.stylus_events.set_mouse_pressed(false);
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        // Only take if egui doesn't want it!
+                        if !self.egui_ctx.wants_pointer_input() {
+                            self.stylus_events.push_position(position.into());
+                        }
+                    }
+                    WindowEvent::MouseInput { state, .. } => {
+                        let pressed = winit::event::ElementState::Pressed == state;
+
+                        if pressed {
+                            // Only take if egui doesn't want it!
+                            if !self.egui_ctx.wants_pointer_input() {
+                                self.stylus_events.set_mouse_pressed(true)
+                            }
+                        } else {
+                            self.stylus_events.set_mouse_pressed(false)
+                        }
+
+                    }
                     _ => (),
                 },
-                Event::DeviceEvent { .. } => {
+                Event::DeviceEvent { event, .. } => {
+
+                    match event {
+                        //Pressure out of 65535
+                        winit::event::DeviceEvent::Motion { axis: 2, value } => {
+                            self.stylus_events.set_pressure(value as f32 / 65535.0)
+                        }
+                        _ => ()
+                    }
                     // 0 -> x in display space
                     // 1 -> y in display space
                     // 2 -> pressure out of 65535, 0 if not pressed
@@ -149,6 +185,8 @@ impl WindowRenderer {
                     if self.egui_ctx.needs_redraw() {
                         self.window().request_redraw()
                     }
+
+                    self.stylus_events.finish();
                 }
                 Event::RedrawRequested(..) => {
                     if let Err(e) = self.paint() {

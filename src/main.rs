@@ -308,7 +308,7 @@ fn load_document_image(
 
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
 /// behind the Egui content.
-trait PreviewRenderProxy {
+pub trait PreviewRenderProxy {
     /// Create the render commands for this frame. Assume used resources are borrowed until a matching "render_complete" for this
     /// frame idx is called.
     fn render(&mut self, swapchain_image_idx: u32)
@@ -691,11 +691,33 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
     }
 }
 
+fn listener(mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    loop {
+        match runtime.block_on(event_stream.recv()) {
+            Ok(event_frame) => {
+                for event in event_frame.iter() {
+                    log::trace!("{event:?}")
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
+                log::warn!("Lost {num} stylus frames!");
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                return 
+            }
+        }
+    }
+}
+
 //If we return, it was due to an error.
 //convert::Infallible is a quite ironic name for this useage, isn't it? :P
 fn main() -> AnyResult<std::convert::Infallible> {
     env_logger::builder().filter_level(log::LevelFilter::max()).init();
-    
+
     let window_surface = window::WindowSurface::new()?;
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
@@ -707,6 +729,10 @@ fn main() -> AnyResult<std::convert::Infallible> {
 
     let document_view = Box::new(DocumentViewportPreviewProxy::new(&render_surface, image)?);
     let window_renderer = window_surface.with_render_surface(render_surface, render_context.clone(), document_view)?;
+
+    let event_stream = window_renderer.stylus_events();
+
+    std::thread::spawn(move || listener(event_stream));
 
     window_renderer.run();
 }
