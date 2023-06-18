@@ -35,6 +35,7 @@ impl WindowSurface {
         Ok(WindowRenderer {
             win: self.win,
             render_surface: Some(render_surface),
+            swapchain_generation: 0,
             render_context,
             event_loop: Some(self.event_loop),
             last_frame: None,
@@ -55,6 +56,7 @@ pub struct WindowRenderer {
     egui_ctx: egui_impl::EguiCtx,
 
     stylus_events: crate::stylus_events::WinitStylusEventCollector,
+    swapchain_generation: u32,
 
     last_frame: Option<Box<dyn GpuFuture>>,
 
@@ -93,6 +95,7 @@ impl WindowRenderer {
         self.egui_ctx.replace_surface(&new_surface)?;
 
         self.render_surface = Some(new_surface);
+        self.swapchain_generation = self.swapchain_generation.wrapping_add(1);
 
         self.preview_renderer.surface_changed(self.render_surface.as_ref().unwrap());
 
@@ -232,6 +235,12 @@ impl WindowRenderer {
                 Ok(r) => r,
             };
 
+
+        // Lmao
+        // Free up resources from the last time this frame index was rendered
+        // Todo: call much much sooner.
+        self.preview_renderer.render_complete(idx);
+
         let preview_commands = self.preview_renderer.render(idx)?;
         let commands = self.egui_ctx.build_commands(idx);
 
@@ -302,74 +311,6 @@ impl WindowRenderer {
             .then_signal_semaphore_and_flush()?;
 
         self.last_frame = Some(next_frame_future.boxed());
-
-        //Minimize heap allocs (by using excessive code duplication)
-        /*let next_frame_semaphore = {
-            if let Some((egui_transfer, egui_draw)) = commands {
-                if let Some(egui_transfer) = egui_transfer {
-
-                    let transfer_complete = if let Some(last_frame_complete) = self.last_frame.take() {
-                        last_frame_complete
-                            .then_execute(
-                                self.render_context.queues().transfer().queue().clone(),
-                                egui_transfer,
-                            )?
-                            .then_signal_semaphore_and_flush()?
-                            .boxed()
-                    } else {
-                        self.render_context.now()
-                            .then_execute(
-                                self.render_context.queues().transfer().queue().clone(),
-                                egui_transfer,
-                            )?
-                            .then_signal_semaphore_and_flush()?
-                            .boxed()
-                    };
-                    image_future
-                        .then_execute(
-                            self.render_context.queues().graphics().queue().clone(),
-                            preview_commands
-                        )?
-                        .join(transfer_complete)
-                        .then_execute(
-                            self.render_context.queues().graphics().queue().clone(),
-                            egui_draw,
-                        )?
-                        .boxed()
-                } else {
-                    //Just draw
-                    image_future
-                        .then_execute(
-                            self.render_context.queues().graphics().queue().clone(),
-                            preview_commands
-                        )?
-                        .then_execute_same_queue(
-                            egui_draw,
-                        )?
-                        .boxed()
-                }
-            } else {
-                image_future
-                    .then_execute(
-                        self.render_context.queues().graphics().queue().clone(),
-                        preview_commands
-                    )?
-                    .boxed()
-            }
-        }
-        .then_swapchain_present(
-            self.render_context
-                .queues()
-                .present()
-                .unwrap()
-                .queue()
-                .clone(),
-            vk::SwapchainPresentInfo::swapchain_image_index(
-                self.render_surface().swapchain().clone(),
-                idx,
-            ),
-        )
-        .then_signal_semaphore_and_flush()?;*/
 
         if suboptimal {
             self.recreate_surface()?
