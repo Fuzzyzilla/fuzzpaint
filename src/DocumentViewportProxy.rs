@@ -71,10 +71,13 @@ struct DocumentVertex {
     #[format(R32G32_SFLOAT)]
     pos: [f32; 2],
 }
+
+//type AnyFence = vk::sync::future::FenceSignalFuture<Box<dyn vk::sync::GpuFuture>>;
 pub struct DocumentViewportPreviewProxy {
     render_context: Arc<render_device::RenderContext>,
 
-    test_image_binding : Arc<vk::PersistentDescriptorSet>,
+    document_images : Vec<Arc<vk::ImageView<vk::StorageImage>>>,
+    document_image_bindings : Vec<Arc<vk::PersistentDescriptorSet>>,
 
     render_pass: Arc<vk::RenderPass>,
     // List of framebuffers for the swapchain, lazily created as they're needed.
@@ -91,8 +94,10 @@ pub struct DocumentViewportPreviewProxy {
     index_buffer: vulkano::buffer::Subbuffer<[u16]>,
 
 }
+
+
 impl DocumentViewportPreviewProxy {
-    pub fn new(render_surface: &render_device::RenderSurface, image: Arc<vk::StorageImage>)
+    pub fn new(render_surface: &render_device::RenderSurface)
         -> AnyResult<Self> {
         let render_pass = vulkano::single_pass_renderpass!(
             render_surface.context().device().clone(),
@@ -109,7 +114,40 @@ impl DocumentViewportPreviewProxy {
                 depth_stencil: {},
             },
         )?;
-        let test_image = vk::ImageView::new_default(image)?;
+
+        // N swapchain images, 1 is onscreen and thus immutable. Therefore N-1
+        // frames *could* be in-flight. Add one for always having a image available for write!
+        let num_document_buffers = render_surface.swapchain_images().len() as u32;
+
+        let document_image_array = vk::StorageImage::with_usage(
+            render_surface.context().allocators().memory(),
+            vk::ImageDimensions::Dim2d { width: crate::DOCUMENT_DIMENSION, height: crate::DOCUMENT_DIMENSION, array_layers: num_document_buffers },
+            vk::Format::R16G16B16A16_SFLOAT,
+            vk::ImageUsage::COLOR_ATTACHMENT | vk::ImageUsage::SAMPLED,
+            vk::ImageCreateFlags::empty(),
+            [
+                render_surface.context().queues().graphics().idx()
+            ],
+        )?;
+
+        let document_image_views : AnyResult<Vec<_>>= (0..num_document_buffers)
+            .map(|layer| -> AnyResult<Arc<vk::ImageView<vk::StorageImage>>> {
+                Ok(
+                    vk::ImageView::new(
+                        document_image_array.clone(),
+                        vk::ImageViewCreateInfo {
+                            subresource_range: vk::ImageSubresourceRange {
+                                array_layers: layer..(layer+1),
+                                aspects: vk::ImageAspects::COLOR,
+                                mip_levels: 0..1,
+                            },
+                            ..vk::ImageViewCreateInfo::from_image(&document_image_array)
+                        }
+                    )?
+                )
+            }).collect();
+        let document_image_views = document_image_views?;
+
         let sampler = vk::Sampler::new(
             render_surface.context().device().clone(),
             vk::SamplerCreateInfo{
@@ -203,13 +241,20 @@ impl DocumentViewportPreviewProxy {
             .build(render_surface.context().device().clone())?;
 
 
-        let test_image_binding = vk::PersistentDescriptorSet::new(
-            render_surface.context().allocators().descriptor_set(),
-            pipeline.layout().set_layouts()[0].clone(),
-            [
-                vk::WriteDescriptorSet::image_view_sampler(0, test_image.clone(), sampler)
-            ]
-        )?;
+        let document_image_bindings: AnyResult<Vec<_>> = 
+            document_image_views.iter()
+                .map(|view| -> AnyResult<Arc<vk::PersistentDescriptorSet>> {
+                    Ok(vk::PersistentDescriptorSet::new(
+                        render_surface.context().allocators().descriptor_set(),
+                        pipeline.layout().set_layouts()[0].clone(),
+                        [
+                            vk::WriteDescriptorSet::image_view_sampler(0, view.clone(), sampler)
+                        ]
+                    )?)
+                })
+                .collect();
+        let document_image_bindings = document_image_bindings?;
+
         let margin = 25.0;
 
         //Total size, to "fit" image. Use the smallest of both dimensions.
@@ -232,7 +277,9 @@ impl DocumentViewportPreviewProxy {
             render_pass,
             transform_matrix: xform.into(),
             viewport_dimensions: size,
-            test_image_binding,
+
+            document_images: document_image_views,
+            document_image_bindings,
         };
         s.surface_changed(
             render_surface
@@ -273,7 +320,7 @@ impl DocumentViewportPreviewProxy {
                     .begin_render_pass(
                         vk::RenderPassBeginInfo {
                             clear_values: vec![
-                                Some([0.2, 0.2, 0.2, 1.0].into())
+                                Some([0.05, 0.05, 0.05, 1.0].into())
                             ],
                             ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
                         },
@@ -306,7 +353,7 @@ impl DocumentViewportPreviewProxy {
                         vulkano::pipeline::PipelineBindPoint::Graphics,
                         self.pipeline.layout().clone(),
                         0,
-                        vec![self.test_image_binding.clone()]
+                        vec![self.document_image_binding.clone()]
                     )
                     .draw_indexed(6, 1, 0, 0, 0)?
                     .end_render_pass()?;

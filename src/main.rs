@@ -63,7 +63,7 @@ mod test_renderer_vert {
 
 const DOCUMENT_DIMENSION : u32 = 1080;
 
-fn make_test_image(render_context: Arc<render_device::RenderContext>) -> AnyResult<(Arc<vk::StorageImage>, vk::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>)> {
+fn make_test_image(render_context: Arc<render_device::RenderContext>) -> AnyResult<(Arc<vk::StorageImage>, vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>)> {
     let document_format = vk::Format::R16G16B16A16_SFLOAT;
     let document_dimension = DOCUMENT_DIMENSION;
     let document_buffer = vk::StorageImage::with_usage(
@@ -225,7 +225,7 @@ fn make_test_image(render_context: Arc<render_device::RenderContext>) -> AnyResu
     
     let image_rendered_semaphore = render_context.now()
         .then_execute(render_context.queues().graphics().queue().clone(), command_buffer)?
-        .then_signal_semaphore_and_flush()?;
+        .then_signal_fence_and_flush()?;
 
     Ok(
         (document_buffer, image_rendered_semaphore)
@@ -332,7 +332,7 @@ struct DocumentPreviewRenderer {
 }
 
 struct SillyDocument {
-    
+
 }
 
 fn listener(mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>) {
@@ -366,12 +366,12 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
+    // Test image generators.
     //let (image, future) = make_test_image(render_context.clone())?;
-    let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("./test-data/sit.png"))?;
+    //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("/home/aspen/Pictures/thesharc.png"))?;
+    //future.wait(None)?;
 
-    future.wait(None)?;
-
-    let document_view = Box::new(DocumentViewportProxy::DocumentViewportPreviewProxy::new(&render_surface, image)?);
+    let document_view = Box::new(DocumentViewportProxy::DocumentViewportPreviewProxy::new(&render_surface)?);
     let window_renderer = window_surface.with_render_surface(render_surface, render_context.clone(), document_view)?;
 
     let event_stream = window_renderer.stylus_events();
