@@ -109,15 +109,9 @@ impl RenderSurface {
                 }
             })
             .unwrap_or(vk::PresentMode::Fifo);
-        let image_count = {
-            //Get one more then minimum, if maximum allows
-            let min_image_count = capabilies.min_image_count + 1;
-            if let Some(max_count) = capabilies.max_image_count {
-                min_image_count.min(max_count)
-            } else {
-                min_image_count
-            }
-        };
+
+        // Use the minimum - Only one frame will be rendered at once.
+        let image_count = capabilies.min_image_count;
 
         // We don't care!
         let alpha_mode = capabilies
@@ -200,6 +194,8 @@ pub struct RenderContext {
     device: Arc<vk::Device>,
     queues: Queues,
 
+    debugger: Option<vulkano::instance::debug::DebugUtilsMessenger>,
+
     allocators: Allocators,
 }
 
@@ -211,7 +207,9 @@ impl RenderContext {
         win: &crate::window::WindowSurface,
     ) -> AnyResult<(Arc<Self>, RenderSurface)> {
         let library = vk::VulkanLibrary::new()?;
-        let required_instance_extensions = vulkano_win::required_extensions(&library);
+
+        let mut required_instance_extensions = vulkano_win::required_extensions(&library);
+        required_instance_extensions.ext_debug_utils = true;
 
         let instance = vk::Instance::new(
             library.clone(),
@@ -226,6 +224,46 @@ impl RenderContext {
                 ..Default::default()
             },
         )?;
+
+        use vulkano::instance::debug as vkDebug;
+
+        // Safety - the closure must not access the vulkan API
+        let debugger = unsafe {
+            vkDebug::DebugUtilsMessenger::new(
+                instance.clone(),
+                vkDebug::DebugUtilsMessengerCreateInfo {
+                    message_severity:
+                        vkDebug::DebugUtilsMessageSeverity::ERROR |
+                        vkDebug::DebugUtilsMessageSeverity::WARNING |
+                        vkDebug::DebugUtilsMessageSeverity::INFO |
+                        vkDebug::DebugUtilsMessageSeverity::VERBOSE,
+                    message_type:
+                        vkDebug::DebugUtilsMessageType::GENERAL |
+                        vkDebug::DebugUtilsMessageType::PERFORMANCE |
+                        vkDebug::DebugUtilsMessageType::VALIDATION,
+                    ..vkDebug::DebugUtilsMessengerCreateInfo::user_callback(
+                        // Must NOT access the vulkan api.
+                        Arc::new(|message| {
+                            let level = match message.severity {
+                                vkDebug::DebugUtilsMessageSeverity::ERROR => log::Level::Error,
+                                vkDebug::DebugUtilsMessageSeverity::WARNING => log::Level::Warn,
+                                vkDebug::DebugUtilsMessageSeverity::VERBOSE => log::Level::Trace,
+                                vkDebug::DebugUtilsMessageSeverity::INFO | _ => log::Level::Info,
+                            };
+                            let ty = match message.ty {
+                                vkDebug::DebugUtilsMessageType::GENERAL => "GENERAL",
+                                vkDebug::DebugUtilsMessageType::PERFORMANCE => "PERFORMANCE",
+                                vkDebug::DebugUtilsMessageType::VALIDATION => "VALIDATION",
+                                _ => "UNKNOWN",
+                            };
+                            let layer = message.layer_prefix.unwrap_or("");
+
+                            log::log!(target: "vulkan", level, "[{ty}] {layer} - {}", message.description);
+                        })
+                    )
+                }
+            )
+        }?;
 
         let surface = vulkano_win::create_surface_from_winit(win.window(), instance.clone())?;
         let required_device_extensions = vk::DeviceExtensions {
@@ -266,6 +304,8 @@ impl RenderContext {
             device,
             physical_device,
             queues,
+
+            debugger: Some(debugger),
         });
         let render_surface =
             RenderSurface::new(context.clone(), surface.clone(), image_size.into())?;

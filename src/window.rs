@@ -38,7 +38,7 @@ impl WindowSurface {
             swapchain_generation: 0,
             render_context,
             event_loop: Some(self.event_loop),
-            last_frame: None,
+            last_frame_fence: None,
             egui_ctx,
             preview_renderer,
             stylus_events: Default::default(),
@@ -58,7 +58,7 @@ pub struct WindowRenderer {
     stylus_events: crate::stylus_events::WinitStylusEventCollector,
     swapchain_generation: u32,
 
-    last_frame: Option<Box<dyn GpuFuture>>,
+    last_frame_fence: Option<vk::sync::future::FenceSignalFuture<Box<dyn GpuFuture>>>,
 
     preview_renderer: Box<dyn crate::PreviewRenderProxy>,
 }
@@ -244,28 +244,19 @@ impl WindowRenderer {
         let preview_commands = self.preview_renderer.render(idx)?;
         let commands = self.egui_ctx.build_commands(idx);
 
+        //Wait for previous frame to end.
+        self.last_frame_fence.take().map(|fence| fence.wait(None));
+
         let render_complete = match commands {
             Some((Some(transfer), draw)) => {
-                let transfer_future = match self.last_frame.take() {
-                    Some(last_frame) => {
-                        last_frame
-                            .then_execute(
-                                self.render_context.queues().transfer().queue().clone(),
-                                transfer
-                            )?
-                            .boxed()
-                            .then_signal_fence_and_flush()?
-                    }
-                    None => {
-                        self.render_context.now()
-                            .then_execute(
-                                self.render_context.queues().transfer().queue().clone(),
-                                transfer
-                            )?
-                            .boxed()
-                            .then_signal_fence_and_flush()?
-                    }
-                };
+                let transfer_future =
+                    self.render_context.now()
+                    .then_execute(
+                        self.render_context.queues().transfer().queue().clone(),
+                        transfer
+                    )?
+                    .boxed()
+                    .then_signal_fence_and_flush()?;
 
                 // Todo: no matter what I do, i cannot seem to get semaphores
                 // to work. Ideally, the only thing that needs to wait is the
@@ -308,9 +299,10 @@ impl WindowRenderer {
                 self.render_context.queues().present().unwrap().queue().clone(),
                 vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface.as_ref().unwrap().swapchain().clone(), idx)
             )
-            .then_signal_semaphore_and_flush()?;
+            .boxed()
+            .then_signal_fence_and_flush()?;
 
-        self.last_frame = Some(next_frame_future.boxed());
+        self.last_frame_fence = Some(next_frame_future);
 
         if suboptimal {
             self.recreate_surface()?

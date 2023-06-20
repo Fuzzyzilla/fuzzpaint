@@ -76,13 +76,13 @@ struct DocumentVertex {
 pub struct DocumentViewportPreviewProxy {
     render_context: Arc<render_device::RenderContext>,
 
-    document_images : Vec<Arc<vk::ImageView<vk::StorageImage>>>,
-    document_image_bindings : Vec<Arc<vk::PersistentDescriptorSet>>,
+    document_images : [Arc<vk::ImageView<vk::StorageImage>>; 2],
+    document_image_bindings : [Arc<vk::PersistentDescriptorSet>; 2],
 
     render_pass: Arc<vk::RenderPass>,
     // List of framebuffers for the swapchain, lazily created as they're needed.
     framebuffers: Vec<Arc<vk::Framebuffer>>,
-    prerecorded_command_buffers: Vec<Arc<vk::PrimaryAutoCommandBuffer>>,
+    prerecorded_command_buffers: Vec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>,
 
     viewport_dimensions: [u32; 2],
 
@@ -92,7 +92,6 @@ pub struct DocumentViewportPreviewProxy {
     transform_matrix: [[f32; 4]; 4],
     vertex_buffer: vulkano::buffer::Subbuffer<[DocumentVertex; 4]>,
     index_buffer: vulkano::buffer::Subbuffer<[u16]>,
-
 }
 
 
@@ -115,9 +114,8 @@ impl DocumentViewportPreviewProxy {
             },
         )?;
 
-        // N swapchain images, 1 is onscreen and thus immutable. Therefore N-1
-        // frames *could* be in-flight. Add one for always having a image available for write!
-        let num_document_buffers = render_surface.swapchain_images().len() as u32;
+        // Only one frame-in-flight - Keep an additional buffer for writing to.
+        let num_document_buffers = 2u32;
 
         let document_image_array = vk::StorageImage::with_usage(
             render_surface.context().allocators().memory(),
@@ -130,23 +128,32 @@ impl DocumentViewportPreviewProxy {
             ],
         )?;
 
-        let document_image_views : AnyResult<Vec<_>>= (0..num_document_buffers)
-            .map(|layer| -> AnyResult<Arc<vk::ImageView<vk::StorageImage>>> {
-                Ok(
-                    vk::ImageView::new(
-                        document_image_array.clone(),
-                        vk::ImageViewCreateInfo {
-                            subresource_range: vk::ImageSubresourceRange {
-                                array_layers: layer..(layer+1),
-                                aspects: vk::ImageAspects::COLOR,
-                                mip_levels: 0..1,
-                            },
-                            ..vk::ImageViewCreateInfo::from_image(&document_image_array)
-                        }
-                    )?
-                )
-            }).collect();
-        let document_image_views = document_image_views?;
+        let document_image_views = [
+            vk::ImageView::new(
+                document_image_array.clone(),
+                vk::ImageViewCreateInfo {
+                    subresource_range: vk::ImageSubresourceRange {
+                        array_layers: 0..1,
+                        aspects: vk::ImageAspects::COLOR,
+                        mip_levels: 0..1,
+                    },
+                    view_type: vulkano::image::view::ImageViewType::Dim2d,
+                    ..vk::ImageViewCreateInfo::from_image(&document_image_array)
+                }
+            )?,
+            vk::ImageView::new(
+                document_image_array.clone(),
+                vk::ImageViewCreateInfo {
+                    subresource_range: vk::ImageSubresourceRange {
+                        array_layers: 1..2,
+                        aspects: vk::ImageAspects::COLOR,
+                        mip_levels: 0..1,
+                    },
+                    view_type: vulkano::image::view::ImageViewType::Dim2d,
+                    ..vk::ImageViewCreateInfo::from_image(&document_image_array)
+                }
+            )?
+        ];
 
         let sampler = vk::Sampler::new(
             render_surface.context().device().clone(),
@@ -241,19 +248,22 @@ impl DocumentViewportPreviewProxy {
             .build(render_surface.context().device().clone())?;
 
 
-        let document_image_bindings: AnyResult<Vec<_>> = 
-            document_image_views.iter()
-                .map(|view| -> AnyResult<Arc<vk::PersistentDescriptorSet>> {
-                    Ok(vk::PersistentDescriptorSet::new(
-                        render_surface.context().allocators().descriptor_set(),
-                        pipeline.layout().set_layouts()[0].clone(),
-                        [
-                            vk::WriteDescriptorSet::image_view_sampler(0, view.clone(), sampler)
-                        ]
-                    )?)
-                })
-                .collect();
-        let document_image_bindings = document_image_bindings?;
+        let document_image_bindings = [
+            vk::PersistentDescriptorSet::new(
+                render_surface.context().allocators().descriptor_set(),
+                pipeline.layout().set_layouts()[0].clone(),
+                [
+                    vk::WriteDescriptorSet::image_view_sampler(0, document_image_views[0].clone(), sampler.clone())
+                ]
+            )?,
+            vk::PersistentDescriptorSet::new(
+                render_surface.context().allocators().descriptor_set(),
+                pipeline.layout().set_layouts()[0].clone(),
+                [
+                    vk::WriteDescriptorSet::image_view_sampler(0, document_image_views[1].clone(), sampler)
+                ]
+            )?
+        ];
 
         let margin = 25.0;
 
@@ -309,66 +319,86 @@ impl DocumentViewportPreviewProxy {
             log::error!("Cannot record commandbuffers with no framebuffers");
         }
         let command_buffers : AnyResult<Vec<_>> = self.framebuffers.iter()
-            .map(|framebuffer| -> AnyResult<vk::PrimaryAutoCommandBuffer> {
-                let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
-                    self.render_context.allocators().command_buffer(),
-                    self.render_context.queues().graphics().idx(),
-                    command_buffer::CommandBufferUsage::MultipleSubmit,
-                )?;
+            .map(|framebuffer| -> AnyResult<[vk::PrimaryAutoCommandBuffer; 2]> {
+                let mut command_buffers = 
+                    [
+                        vk::AutoCommandBufferBuilder::primary(
+                            self.render_context.allocators().command_buffer(),
+                            self.render_context.queues().graphics().idx(),
+                            command_buffer::CommandBufferUsage::MultipleSubmit,
+                        )?,
+                        vk::AutoCommandBufferBuilder::primary(
+                            self.render_context.allocators().command_buffer(),
+                            self.render_context.queues().graphics().idx(),
+                            command_buffer::CommandBufferUsage::MultipleSubmit,
+                        )?
+                    ];
 
-                command_buffer
-                    .begin_render_pass(
-                        vk::RenderPassBeginInfo {
-                            clear_values: vec![
-                                Some([0.05, 0.05, 0.05, 1.0].into())
-                            ],
-                            ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
-                        },
-                        command_buffer::SubpassContents::Inline
-                    )?
-                    .bind_pipeline_graphics(
-                        self.transparency_pipeline.clone()
-                    )
-                    .bind_vertex_buffers(0, self.vertex_buffer.clone())
-                    .bind_index_buffer(self.index_buffer.clone())
-                    .set_viewport(0,
-                        [
-                            vk::Viewport {
-                                depth_range: 0.0..1.0,
-                                dimensions: [self.viewport_dimensions[0] as f32, self.viewport_dimensions[1] as f32],
-                                origin: [0.0; 2]
+                let mut command_buffers = command_buffers
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, mut buffer)| -> AnyResult<vk::PrimaryAutoCommandBuffer> {
+                        buffer.begin_render_pass(
+                            vk::RenderPassBeginInfo {
+                                clear_values: vec![
+                                    Some([0.05, 0.05, 0.05, 1.0].into())
+                                ],
+                                ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
+                            },
+                            command_buffer::SubpassContents::Inline
+                        )?
+                        .bind_pipeline_graphics(
+                            self.transparency_pipeline.clone()
+                        )
+                        .bind_vertex_buffers(0, self.vertex_buffer.clone())
+                        .bind_index_buffer(self.index_buffer.clone())
+                        .set_viewport(0,
+                            [
+                                vk::Viewport {
+                                    depth_range: 0.0..1.0,
+                                    dimensions: [self.viewport_dimensions[0] as f32, self.viewport_dimensions[1] as f32],
+                                    origin: [0.0; 2]
+                                }
+                            ]
+                        )
+                        .push_constants(
+                            self.transparency_pipeline.layout().clone(),
+                            0,
+                            document_preview_shaders::vertex::Matrix{
+                                mat: self.transform_matrix
                             }
-                        ]
-                    )
-                    .push_constants(
-                        self.transparency_pipeline.layout().clone(),
-                        0,
-                        document_preview_shaders::vertex::Matrix{
-                            mat: self.transform_matrix
-                        }
-                    )
-                    .draw_indexed(6, 1, 0, 0, 0)?
-                    .bind_pipeline_graphics(self.pipeline.clone())
-                    .bind_descriptor_sets(
-                        vulkano::pipeline::PipelineBindPoint::Graphics,
-                        self.pipeline.layout().clone(),
-                        0,
-                        vec![self.document_image_binding.clone()]
-                    )
-                    .draw_indexed(6, 1, 0, 0, 0)?
-                    .end_render_pass()?;
+                        )
+                        .draw_indexed(6, 1, 0, 0, 0)?
+                        .bind_pipeline_graphics(self.pipeline.clone())
+                        .bind_descriptor_sets(
+                            vulkano::pipeline::PipelineBindPoint::Graphics,
+                            self.pipeline.layout().clone(),
+                            0,
+                            vec![self.document_image_bindings[idx].clone()]
+                        )
+                        .draw_indexed(6, 1, 0, 0, 0)?
+                        .end_render_pass()?;
 
 
-                Ok(command_buffer.build()?)
+                        Ok(buffer.build()?)
+                    });
+                    
+                Ok([
+                    command_buffers.next().unwrap()?,
+                    command_buffers.next().unwrap()?,
+                ])
             })
             .collect();
         
-        if let Ok(buffers) = command_buffers {
-            self.prerecorded_command_buffers = buffers.into_iter()
-                .map(Arc::new)
+        match command_buffers {
+            Ok(buffers) => {
+                self.prerecorded_command_buffers = buffers.into_iter()
+                .map(|[a, b]| [Arc::new(a), Arc::new(b)])
                 .collect();
-        } else {
-            log::error!("Failed to record preview command buffers");
+            }
+            Err(e) => {
+                log::error!("Failed to record preview command buffers: {e:?}");
+            }
         }
     }
 }
@@ -377,10 +407,11 @@ impl crate::PreviewRenderProxy for DocumentViewportPreviewProxy {
             -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>> {
         let Some(buffer) = self.prerecorded_command_buffers.get(idx as usize)
         else {
-            anyhow::bail!("No buffer found for this frame!")
+            anyhow::bail!("No buffer found for swapchain image {idx}!")
         };
         
-        Ok(buffer.clone())
+        todo!()
+        //Ok(buffer[self.read_buf.load(std::sync::atomic::Ordering::Acquire) as usize].clone())
     }
     fn render_complete(&mut self, idx : u32) {
         
