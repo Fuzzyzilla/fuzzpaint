@@ -20,11 +20,11 @@ trait StylusAxes {
 }
 #[derive(Debug, Clone, Copy)]
 pub struct StylusEvent {
-    pos: (f32, f32),
-    pressed: bool,
-    pressure: Option<f32>,
-    tilt: Option<(f32, f32)>,
-    dist: Option<f32>,
+    pub pos: (f32, f32),
+    pub pressed: bool,
+    pub pressure: Option<f32>,
+    pub tilt: Option<(f32, f32)>,
+    pub dist: Option<f32>,
 }
 impl StylusEvent {
     pub fn empty() -> Self {

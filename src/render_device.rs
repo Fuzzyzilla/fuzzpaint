@@ -211,6 +211,8 @@ impl RenderContext {
         let mut required_instance_extensions = vulkano_win::required_extensions(&library);
         required_instance_extensions.ext_debug_utils = true;
 
+        use vulkano::instance::debug as vkDebug;
+
         let instance = vk::Instance::new(
             library.clone(),
             vk::InstanceCreateInfo {
@@ -224,8 +226,6 @@ impl RenderContext {
                 ..Default::default()
             },
         )?;
-
-        use vulkano::instance::debug as vkDebug;
 
         // Safety - the closure must not access the vulkan API
         let debugger = unsafe {
@@ -392,7 +392,10 @@ impl RenderContext {
             physical_device,
             vk::DeviceCreateInfo {
                 enabled_extensions: extensions,
-                enabled_features: vk::Features::empty(),
+                enabled_features: vk::Features{
+                    wide_lines: true,
+                    ..vk::Features::empty()
+                },
                 queue_create_infos: create_infos,
                 ..Default::default()
             },

@@ -79,6 +79,8 @@ pub struct DocumentViewportPreviewProxy {
     document_images : [Arc<vk::ImageView<vk::StorageImage>>; 2],
     document_image_bindings : [Arc<vk::PersistentDescriptorSet>; 2],
 
+    read_buf : std::sync::atomic::AtomicU8,
+
     render_pass: Arc<vk::RenderPass>,
     // List of framebuffers for the swapchain, lazily created as they're needed.
     framebuffers: Vec<Arc<vk::Framebuffer>>,
@@ -89,6 +91,7 @@ pub struct DocumentViewportPreviewProxy {
     pipeline: Arc<vk::GraphicsPipeline>,
     transparency_pipeline: Arc<vk::GraphicsPipeline>,
 
+    document_to_preview_matrix: cgmath::Matrix4<f32>,
     transform_matrix: [[f32; 4]; 4],
     vertex_buffer: vulkano::buffer::Subbuffer<[DocumentVertex; 4]>,
     index_buffer: vulkano::buffer::Subbuffer<[u16]>,
@@ -271,10 +274,13 @@ impl DocumentViewportPreviewProxy {
         let image_size_px = size[0].min(size[1]) as f32 - (2.0 * margin);
         let x = (size[0] as f32 - image_size_px) / 2.0;
         let y = (size[1] as f32 - image_size_px) / 2.0;
-        let xform = 
-            cgmath::ortho(0.0, size[0] as f32, size[1] as f32, 0.0, -1.0, 1.0) *
+        let document_to_preview_matrix = 
             Matrix4::from_translation(cgmath::Vector3 { x, y, z: 0.0 }) *
             Matrix4::from_scale(image_size_px as f32);
+
+        let xform = 
+            cgmath::ortho(0.0, size[0] as f32, size[1] as f32, 0.0, -1.0, 1.0) *
+            document_to_preview_matrix;
 
         let mut s = Self {
             render_context: render_surface.context().clone(),
@@ -286,7 +292,10 @@ impl DocumentViewportPreviewProxy {
             transparency_pipeline,
             render_pass,
             transform_matrix: xform.into(),
+            document_to_preview_matrix: document_to_preview_matrix,
             viewport_dimensions: size,
+
+            read_buf: 0.into(),
 
             document_images: document_image_views,
             document_image_bindings,
@@ -304,11 +313,15 @@ impl DocumentViewportPreviewProxy {
         let image_size_px = size[0].min(size[1]) as f32 - (2.0 * margin);
         let x = (size[0] as f32 - image_size_px) / 2.0;
         let y = (size[1] as f32 - image_size_px) / 2.0;
-        let xform = 
-            cgmath::ortho(0.0, size[0] as f32, size[1] as f32, 0.0, -1.0, 1.0) *
+        let document_to_preview_matrix = 
             Matrix4::from_translation(cgmath::Vector3 { x, y, z: 0.0 }) *
             Matrix4::from_scale(image_size_px as f32);
+
+        let xform = 
+            cgmath::ortho(0.0, size[0] as f32, size[1] as f32, 0.0, -1.0, 1.0) *
+            document_to_preview_matrix;
         
+        self.document_to_preview_matrix = document_to_preview_matrix;
         self.transform_matrix = xform.into();
     } 
     fn record_commandbuffers(&mut self) {
@@ -401,6 +414,16 @@ impl DocumentViewportPreviewProxy {
             }
         }
     }
+    pub async fn get_writeable_buffer(&self) -> Arc<vk::ImageView<vk::StorageImage>> {
+        //Todo - wait for rendering on this image to complete.
+        self.document_images[(self.read_buf.load(std::sync::atomic::Ordering::Acquire) ^ 1) as usize].clone()
+    }
+    pub fn swap(&self) {
+        self.read_buf.fetch_xor(0x01, std::sync::atomic::Ordering::Release);
+    }
+    pub fn get_matrix(&self) -> cgmath::Matrix4<f32> {
+        self.document_to_preview_matrix
+    }
 }
 impl crate::PreviewRenderProxy for DocumentViewportPreviewProxy {
     fn render<'a>(&'a mut self, idx: u32)
@@ -410,8 +433,7 @@ impl crate::PreviewRenderProxy for DocumentViewportPreviewProxy {
             anyhow::bail!("No buffer found for swapchain image {idx}!")
         };
         
-        todo!()
-        //Ok(buffer[self.read_buf.load(std::sync::atomic::Ordering::Acquire) as usize].clone())
+        Ok(buffer[self.read_buf.load(std::sync::atomic::Ordering::Acquire) as usize].clone())
     }
     fn render_complete(&mut self, idx : u32) {
         

@@ -1,11 +1,11 @@
 #![feature(array_chunks)]
 
-use std::{sync::Arc, ops::Deref};
+use std::{sync::Arc, ops::Deref, fmt::Debug};
 mod egui_impl;
 pub mod gpu_err;
 pub mod vulkano_prelude;
 pub mod window;
-use cgmath::Matrix4;
+use cgmath::{Matrix4, SquareMatrix};
 use gpu_err::GpuResult;
 use rand::{SeedableRng, Rng};
 use vulkano::{command_buffer::{self, AutoCommandBufferBuilder}, format};
@@ -42,7 +42,7 @@ mod test_renderer_vert {
 
         void main() {
             vec4 position_2d = push_matrix.mvp * vec4(pos, 0.0, 1.0);
-            color = vec4(vec3(pressure), 1.0);
+            color = vec4(0.0, 0.0, 0.0, pressure);
             gl_Position = vec4(position_2d.xy, 0.0, 1.0);
         }"
     }
@@ -115,7 +115,12 @@ fn make_test_image(render_context: Arc<render_device::RenderContext>) -> AnyResu
             ..Default::default()
         })
         .color_blend_state(vk::ColorBlendState::default().blend_alpha())
-        .rasterization_state(vk::RasterizationState::default())
+        .rasterization_state(
+            vk::RasterizationState {
+                line_width: vk::StateMode::Fixed(4.0),
+                ..vk::RasterizationState::default()
+            }
+        )
         .viewport_state(
             vk::ViewportState::viewport_fixed_scissor_irrelevant(
                 [
@@ -332,20 +337,203 @@ struct DocumentPreviewRenderer {
 }
 
 struct SillyDocument {
+    verts : Vec<StrokePointUnpacked>,
+    indices : Vec<u32>,
+}
+struct SillyDocumentRenderer {
+    render_context: Arc<render_device::RenderContext>,
+    pipeline : Arc<vk::GraphicsPipeline>,
+    render_pass : Arc<vk::RenderPass>,
+}
+impl SillyDocumentRenderer {
+    fn new(render_context: Arc<render_device::RenderContext>) -> AnyResult<Self> {
+        let document_format = vk::Format::R16G16B16A16_SFLOAT;
+        let document_dimension = DOCUMENT_DIMENSION;
+        let document_buffer = vk::StorageImage::with_usage(
+            render_context.allocators().memory(),
+            vulkano::image::ImageDimensions::Dim2d { width: document_dimension, height: document_dimension, array_layers: 1 },
+            document_format,
+            vk::ImageUsage::COLOR_ATTACHMENT | vk::ImageUsage::SAMPLED | vk::ImageUsage::STORAGE,
+            vk::ImageCreateFlags::empty(),
+            [render_context.queues().graphics().idx()]
+        )?;
+    
+        let document_view = vk::ImageView::new_default(document_buffer.clone())?;
+    
+        let render_pass = vulkano::single_pass_renderpass!(
+            render_context.device().clone(),
+            attachments: {
+                document: {
+                    load: Clear,
+                    store: Store,
+                    format: document_format,
+                    samples: 1,
+                },
+            },
+            pass: {
+                color: [document],
+                depth_stencil: {},
+            },
+        )?;
+        let document_framebuffer = vk::Framebuffer::new(
+            render_pass.clone(),
+            vk::FramebufferCreateInfo {
+                attachments: vec![
+                    document_view
+                ],
+                ..Default::default()
+            }
+        )?;
+    
+        let vert = test_renderer_vert::load(render_context.device().clone())?;
+        let frag = test_renderer_frag::load(render_context.device().clone())?;
+    
+        let pipeline = vk::GraphicsPipeline::start()
+            .render_pass(render_pass.clone().first_subpass())
+            .vertex_shader(vert.entry_point("main").unwrap(), test_renderer_vert::SpecializationConstants::default())
+            .fragment_shader(frag.entry_point("main").unwrap(), test_renderer_frag::SpecializationConstants::default())
+            .vertex_input_state(StrokePointUnpacked::per_vertex())
+            .input_assembly_state(vk::InputAssemblyState {
+                topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::LineStrip),
+                primitive_restart_enable: vk::StateMode::Fixed(true),
+                ..Default::default()
+            })
+            .color_blend_state(vk::ColorBlendState::default().blend_alpha())
+            .rasterization_state(
+                vk::RasterizationState {
+                    line_width: vk::StateMode::Fixed(4.0),
+                    ..vk::RasterizationState::default()
+                }
+            )
+            .viewport_state(
+                vk::ViewportState::viewport_fixed_scissor_irrelevant(
+                    [
+                        vk::Viewport{
+                            depth_range: 0.0..1.0,
+                            dimensions: [document_dimension as f32, document_dimension as f32],
+                            origin: [0.0; 2],
+                        }
+                    ]
+                )
+            )
+            .build(render_context.device().clone())?;
+            
+        Ok(
+            Self {
+                render_context,
+                pipeline,
+                render_pass,
+            }
+        )
+    }
+    fn draw(&self, doc: &SillyDocument, buff : Arc<vk::ImageView<vk::StorageImage>>) -> AnyResult<vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>> {
+        let matrix = cgmath::ortho(0.0, DOCUMENT_DIMENSION as f32, DOCUMENT_DIMENSION as f32, 0.0, -1.0, 0.0);
+    
+        let points_buf = vk::Buffer::from_iter(
+            self.render_context.allocators().memory(),
+            vulkano::buffer::BufferCreateInfo {
+                usage: vk::BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            vulkano::memory::allocator::AllocationCreateInfo { usage: vk::MemoryUsage::Upload, ..Default::default() },
+            doc.verts.iter().copied()
+        )?;
+        let indices = vk::Buffer::from_iter(
+            self.render_context.allocators().memory(),
+            vulkano::buffer::BufferCreateInfo {
+                usage: vk::BufferUsage::INDEX_BUFFER,
+                ..Default::default()
+            },
+            vulkano::memory::allocator::AllocationCreateInfo { usage: vk::MemoryUsage::Upload, ..Default::default() },
+            doc.indices.iter().copied()
+        )?;
 
+        let framebuffer = vk::Framebuffer::new(
+            self.render_pass.clone(),
+            vk::FramebufferCreateInfo {
+                attachments: vec![buff],
+                ..Default::default()
+            }
+        )?;
+
+        let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
+                self.render_context.allocators().command_buffer(),
+                self.render_context.queues().graphics().idx(),
+                vk::CommandBufferUsage::OneTimeSubmit
+            )?;
+        command_buffer.begin_render_pass(vk::RenderPassBeginInfo{
+                clear_values: vec![
+                    Some(vk::ClearValue::Float([0.0; 4]))
+                ],
+                ..vk::RenderPassBeginInfo::framebuffer(framebuffer)
+            }, vk::SubpassContents::Inline)?
+            .bind_pipeline_graphics(self.pipeline.clone())
+            .push_constants(self.pipeline.layout().clone(), 0,
+                test_renderer_vert::Matrix{
+                    mvp: matrix.into()
+                }
+            )
+            .bind_vertex_buffers(0, [points_buf])
+            .bind_index_buffer(indices)
+            .draw_indexed(doc.indices.len() as u32, 1, 0, 0, 0)?
+            .end_render_pass()?;
+        let command_buffer = command_buffer.build()?;
+
+        Ok(
+            self.render_context.now()
+                .then_execute(
+                    self.render_context.queues().graphics().queue().clone(),
+                    command_buffer
+                )?
+                .then_signal_fence_and_flush()?
+        )
+    }
 }
 
-fn listener(mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>) {
+fn listener(mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
+    renderer: Arc<render_device::RenderContext>,
+    document_preview: Arc<parking_lot::RwLock<DocumentViewportProxy::DocumentViewportPreviewProxy>>) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
 
+    let mut doc = SillyDocument {
+        indices: vec![],
+        verts: vec![]
+    };
+
+    let renderer = SillyDocumentRenderer::new(renderer.clone()).unwrap();
+
+    let mut was_pressed = false;
     loop {
         match runtime.block_on(event_stream.recv()) {
             Ok(event_frame) => {
+                let mut changed = false;
+
+                let matrix = document_preview.read().get_matrix().invert().unwrap();
                 for event in event_frame.iter() {
-                    //log::trace!("{event:?}")
+                    // released, append a primitive restart command
+                    if was_pressed && !event.pressed {
+                        doc.indices.push(u32::MAX);
+                    }
+                    if event.pressed {
+                        let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
+
+
+                        doc.verts.push(StrokePointUnpacked { pos: [pos.x * DOCUMENT_DIMENSION as f32, (1.0 - pos.y) * DOCUMENT_DIMENSION as f32], pressure: event.pressure.unwrap_or(0.0) });
+                        doc.indices.push((doc.verts.len() - 1) as u32);
+                        changed = true;
+                    }
+
+                    was_pressed = event.pressed;
                 }
+
+                if changed {
+                    let buff = runtime.block_on(document_preview.read().get_writeable_buffer());
+                    renderer.draw(&doc, buff).unwrap().wait(None);
+
+                    document_preview.read().swap();
+                }   
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
                 log::warn!("Lost {num} stylus frames!");
@@ -371,12 +559,12 @@ fn main() -> AnyResult<std::convert::Infallible> {
     //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("/home/aspen/Pictures/thesharc.png"))?;
     //future.wait(None)?;
 
-    let document_view = Box::new(DocumentViewportProxy::DocumentViewportPreviewProxy::new(&render_surface)?);
-    let window_renderer = window_surface.with_render_surface(render_surface, render_context.clone(), document_view)?;
+    let document_view = Arc::new(parking_lot::RwLock::new(DocumentViewportProxy::DocumentViewportPreviewProxy::new(&render_surface)?));
+    let window_renderer = window_surface.with_render_surface(render_surface, render_context.clone(), document_view.clone())?;
 
     let event_stream = window_renderer.stylus_events();
 
-    std::thread::spawn(move || listener(event_stream));
+    std::thread::spawn(move || listener(event_stream, render_context.clone(), document_view.clone()));
 
     window_renderer.run();
 }
