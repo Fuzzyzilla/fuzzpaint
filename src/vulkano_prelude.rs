@@ -39,7 +39,8 @@ pub mod vk {
             view::{ImageView, ImageViewCreateInfo},
             AttachmentImage, ImageCreateFlags, ImageDimensions, ImageUsage, ImmutableImage,
             StorageImage, SwapchainImage,
-            ImageSubresourceRange, ImageAspects, ImageAccess
+            ImageSubresourceRange, ImageAspects, ImageAccess,
+            SampleCount,
         },
         instance::{Instance, InstanceCreateInfo},
         library::VulkanLibrary,
@@ -53,6 +54,7 @@ pub mod vk {
                 vertex_input::Vertex,
                 viewport::{Scissor, Viewport, ViewportState},
                 GraphicsPipeline, GraphicsPipelineBuilder,
+                multisample::MultisampleState,
             },
             layout::PipelineLayout,
             PartialStateMode, StateMode,

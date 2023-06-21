@@ -124,7 +124,7 @@ impl DocumentViewportPreviewProxy {
             render_surface.context().allocators().memory(),
             vk::ImageDimensions::Dim2d { width: crate::DOCUMENT_DIMENSION, height: crate::DOCUMENT_DIMENSION, array_layers: num_document_buffers },
             vk::Format::R16G16B16A16_SFLOAT,
-            vk::ImageUsage::COLOR_ATTACHMENT | vk::ImageUsage::SAMPLED,
+            vk::ImageUsage::COLOR_ATTACHMENT | vk::ImageUsage::SAMPLED | vk::ImageUsage::TRANSFER_DST,
             vk::ImageCreateFlags::empty(),
             [
                 render_surface.context().queues().graphics().idx()

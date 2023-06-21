@@ -61,7 +61,7 @@ mod test_renderer_vert {
     }
 }
 
-const DOCUMENT_DIMENSION : u32 = 1080;
+const DOCUMENT_DIMENSION : u32 = 64;
 
 fn make_test_image(render_context: Arc<render_device::RenderContext>) -> AnyResult<(Arc<vk::StorageImage>, vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>)> {
     let document_format = vk::Format::R16G16B16A16_SFLOAT;
@@ -105,6 +105,17 @@ fn make_test_image(render_context: Arc<render_device::RenderContext>) -> AnyResu
     let vert = test_renderer_vert::load(render_context.device().clone())?;
     let frag = test_renderer_frag::load(render_context.device().clone())?;
 
+
+    let mut blend_premul = vk::ColorBlendState::new(1);
+    blend_premul.attachments[0].blend = Some(vk::AttachmentBlend{
+        alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+        color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+        alpha_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+        color_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+        alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+        color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+    });
+
     let pipeline = vk::GraphicsPipeline::start()
         .render_pass(render_pass.first_subpass())
         .vertex_shader(vert.entry_point("main").unwrap(), test_renderer_vert::SpecializationConstants::default())
@@ -114,7 +125,7 @@ fn make_test_image(render_context: Arc<render_device::RenderContext>) -> AnyResu
             topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::LineStrip),
             ..Default::default()
         })
-        .color_blend_state(vk::ColorBlendState::default().blend_alpha())
+        .color_blend_state(blend_premul)
         .rasterization_state(
             vk::RasterizationState {
                 line_width: vk::StateMode::Fixed(4.0),
@@ -344,27 +355,32 @@ struct SillyDocumentRenderer {
     render_context: Arc<render_device::RenderContext>,
     pipeline : Arc<vk::GraphicsPipeline>,
     render_pass : Arc<vk::RenderPass>,
+
+    ms_attachment_view: Arc<vk::ImageView<vk::AttachmentImage>>,
 }
 impl SillyDocumentRenderer {
     fn new(render_context: Arc<render_device::RenderContext>) -> AnyResult<Self> {
         let document_format = vk::Format::R16G16B16A16_SFLOAT;
         let document_dimension = DOCUMENT_DIMENSION;
-        let document_buffer = vk::StorageImage::with_usage(
+        let ms_attachment = vk::AttachmentImage::transient_multisampled(
             render_context.allocators().memory(),
-            vulkano::image::ImageDimensions::Dim2d { width: document_dimension, height: document_dimension, array_layers: 1 },
+            [DOCUMENT_DIMENSION; 2],
+            vk::SampleCount::Sample8,
             document_format,
-            vk::ImageUsage::COLOR_ATTACHMENT | vk::ImageUsage::SAMPLED | vk::ImageUsage::STORAGE,
-            vk::ImageCreateFlags::empty(),
-            [render_context.queues().graphics().idx()]
         )?;
-    
-        let document_view = vk::ImageView::new_default(document_buffer.clone())?;
+        let ms_attachment_view = vk::ImageView::new_default(ms_attachment)?;
     
         let render_pass = vulkano::single_pass_renderpass!(
             render_context.device().clone(),
             attachments: {
                 document: {
                     load: Clear,
+                    store: DontCare,
+                    format: document_format,
+                    samples: 8,
+                },
+                resolve: {
+                    load: DontCare,
                     store: Store,
                     format: document_format,
                     samples: 1,
@@ -373,21 +389,23 @@ impl SillyDocumentRenderer {
             pass: {
                 color: [document],
                 depth_stencil: {},
+                resolve: [resolve],
             },
-        )?;
-        let document_framebuffer = vk::Framebuffer::new(
-            render_pass.clone(),
-            vk::FramebufferCreateInfo {
-                attachments: vec![
-                    document_view
-                ],
-                ..Default::default()
-            }
         )?;
     
         let vert = test_renderer_vert::load(render_context.device().clone())?;
         let frag = test_renderer_frag::load(render_context.device().clone())?;
     
+        let mut blend_premul = vk::ColorBlendState::new(1);
+        blend_premul.attachments[0].blend = Some(vk::AttachmentBlend{
+            alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+            color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+            alpha_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+            color_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+            alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+            color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+        });
+
         let pipeline = vk::GraphicsPipeline::start()
             .render_pass(render_pass.clone().first_subpass())
             .vertex_shader(vert.entry_point("main").unwrap(), test_renderer_vert::SpecializationConstants::default())
@@ -398,7 +416,14 @@ impl SillyDocumentRenderer {
                 primitive_restart_enable: vk::StateMode::Fixed(true),
                 ..Default::default()
             })
-            .color_blend_state(vk::ColorBlendState::default().blend_alpha())
+            .color_blend_state(blend_premul)
+            .multisample_state(vk::MultisampleState {
+                alpha_to_coverage_enable: false,
+                alpha_to_one_enable: false,
+                rasterization_samples: vk::SampleCount::Sample8,
+                sample_shading: None,
+                ..Default::default()
+            })
             .rasterization_state(
                 vk::RasterizationState {
                     line_width: vk::StateMode::Fixed(4.0),
@@ -423,6 +448,8 @@ impl SillyDocumentRenderer {
                 render_context,
                 pipeline,
                 render_pass,
+
+                ms_attachment_view,
             }
         )
     }
@@ -448,10 +475,13 @@ impl SillyDocumentRenderer {
             doc.indices.iter().copied()
         )?;
 
-        let framebuffer = vk::Framebuffer::new(
+        let document_framebuffer = vk::Framebuffer::new(
             self.render_pass.clone(),
             vk::FramebufferCreateInfo {
-                attachments: vec![buff],
+                attachments: vec![
+                    self.ms_attachment_view.clone(),
+                    buff.clone(),
+                ],
                 ..Default::default()
             }
         )?;
@@ -463,9 +493,10 @@ impl SillyDocumentRenderer {
             )?;
         command_buffer.begin_render_pass(vk::RenderPassBeginInfo{
                 clear_values: vec![
-                    Some(vk::ClearValue::Float([0.0; 4]))
+                    Some(vk::ClearValue::Float([0.0; 4])),
+                    None,
                 ],
-                ..vk::RenderPassBeginInfo::framebuffer(framebuffer)
+                ..vk::RenderPassBeginInfo::framebuffer(document_framebuffer)
             }, vk::SubpassContents::Inline)?
             .bind_pipeline_graphics(self.pipeline.clone())
             .push_constants(self.pipeline.layout().clone(), 0,
