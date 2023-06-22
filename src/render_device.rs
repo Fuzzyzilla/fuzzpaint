@@ -268,6 +268,7 @@ impl RenderContext {
         let surface = vulkano_win::create_surface_from_winit(win.window(), instance.clone())?;
         let required_device_extensions = vk::DeviceExtensions {
             khr_swapchain: true,
+            ext_line_rasterization: true,
             ..Default::default()
         };
 
@@ -394,6 +395,7 @@ impl RenderContext {
                 enabled_extensions: extensions,
                 enabled_features: vk::Features{
                     wide_lines: true,
+                    rectangular_lines: true,
                     ..vk::Features::empty()
                 },
                 queue_create_infos: create_infos,

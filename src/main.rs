@@ -61,7 +61,7 @@ mod test_renderer_vert {
     }
 }
 
-const DOCUMENT_DIMENSION : u32 = 64;
+const DOCUMENT_DIMENSION : u32 = 256;
 
 fn make_test_image(render_context: Arc<render_device::RenderContext>) -> AnyResult<(Arc<vk::StorageImage>, vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>)> {
     let document_format = vk::Format::R16G16B16A16_SFLOAT;
@@ -427,6 +427,7 @@ impl SillyDocumentRenderer {
             .rasterization_state(
                 vk::RasterizationState {
                     line_width: vk::StateMode::Fixed(4.0),
+                    line_rasterization_mode: vulkano::pipeline::graphics::rasterization::LineRasterizationMode::Rectangular,
                     ..vk::RasterizationState::default()
                 }
             )
