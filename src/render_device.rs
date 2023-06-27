@@ -70,6 +70,9 @@ pub struct RenderSurface {
     swapchain_create_info: vk::SwapchainCreateInfo,
 }
 impl RenderSurface {
+    pub fn extent(&self) -> [u32; 2] {
+        self.swapchain_create_info.image_extent
+    }
     pub fn format(&self) -> vk::Format {
         self.swapchain_create_info.image_format.unwrap()
     }
@@ -96,8 +99,6 @@ impl RenderSurface {
             else {return Err(anyhow::anyhow!("Device reported no valid surface formats."))};
 
         //Use mailbox for low-latency, if supported. Otherwise, FIFO is always supported.
-        //Bug: This results in unreasonably high CPU usage. Unsure why, we're not presenting particularly frequently.
-
         let present_mode = physical_device
             .surface_present_modes(&surface)
             .map(|mut modes| {
@@ -108,20 +109,13 @@ impl RenderSurface {
                 }
             })
             .unwrap_or(vk::PresentMode::Fifo);
-        let image_count = {
-            //Get one more then minimum, if maximum allows
-            let min_image_count = capabilies.min_image_count + 1;
-            if let Some(max_count) = capabilies.max_image_count {
-                min_image_count.min(max_count)
-            } else {
-                min_image_count
-            }
-        };
+
+        // Use the minimum - Only one frame will be rendered at once.
+        let image_count = capabilies.min_image_count;
 
         // We don't care!
         let alpha_mode = capabilies
             .supported_composite_alpha
-            .clone()
             .into_iter()
             .next()
             .expect("Device provided no alpha modes");
@@ -200,6 +194,8 @@ pub struct RenderContext {
     device: Arc<vk::Device>,
     queues: Queues,
 
+    debugger: Option<vulkano::instance::debug::DebugUtilsMessenger>,
+
     allocators: Allocators,
 }
 
@@ -211,7 +207,11 @@ impl RenderContext {
         win: &crate::window::WindowSurface,
     ) -> AnyResult<(Arc<Self>, RenderSurface)> {
         let library = vk::VulkanLibrary::new()?;
-        let required_instance_extensions = vulkano_win::required_extensions(&library);
+
+        let mut required_instance_extensions = vulkano_win::required_extensions(&library);
+        required_instance_extensions.ext_debug_utils = true;
+
+        use vulkano::instance::debug as vkDebug;
 
         let instance = vk::Instance::new(
             library.clone(),
@@ -227,9 +227,48 @@ impl RenderContext {
             },
         )?;
 
+        // Safety - the closure must not access the vulkan API
+        let debugger = unsafe {
+            vkDebug::DebugUtilsMessenger::new(
+                instance.clone(),
+                vkDebug::DebugUtilsMessengerCreateInfo {
+                    message_severity:
+                        vkDebug::DebugUtilsMessageSeverity::ERROR |
+                        vkDebug::DebugUtilsMessageSeverity::WARNING |
+                        vkDebug::DebugUtilsMessageSeverity::INFO |
+                        vkDebug::DebugUtilsMessageSeverity::VERBOSE,
+                    message_type:
+                        vkDebug::DebugUtilsMessageType::GENERAL |
+                        vkDebug::DebugUtilsMessageType::PERFORMANCE |
+                        vkDebug::DebugUtilsMessageType::VALIDATION,
+                    ..vkDebug::DebugUtilsMessengerCreateInfo::user_callback(
+                        // Must NOT access the vulkan api.
+                        Arc::new(|message| {
+                            let level = match message.severity {
+                                vkDebug::DebugUtilsMessageSeverity::ERROR => log::Level::Error,
+                                vkDebug::DebugUtilsMessageSeverity::WARNING => log::Level::Warn,
+                                vkDebug::DebugUtilsMessageSeverity::VERBOSE => log::Level::Trace,
+                                vkDebug::DebugUtilsMessageSeverity::INFO | _ => log::Level::Info,
+                            };
+                            let ty = match message.ty {
+                                vkDebug::DebugUtilsMessageType::GENERAL => "GENERAL",
+                                vkDebug::DebugUtilsMessageType::PERFORMANCE => "PERFORMANCE",
+                                vkDebug::DebugUtilsMessageType::VALIDATION => "VALIDATION",
+                                _ => "UNKNOWN",
+                            };
+                            let layer = message.layer_prefix.unwrap_or("");
+
+                            log::log!(target: "vulkan", level, "[{ty}] {layer} - {}", message.description);
+                        })
+                    )
+                }
+            )
+        }?;
+
         let surface = vulkano_win::create_surface_from_winit(win.window(), instance.clone())?;
         let required_device_extensions = vk::DeviceExtensions {
             khr_swapchain: true,
+            ext_line_rasterization: true,
             ..Default::default()
         };
 
@@ -237,7 +276,7 @@ impl RenderContext {
             Self::choose_physical_device(instance.clone(), required_device_extensions, Some(surface.clone()))?
             else {return Err(anyhow::anyhow!("Failed to find a suitable Vulkan device."))};
 
-        println!(
+        log::info!(
             "Chose physical device {} ({:?})",
             physical_device.properties().device_name,
             physical_device.properties().driver_info
@@ -248,9 +287,7 @@ impl RenderContext {
             queue_indices,
             required_device_extensions,
         )?;
-
-        println!("Got device :3");
-
+        
         // We have a device! Now to create the swapchain..
         let image_size = win.window().inner_size();
 
@@ -268,6 +305,8 @@ impl RenderContext {
             device,
             physical_device,
             queues,
+
+            debugger: Some(debugger),
         });
         let render_surface =
             RenderSurface::new(context.clone(), surface.clone(), image_size.into())?;
@@ -354,7 +393,11 @@ impl RenderContext {
             physical_device,
             vk::DeviceCreateInfo {
                 enabled_extensions: extensions,
-                enabled_features: vk::Features::empty(),
+                enabled_features: vk::Features{
+                    wide_lines: true,
+                    rectangular_lines: true,
+                    ..vk::Features::empty()
+                },
                 queue_create_infos: create_infos,
                 ..Default::default()
             },

@@ -46,6 +46,9 @@ impl EguiCtx {
             full_output: None,
         })
     }
+    pub fn wants_pointer_input(&self) -> bool {
+        self.ctx.wants_pointer_input()
+    }
     pub fn replace_surface(&mut self, surface: &RenderSurface) -> GpuResult<()> {
         self.renderer.gen_framebuffers(surface)
     }
@@ -404,10 +407,7 @@ impl EguiEventAccumulator {
             winit_key::Y => Some(egui_key::Y),
             winit_key::Z => Some(egui_key::Z),
 
-            _ => {
-                eprintln!("Unimplemented Key {winit_button:?}");
-                None
-            }
+            _ => None
         }
     }
     pub fn is_empty(&self) -> bool {
@@ -493,10 +493,36 @@ mod fs {
 
         layout(location = 0) in vec2 uv;
         layout(location = 1) in vec4 vertex_color;
+        
         layout(location = 0) out vec4 out_color;
 
+        vec3 toLinear(vec3 sRGB)
+        {
+            bvec3 cutoff = lessThan(sRGB, vec3(0.04045));
+            vec3 higher = pow((sRGB + vec3(0.055))/vec3(1.055), vec3(2.4));
+            vec3 lower = sRGB/vec3(12.92);
+        
+            return mix(higher, lower, cutoff);
+        }
+
         void main() {
-            out_color = vertex_color * texture(tex, uv);
+            //Texture is straight linear
+            vec4 t = texture(tex, uv);
+
+            //Color is premultiplied sRGB already, convert to straight linear
+            vec3 c = vertex_color.a > 0.0 ? (vertex_color.rgb / vertex_color.a) : vec3(0.0);
+
+            //sRGB to linear (needs to be slow + precise for color picker, unfortunately)
+            //May be incorrect to do this in vertex shader,
+            // due to linear interpolation for fragments. It is intuitively correct to do this here, but Egui
+            // does not list the expected behavior.
+            vec4 straight_vertex_color = vec4(toLinear(c), vertex_color.a);
+            t *= straight_vertex_color;
+
+            //Convert to premul linear
+            t.rgb *= t.a;
+
+            out_color = t;
         }",
     }
 }
@@ -520,8 +546,7 @@ mod vs {
         void main() {
             gl_Position = matrix.ortho * vec4(pos, 0.0, 1.0);
             out_uv = uv;
-            //Color is premultiplied. Undo that
-            vertex_color = color.a == 0 ? vec4(0.0) : vec4(color.rgb/color.a, color.a);
+            vertex_color = color;
         }",
     }
 }
@@ -550,6 +575,7 @@ struct EguiTexture {
     descriptor_set: Arc<vk::PersistentDescriptorSet>,
 }
 struct EguiRenderer {
+    remove_next_frame: Vec<egui::TextureId>,
     images: std::collections::HashMap<egui::TextureId, EguiTexture>,
     render_context: Arc<crate::render_device::RenderContext>,
 
@@ -567,7 +593,7 @@ impl EguiRenderer {
             device.clone(),
             attachments : {
                 swapchain_color : {
-                    load: Clear,
+                    load: Load,
                     store: Store,
                     format: surface_format,
                     samples: 1,
@@ -587,6 +613,16 @@ impl EguiRenderer {
         let fragment_entry = fragment.entry_point("main").unwrap();
         let vertex_entry = vertex.entry_point("main").unwrap();
 
+        let mut blend_premul = vk::ColorBlendState::new(1);
+        blend_premul.attachments[0].blend = Some(vk::AttachmentBlend{
+            alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+            color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+            alpha_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+            color_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+            alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+            color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+        });
+
         let pipeline = vk::GraphicsPipeline::start()
             .vertex_shader(vertex_entry, vs::SpecializationConstants::default())
             .fragment_shader(fragment_entry, fs::SpecializationConstants::default())
@@ -600,7 +636,7 @@ impl EguiRenderer {
                 topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::TriangleList),
                 primitive_restart_enable: vk::StateMode::Fixed(false),
             })
-            .color_blend_state(vk::ColorBlendState::new(1).blend_alpha())
+            .color_blend_state(blend_premul)
             .viewport_state(vk::ViewportState::Dynamic {
                 count: 1,
                 viewport_count_dynamic: false,
@@ -611,6 +647,7 @@ impl EguiRenderer {
             .result()?;
 
         Ok(Self {
+            remove_next_frame: Vec::new(),
             images: Default::default(),
             render_pass: renderpass,
             pipeline,
@@ -744,7 +781,7 @@ impl EguiRenderer {
         command_buffer_builder
             .begin_render_pass(
                 vk::RenderPassBeginInfo {
-                    clear_values: vec![Some(vk::ClearValue::Float([0.2, 0.2, 0.2, 1.0]))],
+                    clear_values: vec![None],
                     ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
                 },
                 vk::SubpassContents::Inline,
@@ -825,16 +862,30 @@ impl EguiRenderer {
             .clone();
         (0, layout)
     }
+    fn cleanup_textures(&mut self) {
+        // Pending removals - clean up after last frame
+        for texture in self.remove_next_frame.drain(..) {
+            let _ = self.images.remove(&texture);
+        }
+    }
     /// Apply image deltas, optionally returning a command buffer filled with any
     /// transfers as needed.
     pub fn do_image_deltas(
         &mut self,
         deltas: egui::TexturesDelta,
     ) -> Option<GpuResult<vk::PrimaryAutoCommandBuffer>> {
-        for free in deltas.free.iter() {
-            self.images.remove(&free).unwrap();
+        // Deltas order of operations:
+        // Set -> Draw -> Free
+        
+        // Clean up from last frame
+        if !self.remove_next_frame.is_empty() {
+            self.cleanup_textures();
         }
 
+        // Queue up removals for next frame
+        self.remove_next_frame.extend_from_slice(&deltas.free);
+
+        // Perform changes
         if deltas.set.is_empty() {
             None
         } else {

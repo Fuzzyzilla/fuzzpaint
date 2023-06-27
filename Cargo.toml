@@ -14,8 +14,11 @@ egui = {version = "0.22.0", features = ["bytemuck"]}
 env_logger = "0.10.0"
 image = "0.24.6"
 log = "0.4.18"
+parking_lot = "0.12.1"
+rand = {version = "0.8.5", features = ["small_rng"]}
 smallvec = "1.10.0"
 thiserror = "1.0.40"
+tokio = { version = "1.28.2", features = ["sync", "rt"] }
 try-block = "0.1.0"
 vulkano = "0.33.0"
 vulkano-shaders = "0.33.0"

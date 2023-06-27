@@ -5,6 +5,7 @@ use crate::egui_impl;
 use crate::gpu_err::*;
 
 use anyhow::Result as AnyResult;
+
 pub struct WindowSurface {
     event_loop: winit::event_loop::EventLoop<()>,
     win: Arc<winit::window::Window>,
@@ -28,14 +29,19 @@ impl WindowSurface {
         self,
         render_surface: render_device::RenderSurface,
         render_context: Arc<render_device::RenderContext>,
+        preview_renderer : Arc<parking_lot::RwLock<dyn crate::PreviewRenderProxy>>,
     ) -> GpuResult<WindowRenderer> {
-        let mut egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
+        let egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
         Ok(WindowRenderer {
             win: self.win,
             render_surface: Some(render_surface),
+            swapchain_generation: 0,
             render_context,
             event_loop: Some(self.event_loop),
+            last_frame_fence: None,
             egui_ctx,
+            preview_renderer,
+            stylus_events: Default::default(),
         })
     }
 }
@@ -48,10 +54,20 @@ pub struct WindowRenderer {
     render_surface: Option<render_device::RenderSurface>,
     render_context: Arc<render_device::RenderContext>,
     egui_ctx: egui_impl::EguiCtx,
+
+    stylus_events: crate::stylus_events::WinitStylusEventCollector,
+    swapchain_generation: u32,
+
+    last_frame_fence: Option<vk::sync::future::FenceSignalFuture<Box<dyn GpuFuture>>>,
+
+    preview_renderer: Arc<parking_lot::RwLock<dyn crate::PreviewRenderProxy>>,
 }
 impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
+    }
+    pub fn stylus_events(&self) -> tokio::sync::broadcast::Receiver<crate::stylus_events::StylusEventFrame> {
+        self.stylus_events.frame_receiver()
     }
     /*
     pub fn gen_framebuffers(&mut self) {
@@ -76,9 +92,12 @@ impl WindowRenderer {
             .unwrap()
             .recreate(Some(self.window().inner_size().into()))?;
 
-        self.egui_ctx.replace_surface(&new_surface);
+        self.egui_ctx.replace_surface(&new_surface)?;
 
         self.render_surface = Some(new_surface);
+        self.swapchain_generation = self.swapchain_generation.wrapping_add(1);
+
+        self.preview_renderer.write().surface_changed(self.render_surface.as_ref().unwrap());
 
         Ok(())
     }
@@ -88,7 +107,7 @@ impl WindowRenderer {
             //Todo: x-platform lol
             let out = std::process::Command::new("xdg-open").arg(url.url).spawn();
             if let Err(e) = out {
-                eprintln!("Failed to open url: {e:?}");
+                log::error!("Failed to open url: {e:?}");
             }
         }
 
@@ -102,6 +121,7 @@ impl WindowRenderer {
     pub fn run(mut self) -> ! {
         //There WILL be an event loop if we got here
         let event_loop = self.event_loop.take().unwrap();
+        self.window().request_redraw();
 
         event_loop.run(move |event, _, control_flow| {
             use winit::event::{Event, WindowEvent};
@@ -119,8 +139,46 @@ impl WindowRenderer {
                     WindowEvent::Resized(..) => {
                         self.recreate_surface().expect("Failed to rebuild surface");
                     }
+                    WindowEvent::CursorLeft { .. } => {
+                        self.stylus_events.set_mouse_pressed(false);
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        // Only take if egui doesn't want it!
+                        if !self.egui_ctx.wants_pointer_input() {
+                            self.stylus_events.push_position(position.into());
+                        }
+                    }
+                    WindowEvent::MouseInput { state, .. } => {
+                        let pressed = winit::event::ElementState::Pressed == state;
+
+                        if pressed {
+                            // Only take if egui doesn't want it!
+                            if !self.egui_ctx.wants_pointer_input() {
+                                self.stylus_events.set_mouse_pressed(true)
+                            }
+                        } else {
+                            self.stylus_events.set_mouse_pressed(false)
+                        }
+
+                    }
                     _ => (),
                 },
+                Event::DeviceEvent { event, .. } => {
+
+                    match event {
+                        //Pressure out of 65535
+                        winit::event::DeviceEvent::Motion { axis: 2, value } => {
+                            self.stylus_events.set_pressure(value as f32 / 65535.0)
+                        }
+                        _ => ()
+                    }
+                    // 0 -> x in display space
+                    // 1 -> y in display space
+                    // 2 -> pressure out of 65535, 0 if not pressed
+                    // 3 -> Tilt X, degrees from vertical, + to the right
+                    // 4 -> Tilt Y, degrees from vertical, + towards user
+                    // 5 -> unknown, always zero (rotation?)
+                }
                 Event::MainEventsCleared => {
                     //Draw!
                     if let Some(output) = self.do_ui() {
@@ -130,15 +188,23 @@ impl WindowRenderer {
                     if self.egui_ctx.needs_redraw() {
                         self.window().request_redraw()
                     }
+
+                    self.stylus_events.finish();
                 }
                 Event::RedrawRequested(..) => {
-                    self.paint();
+                    if let Err(e) = self.paint() {
+                        log::error!("{e:?}")
+                    };
+                }
+                Event::RedrawEventsCleared => {
+                    *control_flow = winit::event_loop::ControlFlow::Wait;
                 }
                 _ => (),
             }
         });
     }
     fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
+        static mut color : [f32; 4] = [1.0; 4];
         self.egui_ctx.update(|ctx| {
             egui::Window::new("🐑 Baa").show(&ctx, |ui| {
                 ui.label("Testing testing 123!!");
@@ -146,86 +212,106 @@ impl WindowRenderer {
 
             egui::Window::new("Beep boop").show(&ctx, |ui| {
                 ui.label("Testing testing 345!!");
+                //Safety - we do not call `do_ui` in a multi-threaded context.
+                // Dirty, but this is for testing ;)
+                ui.color_edit_button_rgba_premultiplied(unsafe{ &mut color }).clicked();
             });
         })
     }
-    fn paint(&mut self) {
+    fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =
             match vk::acquire_next_image(self.render_surface().swapchain().clone(), None) {
                 Err(vulkano::swapchain::AcquireError::OutOfDate) => {
-                    eprintln!("Swapchain unusable.. Recreating");
+                    log::info!("Swapchain unusable. Recreating");
                     //We cannot draw on this surface as-is. Recreate and request another try next frame.
-                    self.recreate_surface()
-                        .expect("Failed to recreate render surface after it went out-of-date.");
+                    self.recreate_surface()?;
                     self.window().request_redraw();
-                    return;
+                    return Ok(())
                 }
-                Err(_) => {
+                Err(e) => {
                     //Todo. Many of these errors are recoverable!
-                    panic!("Surface image acquire failed!");
+                    anyhow::bail!("Surface image acquire failed! {e:?}");
                 }
                 Ok(r) => r,
             };
-        let commands = self.egui_ctx.build_commands(idx);
-        if let None = commands {
-            return;
-        }
 
-        //Minimize heap allocs (by using excessive code duplication)
-        {
-            let now = self.render_context.now();
-            if let Some((transfer, draw)) = commands {
-                if let Some(transfer) = transfer {
-                    //Transfer + Draw
-                    now.then_execute(
+
+        // Lmao
+        // Free up resources from the last time this frame index was rendered
+        // Todo: call much much sooner.
+        let preview_commands = {
+            let mut lock = self.preview_renderer.write();
+
+            lock.render_complete(idx);
+            let preview_commands = lock.render(idx)?;
+            preview_commands
+        };
+        let commands = self.egui_ctx.build_commands(idx);
+
+        //Wait for previous frame to end.
+        self.last_frame_fence.take().map(|fence| fence.wait(None));
+
+        let render_complete = match commands {
+            Some((Some(transfer), draw)) => {
+                let transfer_future =
+                    self.render_context.now()
+                    .then_execute(
                         self.render_context.queues().transfer().queue().clone(),
-                        transfer,
-                    )
-                    .unwrap()
-                    .join(image_future)
-                    .then_signal_semaphore()
+                        transfer
+                    )?
+                    .boxed()
+                    .then_signal_fence_and_flush()?;
+
+                // Todo: no matter what I do, i cannot seem to get semaphores
+                // to work. Ideally, the only thing that needs to wait is the
+                // egui render commands, however it simply refuses to actually
+                // wait for the semaphore. For now, I just stall the thread.
+                transfer_future.wait(None)?;
+
+                image_future
                     .then_execute(
                         self.render_context.queues().graphics().queue().clone(),
-                        draw,
-                    )
-                    .unwrap()
+                        preview_commands
+                    )?
+                    .then_execute(
+                        self.render_context.queues().graphics().queue().clone(),
+                        draw
+                    )?
                     .boxed()
-                } else {
-                    //Just draw
-                    now.join(image_future)
-                        .then_execute(
-                            self.render_context.queues().graphics().queue().clone(),
-                            draw,
-                        )
-                        .unwrap()
-                        .boxed()
-                }
-            } else {
-                //Nothing to do - shouldn't happen (Egui won't request a redraw without anything to draw)
-                //but we've already acquired the image, we have to present it when it becomes ready.
-                now.join(image_future).boxed()
             }
-        }
-        .then_swapchain_present(
-            self.render_context
-                .queues()
-                .present()
-                .unwrap()
-                .queue()
-                .clone(),
-            vk::SwapchainPresentInfo::swapchain_image_index(
-                self.render_surface().swapchain().clone(),
-                idx,
-            ),
-        )
-        .then_signal_fence_and_flush()
-        .unwrap()
-        .wait(None)
-        .unwrap();
+            Some((None, draw)) => {
+                image_future
+                    .then_execute(
+                        self.render_context.queues().graphics().queue().clone(),
+                        preview_commands
+                    )?
+                    .then_execute_same_queue(draw)?
+                    .boxed()
+            }
+            None => {
+                image_future
+                    .then_execute(
+                        self.render_context.queues().graphics().queue().clone(),
+                        preview_commands
+                    )?
+                    .boxed()
+            }
+        };
+
+        let next_frame_future = render_complete
+            .then_swapchain_present(
+                self.render_context.queues().present().unwrap().queue().clone(),
+                vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface.as_ref().unwrap().swapchain().clone(), idx)
+            )
+            .boxed()
+            .then_signal_fence_and_flush()?;
+
+        self.last_frame_fence = Some(next_frame_future);
 
         if suboptimal {
-            self.recreate_surface()
-                .expect("Recreating suboptimal swapchain failed spectacularly");
+            self.recreate_surface()?
         }
+
+        Ok(())
     }
 }
