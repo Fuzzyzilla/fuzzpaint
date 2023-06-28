@@ -149,6 +149,9 @@ struct EguiEventAccumulator {
     screen_rect: Option<egui::Rect>,
     pixels_per_point: f32,
 
+    last_taken: std::time::Instant,
+    start_time: std::time::Instant,
+
     is_empty: bool,
 }
 impl EguiEventAccumulator {
@@ -164,6 +167,9 @@ impl EguiEventAccumulator {
             screen_rect: None,
             pixels_per_point: 1.0,
             is_empty: false,
+
+            start_time: std::time::Instant::now(),
+            last_taken: std::time::Instant::now(),
         }
     }
     pub fn accumulate(&mut self, event: &winit::event::Event<()>) {
@@ -434,6 +440,11 @@ impl EguiEventAccumulator {
     }
     pub fn take_raw_input(&mut self) -> egui::RawInput {
         self.is_empty = true;
+
+        // Take the old time, update it, and find the delta
+        let old_time = std::mem::replace(&mut self.last_taken, std::time::Instant::now());
+        let time_delta = self.last_taken - old_time;
+
         egui::RawInput {
             modifiers: self.last_modifiers,
             events: std::mem::take(&mut self.events),
@@ -442,8 +453,9 @@ impl EguiEventAccumulator {
             hovered_files: std::mem::take(&mut self.hovered_files),
             dropped_files: std::mem::take(&mut self.dropped_files),
 
-            predicted_dt: 1.0 / 60.0,
-            time: None,
+            predicted_dt: time_delta.as_secs_f32(),
+            //Time since app launch.
+            time: Some((self.last_taken - self.start_time).as_secs_f64()),
 
             screen_rect: self.screen_rect,
             pixels_per_point: Some(self.pixels_per_point),

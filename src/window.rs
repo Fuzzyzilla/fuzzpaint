@@ -236,7 +236,7 @@ impl WindowRenderer {
             egui::TopBottomPanel::top("file")   
                 .show(&ctx, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("🐑").on_hover_text("Baa");
+                        ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0))).on_hover_text("Baa");
                         egui::menu::bar(ui, |ui| {
                             ui.menu_button("File", |ui| {
                                 let add_button = |ui : &mut egui::Ui, label, shortcut| -> egui::Response {
