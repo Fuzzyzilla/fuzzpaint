@@ -5,6 +5,7 @@ use crate::egui_impl;
 use crate::gpu_err::*;
 
 use anyhow::Result as AnyResult;
+use image::EncodableLayout;
 
 pub struct WindowSurface {
     event_loop: winit::event_loop::EventLoop<()>,
@@ -210,6 +211,8 @@ impl WindowRenderer {
     fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
         static mut color : egui::Color32 = egui::Color32::BLUE;
         static mut documents : Vec<(u32, bool)> = Vec::new();
+        static mut zoom : f32 = 100.0;
+        static mut rotate : f32 = 0.0;
 
         struct Layer {
             name: String,
@@ -219,11 +222,21 @@ impl WindowRenderer {
         }
         static mut selected_layer_key : u32 = 0;
         static mut layers : Vec<Layer> = Vec::new();
+
+        struct Brush {
+            name: String,
+            image: Option<egui::epaint::TextureHandle>,
+            image_uv: egui::Rect,
+            key: u32,
+        }
+        static mut selected_brush_key : u32 = 0;
+        static mut brushes : Vec<Brush> = Vec::new();
+
         self.egui_ctx.update(|ctx| {
             egui::TopBottomPanel::top("file")   
                 .show(&ctx, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label("🐑");
+                        ui.label("🐑").on_hover_text("Baa");
                         egui::menu::bar(ui, |ui| {
                             ui.menu_button("File", |ui| {
                                 let add_button = |ui : &mut egui::Ui, label, shortcut| -> egui::Response {
@@ -251,6 +264,46 @@ impl WindowRenderer {
                             });
                             ui.menu_button("Edit", |_| ());
                         });
+                    });
+                });
+            egui::TopBottomPanel::bottom("Nav")
+                .show(&ctx, |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        //Everything here is BACKWARDS!!
+
+                        ui.label(":V");
+
+                        ui.add(egui::Separator::default().vertical());
+
+                        unsafe {
+                            //Zoom controls
+                            if ui.small_button("⟲").clicked() {
+                                zoom = 100.0;
+                            }
+                            if ui.small_button("➕").clicked() {
+                                //Next power of two
+                                zoom = (2.0f32.powf(((zoom / 100.0).log2() + 0.001).ceil()) * 100.0).max(12.5);
+                            }
+
+                            ui.add(egui::Slider::new(&mut zoom, 12.5..=12800.0).logarithmic(true).clamp_to_range(true).suffix("%").trailing_fill(true));
+
+                            if ui.small_button("➖").clicked() {
+                                //Previous power of two
+                                zoom = (2.0f32.powf(((zoom / 100.0).log2() - 0.001).floor()) * 100.0).max(12.5);
+                            }
+
+                            ui.add(egui::Separator::default().vertical());
+
+                            //Rotate controls
+                            if ui.small_button("⟲").clicked() {
+                                rotate = 0.0;
+                            };
+                            if ui.drag_angle(&mut rotate).changed() {
+                                rotate = rotate % std::f32::consts::TAU;
+                            }
+
+                            ui.add(egui::Separator::default().vertical());
+                        }
                     });
                 });
 
@@ -312,7 +365,66 @@ impl WindowRenderer {
                     ui.label("Color");
                     ui.separator();
                     unsafe {
-                        egui::color_picker::color_picker_color32(ui, &mut color, egui::color_picker::Alpha::OnlyBlend)
+                        egui::color_picker::color_picker_color32(ui, &mut color, egui::color_picker::Alpha::OnlyBlend);
+                    }
+                    ui.separator();
+                    ui.label("Brushes");
+                    ui.separator();
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("➕").clicked() {
+                            let new_idx = unsafe {brushes.len() as u32};
+                            let brush = Brush {
+                                key: new_idx,
+                                name: format!("Brush {new_idx}"),
+                                //Built-in cheat for blank texture :P
+                                image: None,
+                                image_uv: egui::Rect{min: egui::epaint::WHITE_UV, max: egui::epaint::WHITE_UV}
+                            };
+                            unsafe {
+                                brushes.push(brush);
+                            }
+                        }
+                        let _ = ui.button("✖").on_hover_text("Delete brush");
+                    });
+                    ui.separator();
+
+                    unsafe {
+                        for brush in brushes.iter_mut() {
+                            ui.group(|ui| {
+                                ui.text_edit_singleline(&mut brush.name);
+                                // Texture button, with the brushes texture (if any) or else white
+                                if ui.add(
+                                    egui::ImageButton::new(
+                                        brush.image.as_ref()
+                                            .map(egui::TextureHandle::id)
+                                            .unwrap_or(egui::TextureId::Managed(0)),
+                                        egui::vec2(50.0, 50.0)
+                                    ).uv(brush.image_uv)
+                                ).clicked() {
+                                    //Image picker
+                                    'image_fail: {
+                                        let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("images", &["png"])
+                                            .set_directory(".")
+                                            .pick_file() else {break 'image_fail};
+
+                                        let Ok(image) = image::open(path) else {break 'image_fail};
+                                        let image = image.to_rgba8();
+                                        let image_size = image.dimensions();
+                                        let image_size = [image_size.0 as usize, image_size.1 as usize];
+                                        let image_data = image.as_bytes();
+
+                                        let image = egui::ColorImage::from_rgba_unmultiplied(image_size, image_data);
+
+                                        let handle = ctx.load_texture("Brush texture", image, egui::TextureOptions::LINEAR);
+
+                                        brush.image = Some(handle);
+                                        brush.image_uv = egui::Rect{min: egui::Pos2::ZERO, max: egui::Pos2 {x: 1.0, y: 1.0}};
+                                    }
+                                };
+                            });
+                        }
                     }
                 });
 
@@ -357,7 +469,7 @@ impl WindowRenderer {
                             });
                         });
                 });
-
+                
         })
     }
     fn paint(&mut self) -> AnyResult<()> {
@@ -366,6 +478,7 @@ impl WindowRenderer {
                 Err(vulkano::swapchain::AcquireError::OutOfDate) => {
                     log::info!("Swapchain unusable. Recreating");
                     //We cannot draw on this surface as-is. Recreate and request another try next frame.
+                    //TODO: Race condition, somehow! Surface is recreated with an out-of-date size.
                     self.recreate_surface()?;
                     self.window().request_redraw();
                     return Ok(())
