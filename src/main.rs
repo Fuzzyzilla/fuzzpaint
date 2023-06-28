@@ -131,34 +131,156 @@ impl Default for Layer {
     }
 }
 
-enum LayerNode {
+pub enum LayerNode {
     Group{
         layer: GroupLayer,
-        children: Vec<LayerNode>,
+        // Make a tree in rust without unsafe challenge ((very hard))
+        children: std::cell::UnsafeCell<Vec<LayerNode>>,
+        id: FuzzID<LayerNode>,
     },
-    Layer(Layer),
+    Layer{
+        layer: Layer,
+        id: FuzzID<LayerNode>,
+    }
+}
+impl LayerNode {
+    pub fn id(&self) -> FuzzID<LayerNode> {
+        match self {
+            Self::Group { id, .. } => *id,
+            Self::Layer { id, .. } => *id,
+        }
+    }
+}
+
+impl From<GroupLayer> for LayerNode {
+    fn from(layer: GroupLayer) -> Self {
+        Self::Group { layer, children: Vec::new().into(), id: Default::default() }
+    }
+}
+impl From<Layer> for LayerNode {
+    fn from(layer: Layer) -> Self {
+        Self::Layer { layer, id: Default::default() }
+    }
 }
 
 pub struct LayerGraph {
     top_level: Vec<LayerNode>,
 }
 impl LayerGraph {
-    fn insert(&mut self, node: LayerNode) {
+    // Maybe this is a silly way to do things. It ended up causing a domino effect that caused the need
+    // for unsafe code, maybe I should rethink this. Regardless, it's an implementation detail, so it'll do for now.
+    fn find_recurse<'a>(&'a self, traverse_stack: &mut Vec<&'a LayerNode>, at : FuzzID<LayerNode>) -> bool {
+        //Find search candidates
+        let nodes_to_search = if traverse_stack.is_empty() {
+            self.top_level.as_slice()
+        } else {
+            // Return false if last element is not a group (shouldn't occur)
+            let LayerNode::Group{children, ..} = traverse_stack.last().clone().unwrap() else {return false};
+
+            //Safety - We hold an immutable reference to self, thus no mutable access to `children` can occur as well.
+            unsafe {&*children.get()}.as_slice()
+        };
+
+        for node in nodes_to_search.iter() {
+            //Found it!
+            if node.id() == at {
+                traverse_stack.push(node);
+                return true;
+            }
+
+            //Traverse deeper...
+            match node {
+                LayerNode::Group { .. } => {
+                    traverse_stack.push(node);
+                    if self.find_recurse(traverse_stack, at) {return true}
+                    //Done traversing subtree and it wasn't found, remove subtree.
+                    traverse_stack.pop();
+                }
+                _ => ()
+            }
+        }
+
+        // Did not find it and did not early return, must not have been found.
+        return false;
+    }
+    /// Find the given layer ID in the tree, returning the path to it, if any.
+    /// If a path is returned, the final element will be the layer itself.
+    fn find<'a>(&'a self, at : FuzzID<LayerNode>) -> Option<Vec<&'a LayerNode>>  {
+        let mut traverse_stack = Vec::new();
+
+        if self.find_recurse(&mut traverse_stack, at) {
+            Some(traverse_stack)
+        } else {
+            None
+        }
+    }
+    fn insert_node(&mut self, node: LayerNode) {
         self.top_level.push(node);
     }
-    fn insert_at(&mut self, at: FuzzID<Layer>, node: LayerNode) {
+    fn insert_node_at(&mut self, at: FuzzID<LayerNode>, node: LayerNode) {
+        match self.find(at) {
+            None => self.insert_node(node),
+            Some(path) => {
+                match path.last().unwrap() {
+                    LayerNode::Group { children, .. } => {
+                        //`at` is a group - insert as highest child of `at`.
+                        //Forget borrows
+                        drop(path);
+                        //reinterprit as mutable (uh oh)
+                        //Safety - We hold exclusive access to self, thus no concurrent access to the tree can occur
+                        //and no other references exist.
+                        let children = unsafe { &mut *children.get() };
 
+                        children.push(node);
+                    }
+                    _ => {
+                        //`at` is something else - insert on the same level, immediately above `at`.
+                        let Some(LayerNode::Group { children: siblings, .. }) = path.get(path.len() - 2)
+                            else {
+                                //(should be impossible) parent doesn't exist or isn't a group, add to top level instead.
+                                self.insert_node(node);
+                                return;
+                            };
+                        
+                        //Forget borrows
+                        drop(path);
+
+                        //reinterprit as mutable (uh oh)
+                        //Safety - We hold exclusive access to self, thus no concurrent access to the tree can occur
+                        //and no other references exist.
+                        let siblings = unsafe { &mut *siblings.get() };
+
+                        //Find idx of `at`
+                        let Some((idx, _)) = siblings.iter().enumerate().find(|(_, node)| node.id() == at)
+                            else {
+                                //`at` isn't a child of `at`'s parent - should be impossible! add to top of siblings instead.
+                                siblings.push(node);
+                                return;
+                            };
+
+                        //Insert after idx.
+                        siblings.insert(idx + 1, node);
+                    }
+                }
+            }
+        }
     }
     /// Insert the group at the highest position of the top level
-    pub fn insert_group(&mut self, group: GroupLayer) {
-        self.insert(LayerNode::Group { layer: group, children: Vec::new() });
+    pub fn insert_layer(&mut self, layer: impl Into<LayerNode>) -> FuzzID<LayerNode> {
+        let node = layer.into();
+        let node_id = node.id();
+        self.insert_node(node);
+        node_id
     }
     /// Insert the group at the given position
     /// If the position is a group, insert at the highest position in the group
     /// If the position is a layer, insert above it.
     /// If the position doesn't exist, behaves as `insert_group`.
-    pub fn insert_group_at(&mut self, at: FuzzID<Layer>, group: GroupLayer) {
-        self.insert_at(at, LayerNode::Group { layer: group, children: Vec::new() });
+    pub fn insert_layer_at(&mut self, at: FuzzID<LayerNode>, layer: impl Into<LayerNode>) -> FuzzID<LayerNode> {
+        let node = layer.into();
+        let node_id = node.id();
+        self.insert_node_at(at, node);
+        node_id
     }
 }
 impl Default for LayerGraph {
@@ -196,7 +318,7 @@ struct PerDocumentInterface {
     zoom: f32,
     rotate: f32,
 
-    cur_layer: Option<FuzzID<Layer>>,
+    cur_layer: Option<FuzzID<LayerNode>>,
 }
 impl Default for PerDocumentInterface {
     fn default() -> Self {
@@ -315,25 +437,29 @@ impl DocumentUserInterface {
                     return
                 };
             
-            /*
+            let document_interface = self.document_interfaces.entry(document_id).or_default();
+            
             ui.horizontal(|ui| {
                 if ui.button("➕").clicked() {
-                    let new_idx = unsafe {layers.len() as u32};
-                    let layer = Layer {
-                        blend_mode: crate::BlendMode::Normal,
-                        key: new_idx,
-                        name: format!("Layer {new_idx}"),
-                        opacity: 1.0
-                    };
-                    unsafe {
-                        layers.push(layer);
+                    let layer = Layer::default();
+                    if let Some(selected) = document_interface.cur_layer {
+                        document.layers.insert_layer_at(selected, layer);
+                    } else {
+                        document.layers.insert_layer(layer);
                     }
                 }
-                let _ = ui.button("🗀");
+                if ui.button("🗀").clicked() {
+                    let group = GroupLayer::default();
+                    if let Some(selected) = document_interface.cur_layer {
+                        document.layers.insert_layer_at(selected, group);
+                    } else {
+                        document.layers.insert_layer(group);
+                    }
+                }
                 let _ = ui.button("⤵").on_hover_text("Merge down");
                 let _ = ui.button("✖").on_hover_text("Delete layer");
             });
-
+            /*
             ui.separator();
             egui::ScrollArea::vertical()
                 .show(ui, |ui| {
