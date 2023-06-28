@@ -37,12 +37,31 @@ static ID_SERVER :
 
 /// ID that is unique within this execution of the program.
 /// IDs with different types may share a value but should not be considered equal.
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct FuzzID<T: std::any::Any> {
     id: u32,
     // Namespace marker
     _phantom : std::marker::PhantomData<T>,
 }
+
+//Derivation of these traits fails, for some reason.
+impl<T: std::any::Any> Clone for FuzzID<T> {
+    fn clone(&self) -> Self {
+        FuzzID { id: self.id, _phantom: Default::default() }
+    }
+}
+impl<T: std::any::Any> Copy for FuzzID<T> {}
+impl<T: std::any::Any> std::cmp::PartialEq for FuzzID<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl<T: std::any::Any> std::cmp::Eq for FuzzID<T> {}
+impl<T: std::any::Any> std::hash::Hash for FuzzID<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u32(self.id);
+    }
+}
+
 impl<T: std::any::Any> FuzzID<T> {
     pub fn id(&self) -> u32 {
         self.id
@@ -123,6 +142,25 @@ enum LayerNode {
 pub struct LayerGraph {
     top_level: Vec<LayerNode>,
 }
+impl LayerGraph {
+    fn insert(&mut self, node: LayerNode) {
+        self.top_level.push(node);
+    }
+    fn insert_at(&mut self, at: FuzzID<Layer>, node: LayerNode) {
+
+    }
+    /// Insert the group at the highest position of the top level
+    pub fn insert_group(&mut self, group: GroupLayer) {
+        self.insert(LayerNode::Group { layer: group, children: Vec::new() });
+    }
+    /// Insert the group at the given position
+    /// If the position is a group, insert at the highest position in the group
+    /// If the position is a layer, insert above it.
+    /// If the position doesn't exist, behaves as `insert_group`.
+    pub fn insert_group_at(&mut self, at: FuzzID<Layer>, group: GroupLayer) {
+        self.insert_at(at, LayerNode::Group { layer: group, children: Vec::new() });
+    }
+}
 impl Default for LayerGraph {
     fn default() -> Self {
         Self {
@@ -134,7 +172,7 @@ impl Default for LayerGraph {
 pub struct Document {
     /// The path from which the file was loaded, or None if opened as new.
     path: Option<std::path::PathBuf>,
-    /// Name of the document, from it's path or generated.
+    /// Name of the document, from its path or generated.
     name: String,
 
     /// Layers that make up this document
@@ -152,6 +190,279 @@ impl Default for Document {
             name: format!("New Document {}", id.id().wrapping_add(1)),
             id,
         }
+    }
+}
+struct PerDocumentInterface {
+    zoom: f32,
+    rotate: f32,
+
+    cur_layer: Option<FuzzID<Layer>>,
+}
+impl Default for PerDocumentInterface {
+    fn default() -> Self {
+        Self {
+            zoom: 100.0,
+            rotate: 0.0,
+            cur_layer: None,
+        }
+    }
+}
+pub struct DocumentUserInterface {
+    color: egui::Color32,
+    cur_document: Option<FuzzID<Document>>,
+
+    documents: Vec<Document>,
+    document_interfaces: std::collections::HashMap<FuzzID<Document>, PerDocumentInterface>,
+}
+impl Default for DocumentUserInterface {
+    fn default() -> Self {
+        Self {
+            color: egui::Color32::BLUE,
+            cur_document: None,
+            documents: Vec::new(),
+            document_interfaces: Default::default(),
+        }
+    }
+}
+
+impl DocumentUserInterface {
+    pub fn ui(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("file")   
+        .show(&ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0))).on_hover_text("Baa");
+                egui::menu::bar(ui, |ui| {
+                    ui.menu_button("File", |ui| {
+                        let add_button = |ui : &mut egui::Ui, label, shortcut| -> egui::Response {
+                            let mut button = egui::Button::new(label);
+                            if let Some(shortcut) = shortcut {
+                                button = button.shortcut_text(shortcut);
+                            }
+                            ui.add(button)
+                        };
+                        if add_button(ui, "New", Some("Ctrl+N")).clicked() {
+                            let document = Document::default();
+                            self.document_interfaces.insert(document.id, Default::default());
+                            self.documents.push(document);
+                        };
+                        let _ = add_button(ui, "Save", Some("Ctrl+S"));
+                        let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
+                        let _ = add_button(ui, "Open", Some("Ctrl+O"));
+                        let _ = add_button(ui, "Open as new", None);
+                        let _ = add_button(ui, "Export", None);
+                    });
+                    ui.menu_button("Edit", |_| ());
+                });
+            });
+        });
+    egui::TopBottomPanel::bottom("Nav")
+        .show(&ctx, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                //Everything here is BACKWARDS!!
+
+                ui.label(":V");
+
+                ui.add(egui::Separator::default().vertical());
+
+                // if there is no current document, there is nothing for us to do here
+                let Some(document) = self.cur_document else {return};
+
+                // Get (or create) the document interface
+                let interface = self.document_interfaces.entry(document).or_default();
+
+                //Zoom controls
+                if ui.small_button("⟲").clicked() {
+                    interface.zoom = 100.0;
+                }
+                if ui.small_button("➕").clicked() {
+                    //Next power of two
+                    interface.zoom = (2.0f32.powf(((interface.zoom / 100.0).log2() + 0.001).ceil()) * 100.0).max(12.5);
+                }
+
+                ui.add(egui::Slider::new(&mut interface.zoom, 12.5..=12800.0).logarithmic(true).clamp_to_range(true).suffix("%").trailing_fill(true));
+
+                if ui.small_button("➖").clicked() {
+                    //Previous power of two
+                    interface.zoom = (2.0f32.powf(((interface.zoom / 100.0).log2() - 0.001).floor()) * 100.0).max(12.5);
+                }
+
+                ui.add(egui::Separator::default().vertical());
+
+                //Rotate controls
+                if ui.small_button("⟲").clicked() {
+                    interface.rotate = 0.0;
+                };
+                if ui.drag_angle(&mut interface.rotate).changed() {
+                    interface.rotate = interface.rotate % std::f32::consts::TAU;
+                }
+
+                ui.add(egui::Separator::default().vertical());
+            });
+        });
+
+    egui::SidePanel::right("Layers")
+        .show(&ctx, |ui| {
+            ui.label("Layers");
+            ui.separator();
+
+            // if there is no current document, there is nothing for us to do here
+            let Some(document_id) = self.cur_document else {return};
+
+            // Find the document, otherwise clear selection
+            let Some(document) = self.documents.iter_mut().find(|doc| doc.id == document_id)
+                else {
+                    self.cur_document = None;
+                    return
+                };
+            
+            /*
+            ui.horizontal(|ui| {
+                if ui.button("➕").clicked() {
+                    let new_idx = unsafe {layers.len() as u32};
+                    let layer = Layer {
+                        blend_mode: crate::BlendMode::Normal,
+                        key: new_idx,
+                        name: format!("Layer {new_idx}"),
+                        opacity: 1.0
+                    };
+                    unsafe {
+                        layers.push(layer);
+                    }
+                }
+                let _ = ui.button("🗀");
+                let _ = ui.button("⤵").on_hover_text("Merge down");
+                let _ = ui.button("✖").on_hover_text("Delete layer");
+            });
+
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .show(ui, |ui| {
+                    unsafe {
+                        for layer in layers.iter_mut() {
+                            ui.group(|ui|{
+                                ui.horizontal(|ui| {
+                                    let mut checked = layer.key == selected_layer_key;
+                                    ui.checkbox(&mut checked, "").clicked();
+                                    if checked {
+                                        selected_layer_key = layer.key;
+                                    }
+                                    ui.text_edit_singleline(&mut layer.name);
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add(egui::DragValue::new(&mut layer.opacity).fixed_decimals(2).speed(0.01).clamp_range(0.0..=1.0));
+                                    egui::ComboBox::new(layer.key, "Mode")
+                                        .selected_text(layer.blend_mode.as_ref())
+                                        .show_ui(ui, |ui| {
+                                            for blend_mode in <crate::BlendMode as strum::IntoEnumIterator>::iter() {
+                                                ui.selectable_value(&mut layer.blend_mode, blend_mode, blend_mode.as_ref());
+                                            }
+                                        });
+                                })
+                            });
+                        }
+                    }
+                });
+                */
+        });
+
+    egui::SidePanel::left("Color picker")
+        .show(&ctx, |ui| {
+            ui.label("Color");
+            ui.separator();
+            
+            egui::color_picker::color_picker_color32(ui, &mut self.color, egui::color_picker::Alpha::OnlyBlend);
+            
+            ui.separator();
+            ui.label("Brushes");
+            ui.separator();
+            /*
+            ui.horizontal(|ui| {
+                if ui.button("➕").clicked() {
+                    let new_idx = unsafe {brushes.len() as u32};
+                    let brush = Brush {
+                        key: new_idx,
+                        name: format!("Brush {new_idx}"),
+                        //Built-in cheat for blank texture :P
+                        image: None,
+                        image_uv: egui::Rect{min: egui::epaint::WHITE_UV, max: egui::epaint::WHITE_UV}
+                    };
+                    unsafe {
+                        brushes.push(brush);
+                    }
+                }
+                let _ = ui.button("✖").on_hover_text("Delete brush");
+            });
+            ui.separator();
+
+            unsafe {
+                for brush in brushes.iter_mut() {
+                    ui.group(|ui| {
+                        ui.text_edit_singleline(&mut brush.name);
+                        // Texture button, with the brushes texture (if any) or else white
+                        if ui.add(
+                            egui::ImageButton::new(
+                                brush.image.as_ref()
+                                    .map(egui::TextureHandle::id)
+                                    .unwrap_or(egui::TextureId::Managed(0)),
+                                egui::vec2(50.0, 50.0)
+                            ).uv(brush.image_uv)
+                        ).clicked() {
+                            //Image picker
+                            'image_fail: {
+                                let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("images", &["png"])
+                                    .set_directory(".")
+                                    .pick_file() else {break 'image_fail};
+
+                                let Ok(image) = image::open(path) else {break 'image_fail};
+                                let image = image.to_rgba8();
+                                let image_size = image.dimensions();
+                                let image_size = [image_size.0 as usize, image_size.1 as usize];
+                                let image_data = image.as_bytes();
+
+                                let image = egui::ColorImage::from_rgba_unmultiplied(image_size, image_data);
+
+                                let handle = ctx.load_texture("Brush texture", image, egui::TextureOptions::LINEAR);
+
+                                brush.image = Some(handle);
+                                brush.image_uv = egui::Rect{min: egui::Pos2::ZERO, max: egui::Pos2 {x: 1.0, y: 1.0}};
+                            }
+                        };
+                    });
+                }
+            }*/
+        });
+
+    egui::TopBottomPanel::top("documents")
+        .show(&ctx, |ui| {
+            egui::ScrollArea::horizontal()
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut deleted_ids = Vec::new();
+                        for document in self.documents.iter() {
+                            egui::containers::Frame::group(ui.style())
+                                .outer_margin(egui::Margin::symmetric(0.0, 0.0))
+                                .inner_margin(egui::Margin::symmetric(0.0, 0.0))
+                                .multiply_with_opacity(if self.cur_document == Some(document.id) {1.0} else {0.0})
+                                .rounding(egui::Rounding{ne: 2.0, nw: 2.0, ..0.0.into()})
+                                .show(ui, |ui| {
+                                    ui.selectable_value(&mut self.cur_document, Some(document.id), &document.name);
+                                    if ui.small_button("✖").clicked() {
+                                        deleted_ids.push(document.id);
+                                        //Disselect if deleted.
+                                        if self.cur_document == Some(document.id) {
+                                            self.cur_document = None;
+                                        }
+                                    }
+                                });
+                        }
+                        self.documents.retain(|document| !deleted_ids.contains(&document.id));
+                        for id in deleted_ids.into_iter() {
+                            self.document_interfaces.remove(&id);
+                        }
+                    });
+                });
+        });
     }
 }
 
