@@ -22,6 +22,138 @@ pub enum BlendMode {
     Screen,
     Multiply,
 }
+impl Default for BlendMode {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+// Collection of pending IDs by type.
+static ID_SERVER :
+    std::sync::OnceLock<
+        parking_lot::RwLock<
+            std::collections::HashMap<std::any::TypeId, std::sync::atomic::AtomicU32>
+        >
+    > = std::sync::OnceLock::new();
+
+/// ID that is unique within this execution of the program.
+/// IDs with different types may share a value but should not be considered equal.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct FuzzID<T: std::any::Any> {
+    id: u32,
+    // Namespace marker
+    _phantom : std::marker::PhantomData<T>,
+}
+impl<T: std::any::Any> FuzzID<T> {
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+}
+impl<T: std::any::Any> Default for FuzzID<T> {
+    fn default() -> Self {
+        let map = ID_SERVER.get_or_init(Default::default);
+        let id = {
+            let read = map.upgradable_read();
+            let ty = std::any::TypeId::of::<T>();
+            if let Some(atomic) = read.get(&ty) {
+                //We don't really care about the order things happen in, it just needs
+                //to be unique.
+                atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            } else {
+                // We need to insert into the map - transition to exclusive access
+                let mut write = parking_lot::RwLockUpgradableReadGuard::upgrade(read);
+                // Initialize at 1, return ID 0
+                write.insert(ty, 1.into());
+                0
+            }
+        };
+
+        Self {
+            id,
+            _phantom: Default::default(),
+        }
+    }
+}
+
+pub struct GroupLayer {
+    name: String,
+
+    /// Some - grouped rendering, None - Passthrough
+    mode: Option<BlendMode>,
+
+    /// ID that is unique within this execution of the program
+    id: FuzzID<GroupLayer>,
+}
+impl Default for GroupLayer {
+    fn default() -> Self {
+        let id = FuzzID::default();
+        Self {
+            name: format!("Group {}", id.id().wrapping_add(1)),
+            id,
+            mode: None,
+        }
+    }
+}
+pub struct Layer {
+    name: String,
+    mode: BlendMode,
+
+    /// ID that is unique within this execution of the program
+    id: FuzzID<Layer>,
+}
+
+impl Default for Layer {
+    fn default() -> Self {
+        let id = FuzzID::default();
+        Self {
+            name: format!("Layer {}", id.id().wrapping_add(1)),
+            id,
+            mode: Default::default(),
+        }
+    }
+}
+
+enum LayerNode {
+    Group{
+        layer: GroupLayer,
+        children: Vec<LayerNode>,
+    },
+    Layer(Layer),
+}
+
+pub struct LayerGraph {
+    top_level: Vec<LayerNode>,
+}
+impl Default for LayerGraph {
+    fn default() -> Self {
+        Self {
+            top_level: Vec::new()
+        }
+    }
+}
+
+pub struct Document {
+    /// The path from which the file was loaded, or None if opened as new.
+    path: Option<std::path::PathBuf>,
+    /// Name of the document, from it's path or generated.
+    name: String,
+
+    /// Layers that make up this document
+    layers: LayerGraph,
+
+    /// ID that is unique within this execution of the program
+    id: FuzzID<Document>,
+}
+impl Default for Document {
+    fn default() -> Self {
+        let id = FuzzID::default();
+        Self {
+            path: None,
+            layers: Default::default(),
+            name: format!("New Document {}", id.id().wrapping_add(1)),
+            id,
+        }
+    }
+}
 
 #[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
