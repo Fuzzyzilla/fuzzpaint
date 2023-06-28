@@ -16,6 +16,13 @@ pub mod DocumentViewportProxy;
 
 use anyhow::Result as AnyResult;
 
+#[derive(strum::AsRefStr, PartialEq, Eq, strum::EnumIter, Copy, Clone)]
+pub enum BlendMode {
+    Normal,
+    Screen,
+    Multiply,
+}
+
 #[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
 struct StrokePointUnpacked {
@@ -61,7 +68,7 @@ mod test_renderer_vert {
     }
 }
 
-const DOCUMENT_DIMENSION : u32 = 256;
+const DOCUMENT_DIMENSION : u32 = 512;
 
 fn make_test_image(render_context: Arc<render_device::RenderContext>) -> AnyResult<(Arc<vk::StorageImage>, vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>)> {
     let document_format = vk::Format::R16G16B16A16_SFLOAT;

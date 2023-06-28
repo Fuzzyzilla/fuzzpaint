@@ -12,10 +12,14 @@ pub struct WindowSurface {
 }
 impl WindowSurface {
     pub fn new() -> AnyResult<Self> {
+        const VERSION : Option<&'static str> = option_env!("CARGO_PKG_VERSION");
+
         let event_loop = winit::event_loop::EventLoopBuilder::default().build();
         let win = winit::window::WindowBuilder::default()
+            .with_title(format!("Fuzzpaint v{}", VERSION.unwrap_or("[unknown]")))
+            .with_min_inner_size(winit::dpi::LogicalSize::new(500u32, 500u32))
             .with_transparent(false)
-            .build(&event_loop)?;
+            .build(&event_loop)?; 
 
         Ok(Self {
             event_loop: event_loop,
@@ -204,18 +208,156 @@ impl WindowRenderer {
         });
     }
     fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
-        static mut color : [f32; 4] = [1.0; 4];
-        self.egui_ctx.update(|ctx| {
-            egui::Window::new("🐑 Baa").show(&ctx, |ui| {
-                ui.label("Testing testing 123!!");
-            });
+        static mut color : egui::Color32 = egui::Color32::BLUE;
+        static mut documents : Vec<(u32, bool)> = Vec::new();
 
-            egui::Window::new("Beep boop").show(&ctx, |ui| {
-                ui.label("Testing testing 345!!");
-                //Safety - we do not call `do_ui` in a multi-threaded context.
-                // Dirty, but this is for testing ;)
-                ui.color_edit_button_rgba_premultiplied(unsafe{ &mut color }).clicked();
-            });
+        struct Layer {
+            name: String,
+            blend_mode: crate::BlendMode,
+            opacity: f32,
+            key: u32,
+        }
+        static mut selected_layer_key : u32 = 0;
+        static mut layers : Vec<Layer> = Vec::new();
+        self.egui_ctx.update(|ctx| {
+            egui::TopBottomPanel::top("file")   
+                .show(&ctx, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("🐑");
+                        egui::menu::bar(ui, |ui| {
+                            ui.menu_button("File", |ui| {
+                                let add_button = |ui : &mut egui::Ui, label, shortcut| -> egui::Response {
+                                    let mut button = egui::Button::new(label);
+                                    if let Some(shortcut) = shortcut {
+                                        button = button.shortcut_text(shortcut);
+                                    }
+                                    ui.add(button)
+                                };
+                                if add_button(ui, "New", Some("Ctrl+N")).clicked() {
+                                    unsafe {
+                                        documents.push(
+                                            (
+                                                documents.last().map(|(i, _)| i + 1).unwrap_or_default() as u32,
+                                                false
+                                            )
+                                        ) ;
+                                    }
+                                };
+                                let _ = add_button(ui, "Save", Some("Ctrl+S"));
+                                let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
+                                let _ = add_button(ui, "Open", Some("Ctrl+O"));
+                                let _ = add_button(ui, "Open as new", None);
+                                let _ = add_button(ui, "Export", None);
+                            });
+                            ui.menu_button("Edit", |_| ());
+                        });
+                    });
+                });
+
+            egui::SidePanel::right("Layers")
+                .show(&ctx, |ui| {
+                    ui.label("Layers");
+                    ui.separator();
+
+                    ui.horizontal(|ui| {
+                        if ui.button("➕").clicked() {
+                            let new_idx = unsafe {layers.len() as u32};
+                            let layer = Layer {
+                                blend_mode: crate::BlendMode::Normal,
+                                key: new_idx,
+                                name: format!("Layer {new_idx}"),
+                                opacity: 1.0
+                            };
+                            unsafe {
+                                layers.push(layer);
+                            }
+                        }
+                        let _ = ui.button("🗀");
+                        let _ = ui.button("⤵").on_hover_text("Merge down");
+                        let _ = ui.button("✖").on_hover_text("Delete layer");
+                    });
+
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .show(ui, |ui| {
+                            unsafe {
+                                for layer in layers.iter_mut() {
+                                    ui.group(|ui|{
+                                        ui.horizontal(|ui| {
+                                            let mut checked = layer.key == selected_layer_key;
+                                            ui.checkbox(&mut checked, "").clicked();
+                                            if checked {
+                                                selected_layer_key = layer.key;
+                                            }
+                                            ui.text_edit_singleline(&mut layer.name);
+                                        });
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.add(egui::DragValue::new(&mut layer.opacity).fixed_decimals(2).speed(0.01).clamp_range(0.0..=1.0));
+                                            egui::ComboBox::new(layer.key, "Mode")
+                                                .selected_text(layer.blend_mode.as_ref())
+                                                .show_ui(ui, |ui| {
+                                                    for blend_mode in <crate::BlendMode as strum::IntoEnumIterator>::iter() {
+                                                        ui.selectable_value(&mut layer.blend_mode, blend_mode, blend_mode.as_ref());
+                                                    }
+                                                });
+                                        })
+                                    });
+                                }
+                            }
+                        });
+                });
+
+            egui::SidePanel::left("Color picker")
+                .show(&ctx, |ui| {
+                    ui.label("Color");
+                    ui.separator();
+                    unsafe {
+                        egui::color_picker::color_picker_color32(ui, &mut color, egui::color_picker::Alpha::OnlyBlend)
+                    }
+                });
+
+            egui::TopBottomPanel::top("documents")
+                .show(&ctx, |ui| {
+                    egui::ScrollArea::horizontal()
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                //Safety - not running concurrently.
+                                unsafe {
+                                    let mut new_selected = None;
+                                    let mut deleted = Vec::new();
+                                    for (i, selected) in documents.iter() {
+                                        egui::containers::Frame::group(ui.style())
+                                            .outer_margin(egui::Margin::symmetric(0.0, 0.0))
+                                            .inner_margin(egui::Margin::symmetric(0.0, 0.0))
+                                            .multiply_with_opacity(if *selected {1.0} else {0.0})
+                                            .rounding(egui::Rounding{ne: 2.0, nw: 2.0, ..0.0.into()})
+                                            .show(ui, |ui| {
+                                                if ui.selectable_label(*selected, format!("Document {i}")).clicked() {
+                                                    new_selected = Some(i);
+                                                }
+                                                if ui.small_button("✖").clicked() {
+                                                    deleted.push(*i);
+                                                    if Some(i) == new_selected {
+                                                        new_selected = None;
+                                                    }
+                                                }
+                                            });
+                                    }
+                                    documents.retain(|(i, _)| !deleted.contains(i));
+                                    if let Some(new_selected) = new_selected {
+                                        for (i, selected) in documents.iter_mut() {
+                                            if i == new_selected {
+                                                *selected = true;
+                                            } else {
+                                                *selected = false;
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        });
+                });
+
         })
     }
     fn paint(&mut self) -> AnyResult<()> {
