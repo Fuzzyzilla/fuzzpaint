@@ -169,7 +169,7 @@ impl EguiEventAccumulator {
     pub fn accumulate(&mut self, event: &winit::event::Event<()>) {
         use egui::Event as GuiEvent;
         use winit::event::Event as SysEvent;
-        //TODOS: Copy/Cut/Paste, IME, and Scroll + Zoom + MouseWheel confusion, Touch, AssistKit.
+        //TODOS: Copy/Cut/Paste, IME, Touch, AssistKit.
         match event {
             SysEvent::WindowEvent { event, .. } => {
                 use winit::event::WindowEvent as WinEvent;
@@ -253,12 +253,19 @@ impl EguiEventAccumulator {
                         self.is_empty = false;
                     }
                     WinEvent::MouseWheel { delta, .. } => {
-                        let (unit, delta) = match delta {
+                        let (unit, delta, pix_delta) = match delta {
                             winit::event::MouseScrollDelta::LineDelta(x, y) => {
-                                (egui::MouseWheelUnit::Line, egui::vec2(*x, *y))
+                                (
+                                    egui::MouseWheelUnit::Line,
+                                    egui::vec2(*x, *y),
+                                    //TODO: This 10.0 constant should come from the OS-defined
+                                    //line size, for accessibility.
+                                    egui::vec2(*x, *y) * 10.0,
+                                )
                             }
                             winit::event::MouseScrollDelta::PixelDelta(delta) => (
                                 egui::MouseWheelUnit::Point,
+                                egui::vec2(delta.x as f32, delta.y as f32),
                                 egui::vec2(delta.x as f32, delta.y as f32),
                             ),
                         };
@@ -267,6 +274,18 @@ impl EguiEventAccumulator {
                             delta,
                             modifiers: self.last_modifiers,
                         });
+
+                        //Emit scroll event as well.
+                        {
+                            let mut delta = pix_delta;
+
+                            if self.last_modifiers.shift {
+                                // Transpose scroll delta
+                                std::mem::swap(&mut delta.x, &mut delta.y);
+                            }
+
+                            self.events.push(GuiEvent::Scroll(delta));
+                        }
                         self.is_empty = false;
                     }
                     WinEvent::TouchpadMagnify { delta, .. } => {
