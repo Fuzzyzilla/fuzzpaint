@@ -27,6 +27,20 @@ impl Default for BlendMode {
         Self::Normal
     }
 }
+
+pub struct Blend {
+    mode: BlendMode,
+    opacity: f32,
+}
+impl Default for Blend {
+    fn default() -> Self {
+        Self {
+            mode: Default::default(),
+            opacity: 1.0,
+        }
+    }
+}
+
 // Collection of pending IDs by type.
 static ID_SERVER :
     std::sync::OnceLock<
@@ -97,7 +111,7 @@ pub struct GroupLayer {
     name: String,
 
     /// Some - grouped rendering, None - Passthrough
-    mode: Option<BlendMode>,
+    blend: Option<Blend>,
 
     /// ID that is unique within this execution of the program
     id: FuzzID<GroupLayer>,
@@ -108,13 +122,13 @@ impl Default for GroupLayer {
         Self {
             name: format!("Group {}", id.id().wrapping_add(1)),
             id,
-            mode: None,
+            blend: None,
         }
     }
 }
 pub struct Layer {
     name: String,
-    mode: BlendMode,
+    blend: Blend,
 
     /// ID that is unique within this execution of the program
     id: FuzzID<Layer>,
@@ -126,7 +140,7 @@ impl Default for Layer {
         Self {
             name: format!("Layer {}", id.id().wrapping_add(1)),
             id,
-            mode: Default::default(),
+            blend: Default::default(),
         }
     }
 }
@@ -259,7 +273,7 @@ impl LayerGraph {
                             };
 
                         //Insert after idx.
-                        siblings.insert(idx + 1, node);
+                        siblings.insert(idx, node);
                     }
                 }
             }
@@ -281,6 +295,9 @@ impl LayerGraph {
         let node_id = node.id();
         self.insert_node_at(at, node);
         node_id
+    }
+    pub fn remove(&mut self, at: FuzzID<LayerNode>) -> LayerNode{
+        unimplemented!()
     }
 }
 impl Default for LayerGraph {
@@ -348,6 +365,68 @@ impl Default for DocumentUserInterface {
 }
 
 impl DocumentUserInterface {
+    fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut Blend) {
+        ui.horizontal_wrapped(|ui| {
+            ui.add(egui::DragValue::new(&mut blend.opacity).fixed_decimals(2).speed(0.01).clamp_range(0.0..=1.0));
+            egui::ComboBox::new(id, "Mode")
+                .selected_text(blend.mode.as_ref())
+                .show_ui(ui, |ui| {
+                    for blend_mode in <crate::BlendMode as strum::IntoEnumIterator>::iter() {
+                        ui.selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref());
+                    }
+                });
+        });
+    }
+    fn ui_layer_slice(ui: &mut egui::Ui, document_interface : &mut PerDocumentInterface, layers: &mut [LayerNode]) {
+        for layer in layers.iter_mut() {
+            ui.group(|ui| {
+                match layer {
+                    LayerNode::Group { layer, children, id } => {
+                        ui.horizontal(|ui| {
+                            let mut checked = document_interface.cur_layer == Some(*id);
+                            ui.checkbox(&mut checked, "").clicked();
+                            if checked {
+                                document_interface.cur_layer = Some(*id);
+                            }
+                            ui.text_edit_singleline(&mut layer.name);
+                        });
+
+                        let mut passthrough = layer.blend.is_none();
+                        ui.checkbox(&mut passthrough, "Passthrough");
+                        if !passthrough {
+                            //Get or insert default is unstable? :V
+                            let blend = layer.blend.get_or_insert_with(Default::default);
+
+                            Self::ui_layer_blend(ui, id, blend);
+                        } else {
+                            layer.blend = None;
+                        }
+
+                        //Safety - No concurrent access to these nodes.
+                        //TODO: iter api so as to not expose unsafe innards.
+                        let children = unsafe{ &mut *children.get() };
+                        if !children.is_empty() {
+                            ui.collapsing("Children", |ui| {
+                                Self::ui_layer_slice(ui, document_interface, children);
+                            });
+                        }
+                    },
+                    LayerNode::Layer { layer, id } => {
+                        ui.horizontal(|ui| {
+                            let mut checked = document_interface.cur_layer == Some(*id);
+                            ui.checkbox(&mut checked, "").clicked();
+                            if checked {
+                                document_interface.cur_layer = Some(*id);
+                            }
+                            ui.text_edit_singleline(&mut layer.name);
+                        });
+
+                        Self::ui_layer_blend(ui, id, &mut layer.blend);
+                    }
+                }
+            });
+        }
+    }
     pub fn ui(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("file")   
         .show(&ctx, |ui| {
@@ -457,38 +536,16 @@ impl DocumentUserInterface {
                     }
                 }
                 let _ = ui.button("⤵").on_hover_text("Merge down");
-                let _ = ui.button("✖").on_hover_text("Delete layer");
+                if ui.button("✖").on_hover_text("Delete layer").clicked() {
+
+                };
             });
-            /*
+            
             ui.separator();
             egui::ScrollArea::vertical()
                 .show(ui, |ui| {
-                    unsafe {
-                        for layer in layers.iter_mut() {
-                            ui.group(|ui|{
-                                ui.horizontal(|ui| {
-                                    let mut checked = layer.key == selected_layer_key;
-                                    ui.checkbox(&mut checked, "").clicked();
-                                    if checked {
-                                        selected_layer_key = layer.key;
-                                    }
-                                    ui.text_edit_singleline(&mut layer.name);
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.add(egui::DragValue::new(&mut layer.opacity).fixed_decimals(2).speed(0.01).clamp_range(0.0..=1.0));
-                                    egui::ComboBox::new(layer.key, "Mode")
-                                        .selected_text(layer.blend_mode.as_ref())
-                                        .show_ui(ui, |ui| {
-                                            for blend_mode in <crate::BlendMode as strum::IntoEnumIterator>::iter() {
-                                                ui.selectable_value(&mut layer.blend_mode, blend_mode, blend_mode.as_ref());
-                                            }
-                                        });
-                                })
-                            });
-                        }
-                    }
+                    Self::ui_layer_slice(ui, document_interface, &mut document.layers.top_level);
                 });
-                */
         });
 
     egui::SidePanel::left("Color picker")
