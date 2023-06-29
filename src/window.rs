@@ -5,6 +5,7 @@ use crate::egui_impl;
 use crate::gpu_err::*;
 
 use anyhow::Result as AnyResult;
+use image::EncodableLayout;
 
 pub struct WindowSurface {
     event_loop: winit::event_loop::EventLoop<()>,
@@ -12,10 +13,14 @@ pub struct WindowSurface {
 }
 impl WindowSurface {
     pub fn new() -> AnyResult<Self> {
+        const VERSION : Option<&'static str> = option_env!("CARGO_PKG_VERSION");
+
         let event_loop = winit::event_loop::EventLoopBuilder::default().build();
         let win = winit::window::WindowBuilder::default()
+            .with_title(format!("Fuzzpaint v{}", VERSION.unwrap_or("[unknown]")))
+            .with_min_inner_size(winit::dpi::LogicalSize::new(500u32, 500u32))
             .with_transparent(false)
-            .build(&event_loop)?;
+            .build(&event_loop)?; 
 
         Ok(Self {
             event_loop: event_loop,
@@ -204,19 +209,34 @@ impl WindowRenderer {
         });
     }
     fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
-        static mut color : [f32; 4] = [1.0; 4];
-        self.egui_ctx.update(|ctx| {
-            egui::Window::new("🐑 Baa").show(&ctx, |ui| {
-                ui.label("Testing testing 123!!");
-            });
+        static mut document_interface : std::sync::OnceLock<crate::DocumentUserInterface> = std::sync::OnceLock::new();
 
-            egui::Window::new("Beep boop").show(&ctx, |ui| {
-                ui.label("Testing testing 345!!");
-                //Safety - we do not call `do_ui` in a multi-threaded context.
-                // Dirty, but this is for testing ;)
-                ui.color_edit_button_rgba_premultiplied(unsafe{ &mut color }).clicked();
-            });
-        })
+        struct Layer {
+            name: String,
+            blend_mode: crate::BlendMode,
+            opacity: f32,
+            key: u32,
+        }
+        static mut selected_layer_key : u32 = 0;
+        static mut layers : Vec<Layer> = Vec::new();
+
+        struct Brush {
+            name: String,
+            image: Option<egui::epaint::TextureHandle>,
+            image_uv: egui::Rect,
+            key: u32,
+        }
+        static mut selected_brush_key : u32 = 0;
+        static mut brushes : Vec<Brush> = Vec::new();
+
+        self.egui_ctx.update(|ctx| {
+            //Safety - Not running the ui concurrently, this cannot be accessed similtaneously.
+            unsafe {
+                //Hacky but impermanent
+                document_interface.get_or_init(Default::default);
+                document_interface.get_mut().unwrap().ui(&ctx);
+            }
+        } )
     }
     fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =
@@ -224,6 +244,7 @@ impl WindowRenderer {
                 Err(vulkano::swapchain::AcquireError::OutOfDate) => {
                     log::info!("Swapchain unusable. Recreating");
                     //We cannot draw on this surface as-is. Recreate and request another try next frame.
+                    //TODO: Race condition, somehow! Surface is recreated with an out-of-date size.
                     self.recreate_surface()?;
                     self.window().request_redraw();
                     return Ok(())

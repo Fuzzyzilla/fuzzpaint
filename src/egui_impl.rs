@@ -149,6 +149,9 @@ struct EguiEventAccumulator {
     screen_rect: Option<egui::Rect>,
     pixels_per_point: f32,
 
+    last_taken: std::time::Instant,
+    start_time: std::time::Instant,
+
     is_empty: bool,
 }
 impl EguiEventAccumulator {
@@ -164,12 +167,15 @@ impl EguiEventAccumulator {
             screen_rect: None,
             pixels_per_point: 1.0,
             is_empty: false,
+
+            start_time: std::time::Instant::now(),
+            last_taken: std::time::Instant::now(),
         }
     }
     pub fn accumulate(&mut self, event: &winit::event::Event<()>) {
         use egui::Event as GuiEvent;
         use winit::event::Event as SysEvent;
-        //TODOS: Copy/Cut/Paste, IME, and Scroll + Zoom + MouseWheel confusion, Touch, AssistKit.
+        //TODOS: Copy/Cut/Paste, IME, Touch, AssistKit.
         match event {
             SysEvent::WindowEvent { event, .. } => {
                 use winit::event::WindowEvent as WinEvent;
@@ -253,12 +259,19 @@ impl EguiEventAccumulator {
                         self.is_empty = false;
                     }
                     WinEvent::MouseWheel { delta, .. } => {
-                        let (unit, delta) = match delta {
+                        let (unit, delta, pix_delta) = match delta {
                             winit::event::MouseScrollDelta::LineDelta(x, y) => {
-                                (egui::MouseWheelUnit::Line, egui::vec2(*x, *y))
+                                (
+                                    egui::MouseWheelUnit::Line,
+                                    egui::vec2(*x, *y),
+                                    //TODO: This 10.0 constant should come from the OS-defined
+                                    //line size, for accessibility.
+                                    egui::vec2(*x, *y) * 10.0,
+                                )
                             }
                             winit::event::MouseScrollDelta::PixelDelta(delta) => (
                                 egui::MouseWheelUnit::Point,
+                                egui::vec2(delta.x as f32, delta.y as f32),
                                 egui::vec2(delta.x as f32, delta.y as f32),
                             ),
                         };
@@ -267,6 +280,18 @@ impl EguiEventAccumulator {
                             delta,
                             modifiers: self.last_modifiers,
                         });
+
+                        //Emit scroll event as well.
+                        {
+                            let mut delta = pix_delta;
+
+                            if self.last_modifiers.shift {
+                                // Transpose scroll delta
+                                std::mem::swap(&mut delta.x, &mut delta.y);
+                            }
+
+                            self.events.push(GuiEvent::Scroll(delta));
+                        }
                         self.is_empty = false;
                     }
                     WinEvent::TouchpadMagnify { delta, .. } => {
@@ -415,6 +440,11 @@ impl EguiEventAccumulator {
     }
     pub fn take_raw_input(&mut self) -> egui::RawInput {
         self.is_empty = true;
+
+        // Take the old time, update it, and find the delta
+        let old_time = std::mem::replace(&mut self.last_taken, std::time::Instant::now());
+        let time_delta = self.last_taken - old_time;
+
         egui::RawInput {
             modifiers: self.last_modifiers,
             events: std::mem::take(&mut self.events),
@@ -423,8 +453,9 @@ impl EguiEventAccumulator {
             hovered_files: std::mem::take(&mut self.hovered_files),
             dropped_files: std::mem::take(&mut self.dropped_files),
 
-            predicted_dt: 1.0 / 60.0,
-            time: None,
+            predicted_dt: time_delta.as_secs_f32(),
+            //Time since app launch.
+            time: Some((self.last_taken - self.start_time).as_secs_f64()),
 
             screen_rect: self.screen_rect,
             pixels_per_point: Some(self.pixels_per_point),
