@@ -503,6 +503,9 @@ impl DocumentUserInterface {
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut document_interface.cur_layer, Some(*id), "");
                             ui.text_edit_singleline(&mut layer.name);
+                        }).response.on_hover_ui(|ui| {
+                            ui.label(format!("{}", id));
+                            ui.label(format!("{}", layer.id));
                         });
 
                         let mut passthrough = layer.blend.is_none();
@@ -530,7 +533,10 @@ impl DocumentUserInterface {
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut document_interface.cur_layer, Some(*id), "");
                             ui.text_edit_singleline(&mut layer.name);
-                        });
+                        }).response.on_hover_ui(|ui| {
+                            ui.label(format!("{}", id));
+                            ui.label(format!("{}", layer.id));
+                        });;
 
                         Self::ui_layer_blend(ui, id, &mut layer.blend);
                     }
@@ -739,6 +745,9 @@ impl DocumentUserInterface {
                     ui.horizontal(|ui| {
                         ui.radio_value(&mut self.cur_brush, Some(brush.id), "");
                         ui.text_edit_singleline(&mut brush.name);
+                    }).response.on_hover_ui(|ui| {
+                        ui.label(format!("{}", brush.id));
+                        ui.label(brush.universal_id.to_string());
                     });
                     egui::CollapsingHeader::new("Settings")
                         .id_source(brush.id)
@@ -856,6 +865,8 @@ impl DocumentUserInterface {
                                             self.cur_document = None;
                                         }
                                     }
+                                }).response.on_hover_ui(|ui| {
+                                    ui.label(format!("{}", document.id));
                                 });
                         }
                         self.documents.retain(|document| !deleted_ids.contains(&document.id));
