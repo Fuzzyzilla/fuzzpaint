@@ -1,11 +1,10 @@
-use std::sync::Arc;
-use crate::vulkano_prelude::*;
-use crate::render_device;
 use crate::egui_impl;
 use crate::gpu_err::*;
+use crate::render_device;
+use crate::vulkano_prelude::*;
+use std::sync::Arc;
 
 use anyhow::Result as AnyResult;
-use image::EncodableLayout;
 
 pub struct WindowSurface {
     event_loop: winit::event_loop::EventLoop<()>,
@@ -13,14 +12,14 @@ pub struct WindowSurface {
 }
 impl WindowSurface {
     pub fn new() -> AnyResult<Self> {
-        const VERSION : Option<&'static str> = option_env!("CARGO_PKG_VERSION");
+        const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
         let event_loop = winit::event_loop::EventLoopBuilder::default().build();
         let win = winit::window::WindowBuilder::default()
             .with_title(format!("Fuzzpaint v{}", VERSION.unwrap_or("[unknown]")))
             .with_min_inner_size(winit::dpi::LogicalSize::new(500u32, 500u32))
             .with_transparent(false)
-            .build(&event_loop)?; 
+            .build(&event_loop)?;
 
         Ok(Self {
             event_loop: event_loop,
@@ -34,7 +33,7 @@ impl WindowSurface {
         self,
         render_surface: render_device::RenderSurface,
         render_context: Arc<render_device::RenderContext>,
-        preview_renderer : Arc<parking_lot::RwLock<dyn crate::PreviewRenderProxy>>,
+        preview_renderer: Arc<parking_lot::RwLock<dyn crate::PreviewRenderProxy>>,
     ) -> GpuResult<WindowRenderer> {
         let egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
         Ok(WindowRenderer {
@@ -71,7 +70,9 @@ impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
     }
-    pub fn stylus_events(&self) -> tokio::sync::broadcast::Receiver<crate::stylus_events::StylusEventFrame> {
+    pub fn stylus_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::stylus_events::StylusEventFrame> {
         self.stylus_events.frame_receiver()
     }
     /*
@@ -102,7 +103,9 @@ impl WindowRenderer {
         self.render_surface = Some(new_surface);
         self.swapchain_generation = self.swapchain_generation.wrapping_add(1);
 
-        self.preview_renderer.write().surface_changed(self.render_surface.as_ref().unwrap());
+        self.preview_renderer
+            .write()
+            .surface_changed(self.render_surface.as_ref().unwrap());
 
         Ok(())
     }
@@ -164,18 +167,16 @@ impl WindowRenderer {
                         } else {
                             self.stylus_events.set_mouse_pressed(false)
                         }
-
                     }
                     _ => (),
                 },
                 Event::DeviceEvent { event, .. } => {
-
                     match event {
                         //Pressure out of 65535
                         winit::event::DeviceEvent::Motion { axis: 2, value } => {
                             self.stylus_events.set_pressure(value as f32 / 65535.0)
                         }
-                        _ => ()
+                        _ => (),
                     }
                     // 0 -> x in display space
                     // 1 -> y in display space
@@ -209,34 +210,16 @@ impl WindowRenderer {
         });
     }
     fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
-        static mut document_interface : std::sync::OnceLock<crate::DocumentUserInterface> = std::sync::OnceLock::new();
-
-        struct Layer {
-            name: String,
-            blend_mode: crate::BlendMode,
-            opacity: f32,
-            key: u32,
-        }
-        static mut selected_layer_key : u32 = 0;
-        static mut layers : Vec<Layer> = Vec::new();
-
-        struct Brush {
-            name: String,
-            image: Option<egui::epaint::TextureHandle>,
-            image_uv: egui::Rect,
-            key: u32,
-        }
-        static mut selected_brush_key : u32 = 0;
-        static mut brushes : Vec<Brush> = Vec::new();
-
+        static mut DOCUMENT_INTERFACE: std::sync::OnceLock<crate::DocumentUserInterface> =
+            std::sync::OnceLock::new();
         self.egui_ctx.update(|ctx| {
             //Safety - Not running the ui concurrently, this cannot be accessed similtaneously.
             unsafe {
                 //Hacky but impermanent
-                document_interface.get_or_init(Default::default);
-                document_interface.get_mut().unwrap().ui(&ctx);
+                DOCUMENT_INTERFACE.get_or_init(Default::default);
+                DOCUMENT_INTERFACE.get_mut().unwrap().ui(&ctx);
             }
-        } )
+        })
     }
     fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =
@@ -247,7 +230,7 @@ impl WindowRenderer {
                     //TODO: Race condition, somehow! Surface is recreated with an out-of-date size.
                     self.recreate_surface()?;
                     self.window().request_redraw();
-                    return Ok(())
+                    return Ok(());
                 }
                 Err(e) => {
                     //Todo. Many of these errors are recoverable!
@@ -255,7 +238,6 @@ impl WindowRenderer {
                 }
                 Ok(r) => r,
             };
-
 
         // Lmao
         // Free up resources from the last time this frame index was rendered
@@ -274,11 +256,12 @@ impl WindowRenderer {
 
         let render_complete = match commands {
             Some((Some(transfer), draw)) => {
-                let transfer_future =
-                    self.render_context.now()
+                let transfer_future = self
+                    .render_context
+                    .now()
                     .then_execute(
                         self.render_context.queues().transfer().queue().clone(),
-                        transfer
+                        transfer,
                     )?
                     .boxed()
                     .then_signal_fence_and_flush()?;
@@ -292,37 +275,41 @@ impl WindowRenderer {
                 image_future
                     .then_execute(
                         self.render_context.queues().graphics().queue().clone(),
-                        preview_commands
+                        preview_commands,
                     )?
                     .then_execute(
                         self.render_context.queues().graphics().queue().clone(),
-                        draw
+                        draw,
                     )?
                     .boxed()
             }
-            Some((None, draw)) => {
-                image_future
-                    .then_execute(
-                        self.render_context.queues().graphics().queue().clone(),
-                        preview_commands
-                    )?
-                    .then_execute_same_queue(draw)?
-                    .boxed()
-            }
-            None => {
-                image_future
-                    .then_execute(
-                        self.render_context.queues().graphics().queue().clone(),
-                        preview_commands
-                    )?
-                    .boxed()
-            }
+            Some((None, draw)) => image_future
+                .then_execute(
+                    self.render_context.queues().graphics().queue().clone(),
+                    preview_commands,
+                )?
+                .then_execute_same_queue(draw)?
+                .boxed(),
+            None => image_future
+                .then_execute(
+                    self.render_context.queues().graphics().queue().clone(),
+                    preview_commands,
+                )?
+                .boxed(),
         };
 
         let next_frame_future = render_complete
             .then_swapchain_present(
-                self.render_context.queues().present().unwrap().queue().clone(),
-                vk::SwapchainPresentInfo::swapchain_image_index(self.render_surface.as_ref().unwrap().swapchain().clone(), idx)
+                self.render_context
+                    .queues()
+                    .present()
+                    .unwrap()
+                    .queue()
+                    .clone(),
+                vk::SwapchainPresentInfo::swapchain_image_index(
+                    self.render_surface.as_ref().unwrap().swapchain().clone(),
+                    idx,
+                ),
             )
             .boxed()
             .then_signal_fence_and_flush()?;

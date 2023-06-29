@@ -23,7 +23,6 @@ pub struct EguiCtx {
     ctx: egui::Context,
     events: EguiEventAccumulator,
     renderer: EguiRenderer,
-    render_ctx: Arc<crate::render_device::RenderContext>,
 
     requested_redraw_times: std::collections::VecDeque<std::time::Instant>,
     immediate_redraw: bool,
@@ -38,7 +37,6 @@ impl EguiCtx {
             ctx: Default::default(),
             events: Default::default(),
             renderer,
-            render_ctx: render_surface.context().clone(),
             immediate_redraw: true,
             requested_redraw_times: std::collections::VecDeque::from_iter(std::iter::once(
                 std::time::Instant::now(),
@@ -432,7 +430,7 @@ impl EguiEventAccumulator {
             winit_key::Y => Some(egui_key::Y),
             winit_key::Z => Some(egui_key::Z),
 
-            _ => None
+            _ => None,
         }
     }
     pub fn is_empty(&self) -> bool {
@@ -645,11 +643,13 @@ impl EguiRenderer {
         let vertex_entry = vertex.entry_point("main").unwrap();
 
         let mut blend_premul = vk::ColorBlendState::new(1);
-        blend_premul.attachments[0].blend = Some(vk::AttachmentBlend{
+        blend_premul.attachments[0].blend = Some(vk::AttachmentBlend {
             alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
             color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-            alpha_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-            color_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+            alpha_destination:
+                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+            color_destination:
+                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
             alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
             color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
         });
@@ -907,7 +907,7 @@ impl EguiRenderer {
     ) -> Option<GpuResult<vk::PrimaryAutoCommandBuffer>> {
         // Deltas order of operations:
         // Set -> Draw -> Free
-        
+
         // Clean up from last frame
         if !self.remove_next_frame.is_empty() {
             self.cleanup_textures();

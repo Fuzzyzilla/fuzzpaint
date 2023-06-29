@@ -62,10 +62,8 @@ impl Queues {
 pub struct RenderSurface {
     context: Arc<RenderContext>,
     swapchain: Arc<vk::Swapchain>,
-    surface: Arc<vk::Surface>,
+    _surface: Arc<vk::Surface>,
     swapchain_images: Vec<Arc<vk::SwapchainImage>>,
-    //A future for each image, representing the time at which it has been presented and can start to be redrawn.
-    fences: Vec<Option<Box<dyn vk::sync::GpuFuture>>>,
 
     swapchain_create_info: vk::SwapchainCreateInfo,
 }
@@ -141,10 +139,9 @@ impl RenderSurface {
         Ok(Self {
             context: context,
             swapchain,
-            surface: surface.clone(),
+            _surface: surface.clone(),
             swapchain_images: images,
             swapchain_create_info,
-            fences: Vec::new(),
         })
     }
     pub fn recreate(self, new_size: Option<[u32; 2]>) -> AnyResult<Self> {
@@ -160,12 +157,6 @@ impl RenderSurface {
             swapchain_create_info: new_info,
             ..self
         })
-    }
-    fn gen_framebuffers(&mut self) {
-        let framebuffers = self.swapchain_images.iter().map(|image| {
-            //vulkano::render_pass::Framebuffer::n
-            ()
-        });
     }
 }
 
@@ -188,13 +179,13 @@ impl Allocators {
 }
 
 pub struct RenderContext {
-    library: Arc<vk::VulkanLibrary>,
-    instance: Arc<vk::Instance>,
+    _library: Arc<vk::VulkanLibrary>,
+    _instance: Arc<vk::Instance>,
     physical_device: Arc<vk::PhysicalDevice>,
     device: Arc<vk::Device>,
     queues: Queues,
 
-    debugger: Option<vulkano::instance::debug::DebugUtilsMessenger>,
+    _debugger: Option<vulkano::instance::debug::DebugUtilsMessenger>,
 
     allocators: Allocators,
 }
@@ -232,15 +223,13 @@ impl RenderContext {
             vkDebug::DebugUtilsMessenger::new(
                 instance.clone(),
                 vkDebug::DebugUtilsMessengerCreateInfo {
-                    message_severity:
-                        vkDebug::DebugUtilsMessageSeverity::ERROR |
-                        vkDebug::DebugUtilsMessageSeverity::WARNING |
-                        vkDebug::DebugUtilsMessageSeverity::INFO |
-                        vkDebug::DebugUtilsMessageSeverity::VERBOSE,
-                    message_type:
-                        vkDebug::DebugUtilsMessageType::GENERAL |
-                        vkDebug::DebugUtilsMessageType::PERFORMANCE |
-                        vkDebug::DebugUtilsMessageType::VALIDATION,
+                    message_severity: vkDebug::DebugUtilsMessageSeverity::ERROR
+                        | vkDebug::DebugUtilsMessageSeverity::WARNING
+                        | vkDebug::DebugUtilsMessageSeverity::INFO
+                        | vkDebug::DebugUtilsMessageSeverity::VERBOSE,
+                    message_type: vkDebug::DebugUtilsMessageType::GENERAL
+                        | vkDebug::DebugUtilsMessageType::PERFORMANCE
+                        | vkDebug::DebugUtilsMessageType::VALIDATION,
                     ..vkDebug::DebugUtilsMessengerCreateInfo::user_callback(
                         // Must NOT access the vulkan api.
                         Arc::new(|message| {
@@ -259,9 +248,9 @@ impl RenderContext {
                             let layer = message.layer_prefix.unwrap_or("");
 
                             log::log!(target: "vulkan", level, "[{ty}] {layer} - {}", message.description);
-                        })
+                        }),
                     )
-                }
+                },
             )
         }?;
 
@@ -287,7 +276,7 @@ impl RenderContext {
             queue_indices,
             required_device_extensions,
         )?;
-        
+
         // We have a device! Now to create the swapchain..
         let image_size = win.window().inner_size();
 
@@ -300,13 +289,13 @@ impl RenderContext {
                 memory_alloc: vk::StandardMemoryAllocator::new_default(device.clone()),
                 descriptor_set_alloc: vk::StandardDescriptorSetAllocator::new(device.clone()),
             },
-            library,
-            instance,
+            _library: library,
+            _instance: instance,
             device,
             physical_device,
             queues,
 
-            debugger: Some(debugger),
+            _debugger: Some(debugger),
         });
         let render_surface =
             RenderSurface::new(context.clone(), surface.clone(), image_size.into())?;
@@ -393,7 +382,7 @@ impl RenderContext {
             physical_device,
             vk::DeviceCreateInfo {
                 enabled_extensions: extensions,
-                enabled_features: vk::Features{
+                enabled_features: vk::Features {
                     wide_lines: true,
                     rectangular_lines: true,
                     ..vk::Features::empty()

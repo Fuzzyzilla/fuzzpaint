@@ -1,6 +1,3 @@
-use std::{future::Future, sync::Arc};
-
-
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug)]
 pub enum StylusAxis {
@@ -28,7 +25,13 @@ pub struct StylusEvent {
 }
 impl StylusEvent {
     pub fn empty() -> Self {
-        Self { pos: (0.0, 0.0), pressed: false, pressure: None, tilt: None, dist: None }
+        Self {
+            pos: (0.0, 0.0),
+            pressed: false,
+            pressure: None,
+            tilt: None,
+            dist: None,
+        }
     }
 }
 impl StylusAxes for StylusEvent {
@@ -40,7 +43,6 @@ impl StylusAxes for StylusEvent {
             StylusAxis::Pressure => self.pressure,
             StylusAxis::TiltX => self.tilt.map(|tilt| tilt.0),
             StylusAxis::TiltY => self.tilt.map(|tilt| tilt.1),
-            _ => None,
         }
     }
     fn set_axis(&mut self, axis: StylusAxis, value: f32) -> Result<(), ()> {
@@ -57,7 +59,6 @@ impl StylusAxes for StylusEvent {
                 let tilt_x = self.tilt.unwrap_or_default().0;
                 self.tilt = Some((tilt_x, value));
             }
-            _ => return Err(()),
         }
         Ok(())
     }
@@ -86,7 +87,10 @@ impl WinitStylusEventCollector {
         let event = StylusEvent {
             pos,
             pressed: self.mouse_pressed,
-            pressure: Some(self.pressure.unwrap_or(if self.mouse_pressed {1.0} else {0.0})),
+            pressure: Some(
+                self.pressure
+                    .unwrap_or(if self.mouse_pressed { 1.0 } else { 0.0 }),
+            ),
             ..StylusEvent::empty()
         };
 
@@ -96,7 +100,7 @@ impl WinitStylusEventCollector {
     }
     pub fn set_pressure(&mut self, pressure: f32) {
         self.pressure = Some(pressure);
-    } 
+    }
     pub fn set_mouse_pressed(&mut self, pressed: bool) {
         self.mouse_pressed = pressed;
         if !pressed {
@@ -113,12 +117,12 @@ impl WinitStylusEventCollector {
     /// Events will be accumulated in the case of no listeners.
     fn broadcast(&mut self) {
         let inner_frame = self.take_frame();
-        let frame = StylusEventFrame(Arc::new(inner_frame));
+        let frame = StylusEventFrame(std::sync::Arc::new(inner_frame));
         if let Err(err) = self.frame_channel.send(frame) {
             //The frame failed to send, recover it!
             //The only reference is stored in err.0.0, thus
             //into_inner will never fail.
-            let inner_frame = Arc::into_inner(err.0.0).unwrap();
+            let inner_frame = std::sync::Arc::into_inner(err.0 .0).unwrap();
 
             self.recover_frame(inner_frame);
         }
@@ -129,7 +133,7 @@ impl WinitStylusEventCollector {
     /// Take all the data and construct a frame from it for broadcast.
     fn take_frame(&mut self) -> StylusEventFrameInner {
         StylusEventFrameInner {
-            events: std::mem::take(&mut self.events)
+            events: std::mem::take(&mut self.events),
         }
     }
     /// Take a frame and repopulate self. Useful for failed broadcasts.

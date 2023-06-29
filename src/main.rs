@@ -1,18 +1,16 @@
 #![feature(array_chunks)]
 
-use std::{sync::Arc, ops::Deref, fmt::Debug};
+use std::sync::Arc;
 mod egui_impl;
 pub mod gpu_err;
 pub mod vulkano_prelude;
 pub mod window;
 use cgmath::{Matrix4, SquareMatrix};
-use gpu_err::GpuResult;
-use rand::{SeedableRng, Rng};
-use vulkano::{command_buffer::{self, AutoCommandBufferBuilder}, format};
+use vulkano::command_buffer;
 use vulkano_prelude::*;
+pub mod DocumentViewportProxy;
 pub mod render_device;
 pub mod stylus_events;
-pub mod DocumentViewportProxy;
 
 use anyhow::Result as AnyResult;
 
@@ -42,25 +40,25 @@ impl Default for Blend {
 }
 
 // Collection of pending IDs by type.
-static ID_SERVER :
-    std::sync::OnceLock<
-        parking_lot::RwLock<
-            std::collections::HashMap<std::any::TypeId, std::sync::atomic::AtomicU64>
-        >
-    > = std::sync::OnceLock::new();
+static ID_SERVER: std::sync::OnceLock<
+    parking_lot::RwLock<std::collections::HashMap<std::any::TypeId, std::sync::atomic::AtomicU64>>,
+> = std::sync::OnceLock::new();
 
 /// ID that is unique within this execution of the program.
 /// IDs with different types may share a value but should not be considered equal.
 pub struct FuzzID<T: std::any::Any> {
     id: u64,
     // Namespace marker
-    _phantom : std::marker::PhantomData<T>,
+    _phantom: std::marker::PhantomData<T>,
 }
 
 //Derivation of these traits fails, for some reason.
 impl<T: std::any::Any> Clone for FuzzID<T> {
     fn clone(&self) -> Self {
-        FuzzID { id: self.id, _phantom: Default::default() }
+        FuzzID {
+            id: self.id,
+            _phantom: Default::default(),
+        }
     }
 }
 impl<T: std::any::Any> Copy for FuzzID<T> {}
@@ -109,7 +107,12 @@ impl<T: std::any::Any> Default for FuzzID<T> {
 impl<T: std::any::Any> std::fmt::Display for FuzzID<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         //Unwrap here is safe - the rsplit will always return at least one element, even for empty strings.
-        write!(f, "{}#{}", std::any::type_name::<T>().rsplit("::").next().unwrap(), self.id)
+        write!(
+            f,
+            "{}#{}",
+            std::any::type_name::<T>().rsplit("::").next().unwrap(),
+            self.id
+        )
     }
 }
 
@@ -152,16 +155,16 @@ impl Default for Layer {
 }
 
 pub enum LayerNode {
-    Group{
+    Group {
         layer: GroupLayer,
         // Make a tree in rust without unsafe challenge ((very hard))
         children: std::cell::UnsafeCell<Vec<LayerNode>>,
         id: FuzzID<LayerNode>,
     },
-    Layer{
+    Layer {
         layer: Layer,
         id: FuzzID<LayerNode>,
-    }
+    },
 }
 impl LayerNode {
     pub fn id(&self) -> FuzzID<LayerNode> {
@@ -174,12 +177,19 @@ impl LayerNode {
 
 impl From<GroupLayer> for LayerNode {
     fn from(layer: GroupLayer) -> Self {
-        Self::Group { layer, children: Vec::new().into(), id: Default::default() }
+        Self::Group {
+            layer,
+            children: Vec::new().into(),
+            id: Default::default(),
+        }
     }
 }
 impl From<Layer> for LayerNode {
     fn from(layer: Layer) -> Self {
-        Self::Layer { layer, id: Default::default() }
+        Self::Layer {
+            layer,
+            id: Default::default(),
+        }
     }
 }
 
@@ -189,7 +199,11 @@ pub struct LayerGraph {
 impl LayerGraph {
     // Maybe this is a silly way to do things. It ended up causing a domino effect that caused the need
     // for unsafe code, maybe I should rethink this. Regardless, it's an implementation detail, so it'll do for now.
-    fn find_recurse<'a>(&'a self, traverse_stack: &mut Vec<&'a LayerNode>, at : FuzzID<LayerNode>) -> bool {
+    fn find_recurse<'a>(
+        &'a self,
+        traverse_stack: &mut Vec<&'a LayerNode>,
+        at: FuzzID<LayerNode>,
+    ) -> bool {
         //Find search candidates
         let nodes_to_search = if traverse_stack.is_empty() {
             self.top_level.as_slice()
@@ -198,7 +212,7 @@ impl LayerGraph {
             let LayerNode::Group{children, ..} = traverse_stack.last().clone().unwrap() else {return false};
 
             //Safety - We hold an immutable reference to self, thus no mutable access to `children` can occur as well.
-            unsafe {&*children.get()}.as_slice()
+            unsafe { &*children.get() }.as_slice()
         };
 
         for node in nodes_to_search.iter() {
@@ -212,11 +226,13 @@ impl LayerGraph {
             match node {
                 LayerNode::Group { .. } => {
                     traverse_stack.push(node);
-                    if self.find_recurse(traverse_stack, at) {return true}
+                    if self.find_recurse(traverse_stack, at) {
+                        return true;
+                    }
                     //Done traversing subtree and it wasn't found, remove subtree.
                     traverse_stack.pop();
                 }
-                _ => ()
+                _ => (),
             }
         }
 
@@ -225,7 +241,7 @@ impl LayerGraph {
     }
     /// Find the given layer ID in the tree, returning the path to it, if any.
     /// If a path is returned, the final element will be the layer itself.
-    fn find<'a>(&'a self, at : FuzzID<LayerNode>) -> Option<Vec<&'a LayerNode>>  {
+    fn find<'a>(&'a self, at: FuzzID<LayerNode>) -> Option<Vec<&'a LayerNode>> {
         let mut traverse_stack = Vec::new();
 
         if self.find_recurse(&mut traverse_stack, at) {
@@ -274,7 +290,7 @@ impl LayerGraph {
                             //reinterprit as mutable (uh oh)
                             //Safety - We hold exclusive access to self, thus no concurrent access to the tree can occur
                             //and no other references exist.
-                            unsafe{ &mut *siblings.get() }
+                            unsafe { &mut *siblings.get() }
                         };
 
                         //Find idx of `at`
@@ -303,13 +319,20 @@ impl LayerGraph {
     /// If the position is a group, insert at the highest position in the group
     /// If the position is a layer, insert above it.
     /// If the position doesn't exist, behaves as `insert_group`.
-    pub fn insert_layer_at(&mut self, at: FuzzID<LayerNode>, layer: impl Into<LayerNode>) -> FuzzID<LayerNode> {
+    pub fn insert_layer_at(
+        &mut self,
+        at: FuzzID<LayerNode>,
+        layer: impl Into<LayerNode>,
+    ) -> FuzzID<LayerNode> {
         let node = layer.into();
         let node_id = node.id();
         self.insert_node_at(at, node);
         node_id
     }
-    pub fn mut_children_of<'a>(&'a mut self, parent: FuzzID<LayerNode>) -> Option<&'a mut [LayerNode]> {
+    pub fn mut_children_of<'a>(
+        &'a mut self,
+        parent: FuzzID<LayerNode>,
+    ) -> Option<&'a mut [LayerNode]> {
         let path = self.find(parent)?;
 
         // Get children, or return none if not found or not a group
@@ -328,7 +351,11 @@ impl LayerGraph {
 
         //Parent is top-level
         if path.len() < 2 {
-            let (idx, _) = self.top_level.iter().enumerate().find(|(_, node)| node.id() == at)?;
+            let (idx, _) = self
+                .top_level
+                .iter()
+                .enumerate()
+                .find(|(_, node)| node.id() == at)?;
             Some(self.top_level.remove(idx))
         } else {
             let LayerNode::Group { children: siblings, .. } = path.get(path.len() - 2)?
@@ -338,7 +365,10 @@ impl LayerGraph {
             unsafe {
                 let siblings = &mut *siblings.get();
 
-                let (idx, _) = siblings.iter().enumerate().find(|(_, node)| node.id() == at)?;
+                let (idx, _) = siblings
+                    .iter()
+                    .enumerate()
+                    .find(|(_, node)| node.id() == at)?;
 
                 Some(siblings.remove(idx))
             }
@@ -348,7 +378,7 @@ impl LayerGraph {
 impl Default for LayerGraph {
     fn default() -> Self {
         Self {
-            top_level: Vec::new()
+            top_level: Vec::new(),
         }
     }
 }
@@ -359,16 +389,14 @@ pub enum BrushKind {
     Rolled,
 }
 pub enum BrushStyle {
-    Stamped {
-        spacing: f32,
-    },
+    Stamped { spacing: f32 },
     Rolled,
 }
 impl BrushStyle {
     pub fn default_for(brush_kind: BrushKind) -> Self {
         match brush_kind {
             BrushKind::Stamped => Self::Stamped { spacing: 5.0 },
-            BrushKind::Rolled => Self::Rolled
+            BrushKind::Rolled => Self::Rolled,
         }
     }
     pub fn brush_kind(&self) -> BrushKind {
@@ -448,8 +476,7 @@ impl Default for PerDocumentInterface {
 pub struct DocumentUserInterface {
     color: egui::Color32,
 
-    modal_stack: Vec<Box<dyn FnMut(&mut egui::Ui) -> ()>>,
-
+    // modal_stack: Vec<Box<dyn FnMut(&mut egui::Ui) -> ()>>,
     cur_brush: Option<FuzzID<Brush>>,
     brushes: Vec<Brush>,
 
@@ -462,8 +489,7 @@ impl Default for DocumentUserInterface {
     fn default() -> Self {
         Self {
             color: egui::Color32::BLUE,
-            modal_stack: Vec::new(),
-
+            //modal_stack: Vec::new(),
             cur_brush: None,
             brushes: Vec::new(),
 
@@ -482,7 +508,12 @@ impl DocumentUserInterface {
     }
     fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut Blend) {
         ui.horizontal_wrapped(|ui| {
-            ui.add(egui::DragValue::new(&mut blend.opacity).fixed_decimals(2).speed(0.01).clamp_range(0.0..=1.0));
+            ui.add(
+                egui::DragValue::new(&mut blend.opacity)
+                    .fixed_decimals(2)
+                    .speed(0.01)
+                    .clamp_range(0.0..=1.0),
+            );
             egui::ComboBox::new(id, "Mode")
                 .selected_text(blend.mode.as_ref())
                 .show_ui(ui, |ui| {
@@ -492,18 +523,32 @@ impl DocumentUserInterface {
                 });
         });
     }
-    fn ui_layer_slice(ui: &mut egui::Ui, document_interface : &mut PerDocumentInterface, layers: &mut [LayerNode]) {
+    fn ui_layer_slice(
+        ui: &mut egui::Ui,
+        document_interface: &mut PerDocumentInterface,
+        layers: &mut [LayerNode],
+    ) {
         if layers.is_empty() {
-            ui.label(egui::RichText::new("Empty, for now...").italics().color(egui::Color32::DARK_GRAY));
+            ui.label(
+                egui::RichText::new("Empty, for now...")
+                    .italics()
+                    .color(egui::Color32::DARK_GRAY),
+            );
         }
         for layer in layers.iter_mut() {
             ui.group(|ui| {
                 match layer {
-                    LayerNode::Group { layer, children, id } => {
+                    LayerNode::Group {
+                        layer,
+                        children,
+                        id,
+                    } => {
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut document_interface.cur_layer, Some(*id), "");
                             ui.text_edit_singleline(&mut layer.name);
-                        }).response.on_hover_ui(|ui| {
+                        })
+                        .response
+                        .on_hover_ui(|ui| {
                             ui.label(format!("{}", id));
                             ui.label(format!("{}", layer.id));
                         });
@@ -521,27 +566,31 @@ impl DocumentUserInterface {
 
                         //Safety - No concurrent access to these nodes.
                         //TODO: iter api so as to not expose unsafe innards.
-                        let children = unsafe{ &mut *children.get() };
+                        let children = unsafe { &mut *children.get() };
                         egui::CollapsingHeader::new("Children")
                             .default_open(true)
                             .enabled(!children.is_empty())
                             .show_unindented(ui, |ui| {
                                 Self::ui_layer_slice(ui, document_interface, children);
                             });
-                    },
+                    }
                     LayerNode::Layer { layer, id } => {
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut document_interface.cur_layer, Some(*id), "");
                             ui.text_edit_singleline(&mut layer.name);
-                        }).response.on_hover_ui(|ui| {
+                        })
+                        .response
+                        .on_hover_ui(|ui| {
                             ui.label(format!("{}", id));
                             ui.label(format!("{}", layer.id));
-                        });;
+                        });
 
                         Self::ui_layer_blend(ui, id, &mut layer.blend);
                     }
                 }
-            }).response.context_menu(|ui| {
+            })
+            .response
+            .context_menu(|ui| {
                 if ui.button("Focus Subtree...").clicked() {
                     document_interface.focused_subtree = Some(layer.id());
                 }
@@ -561,7 +610,7 @@ impl DocumentUserInterface {
     fn push_modal(&mut self, add_contents: impl FnMut(&mut egui::Ui) -> ()) {
         self.modal_stack.push(Box::new(add_contents))
     }*/
-    pub fn ui(&mut self, ctx: &egui::Context) { 
+    pub fn ui(&mut self, ctx: &egui::Context) {
         /*
         if !self.modal_stack.is_empty() {
             for modal in self.modal_stack.iter() {
@@ -569,13 +618,13 @@ impl DocumentUserInterface {
             }
         }*/
 
-        egui::TopBottomPanel::top("file")   
-        .show(&ctx, |ui| {
+        egui::TopBottomPanel::top("file").show(&ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0))).on_hover_text("Baa");
+                ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
+                    .on_hover_text("Baa");
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button("File", |ui| {
-                        let add_button = |ui : &mut egui::Ui, label, shortcut| -> egui::Response {
+                        let add_button = |ui: &mut egui::Ui, label, shortcut| -> egui::Response {
                             let mut button = egui::Button::new(label);
                             if let Some(shortcut) = shortcut {
                                 button = button.shortcut_text(shortcut);
@@ -584,7 +633,8 @@ impl DocumentUserInterface {
                         };
                         if add_button(ui, "New", Some("Ctrl+N")).clicked() {
                             let document = Document::default();
-                            self.document_interfaces.insert(document.id, Default::default());
+                            self.document_interfaces
+                                .insert(document.id, Default::default());
                             self.documents.push(document);
                         };
                         let _ = add_button(ui, "Save", Some("Ctrl+S"));
@@ -604,8 +654,7 @@ impl DocumentUserInterface {
                 });
             });
         });
-    egui::TopBottomPanel::bottom("Nav")
-        .show(&ctx, |ui| {
+        egui::TopBottomPanel::bottom("Nav").show(&ctx, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 //Everything here is BACKWARDS!!
 
@@ -625,14 +674,24 @@ impl DocumentUserInterface {
                 }
                 if ui.small_button("➕").clicked() {
                     //Next power of two
-                    interface.zoom = (2.0f32.powf(((interface.zoom / 100.0).log2() + 0.001).ceil()) * 100.0).max(12.5);
+                    interface.zoom =
+                        (2.0f32.powf(((interface.zoom / 100.0).log2() + 0.001).ceil()) * 100.0)
+                            .max(12.5);
                 }
 
-                ui.add(egui::Slider::new(&mut interface.zoom, 12.5..=12800.0).logarithmic(true).clamp_to_range(true).suffix("%").trailing_fill(true));
+                ui.add(
+                    egui::Slider::new(&mut interface.zoom, 12.5..=12800.0)
+                        .logarithmic(true)
+                        .clamp_to_range(true)
+                        .suffix("%")
+                        .trailing_fill(true),
+                );
 
                 if ui.small_button("➖").clicked() {
                     //Previous power of two
-                    interface.zoom = (2.0f32.powf(((interface.zoom / 100.0).log2() - 0.001).floor()) * 100.0).max(12.5);
+                    interface.zoom =
+                        (2.0f32.powf(((interface.zoom / 100.0).log2() - 0.001).floor()) * 100.0)
+                            .max(12.5);
                 }
 
                 ui.add(egui::Separator::default().vertical());
@@ -649,8 +708,7 @@ impl DocumentUserInterface {
             });
         });
 
-    egui::SidePanel::right("Layers")
-        .show(&ctx, |ui| {
+        egui::SidePanel::right("Layers").show(&ctx, |ui| {
             ui.label("Layers");
             ui.separator();
 
@@ -663,9 +721,9 @@ impl DocumentUserInterface {
                     self.cur_document = None;
                     return
                 };
-            
+
             let document_interface = self.document_interfaces.entry(document_id).or_default();
-            
+
             ui.horizontal(|ui| {
                 if ui.button("➕").clicked() {
                     let layer = Layer::default();
@@ -690,7 +748,7 @@ impl DocumentUserInterface {
                     }
                 };
             });
-            
+
             if let Some(subtree) = document_interface.focused_subtree {
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -702,27 +760,36 @@ impl DocumentUserInterface {
             }
 
             ui.separator();
-            egui::ScrollArea::vertical()
-                .show(ui, |ui| {
-                    match document_interface.focused_subtree.and_then(|tree| document.layers.mut_children_of(tree)) {
-                        Some(subtree) => {
-                            Self::ui_layer_slice(ui, document_interface, subtree);
-                        }
-                        None => {
-                            document_interface.focused_subtree = None;
-                            Self::ui_layer_slice(ui, document_interface, &mut document.layers.top_level);
-                        }
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                match document_interface
+                    .focused_subtree
+                    .and_then(|tree| document.layers.mut_children_of(tree))
+                {
+                    Some(subtree) => {
+                        Self::ui_layer_slice(ui, document_interface, subtree);
                     }
-                });
+                    None => {
+                        document_interface.focused_subtree = None;
+                        Self::ui_layer_slice(
+                            ui,
+                            document_interface,
+                            &mut document.layers.top_level,
+                        );
+                    }
+                }
+            });
         });
 
-    egui::SidePanel::left("Color picker")
-        .show(&ctx, |ui| {
+        egui::SidePanel::left("Color picker").show(&ctx, |ui| {
             ui.label("Color");
             ui.separator();
-            
-            egui::color_picker::color_picker_color32(ui, &mut self.color, egui::color_picker::Alpha::OnlyBlend);
-            
+
+            egui::color_picker::color_picker_color32(
+                ui,
+                &mut self.color,
+                egui::color_picker::Alpha::OnlyBlend,
+            );
+
             ui.separator();
             ui.label("Brushes");
             ui.separator();
@@ -745,9 +812,11 @@ impl DocumentUserInterface {
                     ui.horizontal(|ui| {
                         ui.radio_value(&mut self.cur_brush, Some(brush.id), "");
                         ui.text_edit_singleline(&mut brush.name);
-                    }).response.on_hover_ui(|ui| {
+                    })
+                    .response
+                    .on_hover_ui(|ui| {
                         ui.label(format!("{}", brush.id));
-                        
+
                         //Smol optimization to avoid formatters
                         let mut buf = uuid::Uuid::encode_buffer();
                         let uuid = brush.universal_id.as_hyphenated().encode_upper(&mut buf);
@@ -766,12 +835,12 @@ impl DocumentUserInterface {
                                         ui.selectable_value(&mut brush_kind, kind, kind.as_ref());
                                     }
                                 });
-        
+
                             //Changed by user, switch to defaults for the new kind
                             if brush_kind != brush.style.brush_kind() {
                                 brush.style = BrushStyle::default_for(brush_kind);
                             }
-        
+
                             match &mut brush.style {
                                 BrushStyle::Stamped { spacing } => {
                                     let slider = egui::widgets::Slider::new(spacing, 0.1..=200.0)
@@ -781,13 +850,10 @@ impl DocumentUserInterface {
 
                                     ui.add(slider);
                                 }
-                                BrushStyle::Rolled => {
-
-                                }
+                                BrushStyle::Rolled => {}
                             }
                         })
                 });
-
             }
 
             /* Old Image picker, useful later
@@ -812,37 +878,50 @@ impl DocumentUserInterface {
             }*/
         });
 
-    egui::TopBottomPanel::top("documents")
-        .show(&ctx, |ui| {
-            egui::ScrollArea::horizontal()
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let mut deleted_ids = smallvec::SmallVec::<[_; 1]>::new();
-                        for document in self.documents.iter() {
-                            egui::containers::Frame::group(ui.style())
-                                .outer_margin(egui::Margin::symmetric(0.0, 0.0))
-                                .inner_margin(egui::Margin::symmetric(0.0, 0.0))
-                                .multiply_with_opacity(if self.cur_document == Some(document.id) {1.0} else {0.0})
-                                .rounding(egui::Rounding{ne: 2.0, nw: 2.0, ..0.0.into()})
-                                .show(ui, |ui| {
-                                    ui.selectable_value(&mut self.cur_document, Some(document.id), &document.name);
-                                    if ui.small_button("✖").clicked() {
-                                        deleted_ids.push(document.id);
-                                        //Disselect if deleted.
-                                        if self.cur_document == Some(document.id) {
-                                            self.cur_document = None;
-                                        }
+        egui::TopBottomPanel::top("documents").show(&ctx, |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let mut deleted_ids = smallvec::SmallVec::<[_; 1]>::new();
+                    for document in self.documents.iter() {
+                        egui::containers::Frame::group(ui.style())
+                            .outer_margin(egui::Margin::symmetric(0.0, 0.0))
+                            .inner_margin(egui::Margin::symmetric(0.0, 0.0))
+                            .multiply_with_opacity(if self.cur_document == Some(document.id) {
+                                1.0
+                            } else {
+                                0.0
+                            })
+                            .rounding(egui::Rounding {
+                                ne: 2.0,
+                                nw: 2.0,
+                                ..0.0.into()
+                            })
+                            .show(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.cur_document,
+                                    Some(document.id),
+                                    &document.name,
+                                );
+                                if ui.small_button("✖").clicked() {
+                                    deleted_ids.push(document.id);
+                                    //Disselect if deleted.
+                                    if self.cur_document == Some(document.id) {
+                                        self.cur_document = None;
                                     }
-                                }).response.on_hover_ui(|ui| {
-                                    ui.label(format!("{}", document.id));
-                                });
-                        }
-                        self.documents.retain(|document| !deleted_ids.contains(&document.id));
-                        for id in deleted_ids.into_iter() {
-                            self.document_interfaces.remove(&id);
-                        }
-                    });
+                                }
+                            })
+                            .response
+                            .on_hover_ui(|ui| {
+                                ui.label(format!("{}", document.id));
+                            });
+                    }
+                    self.documents
+                        .retain(|document| !deleted_ids.contains(&document.id));
+                    for id in deleted_ids.into_iter() {
+                        self.document_interfaces.remove(&id);
+                    }
                 });
+            });
         });
     }
 }
@@ -851,13 +930,13 @@ impl DocumentUserInterface {
 #[repr(C)]
 struct StrokePointUnpacked {
     #[format(R32G32_SFLOAT)]
-    pos: [f32;2],
+    pos: [f32; 2],
     #[format(R32_SFLOAT)]
     pressure: f32,
 }
 
 mod test_renderer_vert {
-    vulkano_shaders::shader!{
+    vulkano_shaders::shader! {
         ty: "vertex",
         src: r"
         #version 460
@@ -877,8 +956,9 @@ mod test_renderer_vert {
             gl_Position = vec4(position_2d.xy, 0.0, 1.0);
         }"
     }
-}mod test_renderer_frag {
-    vulkano_shaders::shader!{
+}
+mod test_renderer_frag {
+    vulkano_shaders::shader! {
         ty: "fragment",
         src: r"
         #version 460
@@ -892,300 +972,28 @@ mod test_renderer_vert {
     }
 }
 
-const DOCUMENT_DIMENSION : u32 = 512;
-
-fn make_test_image(render_context: Arc<render_device::RenderContext>) -> AnyResult<(Arc<vk::StorageImage>, vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>)> {
-    let document_format = vk::Format::R16G16B16A16_SFLOAT;
-    let document_dimension = DOCUMENT_DIMENSION;
-    let document_buffer = vk::StorageImage::with_usage(
-        render_context.allocators().memory(),
-        vulkano::image::ImageDimensions::Dim2d { width: document_dimension, height: document_dimension, array_layers: 1 },
-        document_format,
-        vk::ImageUsage::COLOR_ATTACHMENT | vk::ImageUsage::SAMPLED | vk::ImageUsage::STORAGE,
-        vk::ImageCreateFlags::empty(),
-        [render_context.queues().graphics().idx()]
-    )?;
-
-    let document_view = vk::ImageView::new_default(document_buffer.clone())?;
-
-    let render_pass = vulkano::single_pass_renderpass!(
-        render_context.device().clone(),
-        attachments: {
-            document: {
-                load: Clear,
-                store: Store,
-                format: document_format,
-                samples: 1,
-            },
-        },
-        pass: {
-            color: [document],
-            depth_stencil: {},
-        },
-    )?;
-    let document_framebuffer = vk::Framebuffer::new(
-        render_pass.clone(),
-        vk::FramebufferCreateInfo {
-            attachments: vec![
-                document_view
-            ],
-            ..Default::default()
-        }
-    )?;
-
-    let vert = test_renderer_vert::load(render_context.device().clone())?;
-    let frag = test_renderer_frag::load(render_context.device().clone())?;
-
-
-    let mut blend_premul = vk::ColorBlendState::new(1);
-    blend_premul.attachments[0].blend = Some(vk::AttachmentBlend{
-        alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-        color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-        alpha_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-        color_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-        alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-        color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-    });
-
-    let pipeline = vk::GraphicsPipeline::start()
-        .render_pass(render_pass.first_subpass())
-        .vertex_shader(vert.entry_point("main").unwrap(), test_renderer_vert::SpecializationConstants::default())
-        .fragment_shader(frag.entry_point("main").unwrap(), test_renderer_frag::SpecializationConstants::default())
-        .vertex_input_state(StrokePointUnpacked::per_vertex())
-        .input_assembly_state(vk::InputAssemblyState {
-            topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::LineStrip),
-            ..Default::default()
-        })
-        .color_blend_state(blend_premul)
-        .rasterization_state(
-            vk::RasterizationState {
-                line_width: vk::StateMode::Fixed(4.0),
-                ..vk::RasterizationState::default()
-            }
-        )
-        .viewport_state(
-            vk::ViewportState::viewport_fixed_scissor_irrelevant(
-                [
-                    vk::Viewport{
-                        depth_range: 0.0..1.0,
-                        dimensions: [document_dimension as f32, document_dimension as f32],
-                        origin: [0.0; 2],
-                    }
-                ]
-            )
-        )
-        .build(render_context.device().clone())?;
-
-    /* square
-    let points = [
-        StrokePointUnpacked {
-            pos: [100.0, 100.0],
-            pressure: 0.1,
-        },
-        StrokePointUnpacked {
-            pos: [1000.0, 100.0],
-            pressure: 0.8,
-        },
-        StrokePointUnpacked {
-            pos: [1000.0, 1000.0],
-            pressure: 0.4,
-        },
-        StrokePointUnpacked {
-            pos: [100.0, 1000.0],
-            pressure: 1.0,
-        },
-        StrokePointUnpacked {
-            pos: [100.0, 100.0],
-            pressure: 0.1,
-        },
-    ];*/
-    let points = {    
-        let mut rng = rand::rngs::SmallRng::from_entropy();
-        let mut rand_point = move || {
-            StrokePointUnpacked {
-                pos: [rng.gen_range(0.0..1080.0), rng.gen_range(0.0..1080.0)],
-                pressure: rng.gen_range(0.0..1.0)
-            }
-        };
-
-        [   
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-            rand_point(),
-        ]
-    };
-    let points_buf = vk::Buffer::from_data(
-        render_context.allocators().memory(),
-        vulkano::buffer::BufferCreateInfo {
-            usage: vk::BufferUsage::VERTEX_BUFFER,
-            ..Default::default()
-        },
-        vulkano::memory::allocator::AllocationCreateInfo { usage: vk::MemoryUsage::Upload, ..Default::default() },
-        points
-    )?;
-    let pipeline_layout = pipeline.layout().clone();
-    let matrix = cgmath::ortho(0.0, document_dimension as f32, document_dimension as f32, 0.0, -1.0, 0.0);
-
-    let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
-            render_context.allocators().command_buffer(),
-            render_context.queues().graphics().idx(),
-            vk::CommandBufferUsage::OneTimeSubmit
-        )?;
-    command_buffer.begin_render_pass(vk::RenderPassBeginInfo{
-            clear_values: vec![
-                Some(vk::ClearValue::Float([0.0; 4]))
-            ],
-            ..vk::RenderPassBeginInfo::framebuffer(document_framebuffer)
-        }, vk::SubpassContents::Inline)?
-        .bind_pipeline_graphics(pipeline)
-        .push_constants(pipeline_layout, 0,
-            test_renderer_vert::Matrix{
-                mvp: matrix.into()
-            }
-        )
-        .bind_vertex_buffers(0, [points_buf])
-        .draw(points.len() as u32, 1, 0, 0)?
-        .end_render_pass()?;
-    let command_buffer = command_buffer.build()?;
-    
-    let image_rendered_semaphore = render_context.now()
-        .then_execute(render_context.queues().graphics().queue().clone(), command_buffer)?
-        .then_signal_fence_and_flush()?;
-
-    Ok(
-        (document_buffer, image_rendered_semaphore)
-    )
-}
-
-fn load_document_image(
-    render_context: Arc<render_device::RenderContext>,
-    path: &std::path::Path
-) -> AnyResult<(Arc<vk::StorageImage>, vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>)> {
-    let image = image::open(path)?;
-    if image.width() != DOCUMENT_DIMENSION || image.height() != DOCUMENT_DIMENSION {
-        anyhow::bail!(
-            "Wrong image size"
-        );
-    }
-    let image = image.into_rgba8();
-
-    let image_data : Vec<_> = 
-        image.into_vec()
-            .array_chunks::<4>()
-            .flat_map(|&[r, g, b, a]| {
-                // Lol algebraic optimization
-                let a = a as f32 / 255.0 / 255.0;
-                let rgba = [
-                    r as f32 * a,
-                    g as f32 * a,
-                    b as f32 * a,
-                    a * 255.0,
-                ];
-                rgba
-            })
-            .map(vulkano::half::f16::from_f32)
-            .collect();
-
-    let image_buffer = vk::Buffer::from_iter(
-        render_context.allocators().memory(),
-        vk::BufferCreateInfo {
-            usage: vk::BufferUsage::TRANSFER_SRC,
-            ..Default::default()
-        },
-        vk::AllocationCreateInfo {
-            usage: vk::MemoryUsage::Upload,
-            ..Default::default()
-        },
-        image_data.into_iter()
-    )?;
-
-    let image = vk::StorageImage::new(
-        render_context.allocators().memory(),
-        vk::ImageDimensions::Dim2d { width: DOCUMENT_DIMENSION, height: DOCUMENT_DIMENSION, array_layers: 1 },
-        vk::Format::R16G16B16A16_SFLOAT,
-        [
-            render_context.queues().compute().idx(),
-        ],
-    )?;
-
-    let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
-        render_context.allocators().command_buffer(),
-        render_context.queues().compute().idx(),
-        vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit
-    )?;
-
-    command_buffer
-        .copy_buffer_to_image(vk::CopyBufferToImageInfo::buffer_image(image_buffer, image.clone()))?;
-
-    let command_buffer = command_buffer.build()?;
-
-    let future =
-        render_context.now()
-            .then_execute(render_context.queues().compute().queue().clone(), command_buffer)?
-            .then_signal_fence_and_flush()?;
-    
-    Ok(
-        (
-            image,
-            future
-        )
-    )
-}
+const DOCUMENT_DIMENSION: u32 = 512;
 
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
 /// behind the Egui content.
 pub trait PreviewRenderProxy {
     /// Create the render commands for this frame. Assume used resources are borrowed until a matching "render_complete" for this
     /// frame idx is called.
-    fn render(&mut self, swapchain_image_idx: u32)
-        -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>>;
+    fn render(&mut self, swapchain_image_idx: u32) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>>;
 
     /// When the future of a previous render has completed
-    fn render_complete(&mut self, idx : u32);
+    fn render_complete(&mut self, idx: u32);
     fn surface_changed(&mut self, render_surface: &render_device::RenderSurface);
 }
 
-struct DocumentPreviewRenderer {
-    /// The composited document
-    document_image: Arc<vk::StorageImage>,
-
-    /// The preview of whatever the user is doing right now - 
-    /// Scratch space for in-progress strokes, brush preview, ect.
-    live_image: Arc<vk::StorageImage>,
-
-
-}
-
 struct SillyDocument {
-    verts : Vec<StrokePointUnpacked>,
-    indices : Vec<u32>,
+    verts: Vec<StrokePointUnpacked>,
+    indices: Vec<u32>,
 }
 struct SillyDocumentRenderer {
     render_context: Arc<render_device::RenderContext>,
-    pipeline : Arc<vk::GraphicsPipeline>,
-    render_pass : Arc<vk::RenderPass>,
+    pipeline: Arc<vk::GraphicsPipeline>,
+    render_pass: Arc<vk::RenderPass>,
 
     ms_attachment_view: Arc<vk::ImageView<vk::AttachmentImage>>,
 }
@@ -1200,7 +1008,7 @@ impl SillyDocumentRenderer {
             document_format,
         )?;
         let ms_attachment_view = vk::ImageView::new_default(ms_attachment)?;
-    
+
         let render_pass = vulkano::single_pass_renderpass!(
             render_context.device().clone(),
             attachments: {
@@ -1223,24 +1031,32 @@ impl SillyDocumentRenderer {
                 resolve: [resolve],
             },
         )?;
-    
+
         let vert = test_renderer_vert::load(render_context.device().clone())?;
         let frag = test_renderer_frag::load(render_context.device().clone())?;
-    
+
         let mut blend_premul = vk::ColorBlendState::new(1);
-        blend_premul.attachments[0].blend = Some(vk::AttachmentBlend{
+        blend_premul.attachments[0].blend = Some(vk::AttachmentBlend {
             alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
             color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-            alpha_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-            color_destination: vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+            alpha_destination:
+                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+            color_destination:
+                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
             alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
             color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
         });
 
         let pipeline = vk::GraphicsPipeline::start()
             .render_pass(render_pass.clone().first_subpass())
-            .vertex_shader(vert.entry_point("main").unwrap(), test_renderer_vert::SpecializationConstants::default())
-            .fragment_shader(frag.entry_point("main").unwrap(), test_renderer_frag::SpecializationConstants::default())
+            .vertex_shader(
+                vert.entry_point("main").unwrap(),
+                test_renderer_vert::SpecializationConstants::default(),
+            )
+            .fragment_shader(
+                frag.entry_point("main").unwrap(),
+                test_renderer_frag::SpecializationConstants::default(),
+            )
             .vertex_input_state(StrokePointUnpacked::per_vertex())
             .input_assembly_state(vk::InputAssemblyState {
                 topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::LineStrip),
@@ -1255,47 +1071,54 @@ impl SillyDocumentRenderer {
                 sample_shading: None,
                 ..Default::default()
             })
-            .rasterization_state(
-                vk::RasterizationState {
-                    line_width: vk::StateMode::Fixed(4.0),
-                    line_rasterization_mode: vulkano::pipeline::graphics::rasterization::LineRasterizationMode::Rectangular,
-                    ..vk::RasterizationState::default()
-                }
-            )
-            .viewport_state(
-                vk::ViewportState::viewport_fixed_scissor_irrelevant(
-                    [
-                        vk::Viewport{
-                            depth_range: 0.0..1.0,
-                            dimensions: [document_dimension as f32, document_dimension as f32],
-                            origin: [0.0; 2],
-                        }
-                    ]
-                )
-            )
+            .rasterization_state(vk::RasterizationState {
+                line_width: vk::StateMode::Fixed(4.0),
+                line_rasterization_mode:
+                    vulkano::pipeline::graphics::rasterization::LineRasterizationMode::Rectangular,
+                ..vk::RasterizationState::default()
+            })
+            .viewport_state(vk::ViewportState::viewport_fixed_scissor_irrelevant([
+                vk::Viewport {
+                    depth_range: 0.0..1.0,
+                    dimensions: [document_dimension as f32, document_dimension as f32],
+                    origin: [0.0; 2],
+                },
+            ]))
             .build(render_context.device().clone())?;
-            
-        Ok(
-            Self {
-                render_context,
-                pipeline,
-                render_pass,
 
-                ms_attachment_view,
-            }
-        )
+        Ok(Self {
+            render_context,
+            pipeline,
+            render_pass,
+
+            ms_attachment_view,
+        })
     }
-    fn draw(&self, doc: &SillyDocument, buff : Arc<vk::ImageView<vk::StorageImage>>) -> AnyResult<vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>> {
-        let matrix = cgmath::ortho(0.0, DOCUMENT_DIMENSION as f32, DOCUMENT_DIMENSION as f32, 0.0, -1.0, 0.0);
-    
+    fn draw(
+        &self,
+        doc: &SillyDocument,
+        buff: Arc<vk::ImageView<vk::StorageImage>>,
+    ) -> AnyResult<vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>> {
+        let matrix = cgmath::ortho(
+            0.0,
+            DOCUMENT_DIMENSION as f32,
+            DOCUMENT_DIMENSION as f32,
+            0.0,
+            -1.0,
+            0.0,
+        );
+
         let points_buf = vk::Buffer::from_iter(
             self.render_context.allocators().memory(),
             vulkano::buffer::BufferCreateInfo {
                 usage: vk::BufferUsage::VERTEX_BUFFER,
                 ..Default::default()
             },
-            vulkano::memory::allocator::AllocationCreateInfo { usage: vk::MemoryUsage::Upload, ..Default::default() },
-            doc.verts.iter().copied()
+            vulkano::memory::allocator::AllocationCreateInfo {
+                usage: vk::MemoryUsage::Upload,
+                ..Default::default()
+            },
+            doc.verts.iter().copied(),
         )?;
         let indices = vk::Buffer::from_iter(
             self.render_context.allocators().memory(),
@@ -1303,38 +1126,39 @@ impl SillyDocumentRenderer {
                 usage: vk::BufferUsage::INDEX_BUFFER,
                 ..Default::default()
             },
-            vulkano::memory::allocator::AllocationCreateInfo { usage: vk::MemoryUsage::Upload, ..Default::default() },
-            doc.indices.iter().copied()
+            vulkano::memory::allocator::AllocationCreateInfo {
+                usage: vk::MemoryUsage::Upload,
+                ..Default::default()
+            },
+            doc.indices.iter().copied(),
         )?;
 
         let document_framebuffer = vk::Framebuffer::new(
             self.render_pass.clone(),
             vk::FramebufferCreateInfo {
-                attachments: vec![
-                    self.ms_attachment_view.clone(),
-                    buff.clone(),
-                ],
+                attachments: vec![self.ms_attachment_view.clone(), buff.clone()],
                 ..Default::default()
-            }
+            },
         )?;
 
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
-                self.render_context.allocators().command_buffer(),
-                self.render_context.queues().graphics().idx(),
-                vk::CommandBufferUsage::OneTimeSubmit
-            )?;
-        command_buffer.begin_render_pass(vk::RenderPassBeginInfo{
-                clear_values: vec![
-                    Some(vk::ClearValue::Float([0.0; 4])),
-                    None,
-                ],
-                ..vk::RenderPassBeginInfo::framebuffer(document_framebuffer)
-            }, vk::SubpassContents::Inline)?
+            self.render_context.allocators().command_buffer(),
+            self.render_context.queues().graphics().idx(),
+            vk::CommandBufferUsage::OneTimeSubmit,
+        )?;
+        command_buffer
+            .begin_render_pass(
+                vk::RenderPassBeginInfo {
+                    clear_values: vec![Some(vk::ClearValue::Float([0.0; 4])), None],
+                    ..vk::RenderPassBeginInfo::framebuffer(document_framebuffer)
+                },
+                vk::SubpassContents::Inline,
+            )?
             .bind_pipeline_graphics(self.pipeline.clone())
-            .push_constants(self.pipeline.layout().clone(), 0,
-                test_renderer_vert::Matrix{
-                    mvp: matrix.into()
-                }
+            .push_constants(
+                self.pipeline.layout().clone(),
+                0,
+                test_renderer_vert::Matrix { mvp: matrix.into() },
             )
             .bind_vertex_buffers(0, [points_buf])
             .bind_index_buffer(indices)
@@ -1342,27 +1166,29 @@ impl SillyDocumentRenderer {
             .end_render_pass()?;
         let command_buffer = command_buffer.build()?;
 
-        Ok(
-            self.render_context.now()
-                .then_execute(
-                    self.render_context.queues().graphics().queue().clone(),
-                    command_buffer
-                )?
-                .then_signal_fence_and_flush()?
-        )
+        Ok(self
+            .render_context
+            .now()
+            .then_execute(
+                self.render_context.queues().graphics().queue().clone(),
+                command_buffer,
+            )?
+            .then_signal_fence_and_flush()?)
     }
 }
 
-fn listener(mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
+fn listener(
+    mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     renderer: Arc<render_device::RenderContext>,
-    document_preview: Arc<parking_lot::RwLock<DocumentViewportProxy::DocumentViewportPreviewProxy>>) {
+    document_preview: Arc<parking_lot::RwLock<DocumentViewportProxy::DocumentViewportPreviewProxy>>,
+) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
 
     let mut doc = SillyDocument {
         indices: vec![],
-        verts: vec![]
+        verts: vec![],
     };
 
     let renderer = SillyDocumentRenderer::new(renderer.clone()).unwrap();
@@ -1382,8 +1208,13 @@ fn listener(mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::St
                     if event.pressed {
                         let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
 
-
-                        doc.verts.push(StrokePointUnpacked { pos: [pos.x * DOCUMENT_DIMENSION as f32, (1.0 - pos.y) * DOCUMENT_DIMENSION as f32], pressure: event.pressure.unwrap_or(0.0) });
+                        doc.verts.push(StrokePointUnpacked {
+                            pos: [
+                                pos.x * DOCUMENT_DIMENSION as f32,
+                                (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
+                            ],
+                            pressure: event.pressure.unwrap_or(0.0),
+                        });
                         doc.indices.push((doc.verts.len() - 1) as u32);
                         changed = true;
                     }
@@ -1393,17 +1224,15 @@ fn listener(mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::St
 
                 if changed {
                     let buff = runtime.block_on(document_preview.read().get_writeable_buffer());
-                    renderer.draw(&doc, buff).unwrap().wait(None);
+                    renderer.draw(&doc, buff).unwrap().wait(None).unwrap();
 
                     document_preview.read().swap();
-                }   
+                }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
                 log::warn!("Lost {num} stylus frames!");
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                return 
-            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
         }
     }
 }
@@ -1411,7 +1240,9 @@ fn listener(mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::St
 //If we return, it was due to an error.
 //convert::Infallible is a quite ironic name for this useage, isn't it? :P
 fn main() -> AnyResult<std::convert::Infallible> {
-    env_logger::builder().filter_level(log::LevelFilter::max()).init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::max())
+        .init();
 
     let window_surface = window::WindowSurface::new()?;
     let (render_context, render_surface) =
@@ -1422,12 +1253,20 @@ fn main() -> AnyResult<std::convert::Infallible> {
     //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("/home/aspen/Pictures/thesharc.png"))?;
     //future.wait(None)?;
 
-    let document_view = Arc::new(parking_lot::RwLock::new(DocumentViewportProxy::DocumentViewportPreviewProxy::new(&render_surface)?));
-    let window_renderer = window_surface.with_render_surface(render_surface, render_context.clone(), document_view.clone())?;
+    let document_view = Arc::new(parking_lot::RwLock::new(
+        DocumentViewportProxy::DocumentViewportPreviewProxy::new(&render_surface)?,
+    ));
+    let window_renderer = window_surface.with_render_surface(
+        render_surface,
+        render_context.clone(),
+        document_view.clone(),
+    )?;
 
     let event_stream = window_renderer.stylus_events();
 
-    std::thread::spawn(move || listener(event_stream, render_context.clone(), document_view.clone()));
+    std::thread::spawn(move || {
+        listener(event_stream, render_context.clone(), document_view.clone())
+    });
 
     window_renderer.run();
 }
