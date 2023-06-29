@@ -106,6 +106,11 @@ impl<T: std::any::Any> Default for FuzzID<T> {
         }
     }
 }
+impl<T: std::any::Any> std::fmt::Display for FuzzID<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#{}", std::any::type_name::<T>().split("::").last().unwrap(), self.id)
+    }
+}
 
 pub struct GroupLayer {
     name: String,
@@ -248,21 +253,28 @@ impl LayerGraph {
                         children.push(node);
                     }
                     _ => {
-                        //`at` is something else - insert on the same level, immediately above `at`.
-                        let Some(LayerNode::Group { children: siblings, .. }) = path.get(path.len() - 2)
+                        //`at` is something else - insert on the same level, immediately above `at`.'
+
+                        //Parent is just top level
+                        let siblings = if path.len() < 2 {
+                            drop(path);
+                            &mut self.top_level
+                        } else {
+                            //Find siblings
+                            let Some(LayerNode::Group { children: siblings, .. }) = path.get(path.len() - 2)
                             else {
                                 //(should be impossible) parent doesn't exist or isn't a group, add to top level instead.
                                 self.insert_node(node);
                                 return;
                             };
-                        
-                        //Forget borrows
-                        drop(path);
 
-                        //reinterprit as mutable (uh oh)
-                        //Safety - We hold exclusive access to self, thus no concurrent access to the tree can occur
-                        //and no other references exist.
-                        let siblings = unsafe { &mut *siblings.get() };
+                            drop(path);
+
+                            //reinterprit as mutable (uh oh)
+                            //Safety - We hold exclusive access to self, thus no concurrent access to the tree can occur
+                            //and no other references exist.
+                            unsafe{ &mut *siblings.get() }
+                        };
 
                         //Find idx of `at`
                         let Some((idx, _)) = siblings.iter().enumerate().find(|(_, node)| node.id() == at)
@@ -296,8 +308,40 @@ impl LayerGraph {
         self.insert_node_at(at, node);
         node_id
     }
-    pub fn remove(&mut self, at: FuzzID<LayerNode>) -> LayerNode{
-        unimplemented!()
+    pub fn mut_children_of<'a>(&'a mut self, parent: FuzzID<LayerNode>) -> Option<&'a mut [LayerNode]> {
+        let path = self.find(parent)?;
+
+        // Get children, or return none if not found or not a group
+        let Some(LayerNode::Group { children, ..}) = path.last()
+            else {return None};
+
+        unsafe {
+            // Safety - the return value continues to mutably borrow self,
+            // so no other access can occur.
+            Some((*children.get()).as_mut_slice())
+        }
+    }
+    /// Remove and return the node of the given ID. None if not found.
+    pub fn remove(&mut self, at: FuzzID<LayerNode>) -> Option<LayerNode> {
+        let path = self.find(at)?;
+
+        //Parent is top-level
+        if path.len() < 2 {
+            let (idx, _) = self.top_level.iter().enumerate().find(|(_, node)| node.id() == at)?;
+            Some(self.top_level.remove(idx))
+        } else {
+            let LayerNode::Group { children: siblings, .. } = path.get(path.len() - 2)?
+                else {return None};
+
+            //Safety - has exclusive access to self, so the graph cannot be concurrently accessed
+            unsafe {
+                let siblings = &mut *siblings.get();
+
+                let (idx, _) = siblings.iter().enumerate().find(|(_, node)| node.id() == at)?;
+
+                Some(siblings.remove(idx))
+            }
+        }
     }
 }
 impl Default for LayerGraph {
@@ -335,6 +379,7 @@ struct PerDocumentInterface {
     zoom: f32,
     rotate: f32,
 
+    focused_subtree: Option<FuzzID<LayerNode>>,
     cur_layer: Option<FuzzID<LayerNode>>,
 }
 impl Default for PerDocumentInterface {
@@ -343,6 +388,7 @@ impl Default for PerDocumentInterface {
             zoom: 100.0,
             rotate: 0.0,
             cur_layer: None,
+            focused_subtree: None,
         }
     }
 }
@@ -378,6 +424,9 @@ impl DocumentUserInterface {
         });
     }
     fn ui_layer_slice(ui: &mut egui::Ui, document_interface : &mut PerDocumentInterface, layers: &mut [LayerNode]) {
+        if layers.is_empty() {
+            ui.label(egui::RichText::new("Empty, for now...").italics().color(egui::Color32::DARK_GRAY));
+        }
         for layer in layers.iter_mut() {
             ui.group(|ui| {
                 match layer {
@@ -405,11 +454,12 @@ impl DocumentUserInterface {
                         //Safety - No concurrent access to these nodes.
                         //TODO: iter api so as to not expose unsafe innards.
                         let children = unsafe{ &mut *children.get() };
-                        if !children.is_empty() {
-                            ui.collapsing("Children", |ui| {
+                        egui::CollapsingHeader::new("Children")
+                            .default_open(true)
+                            .enabled(!children.is_empty())
+                            .show(ui, |ui| {
                                 Self::ui_layer_slice(ui, document_interface, children);
                             });
-                        }
                     },
                     LayerNode::Layer { layer, id } => {
                         ui.horizontal(|ui| {
@@ -423,6 +473,10 @@ impl DocumentUserInterface {
 
                         Self::ui_layer_blend(ui, id, &mut layer.blend);
                     }
+                }
+            }).response.context_menu(|ui| {
+                if ui.button("Focus Subtree...").clicked() {
+                    document_interface.focused_subtree = Some(layer.id());
                 }
             });
         }
@@ -537,14 +591,34 @@ impl DocumentUserInterface {
                 }
                 let _ = ui.button("⤵").on_hover_text("Merge down");
                 if ui.button("✖").on_hover_text("Delete layer").clicked() {
-
+                    if let Some(layer_id) = document_interface.cur_layer.take() {
+                        document.layers.remove(layer_id);
+                    }
                 };
             });
             
+            if let Some(subtree) = document_interface.focused_subtree {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("⬅").clicked() {
+                        document_interface.focused_subtree = None;
+                    }
+                    ui.label(format!("Viewing subtree of {subtree}"));
+                });
+            }
+
             ui.separator();
             egui::ScrollArea::vertical()
                 .show(ui, |ui| {
-                    Self::ui_layer_slice(ui, document_interface, &mut document.layers.top_level);
+                    match document_interface.focused_subtree.and_then(|tree| document.layers.mut_children_of(tree)) {
+                        Some(subtree) => {
+                            Self::ui_layer_slice(ui, document_interface, subtree);
+                        }
+                        None => {
+                            document_interface.focused_subtree = None;
+                            Self::ui_layer_slice(ui, document_interface, &mut document.layers.top_level);
+                        }
+                    }
                 });
         });
 
