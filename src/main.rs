@@ -733,7 +733,7 @@ impl DocumentUserInterface {
                     self.brushes.push(brush);
                 }
                 if ui.button("✖").on_hover_text("Delete brush").clicked() {
-                    if let Some(id) = self.cur_brush {
+                    if let Some(id) = self.cur_brush.take() {
                         self.brushes.retain(|brush| brush.id != id);
                     }
                 };
@@ -747,7 +747,11 @@ impl DocumentUserInterface {
                         ui.text_edit_singleline(&mut brush.name);
                     }).response.on_hover_ui(|ui| {
                         ui.label(format!("{}", brush.id));
-                        ui.label(brush.universal_id.to_string());
+                        
+                        //Smol optimization to avoid formatters
+                        let mut buf = uuid::Uuid::encode_buffer();
+                        let uuid = brush.universal_id.as_hyphenated().encode_upper(&mut buf);
+                        ui.label(&uuid[..]);
                     });
                     egui::CollapsingHeader::new("Settings")
                         .id_source(brush.id)
@@ -786,61 +790,25 @@ impl DocumentUserInterface {
 
             }
 
-            /*
-            ui.horizontal(|ui| {
-                if ui.button("➕").clicked() {
-                    let new_idx = unsafe {brushes.len() as u32};
-                    let brush = Brush {
-                        key: new_idx,
-                        name: format!("Brush {new_idx}"),
-                        //Built-in cheat for blank texture :P
-                        image: None,
-                        image_uv: egui::Rect{min: egui::epaint::WHITE_UV, max: egui::epaint::WHITE_UV}
-                    };
-                    unsafe {
-                        brushes.push(brush);
-                    }
-                }
-                let _ = ui.button("✖").on_hover_text("Delete brush");
-            });
-            ui.separator();
+            /* Old Image picker, useful later
+                'image_fail: {
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("images", &["png"])
+                    .set_directory(".")
+                    .pick_file() else {break 'image_fail};
 
-            unsafe {
-                for brush in brushes.iter_mut() {
-                    ui.group(|ui| {
-                        ui.text_edit_singleline(&mut brush.name);
-                        // Texture button, with the brushes texture (if any) or else white
-                        if ui.add(
-                            egui::ImageButton::new(
-                                brush.image.as_ref()
-                                    .map(egui::TextureHandle::id)
-                                    .unwrap_or(egui::TextureId::Managed(0)),
-                                egui::vec2(50.0, 50.0)
-                            ).uv(brush.image_uv)
-                        ).clicked() {
-                            //Image picker
-                            'image_fail: {
-                                let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("images", &["png"])
-                                    .set_directory(".")
-                                    .pick_file() else {break 'image_fail};
+                let Ok(image) = image::open(path) else {break 'image_fail};
+                let image = image.to_rgba8();
+                let image_size = image.dimensions();
+                let image_size = [image_size.0 as usize, image_size.1 as usize];
+                let image_data = image.as_bytes();
 
-                                let Ok(image) = image::open(path) else {break 'image_fail};
-                                let image = image.to_rgba8();
-                                let image_size = image.dimensions();
-                                let image_size = [image_size.0 as usize, image_size.1 as usize];
-                                let image_data = image.as_bytes();
+                let image = egui::ColorImage::from_rgba_unmultiplied(image_size, image_data);
 
-                                let image = egui::ColorImage::from_rgba_unmultiplied(image_size, image_data);
+                let handle = ctx.load_texture("Brush texture", image, egui::TextureOptions::LINEAR);
 
-                                let handle = ctx.load_texture("Brush texture", image, egui::TextureOptions::LINEAR);
-
-                                brush.image = Some(handle);
-                                brush.image_uv = egui::Rect{min: egui::Pos2::ZERO, max: egui::Pos2 {x: 1.0, y: 1.0}};
-                            }
-                        };
-                    });
-                }
+                brush.image = Some(handle);
+                brush.image_uv = egui::Rect{min: egui::Pos2::ZERO, max: egui::Pos2 {x: 1.0, y: 1.0}};
             }*/
         });
 
@@ -849,7 +817,7 @@ impl DocumentUserInterface {
             egui::ScrollArea::horizontal()
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let mut deleted_ids = Vec::new();
+                        let mut deleted_ids = smallvec::SmallVec::<[_; 1]>::new();
                         for document in self.documents.iter() {
                             egui::containers::Frame::group(ui.style())
                                 .outer_margin(egui::Margin::symmetric(0.0, 0.0))
