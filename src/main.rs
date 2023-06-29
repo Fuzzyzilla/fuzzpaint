@@ -396,6 +396,8 @@ pub struct DocumentUserInterface {
     color: egui::Color32,
     cur_document: Option<FuzzID<Document>>,
 
+    modal_stack: Vec<Box<dyn FnMut(&mut egui::Ui) -> ()>>,
+
     documents: Vec<Document>,
     document_interfaces: std::collections::HashMap<FuzzID<Document>, PerDocumentInterface>,
 }
@@ -404,6 +406,7 @@ impl Default for DocumentUserInterface {
         Self {
             color: egui::Color32::BLUE,
             cur_document: None,
+            modal_stack: Vec::new(),
             documents: Vec::new(),
             document_interfaces: Default::default(),
         }
@@ -457,7 +460,7 @@ impl DocumentUserInterface {
                         egui::CollapsingHeader::new("Children")
                             .default_open(true)
                             .enabled(!children.is_empty())
-                            .show(ui, |ui| {
+                            .show_unindented(ui, |ui| {
                                 Self::ui_layer_slice(ui, document_interface, children);
                             });
                     },
@@ -481,7 +484,27 @@ impl DocumentUserInterface {
             });
         }
     }
-    pub fn ui(&mut self, ctx: &egui::Context) {
+    /*
+    fn do_modal(&mut self, ctx: &egui::Context, add_contents: &Box<dyn FnMut(&mut egui::Ui) -> ()>) {
+        egui::Area::new("Modal")
+            .order(egui::Order::TOP)
+            .movable(true)
+            .show(&ctx, |ui| {
+                egui::Frame::window(ui.style())
+                    .show(ui, *add_contents)
+            });
+    }
+    fn push_modal(&mut self, add_contents: impl FnMut(&mut egui::Ui) -> ()) {
+        self.modal_stack.push(Box::new(add_contents))
+    }*/
+    pub fn ui(&mut self, ctx: &egui::Context) { 
+        /*
+        if !self.modal_stack.is_empty() {
+            for modal in self.modal_stack.iter() {
+                self.do_modal(&ctx, modal);
+            }
+        }*/
+
         egui::TopBottomPanel::top("file")   
         .show(&ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -507,6 +530,13 @@ impl DocumentUserInterface {
                         let _ = add_button(ui, "Export", None);
                     });
                     ui.menu_button("Edit", |_| ());
+                    ui.menu_button("Image", |ui| {
+                        if ui.button("Image Size").clicked() {
+                            /*self.push_modal(|ui| {
+                                ui.label("Hai :>");
+                            });*/
+                        };
+                    });
                 });
             });
         });
