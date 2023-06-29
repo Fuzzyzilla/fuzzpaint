@@ -353,6 +353,58 @@ impl Default for LayerGraph {
     }
 }
 
+#[derive(PartialEq, Eq, Hash, strum::AsRefStr, strum::EnumIter, Copy, Clone)]
+pub enum BrushKind {
+    Stamped,
+    Rolled,
+}
+pub enum BrushStyle {
+    Stamped {
+        spacing: f32,
+    },
+    Rolled,
+}
+impl BrushStyle {
+    pub fn default_for(brush_kind: BrushKind) -> Self {
+        match brush_kind {
+            BrushKind::Stamped => Self::Stamped { spacing: 5.0 },
+            BrushKind::Rolled => Self::Rolled
+        }
+    }
+    pub fn brush_kind(&self) -> BrushKind {
+        match self {
+            Self::Stamped { .. } => BrushKind::Stamped,
+            Self::Rolled => BrushKind::Rolled,
+        }
+    }
+}
+impl Default for BrushStyle {
+    fn default() -> Self {
+        Self::default_for(BrushKind::Stamped)
+    }
+}
+pub struct Brush {
+    name: String,
+
+    style: BrushStyle,
+
+    id: FuzzID<Brush>,
+
+    //Globally unique ID, for allowing files to be shared after serialization
+    universal_id: uuid::Uuid,
+}
+impl Default for Brush {
+    fn default() -> Self {
+        let id = FuzzID::default();
+        Self {
+            name: format!("Brush {}", id.id()),
+            style: Default::default(),
+            id,
+            universal_id: uuid::Uuid::new_v4(),
+        }
+    }
+}
+
 pub struct Document {
     /// The path from which the file was loaded, or None if opened as new.
     path: Option<std::path::PathBuf>,
@@ -395,19 +447,27 @@ impl Default for PerDocumentInterface {
 }
 pub struct DocumentUserInterface {
     color: egui::Color32,
-    cur_document: Option<FuzzID<Document>>,
 
     modal_stack: Vec<Box<dyn FnMut(&mut egui::Ui) -> ()>>,
 
+    cur_brush: Option<FuzzID<Brush>>,
+    brushes: Vec<Brush>,
+
+    cur_document: Option<FuzzID<Document>>,
     documents: Vec<Document>,
+
     document_interfaces: std::collections::HashMap<FuzzID<Document>, PerDocumentInterface>,
 }
 impl Default for DocumentUserInterface {
     fn default() -> Self {
         Self {
             color: egui::Color32::BLUE,
-            cur_document: None,
             modal_stack: Vec::new(),
+
+            cur_brush: None,
+            brushes: Vec::new(),
+
+            cur_document: None,
             documents: Vec::new(),
             document_interfaces: Default::default(),
         }
@@ -441,11 +501,7 @@ impl DocumentUserInterface {
                 match layer {
                     LayerNode::Group { layer, children, id } => {
                         ui.horizontal(|ui| {
-                            let mut checked = document_interface.cur_layer == Some(*id);
-                            ui.checkbox(&mut checked, "").clicked();
-                            if checked {
-                                document_interface.cur_layer = Some(*id);
-                            }
+                            ui.radio_value(&mut document_interface.cur_layer, Some(*id), "");
                             ui.text_edit_singleline(&mut layer.name);
                         });
 
@@ -472,11 +528,7 @@ impl DocumentUserInterface {
                     },
                     LayerNode::Layer { layer, id } => {
                         ui.horizontal(|ui| {
-                            let mut checked = document_interface.cur_layer == Some(*id);
-                            ui.checkbox(&mut checked, "").clicked();
-                            if checked {
-                                document_interface.cur_layer = Some(*id);
-                            }
+                            ui.radio_value(&mut document_interface.cur_layer, Some(*id), "");
                             ui.text_edit_singleline(&mut layer.name);
                         });
 
@@ -668,6 +720,63 @@ impl DocumentUserInterface {
             ui.separator();
             ui.label("Brushes");
             ui.separator();
+
+            ui.horizontal(|ui| {
+                if ui.button("➕").clicked() {
+                    let brush = Brush::default();
+                    self.brushes.push(brush);
+                }
+                if ui.button("✖").on_hover_text("Delete brush").clicked() {
+                    if let Some(id) = self.cur_brush {
+                        self.brushes.retain(|brush| brush.id != id);
+                    }
+                };
+            });
+            ui.separator();
+
+            for brush in self.brushes.iter_mut() {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut self.cur_brush, Some(brush.id), "");
+                        ui.text_edit_singleline(&mut brush.name);
+                    });
+                    egui::CollapsingHeader::new("Settings")
+                        .id_source(brush.id)
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            let mut brush_kind = brush.style.brush_kind();
+
+                            egui::ComboBox::new(brush.id, "")
+                                .selected_text(brush_kind.as_ref())
+                                .show_ui(ui, |ui| {
+                                    for kind in <BrushKind as strum::IntoEnumIterator>::iter() {
+                                        ui.selectable_value(&mut brush_kind, kind, kind.as_ref());
+                                    }
+                                });
+        
+                            //Changed by user, switch to defaults for the new kind
+                            if brush_kind != brush.style.brush_kind() {
+                                brush.style = BrushStyle::default_for(brush_kind);
+                            }
+        
+                            match &mut brush.style {
+                                BrushStyle::Stamped { spacing } => {
+                                    let slider = egui::widgets::Slider::new(spacing, 0.1..=200.0)
+                                        .clamp_to_range(true)
+                                        .logarithmic(true)
+                                        .suffix("px");
+
+                                    ui.add(slider);
+                                }
+                                BrushStyle::Rolled => {
+
+                                }
+                            }
+                        })
+                });
+
+            }
+
             /*
             ui.horizontal(|ui| {
                 if ui.button("➕").clicked() {

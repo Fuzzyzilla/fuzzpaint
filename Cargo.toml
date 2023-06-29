@@ -22,6 +22,7 @@ strum = {version = "0.25.0", features = ["derive"]}
 thiserror = "1.0.40"
 tokio = { version = "1.28.2", features = ["sync", "rt"] }
 try-block = "0.1.0"
+uuid = { version = "1.4.0", features = ["v4"] }
 vulkano = "0.33.0"
 vulkano-shaders = "0.33.0"
 vulkano-win = "0.33.0"
