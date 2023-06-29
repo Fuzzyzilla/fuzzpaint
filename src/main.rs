@@ -8,7 +8,7 @@ pub mod window;
 use cgmath::{Matrix4, SquareMatrix};
 use vulkano::command_buffer;
 use vulkano_prelude::*;
-pub mod DocumentViewportProxy;
+pub mod document_viewport_proxy;
 pub mod render_device;
 pub mod stylus_events;
 
@@ -1180,7 +1180,7 @@ impl SillyDocumentRenderer {
 fn listener(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     renderer: Arc<render_device::RenderContext>,
-    document_preview: Arc<parking_lot::RwLock<DocumentViewportProxy::DocumentViewportPreviewProxy>>,
+    document_preview: Arc<parking_lot::RwLock<document_viewport_proxy::DocumentViewportPreviewProxy>>,
 ) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -1254,7 +1254,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
     //future.wait(None)?;
 
     let document_view = Arc::new(parking_lot::RwLock::new(
-        DocumentViewportProxy::DocumentViewportPreviewProxy::new(&render_surface)?,
+        document_viewport_proxy::DocumentViewportPreviewProxy::new(&render_surface)?,
     ));
     let window_renderer = window_surface.with_render_surface(
         render_surface,
