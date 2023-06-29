@@ -45,14 +45,14 @@ impl Default for Blend {
 static ID_SERVER :
     std::sync::OnceLock<
         parking_lot::RwLock<
-            std::collections::HashMap<std::any::TypeId, std::sync::atomic::AtomicU32>
+            std::collections::HashMap<std::any::TypeId, std::sync::atomic::AtomicU64>
         >
     > = std::sync::OnceLock::new();
 
 /// ID that is unique within this execution of the program.
 /// IDs with different types may share a value but should not be considered equal.
 pub struct FuzzID<T: std::any::Any> {
-    id: u32,
+    id: u64,
     // Namespace marker
     _phantom : std::marker::PhantomData<T>,
 }
@@ -72,12 +72,12 @@ impl<T: std::any::Any> std::cmp::PartialEq for FuzzID<T> {
 impl<T: std::any::Any> std::cmp::Eq for FuzzID<T> {}
 impl<T: std::any::Any> std::hash::Hash for FuzzID<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write_u32(self.id);
+        state.write_u64(self.id);
     }
 }
 
 impl<T: std::any::Any> FuzzID<T> {
-    pub fn id(&self) -> u32 {
+    pub fn id(&self) -> u64 {
         self.id
     }
 }
@@ -108,7 +108,8 @@ impl<T: std::any::Any> Default for FuzzID<T> {
 }
 impl<T: std::any::Any> std::fmt::Display for FuzzID<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}#{}", std::any::type_name::<T>().split("::").last().unwrap(), self.id)
+        //Unwrap here is safe - the rsplit will always return at least one element, even for empty strings.
+        write!(f, "{}#{}", std::any::type_name::<T>().rsplit("::").next().unwrap(), self.id)
     }
 }
 
@@ -414,6 +415,11 @@ impl Default for DocumentUserInterface {
 }
 
 impl DocumentUserInterface {
+    fn target_layer(&self) -> Option<FuzzID<LayerNode>> {
+        let id = self.cur_document?;
+        // Selected layer of the currently focused document, if any
+        self.document_interfaces.get(&id)?.cur_layer
+    }
     fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut Blend) {
         ui.horizontal_wrapped(|ui| {
             ui.add(egui::DragValue::new(&mut blend.opacity).fixed_decimals(2).speed(0.01).clamp_range(0.0..=1.0));
