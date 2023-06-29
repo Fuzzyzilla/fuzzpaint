@@ -27,15 +27,16 @@ To declare **0.2.0**, I would like to be able to somewhat freely draw a thing an
    - [ ] Stamped brushes
    - [ ] Efficient erasers
  - [ ] Layers
-   - [ ] Simple UI to manage layer creation, order, modes, etc.
+   - [X] Simple UI to manage layer creation, order, modes, etc.
    - [ ] Blending Über-compute-shader 
      - In the future, compile a document-specific compute shader to do the blending in a more optimizer-friendly manner.
      - fall forward on `EXT_blend_operation_advanced`?
    - Groups + FX + self-populating layers (clone, fill) come later
  - [ ] UI
+   - [X] Initial layout
    - [ ] A simple hotkey system, for common actions like Ctrl+Z or Ctrl+Space
    - [ ] Infinite Undo/Redo
-   - [ ] Pan, Zoom, Scroll, Rotate viewport
+   - [ ] Pan, Zoom, Scroll, Rotate, Mirror viewport
    - [ ] Fit, 100% modes
 
 ## Long-term Goals
