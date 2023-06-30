@@ -72,6 +72,7 @@ impl<T: std::any::Any> std::cmp::PartialEq for FuzzID<T> {
 impl<T: std::any::Any> std::cmp::Eq for FuzzID<T> {}
 impl<T: std::any::Any> std::hash::Hash for FuzzID<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::any::TypeId::of::<T>().hash(state);
         state.write_u64(self.id);
     }
 }
