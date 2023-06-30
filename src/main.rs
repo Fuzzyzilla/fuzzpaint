@@ -29,12 +29,14 @@ impl Default for BlendMode {
 pub struct Blend {
     mode: BlendMode,
     opacity: f32,
+    alpha_clip: bool,
 }
 impl Default for Blend {
     fn default() -> Self {
         Self {
             mode: Default::default(),
             opacity: 1.0,
+            alpha_clip: false,
         }
     }
 }
@@ -70,6 +72,7 @@ impl<T: std::any::Any> std::cmp::PartialEq for FuzzID<T> {
 impl<T: std::any::Any> std::cmp::Eq for FuzzID<T> {}
 impl<T: std::any::Any> std::hash::Hash for FuzzID<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::any::TypeId::of::<T>().hash(state);
         state.write_u64(self.id);
     }
 }
@@ -135,15 +138,15 @@ impl Default for GroupLayer {
         }
     }
 }
-pub struct Layer {
+pub struct StrokeLayer {
     name: String,
     blend: Blend,
 
     /// ID that is unique within this execution of the program
-    id: FuzzID<Layer>,
+    id: FuzzID<StrokeLayer>,
 }
 
-impl Default for Layer {
+impl Default for StrokeLayer {
     fn default() -> Self {
         let id = FuzzID::default();
         Self {
@@ -161,8 +164,8 @@ pub enum LayerNode {
         children: std::cell::UnsafeCell<Vec<LayerNode>>,
         id: FuzzID<LayerNode>,
     },
-    Layer {
-        layer: Layer,
+    StrokeLayer {
+        layer: StrokeLayer,
         id: FuzzID<LayerNode>,
     },
 }
@@ -170,7 +173,7 @@ impl LayerNode {
     pub fn id(&self) -> FuzzID<LayerNode> {
         match self {
             Self::Group { id, .. } => *id,
-            Self::Layer { id, .. } => *id,
+            Self::StrokeLayer { id, .. } => *id,
         }
     }
 }
@@ -184,9 +187,9 @@ impl From<GroupLayer> for LayerNode {
         }
     }
 }
-impl From<Layer> for LayerNode {
-    fn from(layer: Layer) -> Self {
-        Self::Layer {
+impl From<StrokeLayer> for LayerNode {
+    fn from(layer: StrokeLayer) -> Self {
+        Self::StrokeLayer {
             layer,
             id: Default::default(),
         }
@@ -507,14 +510,18 @@ impl DocumentUserInterface {
         self.document_interfaces.get(&id)?.cur_layer
     }
     fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut Blend) {
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
+            //Checkerboard icon, for alpha clipping
+            ui.toggle_value(&mut blend.alpha_clip, "▓")
+                .on_hover_text("Alpha clip");
+
             ui.add(
                 egui::DragValue::new(&mut blend.opacity)
                     .fixed_decimals(2)
                     .speed(0.01)
                     .clamp_range(0.0..=1.0),
             );
-            egui::ComboBox::new(id, "Mode")
+            egui::ComboBox::new(id, "")
                 .selected_text(blend.mode.as_ref())
                 .show_ui(ui, |ui| {
                     for blend_mode in <crate::BlendMode as strum::IntoEnumIterator>::iter() {
@@ -544,7 +551,7 @@ impl DocumentUserInterface {
                         id,
                     } => {
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut document_interface.cur_layer, Some(*id), "");
+                            ui.selectable_value(&mut document_interface.cur_layer, Some(*id), "🗀");
                             ui.text_edit_singleline(&mut layer.name);
                         })
                         .response
@@ -559,7 +566,7 @@ impl DocumentUserInterface {
                             //Get or insert default is unstable? :V
                             let blend = layer.blend.get_or_insert_with(Default::default);
 
-                            Self::ui_layer_blend(ui, id, blend);
+                            Self::ui_layer_blend(ui, *id, blend);
                         } else {
                             layer.blend = None;
                         }
@@ -568,15 +575,16 @@ impl DocumentUserInterface {
                         //TODO: iter api so as to not expose unsafe innards.
                         let children = unsafe { &mut *children.get() };
                         egui::CollapsingHeader::new("Children")
+                            .id_source(*id)
                             .default_open(true)
                             .enabled(!children.is_empty())
                             .show_unindented(ui, |ui| {
                                 Self::ui_layer_slice(ui, document_interface, children);
                             });
                     }
-                    LayerNode::Layer { layer, id } => {
+                    LayerNode::StrokeLayer { layer, id } => {
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut document_interface.cur_layer, Some(*id), "");
+                            ui.selectable_value(&mut document_interface.cur_layer, Some(*id), "✏");
                             ui.text_edit_singleline(&mut layer.name);
                         })
                         .response
@@ -726,7 +734,7 @@ impl DocumentUserInterface {
 
             ui.horizontal(|ui| {
                 if ui.button("➕").clicked() {
-                    let layer = Layer::default();
+                    let layer = StrokeLayer::default();
                     if let Some(selected) = document_interface.cur_layer {
                         document.layers.insert_layer_at(selected, layer);
                     } else {
@@ -924,6 +932,25 @@ impl DocumentUserInterface {
             });
         });
     }
+}
+
+
+#[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
+#[repr(C)]
+struct TessellatedStrokeVertex {
+    #[format(R32G32_SFLOAT)]
+    pos: [f32; 2],
+    #[format(R32_SFLOAT)]
+    pressure: f32,
+}
+
+struct LayerRenderData {
+    image: Option<vk::StorageImage>,
+    tessellated_stroke_vertices: Option<vk::Subbuffer<TessellatedStrokeVertex>>,
+    stroke_indirect_commands: Option<vk::Subbuffer<vulkano::command_buffer::DrawIndirectCommand>>,
+}
+pub struct LayerNodeRenderer {
+    layer_data: std::collections::HashMap<LayerNode, LayerRenderData>,
 }
 
 #[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
@@ -1180,7 +1207,9 @@ impl SillyDocumentRenderer {
 fn listener(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     renderer: Arc<render_device::RenderContext>,
-    document_preview: Arc<parking_lot::RwLock<document_viewport_proxy::DocumentViewportPreviewProxy>>,
+    document_preview: Arc<
+        parking_lot::RwLock<document_viewport_proxy::DocumentViewportPreviewProxy>,
+    >,
 ) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
