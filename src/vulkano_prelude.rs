@@ -10,6 +10,7 @@ pub mod vk {
         buffer::{
             view::{BufferView, BufferViewCreateInfo},
             Buffer, BufferContents, BufferCreateInfo, BufferUsage,
+            Subbuffer,
         },
         command_buffer::{
             allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},

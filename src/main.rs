@@ -933,6 +933,25 @@ impl DocumentUserInterface {
     }
 }
 
+
+#[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
+#[repr(C)]
+struct TessellatedStrokeVertex {
+    #[format(R32G32_SFLOAT)]
+    pos: [f32; 2],
+    #[format(R32_SFLOAT)]
+    pressure: f32,
+}
+
+struct LayerRenderData {
+    image: Option<vk::StorageImage>,
+    tessellated_stroke_vertices: Option<vk::Subbuffer<TessellatedStrokeVertex>>,
+    stroke_indirect_commands: Option<vk::Subbuffer<vulkano::command_buffer::DrawIndirectCommand>>,
+}
+pub struct LayerNodeRenderer {
+    layer_data: std::collections::HashMap<LayerNode, LayerRenderData>,
+}
+
 #[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
 struct StrokePointUnpacked {
