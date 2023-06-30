@@ -71,6 +71,9 @@ impl<T: std::any::Any> std::cmp::PartialEq for FuzzID<T> {
 }
 impl<T: std::any::Any> std::cmp::Eq for FuzzID<T> {}
 impl<T: std::any::Any> std::hash::Hash for FuzzID<T> {
+    /// A note on hashes - this relies on the internal representation of TypeID,
+    /// which is unstable between compilations. Do NOT serialize or otherwise rely on
+    /// comparisons between hashes from different executions of the program.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::any::TypeId::of::<T>().hash(state);
         state.write_u64(self.id);
@@ -487,6 +490,8 @@ pub struct DocumentUserInterface {
     documents: Vec<Document>,
 
     document_interfaces: std::collections::HashMap<FuzzID<Document>, PerDocumentInterface>,
+
+    viewport: egui::Rect,
 }
 impl Default for DocumentUserInterface {
     fn default() -> Self {
@@ -499,6 +504,8 @@ impl Default for DocumentUserInterface {
             cur_document: None,
             documents: Vec::new(),
             document_interfaces: Default::default(),
+
+            viewport: egui::Rect{min: egui::Pos2::ZERO, max: egui::Pos2::ZERO},
         }
     }
 }
@@ -508,6 +515,19 @@ impl DocumentUserInterface {
         let id = self.cur_document?;
         // Selected layer of the currently focused document, if any
         self.document_interfaces.get(&id)?.cur_layer
+    }
+
+    /// Get the available area for document rendering, in logical pixels. 
+    /// None if there is no space for a viewport.
+    pub fn get_document_viewport(&self) -> Option<egui::Rect> {
+        // Avoid giving a zero or negative size viewport.
+        let size = self.viewport.size();
+
+        if size.x > 0.0 && size.y > 0.0 {
+            Some(self.viewport)
+        } else {
+            None
+        }
     }
     fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut Blend) {
         ui.horizontal(|ui| {
@@ -931,6 +951,8 @@ impl DocumentUserInterface {
                 });
             });
         });
+
+        self.viewport = ctx.available_rect();
     }
 }
 
@@ -938,19 +960,63 @@ impl DocumentUserInterface {
 #[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
 struct TessellatedStrokeVertex {
+    // Must be f32, as f16 only supports up to a 2048px document with pixel precision.
     #[format(R32G32_SFLOAT)]
     pos: [f32; 2],
-    #[format(R32_SFLOAT)]
-    pressure: f32,
+    // Could maybe be f16, as long as brush textures are <2048px.
+    #[format(R32G32_SFLOAT)]
+    uv: [f32; 2],
+    // Nearly 100% coverage on this vertex input type.
+    #[format(R16G16B16A16_SFLOAT)]
+    color: [vulkano::half::f16; 4],
 }
 
 struct LayerRenderData {
+    /// For any layer that needs to be rendered separately
+    /// (or can be used to optimize draws into a pre-rendered buffer)
     image: Option<vk::StorageImage>,
+
+    // For stroke layers
     tessellated_stroke_vertices: Option<vk::Subbuffer<TessellatedStrokeVertex>>,
     stroke_indirect_commands: Option<vk::Subbuffer<vulkano::command_buffer::DrawIndirectCommand>>,
 }
+/// A collection of images that have been merged, to skip re-blending them
+/// Useful for all layers below whatever the user is editting.
+/// Blended with normal alpha (for now), so only backgrounds and continuous sets
+/// of normal-mode images can be cached this way.
+struct DocumentCachedBlend{
+    image: Option<vk::StorageImage>,
+    // The layers the cached image contains - invalidated if any are modified/reordered ect.
+    depends_on: Vec<FuzzID<LayerNode>>,
+}
+struct DocumentRenderData {
+    cached_background : Option<DocumentCachedBlend>,
+}
 pub struct LayerNodeRenderer {
-    layer_data: std::collections::HashMap<LayerNode, LayerRenderData>,
+    layer_data: std::collections::HashMap<FuzzID<LayerNode>, LayerRenderData>,
+    document_data: std::collections::HashMap<FuzzID<Document>, DocumentRenderData>,
+}
+pub struct StrokeBrushSettings {
+    brush: FuzzID<Brush>,
+    color: [f32; 4],
+    size_mul: f32,
+    /// NOT opacity, since the stroke is blended continuously, not blended as a group.
+    flow_mul: f32,
+}
+pub struct StrokePoint {
+    pos: [f32; 2],
+    pressure: f32,
+}
+pub struct Stroke {
+    brush: StrokeBrushSettings,
+    points: Vec<StrokePoint>,
+}
+/// Decoupled data from header, stored in separate manager. Header managed by UI.
+pub struct StrokeLayerData {
+    strokes: Vec<Stroke>,
+}
+pub struct StrokeLayerManager {
+    layers: std::collections::HashMap<FuzzID<StrokeLayer>, StrokeLayerData>,
 }
 
 #[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]

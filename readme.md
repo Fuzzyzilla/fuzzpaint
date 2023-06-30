@@ -30,7 +30,7 @@ To declare **0.2.0**, I would like to be able to somewhat freely draw a thing an
    - [X] Simple UI to manage layer creation, order, modes, etc.
    - [ ] Blending Über-compute-shader 
      - In the future, compile a document-specific compute shader to do the blending in a more optimizer-friendly manner.
-     - fall forward on `EXT_blend_operation_advanced`?
+     - fall forward on `EXT_blend_operation_advanced` or `EXT_fragment_shader_interlock`?
    - Groups + FX + self-populating layers (clone, fill) come later
  - [ ] UI
    - [X] Initial layout
