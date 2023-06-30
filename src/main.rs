@@ -565,7 +565,7 @@ impl DocumentUserInterface {
                             //Get or insert default is unstable? :V
                             let blend = layer.blend.get_or_insert_with(Default::default);
 
-                            Self::ui_layer_blend(ui, id, blend);
+                            Self::ui_layer_blend(ui, *id, blend);
                         } else {
                             layer.blend = None;
                         }
@@ -574,6 +574,7 @@ impl DocumentUserInterface {
                         //TODO: iter api so as to not expose unsafe innards.
                         let children = unsafe { &mut *children.get() };
                         egui::CollapsingHeader::new("Children")
+                            .id_source(*id)
                             .default_open(true)
                             .enabled(!children.is_empty())
                             .show_unindented(ui, |ui| {
