@@ -1126,9 +1126,8 @@ mod stroke_renderer {
             })
         }
         /// Render strokes into the provided buffer.
-        /// Assumes that the existing data inside the render cache matches the beginning of the strokes array,
-        /// and adds any new strokes to it.
-        /// Be sure to invalidate the cache if this is not the case - strokes were changed, brushes modified, ect.
+        /// Assumes that the existing data inside the render cache matches the strokes array.
+        /// Be sure to re-tessellate the cache if this is not the case - strokes were changed, brushes modified, ect.
         pub fn render_into(
             &self,
             stroke_data: &super::StrokeLayerData,
