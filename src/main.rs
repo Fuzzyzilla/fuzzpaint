@@ -1017,9 +1017,10 @@ fn num_vertices_of(brush: &FuzzID<Brush>, stroke: Stroke) -> usize {
 }
 
 mod stroke_renderer {
-    use anyhow::Result as AnyResult;
     use crate::vk;
+    use anyhow::Result as AnyResult;
     use std::sync::Arc;
+    use vulkano::pipeline::graphics::vertex_input::Vertex;
     mod vert {
         vulkano_shaders::shader! {
             ty: "vertex",
@@ -1031,13 +1032,16 @@ mod stroke_renderer {
             } push_matrix;
     
             layout(location = 0) in vec2 pos;
-            layout(location = 1) in float pressure;
+            layout(location = 1) in vec2 uv;
+            layout(location = 2) in vec4 color;
     
-            layout(location = 0) flat out vec4 color;
+            layout(location = 0) out vec4 out_color;
+            layout(location = 1) out vec2 out_uv;
     
             void main() {
+                out_color = color;
+                out_uv = uv;
                 vec4 position_2d = push_matrix.mvp * vec4(pos, 0.0, 1.0);
-                color = vec4(0.0, 0.0, 0.0, pressure);
                 gl_Position = vec4(position_2d.xy, 0.0, 1.0);
             }"
         }
@@ -1047,7 +1051,8 @@ mod stroke_renderer {
             ty: "fragment",
             src: r"
             #version 460
-            layout(location = 0) flat in vec4 color;
+            layout(location = 0) in vec4 color;
+            layout(location = 1) in vec2 uv;
     
             layout(location = 0) out vec4 out_color;
     
@@ -1059,10 +1064,66 @@ mod stroke_renderer {
 
     pub struct StrokeLayerRenderer {
         context: Arc<crate::render_device::RenderContext>,
+
+        render_pass: Arc<vk::RenderPass>,
+        pipeline: Arc<vk::GraphicsPipeline>,
     }
     impl StrokeLayerRenderer {
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {
-            todo!()
+            let render_pass = vulkano::single_pass_renderpass!(
+                context.device().clone(),
+                attachments: {
+                    output_image: {
+                        // TODO: An optimized render sequence could involve this being a load.
+                        load: Clear,
+                        store: Store,
+                        format: crate::DOCUMENT_FORMAT,
+                        samples: 1,
+                    },
+                },
+                pass: {
+                    color: [output_image],
+                    depth_stencil: {},
+                },
+            )?;
+
+            let frag = frag::load(context.device().clone())?;
+            let vert = vert::load(context.device().clone())?;
+            // Unwraps ok here, using GLSL where "main" is the only allowed entry point.
+            let frag = frag.entry_point("main").unwrap();
+            let vert = vert.entry_point("main").unwrap();
+
+            // Premultiplied blending with blend constants specified at rendertime.
+            // constant of [1.0; 4] is normal, constant of [0.0; 4] is eraser. [r,g,b,1.0] can be used to modulate color, but not alpha.
+            let mut premul_dyn_constants = vk::ColorBlendState::new(1);
+            premul_dyn_constants.blend_constants = vk::StateMode::Dynamic;
+            premul_dyn_constants.attachments[0].blend = Some(vk::AttachmentBlend {
+                alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+                color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+                alpha_destination:
+                    vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+                color_destination:
+                    vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+                alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+                color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+            });
+
+            let pipeline = vk::GraphicsPipeline::start()
+                .fragment_shader(frag, frag::SpecializationConstants::default())
+                .vertex_shader(vert, vert::SpecializationConstants::default())
+                .vertex_input_state(super::TessellatedStrokeVertex::per_vertex())
+                .input_assembly_state(vk::InputAssemblyState::new()) //Triangle list, no prim restart
+                .color_blend_state(premul_dyn_constants)
+                .rasterization_state(vk::RasterizationState::new()) // No cull
+                .viewport_state(vk::ViewportState::viewport_dynamic_scissor_irrelevant())
+                .render_pass(render_pass.clone().first_subpass())
+                .build(context.device().clone())?;
+
+            Ok(Self {
+                context,
+                pipeline,
+                render_pass,
+            })
         }
         /// Render strokes into the provided buffer.
         /// Assumes that the existing data inside the render cache matches the beginning of the strokes array,
@@ -1077,12 +1138,12 @@ mod stroke_renderer {
             if stroke_data.strokes.is_empty() {
                 return Ok(());
             }
-    
+
             // "Get or try insert with" - make the image if it doesn't already exist.
             let render_image = match render_data.image {
                 Some(ref image) => image.clone(),
                 None => {
-                    let new_image = vk::StorageImage::new(
+                    let new_image = vk::StorageImage::with_usage(
                         self.context.allocators().memory(),
                         vulkano::image::ImageDimensions::Dim2d {
                             width: crate::DOCUMENT_DIMENSION,
@@ -1090,6 +1151,8 @@ mod stroke_renderer {
                             array_layers: 1,
                         },
                         crate::DOCUMENT_FORMAT,
+                        vk::ImageUsage::COLOR_ATTACHMENT,
+                        vk::ImageCreateFlags::empty(),
                         [
                             self.context.queues().graphics().idx(),
                             self.context.queues().compute().idx(),
@@ -1162,7 +1225,7 @@ mod test_renderer_vert {
         layout(location = 0) in vec2 pos;
         layout(location = 1) in float pressure;
 
-        layout(location = 0) flat out vec4 color;
+        layout(location = 0) out vec4 color;
 
         void main() {
             vec4 position_2d = push_matrix.mvp * vec4(pos, 0.0, 1.0);
@@ -1176,7 +1239,7 @@ mod test_renderer_frag {
         ty: "fragment",
         src: r"
         #version 460
-        layout(location = 0) flat in vec4 color;
+        layout(location = 0) in vec4 color;
 
         layout(location = 0) out vec4 out_color;
 

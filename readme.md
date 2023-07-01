@@ -18,10 +18,12 @@ To declare **0.2.0**, I would like to be able to somewhat freely draw a thing an
  - [ ] File I/O
    - [ ] Read/Write custom vector image format
    - [ ] File history (linear)
-   - [ ] Write common image formats (via image-rs/image)
+   - [ ] Export common image formats
+     - via image-rs/image
  - [ ] Brushes
    - [ ] Make and manage textured brushes from inside fuzzpaint
-   - [ ] Save brushes to file (to document or to global repo?)
+   - [ ] Save brushes to file
+     - To document or to global repo? - resolved: both, with UUIDs! That way, files can be freely shared, and brushes can be easily re-used.
    - [ ] Tesselation engine capable of mixed brushes
    - [ ] Roller brushes
    - [ ] Stamped brushes
@@ -31,7 +33,7 @@ To declare **0.2.0**, I would like to be able to somewhat freely draw a thing an
    - [ ] Blending Über-compute-shader 
      - In the future, compile a document-specific compute shader to do the blending in a more optimizer-friendly manner.
      - fall forward on `EXT_blend_operation_advanced` or `EXT_fragment_shader_interlock`?
-   - Groups + FX + self-populating layers (clone, fill) come later
+   - Groups + FX + self-populating layers (clone, fill, gradients) come later
  - [ ] UI
    - [X] Initial layout
    - [ ] A simple hotkey system, for common actions like Ctrl+Z or Ctrl+Space
