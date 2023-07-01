@@ -982,10 +982,12 @@ struct TessellatedStrokeVertex {
     color: [vulkano::half::f16; 4],
 }
 
+/// All the data needed to render tessellated output.
 struct TessellatedStrokeInfo {
     source: FuzzID<Stroke>,
     first_vertex: u32,
     vertices: u32,
+    blend_constants: [f32; 4]
 }
 
 struct LayerRenderData {
@@ -1125,16 +1127,15 @@ mod stroke_renderer {
                 render_pass,
             })
         }
-        /// Render strokes into the provided buffer.
-        /// Assumes that the existing data inside the render cache matches the strokes array.
-        /// Be sure to re-tessellate the cache if this is not the case - strokes were changed, brushes modified, ect.
-        pub fn render_into(
+        /// Render provided tessellated strokes from and into the provided buffer.
+        /// Assumes the tessellated stroke infos match the contenst of the buffer.
+        /// Some cursory checks are made to ensure this is the case, but don't rely on them.
+        pub fn render(
             &self,
-            stroke_data: &super::StrokeLayerData,
             render_data: &mut super::LayerRenderData,
         ) -> AnyResult<()> {
             // Skip
-            if stroke_data.strokes.is_empty() {
+            if render_data.tessellated_stroke_infos.is_empty() || render_data.tessellated_stroke_vertices.is_none() {
                 return Ok(());
             }
 
