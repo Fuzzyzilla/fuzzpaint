@@ -1216,6 +1216,42 @@ mod stroke_renderer {
     }
 }
 
+enum TessellationError {
+    BufferTooSmall { needed_size: usize },
+}
+
+trait StrokeTessellator {
+    fn tessellate(
+        &self,
+        strokes: &[Stroke],
+        into: vk::Subbuffer<crate::TessellatedStrokeVertex>,
+    ) -> ::std::result::Result<(), TessellationError>;
+    /// Exact number of vertices to allocate and draw for this stroke.
+    /// No method for estimates for now.
+    fn num_vertices_of(&self, stroke: &Stroke) -> usize;
+    /// Exact number of vertices to allocate and draw for all strokes.
+    fn num_vertices_of_slice(&self, strokes: &[Stroke]) -> usize {
+        strokes.iter()
+            .map(|s| self.num_vertices_of(s))
+            .sum()
+    }
+}
+
+pub struct RayonTessellator;
+
+impl StrokeTessellator for RayonTessellator {
+    fn tessellate(
+            &self,
+            strokes: &[Stroke],
+            into: vk::Subbuffer<crate::TessellatedStrokeVertex>,
+        ) -> std::result::Result<(), TessellationError> {
+        Ok(())
+    }
+    fn num_vertices_of(&self, stroke: &Stroke) -> usize {
+        
+    }
+}
+
 pub struct LayerNodeRenderer {
     context: Arc<render_device::RenderContext>,
 

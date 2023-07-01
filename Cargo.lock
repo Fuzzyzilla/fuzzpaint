@@ -699,6 +699,7 @@ dependencies = [
  "image",
  "log",
  "parking_lot",
+ "rayon",
  "rfd",
  "smallvec",
  "strum",
