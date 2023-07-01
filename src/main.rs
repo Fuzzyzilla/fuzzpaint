@@ -987,13 +987,13 @@ struct TessellatedStrokeInfo {
     source: FuzzID<Stroke>,
     first_vertex: u32,
     vertices: u32,
-    blend_constants: [f32; 4]
+    blend_constants: [f32; 4],
 }
 
-struct LayerRenderData {
+pub struct LayerRenderData {
     /// For any layer that needs to be rendered separately
     /// (or can be used to optimize draws into a pre-rendered buffer)
-    image: Option<Arc<vk::StorageImage>>,
+    image: Option<Arc<vk::ImageView<vk::StorageImage>>>,
 
     // For stroke layers
     tessellated_stroke_vertices: Option<vk::Subbuffer<TessellatedStrokeVertex>>,
@@ -1133,14 +1133,18 @@ mod stroke_renderer {
         pub fn render(
             &self,
             render_data: &mut super::LayerRenderData,
-        ) -> AnyResult<()> {
-            // Skip
-            if render_data.tessellated_stroke_infos.is_empty() || render_data.tessellated_stroke_vertices.is_none() {
-                return Ok(());
+        ) -> AnyResult<vk::PrimaryAutoCommandBuffer> {
+            // Skip if no tessellated verts
+            let Some(verts) = render_data.tessellated_stroke_vertices.clone() else {
+                anyhow::bail!("No vertices to render.");
+            };
+            // Skip if no infos
+            if render_data.tessellated_stroke_infos.is_empty() {
+                anyhow::bail!("No strokes to render.");
             }
 
             // "Get or try insert with" - make the image if it doesn't already exist.
-            let render_image = match render_data.image {
+            let render_view = match render_data.image {
                 Some(ref image) => image.clone(),
                 None => {
                     let new_image = vk::StorageImage::with_usage(
@@ -1158,11 +1162,56 @@ mod stroke_renderer {
                             self.context.queues().compute().idx(),
                         ],
                     )?;
-                    render_data.image = Some(new_image.clone());
-                    new_image
+                    let view = vk::ImageView::new_default(new_image)?;
+                    render_data.image = Some(view.clone());
+                    view
                 }
             };
-            Ok(())
+
+            let framebuffer = vk::Framebuffer::new(
+                self.render_pass.clone(),
+                vk::FramebufferCreateInfo {
+                    attachments: vec![render_view],
+                    ..Default::default()
+                },
+            )?;
+
+            let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
+                self.context.allocators().command_buffer(),
+                self.context.queues().graphics().idx(),
+                vk::CommandBufferUsage::OneTimeSubmit,
+            )?;
+
+            let mut prev_blend_constants = [1.0; 4];
+
+            command_buffer
+                .begin_render_pass(
+                    vk::RenderPassBeginInfo::framebuffer(framebuffer),
+                    vk::SubpassContents::Inline,
+                )?
+                .bind_pipeline_graphics(self.pipeline.clone())
+                .bind_vertex_buffers(0, [verts])
+                .set_viewport(
+                    0,
+                    [vk::Viewport {
+                        depth_range: 0.0..1.0,
+                        dimensions: [crate::DOCUMENT_DIMENSION as f32; 2],
+                        origin: [0.0; 2],
+                    }],
+                )
+                .set_blend_constants(prev_blend_constants);
+
+            for info in render_data.tessellated_stroke_infos.iter() {
+                // Draws can further be batched here. For now, just avoid resetting all the time.
+                if info.blend_constants != prev_blend_constants {
+                    prev_blend_constants = info.blend_constants;
+                    command_buffer.set_blend_constants(info.blend_constants);
+                }
+                command_buffer.draw(info.vertices, 1, info.first_vertex, 0)?;
+            }
+
+            command_buffer.end_render_pass()?;
+            Ok(command_buffer.build()?)
         }
     }
 }
