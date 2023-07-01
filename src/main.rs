@@ -1012,12 +1012,6 @@ struct DocumentRenderData {
     cached_background: Option<DocumentCachedBlend>,
 }
 
-/// Compute the EXACT number of vertices needed to tesselate the given stroke with the given brush.
-fn num_vertices_of(brush: &FuzzID<Brush>, stroke: Stroke) -> usize {
-    // Not so sure how this will work yet.
-    todo!();
-}
-
 mod stroke_renderer {
     use crate::vk;
     use anyhow::Result as AnyResult;
@@ -1217,23 +1211,23 @@ mod stroke_renderer {
 }
 
 enum TessellationError {
-    BufferTooSmall { needed_size: usize },
+    VertexBufferTooSmall { needed_size: usize },
+    InfosBufferTooSmall { needed_size: usize },
 }
 
 trait StrokeTessellator {
     fn tessellate(
         &self,
         strokes: &[Stroke],
-        into: vk::Subbuffer<crate::TessellatedStrokeVertex>,
+        infos_into: &mut [crate::TessellatedStrokeInfo],
+        vertices_into: vk::Subbuffer<crate::TessellatedStrokeVertex>,
     ) -> ::std::result::Result<(), TessellationError>;
     /// Exact number of vertices to allocate and draw for this stroke.
     /// No method for estimates for now.
     fn num_vertices_of(&self, stroke: &Stroke) -> usize;
     /// Exact number of vertices to allocate and draw for all strokes.
     fn num_vertices_of_slice(&self, strokes: &[Stroke]) -> usize {
-        strokes.iter()
-            .map(|s| self.num_vertices_of(s))
-            .sum()
+        strokes.iter().map(|s| self.num_vertices_of(s)).sum()
     }
 }
 
@@ -1241,14 +1235,35 @@ pub struct RayonTessellator;
 
 impl StrokeTessellator for RayonTessellator {
     fn tessellate(
-            &self,
-            strokes: &[Stroke],
-            into: vk::Subbuffer<crate::TessellatedStrokeVertex>,
-        ) -> std::result::Result<(), TessellationError> {
+        &self,
+        strokes: &[Stroke],
+        infos_into: &mut [crate::TessellatedStrokeInfo],
+        vertices_into: vk::Subbuffer<crate::TessellatedStrokeVertex>,
+    ) -> std::result::Result<(), TessellationError> {
         Ok(())
     }
     fn num_vertices_of(&self, stroke: &Stroke) -> usize {
-        
+        // Somehow fetch the brush of this stroke
+        let brush: Brush = todo!();
+
+        match brush.style {
+            BrushStyle::Rolled => unimplemented!(),
+            BrushStyle::Stamped { spacing } => {
+                if spacing <= 0.0 {
+                    // Sanity check.
+                    0
+                } else {
+                    stroke
+                        .points
+                        .last()
+                        .map(|last| {
+                            let num_stamps = (last.dist / spacing).floor();
+                            (num_stamps as usize * 4)
+                        })
+                        .unwrap_or(0usize)
+                }
+            }
+        }
     }
 }
 
