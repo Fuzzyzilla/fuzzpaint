@@ -12,6 +12,9 @@ pub mod document_viewport_proxy;
 pub mod render_device;
 pub mod stylus_events;
 
+const DOCUMENT_DIMENSION: u32 = 512;
+const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
+
 use anyhow::Result as AnyResult;
 
 #[derive(strum::AsRefStr, PartialEq, Eq, strum::EnumIter, Copy, Clone)]
@@ -46,7 +49,7 @@ static ID_SERVER: std::sync::OnceLock<
     parking_lot::RwLock<std::collections::HashMap<std::any::TypeId, std::sync::atomic::AtomicU64>>,
 > = std::sync::OnceLock::new();
 
-/// ID that is unique within this execution of the program.
+/// ID that is guarunteed unique within this execution of the program.
 /// IDs with different types may share a value but should not be considered equal.
 pub struct FuzzID<T: std::any::Any> {
     id: u64,
@@ -88,6 +91,7 @@ impl<T: std::any::Any> FuzzID<T> {
 impl<T: std::any::Any> Default for FuzzID<T> {
     fn default() -> Self {
         let map = ID_SERVER.get_or_init(Default::default);
+        // ID of zero will be invalid, start at one and go up.
         let id = {
             let read = map.upgradable_read();
             let ty = std::any::TypeId::of::<T>();
@@ -98,11 +102,16 @@ impl<T: std::any::Any> Default for FuzzID<T> {
             } else {
                 // We need to insert into the map - transition to exclusive access
                 let mut write = parking_lot::RwLockUpgradableReadGuard::upgrade(read);
-                // Initialize at 1, return ID 0
-                write.insert(ty, 1.into());
-                0
+                // Initialize at 2, return ID 1
+                write.insert(ty, 2.into());
+                1
             }
         };
+
+        // Incredibly unrealistic - At one brush stroke per second, 24/7/365, it will take
+        // half a trillion years to overflow. This assert is debug-only, to catch exhaustion from some
+        // programming error.
+        debug_assert!(id != 0, "{} ID overflow!", std::any::type_name::<T>());
 
         Self {
             id,
@@ -505,7 +514,10 @@ impl Default for DocumentUserInterface {
             documents: Vec::new(),
             document_interfaces: Default::default(),
 
-            viewport: egui::Rect{min: egui::Pos2::ZERO, max: egui::Pos2::ZERO},
+            viewport: egui::Rect {
+                min: egui::Pos2::ZERO,
+                max: egui::Pos2::ZERO,
+            },
         }
     }
 }
@@ -517,7 +529,7 @@ impl DocumentUserInterface {
         self.document_interfaces.get(&id)?.cur_layer
     }
 
-    /// Get the available area for document rendering, in logical pixels. 
+    /// Get the available area for document rendering, in logical pixels.
     /// None if there is no space for a viewport.
     pub fn get_document_viewport(&self) -> Option<egui::Rect> {
         // Avoid giving a zero or negative size viewport.
@@ -956,7 +968,6 @@ impl DocumentUserInterface {
     }
 }
 
-
 #[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
 struct TessellatedStrokeVertex {
@@ -971,28 +982,85 @@ struct TessellatedStrokeVertex {
     color: [vulkano::half::f16; 4],
 }
 
+struct TessellatedStrokeInfo {
+    source: FuzzID<Stroke>,
+    first_vertex: u32,
+    vertices: u32,
+}
+
 struct LayerRenderData {
     /// For any layer that needs to be rendered separately
     /// (or can be used to optimize draws into a pre-rendered buffer)
-    image: Option<vk::StorageImage>,
+    image: Option<Arc<vk::StorageImage>>,
 
     // For stroke layers
     tessellated_stroke_vertices: Option<vk::Subbuffer<TessellatedStrokeVertex>>,
-    stroke_indirect_commands: Option<vk::Subbuffer<vulkano::command_buffer::DrawIndirectCommand>>,
+    tessellated_stroke_infos: Vec<TessellatedStrokeInfo>,
 }
 /// A collection of images that have been merged, to skip re-blending them
 /// Useful for all layers below whatever the user is editting.
 /// Blended with normal alpha (for now), so only backgrounds and continuous sets
 /// of normal-mode images can be cached this way.
-struct DocumentCachedBlend{
-    image: Option<vk::StorageImage>,
+struct DocumentCachedBlend {
+    image: Option<Arc<vk::StorageImage>>,
     // The layers the cached image contains - invalidated if any are modified/reordered ect.
     depends_on: Vec<FuzzID<LayerNode>>,
 }
 struct DocumentRenderData {
-    cached_background : Option<DocumentCachedBlend>,
+    cached_background: Option<DocumentCachedBlend>,
+}
+
+/// Compute the EXACT number of vertices needed to tesselate the given stroke with the given brush.
+fn num_vertices_of(brush: &FuzzID<Brush>, stroke: Stroke) -> usize {
+    // Not so sure how this will work yet.
+    todo!();
+}
+
+pub struct StrokeLayerRenderer {
+    context: Arc<render_device::RenderContext>,
+}
+impl StrokeLayerRenderer {
+    /// Render strokes into the provided buffer.
+    /// Assumes that the existing data inside the render cache matches the beginning of the strokes array,
+    /// and adds any new strokes to it.
+    /// Be sure to invalidate the cache if this is not the case - strokes were changed, brushes modified, ect.
+    fn render_into(
+        &self,
+        stroke_data: &StrokeLayerData,
+        render_data: &mut LayerRenderData,
+    ) -> AnyResult<()> {
+        // Skip
+        if stroke_data.strokes.is_empty() {
+            return Ok(());
+        }
+
+        // "Get or try insert with" - make the image if it doesn't already exist.
+        let render_image = match render_data.image {
+            Some(ref image) => image.clone(),
+            None => {
+                let new_image = vk::StorageImage::new(
+                    self.context.allocators().memory(),
+                    vulkano::image::ImageDimensions::Dim2d {
+                        width: DOCUMENT_DIMENSION,
+                        height: DOCUMENT_DIMENSION,
+                        array_layers: 1,
+                    },
+                    DOCUMENT_FORMAT,
+                    [
+                        self.context.queues().graphics().idx(),
+                        self.context.queues().compute().idx(),
+                    ],
+                )?;
+                render_data.image = Some(new_image.clone());
+                new_image
+            }
+        };
+        Ok(())
+    }
 }
 pub struct LayerNodeRenderer {
+    context: Arc<render_device::RenderContext>,
+
     layer_data: std::collections::HashMap<FuzzID<LayerNode>, LayerRenderData>,
     document_data: std::collections::HashMap<FuzzID<Document>, DocumentRenderData>,
 }
@@ -1002,12 +1070,19 @@ pub struct StrokeBrushSettings {
     size_mul: f32,
     /// NOT opacity, since the stroke is blended continuously, not blended as a group.
     flow_mul: f32,
+    /// If true, the blend constants must be set to generate an erasing effect.
+    is_eraser: bool,
 }
 pub struct StrokePoint {
     pos: [f32; 2],
     pressure: f32,
+    /// Arc length of stroke from beginning to this point
+    dist: f32,
 }
 pub struct Stroke {
+    /// Unique id during this execution of the program.
+    /// We have 64 bits, this won't get exhausted anytime soon! :P
+    id: FuzzID<Stroke>,
     brush: StrokeBrushSettings,
     points: Vec<StrokePoint>,
 }
@@ -1065,8 +1140,6 @@ mod test_renderer_frag {
     }
 }
 
-const DOCUMENT_DIMENSION: u32 = 512;
-
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
 /// behind the Egui content.
 pub trait PreviewRenderProxy {
@@ -1092,13 +1165,12 @@ struct SillyDocumentRenderer {
 }
 impl SillyDocumentRenderer {
     fn new(render_context: Arc<render_device::RenderContext>) -> AnyResult<Self> {
-        let document_format = vk::Format::R16G16B16A16_SFLOAT;
         let document_dimension = DOCUMENT_DIMENSION;
         let ms_attachment = vk::AttachmentImage::transient_multisampled(
             render_context.allocators().memory(),
             [DOCUMENT_DIMENSION; 2],
             vk::SampleCount::Sample8,
-            document_format,
+            DOCUMENT_FORMAT,
         )?;
         let ms_attachment_view = vk::ImageView::new_default(ms_attachment)?;
 
@@ -1108,13 +1180,13 @@ impl SillyDocumentRenderer {
                 document: {
                     load: Clear,
                     store: DontCare,
-                    format: document_format,
+                    format: DOCUMENT_FORMAT,
                     samples: 8,
                 },
                 resolve: {
                     load: DontCare,
                     store: Store,
-                    format: document_format,
+                    format: DOCUMENT_FORMAT,
                     samples: 1,
                 },
             },
