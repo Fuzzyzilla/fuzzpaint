@@ -1016,48 +1016,94 @@ fn num_vertices_of(brush: &FuzzID<Brush>, stroke: Stroke) -> usize {
     todo!();
 }
 
-pub struct StrokeLayerRenderer {
-    context: Arc<render_device::RenderContext>,
-}
-impl StrokeLayerRenderer {
-    /// Render strokes into the provided buffer.
-    /// Assumes that the existing data inside the render cache matches the beginning of the strokes array,
-    /// and adds any new strokes to it.
-    /// Be sure to invalidate the cache if this is not the case - strokes were changed, brushes modified, ect.
-    fn render_into(
-        &self,
-        stroke_data: &StrokeLayerData,
-        render_data: &mut LayerRenderData,
-    ) -> AnyResult<()> {
-        // Skip
-        if stroke_data.strokes.is_empty() {
-            return Ok(());
+mod stroke_renderer {
+    use anyhow::Result as AnyResult;
+    use crate::vk;
+    use std::sync::Arc;
+    mod vert {
+        vulkano_shaders::shader! {
+            ty: "vertex",
+            src: r"
+            #version 460
+    
+            layout(push_constant) uniform Matrix {
+                mat4 mvp;
+            } push_matrix;
+    
+            layout(location = 0) in vec2 pos;
+            layout(location = 1) in float pressure;
+    
+            layout(location = 0) flat out vec4 color;
+    
+            void main() {
+                vec4 position_2d = push_matrix.mvp * vec4(pos, 0.0, 1.0);
+                color = vec4(0.0, 0.0, 0.0, pressure);
+                gl_Position = vec4(position_2d.xy, 0.0, 1.0);
+            }"
         }
+    }
+    mod frag {
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            src: r"
+            #version 460
+            layout(location = 0) flat in vec4 color;
+    
+            layout(location = 0) out vec4 out_color;
+    
+            void main() {
+                out_color = color;
+            }"
+        }
+    }
 
-        // "Get or try insert with" - make the image if it doesn't already exist.
-        let render_image = match render_data.image {
-            Some(ref image) => image.clone(),
-            None => {
-                let new_image = vk::StorageImage::new(
-                    self.context.allocators().memory(),
-                    vulkano::image::ImageDimensions::Dim2d {
-                        width: DOCUMENT_DIMENSION,
-                        height: DOCUMENT_DIMENSION,
-                        array_layers: 1,
-                    },
-                    DOCUMENT_FORMAT,
-                    [
-                        self.context.queues().graphics().idx(),
-                        self.context.queues().compute().idx(),
-                    ],
-                )?;
-                render_data.image = Some(new_image.clone());
-                new_image
+    pub struct StrokeLayerRenderer {
+        context: Arc<crate::render_device::RenderContext>,
+    }
+    impl StrokeLayerRenderer {
+        pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {
+            todo!()
+        }
+        /// Render strokes into the provided buffer.
+        /// Assumes that the existing data inside the render cache matches the beginning of the strokes array,
+        /// and adds any new strokes to it.
+        /// Be sure to invalidate the cache if this is not the case - strokes were changed, brushes modified, ect.
+        pub fn render_into(
+            &self,
+            stroke_data: &super::StrokeLayerData,
+            render_data: &mut super::LayerRenderData,
+        ) -> AnyResult<()> {
+            // Skip
+            if stroke_data.strokes.is_empty() {
+                return Ok(());
             }
-        };
-        Ok(())
+    
+            // "Get or try insert with" - make the image if it doesn't already exist.
+            let render_image = match render_data.image {
+                Some(ref image) => image.clone(),
+                None => {
+                    let new_image = vk::StorageImage::new(
+                        self.context.allocators().memory(),
+                        vulkano::image::ImageDimensions::Dim2d {
+                            width: crate::DOCUMENT_DIMENSION,
+                            height: crate::DOCUMENT_DIMENSION,
+                            array_layers: 1,
+                        },
+                        crate::DOCUMENT_FORMAT,
+                        [
+                            self.context.queues().graphics().idx(),
+                            self.context.queues().compute().idx(),
+                        ],
+                    )?;
+                    render_data.image = Some(new_image.clone());
+                    new_image
+                }
+            };
+            Ok(())
+        }
     }
 }
+
 pub struct LayerNodeRenderer {
     context: Arc<render_device::RenderContext>,
 
