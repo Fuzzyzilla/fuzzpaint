@@ -420,7 +420,7 @@ pub enum BrushStyle {
 impl BrushStyle {
     pub fn default_for(brush_kind: BrushKind) -> Self {
         match brush_kind {
-            BrushKind::Stamped => Self::Stamped { spacing: 5.0 },
+            BrushKind::Stamped => Self::Stamped { spacing: 2.0 },
             BrushKind::Rolled => Self::Rolled,
         }
     }
@@ -996,6 +996,7 @@ struct TessellatedStrokeVertex {
 }
 
 /// All the data needed to render tessellated output.
+#[derive(Clone, Copy)]
 struct TessellatedStrokeInfo {
     source: FuzzID<Stroke>,
     first_vertex: u32,
@@ -1009,7 +1010,7 @@ pub struct LayerRenderData {
     image: Option<Arc<vk::ImageView<vk::StorageImage>>>,
 
     // For stroke layers
-    tessellated_stroke_vertices: Option<vk::Subbuffer<TessellatedStrokeVertex>>,
+    tessellated_stroke_vertices: Option<vk::Subbuffer<[TessellatedStrokeVertex]>>,
     tessellated_stroke_infos: Vec<TessellatedStrokeInfo>,
 }
 /// A collection of images that have been merged, to skip re-blending them
@@ -1029,7 +1030,7 @@ mod stroke_renderer {
     use crate::vk;
     use anyhow::Result as AnyResult;
     use std::sync::Arc;
-    use vulkano::pipeline::graphics::vertex_input::Vertex;
+    use vulkano::pipeline::{graphics::vertex_input::Vertex, Pipeline};
     mod vert {
         vulkano_shaders::shader! {
             ty: "vertex",
@@ -1066,7 +1067,7 @@ mod stroke_renderer {
             layout(location = 0) out vec4 out_color;
     
             void main() {
-                out_color = color;
+                out_color = color * vec4(uv, 1.0, 1.0);
             }"
         }
     }
@@ -1189,11 +1190,23 @@ mod stroke_renderer {
                 vk::CommandBufferUsage::OneTimeSubmit,
             )?;
 
+            let push_matrix = cgmath::ortho(
+                0.0,
+                crate::DOCUMENT_DIMENSION as f32,
+                crate::DOCUMENT_DIMENSION as f32,
+                0.0,
+                -1.0,
+                1.0,
+            );
+
             let mut prev_blend_constants = [1.0; 4];
 
             command_buffer
                 .begin_render_pass(
-                    vk::RenderPassBeginInfo::framebuffer(framebuffer),
+                    vk::RenderPassBeginInfo {
+                        clear_values: vec![Some([0.0; 4].into())],
+                        ..vk::RenderPassBeginInfo::framebuffer(framebuffer)
+                    },
                     vk::SubpassContents::Inline,
                 )?
                 .bind_pipeline_graphics(self.pipeline.clone())
@@ -1205,6 +1218,13 @@ mod stroke_renderer {
                         dimensions: [crate::DOCUMENT_DIMENSION as f32; 2],
                         origin: [0.0; 2],
                     }],
+                )
+                .push_constants(
+                    self.pipeline.layout().clone(),
+                    0,
+                    vert::Matrix {
+                        mvp: push_matrix.into(),
+                    },
                 )
                 .set_blend_constants(prev_blend_constants);
 
@@ -1223,10 +1243,11 @@ mod stroke_renderer {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum TessellationError {
     VertexBufferTooSmall { needed_size: usize },
     InfosBufferTooSmall { needed_size: usize },
-    BufferError( vulkano::buffer::BufferError),
+    BufferError(vulkano::buffer::BufferError),
 }
 
 trait StrokeTessellator {
@@ -1311,7 +1332,7 @@ impl StrokeTessellator for RayonTessellator {
         }
         let mut vertices_into = match vertices_into.write() {
             Ok(o) => o,
-            Err(e) => return Err(TessellationError::BufferError(e))
+            Err(e) => return Err(TessellationError::BufferError(e)),
         };
 
         for (stroke, info) in strokes.iter().zip(infos_into.iter_mut()) {
@@ -1329,50 +1350,49 @@ impl StrokeTessellator for RayonTessellator {
                     stroke
                         .points
                         .par_windows(2)
-                        // Type: optimize for 4, but more is allowable (spills to heap).
+                        // Type: optimize for 6, but more is allowable (spills to heap).
                         // flat_map_iter, as each iter is small and thus wouldn't benifit from parallelization
-                        .flat_map_iter(
-                            |win| -> smallvec::SmallVec<[TessellatedStrokeVertex; 6]> {
-                                // Windows are always 2. no par_array_windows :V
-                                let [a, b] = win else { unreachable!() };
+                        .flat_map_iter(|win| -> smallvec::SmallVec<[TessellatedStrokeVertex; 6]> {
+                            // Windows are always 2. no par_array_windows :V
+                            let [a, b] = win else { unreachable!() };
 
-                                // Sanity check - avoid division by zero and other weirdness.
-                                if b.dist - a.dist <= 0.0 {
-                                    return Default::default();
-                                }
+                            // Sanity check - avoid division by zero and other weirdness.
+                            if b.dist - a.dist <= 0.0 {
+                                return Default::default();
+                            }
 
-                                // Offset of first stamp into this segment.
-                                let offs = a.dist % spacing;
-                                // Length of segment, after the first stamp (could be negative = no stamps)
-                                let len = (b.dist - a.dist) - offs;
+                            // Offset of first stamp into this segment.
+                            let offs = a.dist % spacing;
+                            // Length of segment, after the first stamp (could be negative = no stamps)
+                            let len = (b.dist - a.dist) - offs;
 
-                                let mut current = offs;
-                                let mut vertices = smallvec::SmallVec::new();
-                                while current < len {
-                                    // fractional [0, 1] distance between a and b.
-                                    let factor = (current + offs) / (b.dist - a.dist);
+                            let mut current = 0.0;
+                            let mut vertices = smallvec::SmallVec::new();
+                            while current <= len {
+                                // fractional [0, 1] distance between a and b.
+                                let factor = (current + offs) / (b.dist - a.dist);
 
-                                    let point = a.lerp(b, factor);
+                                let point = a.lerp(b, factor);
 
-                                    vertices.extend(
-                                        Self::do_stamp(&point, &stroke.brush).into_iter(),
-                                    );
+                                vertices.extend(Self::do_stamp(&point, &stroke.brush).into_iter());
 
-                                    current += spacing;
-                                }
+                                current += spacing;
+                            }
 
-                                vertices
-                            },
-                        )
+                            vertices
+                        })
                         .collect()
                 }
                 BrushStyle::Rolled => unimplemented!(),
-            
             };
 
             // Get some space in the buffer to write into
-            let Some(slice) = vertices_into.get_mut(base_vertex..(base_vertex+points.len()))
-                else {return Err(TessellationError::VertexBufferTooSmall { needed_size: base_vertex+points.len() })};
+            let Some(slice) = vertices_into.get_mut(base_vertex..(base_vertex + points.len()))
+            else {
+                return Err(TessellationError::VertexBufferTooSmall {
+                    needed_size: base_vertex + points.len(),
+                });
+            };
 
             // Populate infos
             info.first_vertex = base_vertex as u32;
@@ -1382,7 +1402,10 @@ impl StrokeTessellator for RayonTessellator {
             base_vertex += points.len();
 
             // Copy over.
-            slice.iter_mut().zip(points.into_iter()).for_each(|(into, from)| *into = from);
+            slice
+                .iter_mut()
+                .zip(points.into_iter())
+                .for_each(|(into, from)| *into = from);
         }
 
         Ok(())
@@ -1426,6 +1449,7 @@ pub struct StrokeBrushSettings {
     /// If true, the blend constants must be set to generate an erasing effect.
     is_eraser: bool,
 }
+#[derive(Clone, Copy)]
 pub struct StrokePoint {
     pos: [f32; 2],
     pressure: f32,
@@ -1709,6 +1733,12 @@ impl SillyDocumentRenderer {
     }
 }
 
+struct TessTest {
+    infos: Vec<TessellatedStrokeInfo>,
+    buf: vk::Subbuffer<[TessellatedStrokeVertex]>,
+    strokes: Vec<Stroke>,
+}
+
 fn listener(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     renderer: Arc<render_device::RenderContext>,
@@ -1720,12 +1750,27 @@ fn listener(
         .build()
         .unwrap();
 
-    let mut doc = SillyDocument {
-        indices: vec![],
-        verts: vec![],
+    let mut tess_test = TessTest {
+        strokes: Default::default(),
+        infos: Default::default(),
+        buf: vk::Buffer::new_unsized::<[TessellatedStrokeVertex]>(
+            renderer.allocators().memory(),
+            vk::BufferCreateInfo {
+                usage: vk::BufferUsage::VERTEX_BUFFER,
+                sharing: vk::Sharing::Exclusive,
+                ..Default::default()
+            },
+            vk::AllocationCreateInfo {
+                allocate_preference: vulkano::memory::allocator::MemoryAllocatePreference::Unknown,
+                usage: vk::MemoryUsage::Upload,
+                ..Default::default()
+            },
+            65536,
+        )
+        .unwrap(),
     };
-
-    let renderer = SillyDocumentRenderer::new(renderer.clone()).unwrap();
+    let tesselator = RayonTessellator;
+    let stroke_renderer = stroke_renderer::StrokeLayerRenderer::new(renderer.clone()).unwrap();
 
     let mut was_pressed = false;
     loop {
@@ -1735,21 +1780,47 @@ fn listener(
 
                 let matrix = document_preview.read().get_matrix().invert().unwrap();
                 for event in event_frame.iter() {
-                    // released, append a primitive restart command
-                    if was_pressed && !event.pressed {
-                        doc.indices.push(u32::MAX);
+                    // just pressed - append a new stroke.
+                    if event.pressed && !was_pressed {
+                        tess_test.strokes.push(Stroke {
+                            id: Default::default(),
+                            brush: StrokeBrushSettings {
+                                brush: FuzzID {
+                                    id: 0,
+                                    _phantom: Default::default(),
+                                },
+                                color_modulate: [1.0; 4],
+                                size_mul: 10.0,
+                                is_eraser: false,
+                            },
+                            points: Vec::new(),
+                        });
                     }
                     if event.pressed {
                         let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
+                        let pos = [
+                            pos.x * DOCUMENT_DIMENSION as f32,
+                            (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
+                        ];
 
-                        doc.verts.push(StrokePointUnpacked {
-                            pos: [
-                                pos.x * DOCUMENT_DIMENSION as f32,
-                                (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
-                            ],
-                            pressure: event.pressure.unwrap_or(0.0),
+                        let mut this_stroke = tess_test.strokes.last_mut().unwrap();
+                        let last_point = this_stroke.points.last();
+
+                        // Last point's dist plus new dist, or 0.0 if no last point.
+                        let new_dist = last_point
+                            .map(|point| {
+                                let delta = [pos[0] - point.pos[0], pos[1] - point.pos[1]];
+
+                                point.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
+                            })
+                            .unwrap_or(0.0);
+
+                        this_stroke.points.push(StrokePoint {
+                            pos,
+                            pressure: event.pressure.unwrap_or(1.0),
+                            dist: new_dist,
                         });
-                        doc.indices.push((doc.verts.len() - 1) as u32);
+
                         changed = true;
                     }
 
@@ -1758,8 +1829,42 @@ fn listener(
 
                 if changed {
                     let buff = runtime.block_on(document_preview.read().get_writeable_buffer());
-                    renderer.draw(&doc, buff).unwrap().wait(None).unwrap();
+                    tess_test.infos.resize_with(tess_test.strokes.len(), || {
+                        TessellatedStrokeInfo {
+                            source: FuzzID {
+                                id: 0,
+                                _phantom: Default::default(),
+                            },
+                            first_vertex: 0,
+                            vertices: 0,
+                            blend_constants: [0.0; 4],
+                        }
+                    });
 
+                    tesselator
+                        .tessellate(
+                            &tess_test.strokes,
+                            &mut tess_test.infos,
+                            tess_test.buf.clone(),
+                            0,
+                        )
+                        .unwrap();
+
+                    let mut layer_output = LayerRenderData {
+                        image: Some(buff),
+                        tessellated_stroke_vertices: Some(tess_test.buf.clone()),
+                        tessellated_stroke_infos: tess_test.infos.clone(),
+                    };
+                    let cmd = stroke_renderer.render(&mut layer_output).unwrap();
+
+                    renderer
+                        .now()
+                        .then_execute(renderer.queues().graphics().queue().clone(), cmd)
+                        .unwrap()
+                        .then_signal_fence_and_flush()
+                        .unwrap()
+                        .wait(None)
+                        .unwrap();
                     document_preview.read().swap();
                 }
             }
