@@ -1231,6 +1231,8 @@ trait StrokeTessellator {
     }
 }
 
+
+use rayon::prelude::*;
 pub struct RayonTessellator;
 
 impl StrokeTessellator for RayonTessellator {
@@ -1240,7 +1242,14 @@ impl StrokeTessellator for RayonTessellator {
         infos_into: &mut [crate::TessellatedStrokeInfo],
         vertices_into: vk::Subbuffer<crate::TessellatedStrokeVertex>,
     ) -> std::result::Result<(), TessellationError> {
-        Ok(())
+        if infos_into.len() < strokes.len() {
+            return Err(TessellationError::InfosBufferTooSmall { needed_size: strokes.len() })
+        }
+
+        strokes.iter().zip(infos_into.iter_mut())
+            .par_bridge();
+
+        todo!();
     }
     fn num_vertices_of(&self, stroke: &Stroke) -> usize {
         // Somehow fetch the brush of this stroke
@@ -1275,10 +1284,9 @@ pub struct LayerNodeRenderer {
 }
 pub struct StrokeBrushSettings {
     brush: FuzzID<Brush>,
-    color: [f32; 4],
+    /// `a` is flow, NOT opacity, since the stroke is blended continuously not blended as a group.
+    color_modulate: [f32; 4],
     size_mul: f32,
-    /// NOT opacity, since the stroke is blended continuously, not blended as a group.
-    flow_mul: f32,
     /// If true, the blend constants must be set to generate an erasing effect.
     is_eraser: bool,
 }
