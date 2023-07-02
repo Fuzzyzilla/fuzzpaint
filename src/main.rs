@@ -1,5 +1,3 @@
-#![feature(array_chunks)]
-
 use std::sync::Arc;
 mod egui_impl;
 pub mod gpu_err;
@@ -224,7 +222,9 @@ impl LayerGraph {
             self.top_level.as_slice()
         } else {
             // Return false if last element is not a group (shouldn't occur)
-            let LayerNode::Group{children, ..} = traverse_stack.last().clone().unwrap() else {return false};
+            let LayerNode::Group { children, .. } = traverse_stack.last().clone().unwrap() else {
+                return false;
+            };
 
             //Safety - We hold an immutable reference to self, thus no mutable access to `children` can occur as well.
             unsafe { &*children.get() }.as_slice()
@@ -293,7 +293,9 @@ impl LayerGraph {
                             &mut self.top_level
                         } else {
                             //Find siblings
-                            let Some(LayerNode::Group { children: siblings, .. }) = path.get(path.len() - 2)
+                            let Some(LayerNode::Group {
+                                children: siblings, ..
+                            }) = path.get(path.len() - 2)
                             else {
                                 //(should be impossible) parent doesn't exist or isn't a group, add to top level instead.
                                 self.insert_node(node);
@@ -309,12 +311,15 @@ impl LayerGraph {
                         };
 
                         //Find idx of `at`
-                        let Some((idx, _)) = siblings.iter().enumerate().find(|(_, node)| node.id() == at)
-                            else {
-                                //`at` isn't a child of `at`'s parent - should be impossible! add to top of siblings instead.
-                                siblings.push(node);
-                                return;
-                            };
+                        let Some((idx, _)) = siblings
+                            .iter()
+                            .enumerate()
+                            .find(|(_, node)| node.id() == at)
+                        else {
+                            //`at` isn't a child of `at`'s parent - should be impossible! add to top of siblings instead.
+                            siblings.push(node);
+                            return;
+                        };
 
                         //Insert after idx.
                         siblings.insert(idx, node);
@@ -351,8 +356,9 @@ impl LayerGraph {
         let path = self.find(parent)?;
 
         // Get children, or return none if not found or not a group
-        let Some(LayerNode::Group { children, ..}) = path.last()
-            else {return None};
+        let Some(LayerNode::Group { children, .. }) = path.last() else {
+            return None;
+        };
 
         unsafe {
             // Safety - the return value continues to mutably borrow self,
@@ -373,8 +379,12 @@ impl LayerGraph {
                 .find(|(_, node)| node.id() == at)?;
             Some(self.top_level.remove(idx))
         } else {
-            let LayerNode::Group { children: siblings, .. } = path.get(path.len() - 2)?
-                else {return None};
+            let LayerNode::Group {
+                children: siblings, ..
+            } = path.get(path.len() - 2)?
+            else {
+                return None;
+            };
 
             //Safety - has exclusive access to self, so the graph cannot be concurrently accessed
             unsafe {
@@ -703,7 +713,9 @@ impl DocumentUserInterface {
                 ui.add(egui::Separator::default().vertical());
 
                 // if there is no current document, there is nothing for us to do here
-                let Some(document) = self.cur_document else {return};
+                let Some(document) = self.cur_document else {
+                    return;
+                };
 
                 // Get (or create) the document interface
                 let interface = self.document_interfaces.entry(document).or_default();
@@ -753,14 +765,15 @@ impl DocumentUserInterface {
             ui.separator();
 
             // if there is no current document, there is nothing for us to do here
-            let Some(document_id) = self.cur_document else {return};
+            let Some(document_id) = self.cur_document else {
+                return;
+            };
 
             // Find the document, otherwise clear selection
-            let Some(document) = self.documents.iter_mut().find(|doc| doc.id == document_id)
-                else {
-                    self.cur_document = None;
-                    return
-                };
+            let Some(document) = self.documents.iter_mut().find(|doc| doc.id == document_id) else {
+                self.cur_document = None;
+                return;
+            };
 
             let document_interface = self.document_interfaces.entry(document_id).or_default();
 
@@ -1210,9 +1223,10 @@ mod stroke_renderer {
     }
 }
 
-enum TessellationError {
+pub enum TessellationError {
     VertexBufferTooSmall { needed_size: usize },
     InfosBufferTooSmall { needed_size: usize },
+    BufferError( vulkano::buffer::BufferError),
 }
 
 trait StrokeTessellator {
@@ -1220,7 +1234,8 @@ trait StrokeTessellator {
         &self,
         strokes: &[Stroke],
         infos_into: &mut [crate::TessellatedStrokeInfo],
-        vertices_into: vk::Subbuffer<crate::TessellatedStrokeVertex>,
+        vertices_into: vk::Subbuffer<[crate::TessellatedStrokeVertex]>,
+        base_vertex: usize,
     ) -> ::std::result::Result<(), TessellationError>;
     /// Exact number of vertices to allocate and draw for this stroke.
     /// No method for estimates for now.
@@ -1231,29 +1246,150 @@ trait StrokeTessellator {
     }
 }
 
+fn todo_brush() -> Brush {
+    Brush {
+        name: "Todo".into(),
+        style: Default::default(),
+        id: FuzzID {
+            id: 0,
+            _phantom: Default::default(),
+        },
+        // Example UUID from wikipedia lol
+        universal_id: uuid::uuid!("123e4567-e89b-12d3-a456-426614174000"),
+    }
+}
 
 use rayon::prelude::*;
 pub struct RayonTessellator;
 
+impl RayonTessellator {
+    fn do_stamp(point: &StrokePoint, brush: &StrokeBrushSettings) -> [TessellatedStrokeVertex; 6] {
+        let size2 = (point.pressure * brush.size_mul) / 2.0;
+        let color = [
+            vulkano::half::f16::from_f32(brush.color_modulate[0]),
+            vulkano::half::f16::from_f32(brush.color_modulate[1]),
+            vulkano::half::f16::from_f32(brush.color_modulate[2]),
+            vulkano::half::f16::from_f32(brush.color_modulate[3]),
+        ];
+
+        let tl = TessellatedStrokeVertex {
+            pos: [point.pos[0] - size2, point.pos[1] - size2],
+            uv: [0.0, 0.0],
+            color,
+        };
+        let tr = TessellatedStrokeVertex {
+            pos: [point.pos[0] + size2, point.pos[1] - size2],
+            uv: [1.0, 0.0],
+            color,
+        };
+        let bl = TessellatedStrokeVertex {
+            pos: [point.pos[0] - size2, point.pos[1] + size2],
+            uv: [0.0, 1.0],
+            color,
+        };
+        let br = TessellatedStrokeVertex {
+            pos: [point.pos[0] + size2, point.pos[1] + size2],
+            uv: [1.0, 1.0],
+            color,
+        };
+
+        [tl, tr.clone(), bl.clone(), bl, tr, br]
+    }
+}
 impl StrokeTessellator for RayonTessellator {
     fn tessellate(
         &self,
         strokes: &[Stroke],
         infos_into: &mut [crate::TessellatedStrokeInfo],
-        vertices_into: vk::Subbuffer<crate::TessellatedStrokeVertex>,
+        vertices_into: vk::Subbuffer<[crate::TessellatedStrokeVertex]>,
+        mut base_vertex: usize,
     ) -> std::result::Result<(), TessellationError> {
         if infos_into.len() < strokes.len() {
-            return Err(TessellationError::InfosBufferTooSmall { needed_size: strokes.len() })
+            return Err(TessellationError::InfosBufferTooSmall {
+                needed_size: strokes.len(),
+            });
+        }
+        let mut vertices_into = match vertices_into.write() {
+            Ok(o) => o,
+            Err(e) => return Err(TessellationError::BufferError(e))
+        };
+
+        for (stroke, info) in strokes.iter().zip(infos_into.iter_mut()) {
+            info.blend_constants = if stroke.brush.is_eraser {
+                [0.0; 4]
+            } else {
+                [1.0; 4]
+            };
+
+            let brush = todo_brush();
+
+            // Perform tessellation!
+            let points: Vec<TessellatedStrokeVertex> = match brush.style {
+                BrushStyle::Stamped { spacing } => {
+                    stroke
+                        .points
+                        .par_windows(2)
+                        // Type: optimize for 4, but more is allowable (spills to heap).
+                        // flat_map_iter, as each iter is small and thus wouldn't benifit from parallelization
+                        .flat_map_iter(
+                            |win| -> smallvec::SmallVec<[TessellatedStrokeVertex; 6]> {
+                                // Windows are always 2. no par_array_windows :V
+                                let [a, b] = win else { unreachable!() };
+
+                                // Sanity check - avoid division by zero and other weirdness.
+                                if b.dist - a.dist <= 0.0 {
+                                    return Default::default();
+                                }
+
+                                // Offset of first stamp into this segment.
+                                let offs = a.dist % spacing;
+                                // Length of segment, after the first stamp (could be negative = no stamps)
+                                let len = (b.dist - a.dist) - offs;
+
+                                let mut current = offs;
+                                let mut vertices = smallvec::SmallVec::new();
+                                while current < len {
+                                    // fractional [0, 1] distance between a and b.
+                                    let factor = (current + offs) / (b.dist - a.dist);
+
+                                    let point = a.lerp(b, factor);
+
+                                    vertices.extend(
+                                        Self::do_stamp(&point, &stroke.brush).into_iter(),
+                                    );
+
+                                    current += spacing;
+                                }
+
+                                vertices
+                            },
+                        )
+                        .collect()
+                }
+                BrushStyle::Rolled => unimplemented!(),
+            
+            };
+
+            // Get some space in the buffer to write into
+            let Some(slice) = vertices_into.get_mut(base_vertex..(base_vertex+points.len()))
+                else {return Err(TessellationError::VertexBufferTooSmall { needed_size: base_vertex+points.len() })};
+
+            // Populate infos
+            info.first_vertex = base_vertex as u32;
+            info.vertices = points.len() as u32;
+
+            // Shift slice over for next stroke
+            base_vertex += points.len();
+
+            // Copy over.
+            slice.iter_mut().zip(points.into_iter()).for_each(|(into, from)| *into = from);
         }
 
-        strokes.iter().zip(infos_into.iter_mut())
-            .par_bridge();
-
-        todo!();
+        Ok(())
     }
     fn num_vertices_of(&self, stroke: &Stroke) -> usize {
         // Somehow fetch the brush of this stroke
-        let brush: Brush = todo!();
+        let brush: Brush = todo_brush();
 
         match brush.style {
             BrushStyle::Rolled => unimplemented!(),
@@ -1267,7 +1403,7 @@ impl StrokeTessellator for RayonTessellator {
                         .last()
                         .map(|last| {
                             let num_stamps = (last.dist / spacing).floor();
-                            (num_stamps as usize * 4)
+                            num_stamps as usize * 6
                         })
                         .unwrap_or(0usize)
                 }
@@ -1295,6 +1431,20 @@ pub struct StrokePoint {
     pressure: f32,
     /// Arc length of stroke from beginning to this point
     dist: f32,
+}
+
+impl StrokePoint {
+    pub fn lerp(&self, other: &Self, factor: f32) -> Self {
+        let inv_factor = 1.0 - factor;
+        Self {
+            pos: [
+                self.pos[0] * inv_factor + other.pos[0] * factor,
+                self.pos[1] * inv_factor + other.pos[1] * factor,
+            ],
+            pressure: self.pressure * inv_factor + other.pressure * factor,
+            dist: self.dist * inv_factor + other.dist * factor,
+        }
+    }
 }
 pub struct Stroke {
     /// Unique id during this execution of the program.
