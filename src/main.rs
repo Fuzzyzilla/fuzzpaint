@@ -555,8 +555,8 @@ impl DocumentUserInterface {
     }
     fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut Blend) {
         ui.horizontal(|ui| {
-            //Checkerboard icon, for alpha clipping
-            ui.toggle_value(&mut blend.alpha_clip, "▓")
+            //alpha symbol for clipping (allocates every frame - why??)
+            ui.toggle_value(&mut blend.alpha_clip, egui::RichText::new("α").monospace().strong())
                 .on_hover_text("Alpha clip");
 
             ui.add(
@@ -1138,10 +1138,11 @@ mod stroke_renderer {
                     image.clone(),
                     vk::ImageViewCreateInfo {
                         component_mapping: vk::ComponentMapping {
+                            //Red is coverage of white, with premul.
                             a: vk::ComponentSwizzle::Red,
-                            r: vk::ComponentSwizzle::One,
-                            b: vk::ComponentSwizzle::One,
-                            g: vk::ComponentSwizzle::One,
+                            r: vk::ComponentSwizzle::Red,
+                            b: vk::ComponentSwizzle::Red,
+                            g: vk::ComponentSwizzle::Red,
                         },
                         ..vk::ImageViewCreateInfo::from_image(&image)
                     },
