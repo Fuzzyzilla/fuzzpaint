@@ -1372,23 +1372,28 @@ impl RayonTessellator {
             vulkano::half::f16::from_f32(brush.color_modulate[3]),
         ];
 
+        let rand = (point.pos[0] * 100.0).cos() / 2.0 + 0.5;
+        let (sin, cos) = rand.sin_cos();
+        let cos = cos * size2;
+        let sin = sin * size2;
+
         let tl = TessellatedStrokeVertex {
-            pos: [point.pos[0] - size2, point.pos[1] - size2],
+            pos: [point.pos[0] - sin, point.pos[1] - cos],
             uv: [0.0, 0.0],
             color,
         };
         let tr = TessellatedStrokeVertex {
-            pos: [point.pos[0] + size2, point.pos[1] - size2],
+            pos: [point.pos[0] + cos, point.pos[1] - sin],
             uv: [1.0, 0.0],
             color,
         };
         let bl = TessellatedStrokeVertex {
-            pos: [point.pos[0] - size2, point.pos[1] + size2],
+            pos: [point.pos[0] - cos, point.pos[1] + sin],
             uv: [0.0, 1.0],
             color,
         };
         let br = TessellatedStrokeVertex {
-            pos: [point.pos[0] + size2, point.pos[1] + size2],
+            pos: [point.pos[0] + sin, point.pos[1] + cos],
             uv: [1.0, 1.0],
             color,
         };
@@ -1544,7 +1549,7 @@ impl StrokePoint {
         let o = std::simd::f32x4::from_array([other.pos[0], other.pos[1], other.pressure, other.dist]);
 
         // FMA is planned but unimplemented ;w;
-        let n = (s * std::simd::f32x4::splat(inv_factor) + (o * std::simd::f32x4::splat(factor)));
+        let n = s * std::simd::f32x4::splat(inv_factor) + (o * std::simd::f32x4::splat(factor));
         Self {
             pos: [
                 n[0],
