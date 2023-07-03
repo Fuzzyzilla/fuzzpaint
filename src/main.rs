@@ -1,3 +1,5 @@
+#![feature(portable_simd)]
+
 use std::sync::Arc;
 mod egui_impl;
 pub mod gpu_err;
@@ -1537,13 +1539,19 @@ pub struct StrokePoint {
 impl StrokePoint {
     pub fn lerp(&self, other: &Self, factor: f32) -> Self {
         let inv_factor = 1.0 - factor;
+
+        let s = std::simd::f32x4::from_array([self.pos[0], self.pos[1], self.pressure, self.dist]);
+        let o = std::simd::f32x4::from_array([other.pos[0], other.pos[1], other.pressure, other.dist]);
+
+        // FMA is planned but unimplemented ;w;
+        let n = (s * std::simd::f32x4::splat(inv_factor) + (o * std::simd::f32x4::splat(factor)));
         Self {
             pos: [
-                self.pos[0] * inv_factor + other.pos[0] * factor,
-                self.pos[1] * inv_factor + other.pos[1] * factor,
+                n[0],
+                n[1],
             ],
-            pressure: self.pressure * inv_factor + other.pressure * factor,
-            dist: self.dist * inv_factor + other.dist * factor,
+            pressure: n[2],
+            dist: n[3]
         }
     }
 }
