@@ -351,7 +351,7 @@ impl LayerGraph {
         self.insert_node_at(at, node);
         node_id
     }
-    pub fn mut_children_of<'a>(
+    pub fn find_mut_children_of<'a>(
         &'a mut self,
         parent: FuzzID<LayerNode>,
     ) -> Option<&'a mut [LayerNode]> {
@@ -615,9 +615,7 @@ impl DocumentUserInterface {
                             layer.blend = None;
                         }
 
-                        //Safety - No concurrent access to these nodes.
-                        //TODO: iter api so as to not expose unsafe innards.
-                        let children = unsafe { &mut *children.get() };
+                        let children = children.get_mut();
                         egui::CollapsingHeader::new("Children")
                             .id_source(*id)
                             .default_open(true)
@@ -818,7 +816,7 @@ impl DocumentUserInterface {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 match document_interface
                     .focused_subtree
-                    .and_then(|tree| document.layers.mut_children_of(tree))
+                    .and_then(|tree| document.layers.find_mut_children_of(tree))
                 {
                     Some(subtree) => {
                         Self::ui_layer_slice(ui, document_interface, subtree);
@@ -1575,52 +1573,6 @@ pub struct StrokeLayerManager {
     layers: std::collections::HashMap<FuzzID<StrokeLayer>, StrokeLayerData>,
 }
 
-#[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
-#[repr(C)]
-struct StrokePointUnpacked {
-    #[format(R32G32_SFLOAT)]
-    pos: [f32; 2],
-    #[format(R32_SFLOAT)]
-    pressure: f32,
-}
-
-mod test_renderer_vert {
-    vulkano_shaders::shader! {
-        ty: "vertex",
-        src: r"
-        #version 460
-
-        layout(push_constant) uniform Matrix {
-            mat4 mvp;
-        } push_matrix;
-
-        layout(location = 0) in vec2 pos;
-        layout(location = 1) in float pressure;
-
-        layout(location = 0) out vec4 color;
-
-        void main() {
-            vec4 position_2d = push_matrix.mvp * vec4(pos, 0.0, 1.0);
-            color = vec4(0.0, 0.0, 0.0, pressure);
-            gl_Position = vec4(position_2d.xy, 0.0, 1.0);
-        }"
-    }
-}
-mod test_renderer_frag {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        src: r"
-        #version 460
-        layout(location = 0) in vec4 color;
-
-        layout(location = 0) out vec4 out_color;
-
-        void main() {
-            out_color = color;
-        }"
-    }
-}
-
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
 /// behind the Egui content.
 pub trait PreviewRenderProxy {
@@ -1632,197 +1584,6 @@ pub trait PreviewRenderProxy {
     fn render_complete(&mut self, idx: u32);
     fn surface_changed(&mut self, render_surface: &render_device::RenderSurface);
 }
-
-struct SillyDocument {
-    verts: Vec<StrokePointUnpacked>,
-    indices: Vec<u32>,
-}
-struct SillyDocumentRenderer {
-    render_context: Arc<render_device::RenderContext>,
-    pipeline: Arc<vk::GraphicsPipeline>,
-    render_pass: Arc<vk::RenderPass>,
-
-    ms_attachment_view: Arc<vk::ImageView<vk::AttachmentImage>>,
-}
-impl SillyDocumentRenderer {
-    fn new(render_context: Arc<render_device::RenderContext>) -> AnyResult<Self> {
-        let document_dimension = DOCUMENT_DIMENSION;
-        let ms_attachment = vk::AttachmentImage::transient_multisampled(
-            render_context.allocators().memory(),
-            [DOCUMENT_DIMENSION; 2],
-            vk::SampleCount::Sample8,
-            DOCUMENT_FORMAT,
-        )?;
-        let ms_attachment_view = vk::ImageView::new_default(ms_attachment)?;
-
-        let render_pass = vulkano::single_pass_renderpass!(
-            render_context.device().clone(),
-            attachments: {
-                document: {
-                    load: Clear,
-                    store: DontCare,
-                    format: DOCUMENT_FORMAT,
-                    samples: 8,
-                },
-                resolve: {
-                    load: DontCare,
-                    store: Store,
-                    format: DOCUMENT_FORMAT,
-                    samples: 1,
-                },
-            },
-            pass: {
-                color: [document],
-                depth_stencil: {},
-                resolve: [resolve],
-            },
-        )?;
-
-        let vert = test_renderer_vert::load(render_context.device().clone())?;
-        let frag = test_renderer_frag::load(render_context.device().clone())?;
-
-        let mut blend_premul = vk::ColorBlendState::new(1);
-        blend_premul.attachments[0].blend = Some(vk::AttachmentBlend {
-            alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-            color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-            alpha_destination:
-                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-            color_destination:
-                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-            alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-            color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-        });
-
-        let pipeline = vk::GraphicsPipeline::start()
-            .render_pass(render_pass.clone().first_subpass())
-            .vertex_shader(
-                vert.entry_point("main").unwrap(),
-                test_renderer_vert::SpecializationConstants::default(),
-            )
-            .fragment_shader(
-                frag.entry_point("main").unwrap(),
-                test_renderer_frag::SpecializationConstants::default(),
-            )
-            .vertex_input_state(StrokePointUnpacked::per_vertex())
-            .input_assembly_state(vk::InputAssemblyState {
-                topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::LineStrip),
-                primitive_restart_enable: vk::StateMode::Fixed(true),
-                ..Default::default()
-            })
-            .color_blend_state(blend_premul)
-            .multisample_state(vk::MultisampleState {
-                alpha_to_coverage_enable: false,
-                alpha_to_one_enable: false,
-                rasterization_samples: vk::SampleCount::Sample8,
-                sample_shading: None,
-                ..Default::default()
-            })
-            .rasterization_state(vk::RasterizationState {
-                line_width: vk::StateMode::Fixed(4.0),
-                line_rasterization_mode:
-                    vulkano::pipeline::graphics::rasterization::LineRasterizationMode::Rectangular,
-                ..vk::RasterizationState::default()
-            })
-            .viewport_state(vk::ViewportState::viewport_fixed_scissor_irrelevant([
-                vk::Viewport {
-                    depth_range: 0.0..1.0,
-                    dimensions: [document_dimension as f32, document_dimension as f32],
-                    origin: [0.0; 2],
-                },
-            ]))
-            .build(render_context.device().clone())?;
-
-        Ok(Self {
-            render_context,
-            pipeline,
-            render_pass,
-
-            ms_attachment_view,
-        })
-    }
-    fn draw(
-        &self,
-        doc: &SillyDocument,
-        buff: Arc<vk::ImageView<vk::StorageImage>>,
-    ) -> AnyResult<vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>> {
-        let matrix = cgmath::ortho(
-            0.0,
-            DOCUMENT_DIMENSION as f32,
-            DOCUMENT_DIMENSION as f32,
-            0.0,
-            -1.0,
-            0.0,
-        );
-
-        let points_buf = vk::Buffer::from_iter(
-            self.render_context.allocators().memory(),
-            vulkano::buffer::BufferCreateInfo {
-                usage: vk::BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            vulkano::memory::allocator::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Upload,
-                ..Default::default()
-            },
-            doc.verts.iter().copied(),
-        )?;
-        let indices = vk::Buffer::from_iter(
-            self.render_context.allocators().memory(),
-            vulkano::buffer::BufferCreateInfo {
-                usage: vk::BufferUsage::INDEX_BUFFER,
-                ..Default::default()
-            },
-            vulkano::memory::allocator::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Upload,
-                ..Default::default()
-            },
-            doc.indices.iter().copied(),
-        )?;
-
-        let document_framebuffer = vk::Framebuffer::new(
-            self.render_pass.clone(),
-            vk::FramebufferCreateInfo {
-                attachments: vec![self.ms_attachment_view.clone(), buff.clone()],
-                ..Default::default()
-            },
-        )?;
-
-        let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
-            self.render_context.allocators().command_buffer(),
-            self.render_context.queues().graphics().idx(),
-            vk::CommandBufferUsage::OneTimeSubmit,
-        )?;
-        command_buffer
-            .begin_render_pass(
-                vk::RenderPassBeginInfo {
-                    clear_values: vec![Some(vk::ClearValue::Float([0.0; 4])), None],
-                    ..vk::RenderPassBeginInfo::framebuffer(document_framebuffer)
-                },
-                vk::SubpassContents::Inline,
-            )?
-            .bind_pipeline_graphics(self.pipeline.clone())
-            .push_constants(
-                self.pipeline.layout().clone(),
-                0,
-                test_renderer_vert::Matrix { mvp: matrix.into() },
-            )
-            .bind_vertex_buffers(0, [points_buf])
-            .bind_index_buffer(indices)
-            .draw_indexed(doc.indices.len() as u32, 1, 0, 0, 0)?
-            .end_render_pass()?;
-        let command_buffer = command_buffer.build()?;
-
-        Ok(self
-            .render_context
-            .now()
-            .then_execute(
-                self.render_context.queues().graphics().queue().clone(),
-                command_buffer,
-            )?
-            .then_signal_fence_and_flush()?)
-    }
-}
-
 struct TessTest {
     infos: Vec<TessellatedStrokeInfo>,
     buf: vk::Subbuffer<[TessellatedStrokeVertex]>,
@@ -1855,7 +1616,7 @@ fn listener(
                 usage: vk::MemoryUsage::Upload,
                 ..Default::default()
             },
-            65536,
+            65536*2,
         )
         .unwrap(),
     };
