@@ -10,7 +10,7 @@ pub mod document_viewport_proxy;
 pub mod render_device;
 pub mod stylus_events;
 
-const DOCUMENT_DIMENSION: u32 = 512;
+const DOCUMENT_DIMENSION: u32 = 1024;
 const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 use anyhow::Result as AnyResult;
@@ -1030,7 +1030,10 @@ mod stroke_renderer {
     use crate::vk;
     use anyhow::Result as AnyResult;
     use std::sync::Arc;
-    use vulkano::pipeline::{graphics::vertex_input::Vertex, Pipeline};
+    use vulkano::{
+        pipeline::{graphics::vertex_input::Vertex, Pipeline},
+        sync::GpuFuture,
+    };
     mod vert {
         vulkano_shaders::shader! {
             ty: "vertex",
@@ -1061,19 +1064,22 @@ mod stroke_renderer {
             ty: "fragment",
             src: r"
             #version 460
+            layout(set = 0, binding = 0) uniform sampler2D brush_tex;
+
             layout(location = 0) in vec4 color;
             layout(location = 1) in vec2 uv;
     
             layout(location = 0) out vec4 out_color;
     
             void main() {
-                out_color = color * vec4(uv, 1.0, 1.0);
+                out_color = color * texture(brush_tex, uv);
             }"
         }
     }
 
     pub struct StrokeLayerRenderer {
         context: Arc<crate::render_device::RenderContext>,
+        texture_descriptor: Arc<vk::PersistentDescriptorSet>,
 
         render_pass: Arc<vk::RenderPass>,
         pipeline: Arc<vk::GraphicsPipeline>,
@@ -1097,6 +1103,62 @@ mod stroke_renderer {
                 },
             )?;
 
+            let image = image::open("brushes/splotch.png")
+                .unwrap()
+                .into_luma_alpha8();
+
+            //Iter over transparencies.
+            let image_grey = image.iter().skip(1).step_by(2).cloned();
+
+            let mut cb = vk::AutoCommandBufferBuilder::primary(
+                context.allocators().command_buffer(),
+                context.queues().transfer().idx(),
+                vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+            )?;
+            let (image, sampler) = {
+                let image = vk::ImmutableImage::from_iter(
+                    context.allocators().memory(),
+                    image_grey,
+                    vk::ImageDimensions::Dim2d {
+                        width: image.width(),
+                        height: image.height(),
+                        array_layers: 1,
+                    },
+                    vulkano::image::MipmapsCount::One,
+                    vk::Format::R8_UNORM,
+                    &mut cb,
+                )?;
+                context
+                    .now()
+                    .then_execute(context.queues().transfer().queue().clone(), cb.build()?)?
+                    .then_signal_fence_and_flush()?
+                    .wait(None)?;
+
+                let view = vk::ImageView::new(
+                    image.clone(),
+                    vk::ImageViewCreateInfo {
+                        component_mapping: vk::ComponentMapping {
+                            a: vk::ComponentSwizzle::Red,
+                            r: vk::ComponentSwizzle::One,
+                            b: vk::ComponentSwizzle::One,
+                            g: vk::ComponentSwizzle::One,
+                        },
+                        ..vk::ImageViewCreateInfo::from_image(&image)
+                    },
+                )?;
+
+                let sampler = vk::Sampler::new(
+                    context.device().clone(),
+                    vk::SamplerCreateInfo {
+                        min_filter: vk::Filter::Linear,
+                        mag_filter: vk::Filter::Linear,
+                        ..Default::default()
+                    },
+                )?;
+
+                (view, sampler)
+            };
+
             let frag = frag::load(context.device().clone())?;
             let vert = vert::load(context.device().clone())?;
             // Unwraps ok here, using GLSL where "main" is the only allowed entry point.
@@ -1108,8 +1170,8 @@ mod stroke_renderer {
             let mut premul_dyn_constants = vk::ColorBlendState::new(1);
             premul_dyn_constants.blend_constants = vk::StateMode::Dynamic;
             premul_dyn_constants.attachments[0].blend = Some(vk::AttachmentBlend {
-                alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-                color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+                alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::ConstantColor,
+                color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::ConstantAlpha,
                 alpha_destination:
                     vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
                 color_destination:
@@ -1129,10 +1191,19 @@ mod stroke_renderer {
                 .render_pass(render_pass.clone().first_subpass())
                 .build(context.device().clone())?;
 
+            let descriptor_set = vk::PersistentDescriptorSet::new(
+                context.allocators().descriptor_set(),
+                pipeline.layout().set_layouts()[0].clone(),
+                [vk::WriteDescriptorSet::image_view_sampler(
+                    0, image, sampler,
+                )],
+            )?;
+
             Ok(Self {
                 context,
                 pipeline,
                 render_pass,
+                texture_descriptor: descriptor_set,
             })
         }
         /// Render provided tessellated strokes from and into the provided buffer.
@@ -1211,6 +1282,12 @@ mod stroke_renderer {
                 )?
                 .bind_pipeline_graphics(self.pipeline.clone())
                 .bind_vertex_buffers(0, [verts])
+                .bind_descriptor_sets(
+                    vulkano::pipeline::PipelineBindPoint::Graphics,
+                    self.pipeline.layout().clone(),
+                    0,
+                    vec![self.texture_descriptor.clone()],
+                )
                 .set_viewport(
                     0,
                     [vk::Viewport {
@@ -1789,8 +1866,8 @@ fn listener(
                                     id: 0,
                                     _phantom: Default::default(),
                                 },
-                                color_modulate: [1.0; 4],
-                                size_mul: 10.0,
+                                color_modulate: [0.0, 0.0, 0.0, 1.0],
+                                size_mul: 20.0,
                                 is_eraser: false,
                             },
                             points: Vec::new(),
