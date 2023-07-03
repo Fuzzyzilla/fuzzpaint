@@ -1372,7 +1372,7 @@ impl RayonTessellator {
             vulkano::half::f16::from_f32(brush.color_modulate[3]),
         ];
 
-        let rand = (point.pos[0] * 100.0).cos() / 2.0 + 0.5;
+        let rand = (point.pos[0] * 100.0).cos() * std::f32::consts::PI;
         let (sin, cos) = rand.sin_cos();
         let cos = cos * size2;
         let sin = sin * size2;
