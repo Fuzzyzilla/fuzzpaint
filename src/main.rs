@@ -127,6 +127,22 @@ impl From<StrokeLayer> for LayerNode {
     }
 }
 
+static IS_ERASER: std::sync::OnceLock<parking_lot::RwLock<bool>> = std::sync::OnceLock::new();
+static IS_UNDO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn is_eraser() -> bool {
+    *IS_ERASER.get_or_init(|| false.into()).read()
+}
+fn eraser_mut() -> parking_lot::RwLockWriteGuard<'static, bool> {
+    IS_ERASER.get_or_init(|| false.into()).write()
+}
+fn take_undo() -> bool {
+    IS_UNDO.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+fn set_undo() {
+    IS_UNDO.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub struct LayerGraph {
     top_level: Vec<LayerNode>,
 }
@@ -637,6 +653,10 @@ impl DocumentUserInterface {
                 }
 
                 ui.add(egui::Separator::default().vertical());
+
+                if ui.button("⮪").clicked() {
+                    set_undo();
+                }
             });
         });
 
@@ -738,6 +758,8 @@ impl DocumentUserInterface {
                         self.brushes.retain(|brush| brush.id() != id);
                     }
                 };
+                let mut erase = eraser_mut();
+                ui.toggle_value(&mut erase, "Erase");
             });
             ui.separator();
 
@@ -1279,6 +1301,12 @@ fn listener(
 
                 let matrix = document_preview.read().get_matrix().invert().unwrap();
                 for event in event_frame.iter() {
+                    if !event.pressed {
+                        if take_undo() {
+                            tess_test.strokes.pop();
+                            tess_test.infos.pop();
+                        }
+                    }
                     // just pressed - append a new stroke.
                     if event.pressed && !was_pressed {
                         tess_test.strokes.push(Stroke {
@@ -1287,7 +1315,7 @@ fn listener(
                                 brush: brush::todo_brush().id().weak(),
                                 color_modulate: [0.0, 0.0, 0.0, 1.0],
                                 size_mul: 20.0,
-                                is_eraser: false,
+                                is_eraser: is_eraser(),
                             },
                             points: Vec::new(),
                         });
