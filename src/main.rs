@@ -1087,10 +1087,6 @@ mod stroke_renderer {
             let Some(verts) = render_data.tessellated_stroke_vertices.clone() else {
                 anyhow::bail!("No vertices to render.");
             };
-            // Skip if no infos
-            if render_data.tessellated_stroke_infos.is_empty() {
-                anyhow::bail!("No strokes to render.");
-            }
 
             // "Get or try insert with" - make the image if it doesn't already exist.
             let render_view = match render_data.image {
@@ -1305,6 +1301,7 @@ fn listener(
                         if take_undo() {
                             tess_test.strokes.pop();
                             tess_test.infos.pop();
+                            changed = true;
                         }
                     }
                     // just pressed - append a new stroke.
