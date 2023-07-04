@@ -347,7 +347,7 @@ impl Default for Document {
         Self {
             path: None,
             layers: Default::default(),
-            name: format!("New Document {}", id.id().wrapping_add(1)),
+            name: format!("New Document {}", id.id()),
             id,
         }
     }
@@ -864,18 +864,6 @@ pub struct LayerRenderData {
     tessellated_stroke_vertices: Option<vk::Subbuffer<[tess::TessellatedStrokeVertex]>>,
     tessellated_stroke_infos: Vec<tess::TessellatedStrokeInfo>,
 }
-/// A collection of images that have been merged, to skip re-blending them
-/// Useful for all layers below whatever the user is editting.
-/// Blended with normal alpha (for now), so only backgrounds and continuous sets
-/// of normal-mode images can be cached this way.
-struct DocumentCachedBlend {
-    image: Option<Arc<vk::StorageImage>>,
-    // The layers the cached image contains - invalidated if any are modified/reordered ect.
-    depends_on: Vec<FuzzID<LayerNode>>,
-}
-struct DocumentRenderData {
-    cached_background: Option<DocumentCachedBlend>,
-}
 
 mod stroke_renderer {
     use crate::vk;
@@ -1173,7 +1161,6 @@ pub struct LayerNodeRenderer {
     context: Arc<render_device::RenderContext>,
 
     layer_data: std::collections::HashMap<FuzzID<LayerNode>, LayerRenderData>,
-    document_data: std::collections::HashMap<FuzzID<Document>, DocumentRenderData>,
 }
 pub struct StrokeBrushSettings {
     brush: brush::BrushID,
