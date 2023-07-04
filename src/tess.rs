@@ -30,9 +30,9 @@ pub trait StrokeTessellator {
 }
 
 /// All the data needed to render tessellated output.
-#[derive(Clone, Copy)]
+#[derive(Copy, Clone)]
 pub struct TessellatedStrokeInfo {
-    pub source: crate::FuzzID<crate::Stroke>,
+    pub source: crate::WeakID<crate::Stroke>,
     pub first_vertex: u32,
     pub vertices: u32,
     pub blend_constants: [f32; 4],

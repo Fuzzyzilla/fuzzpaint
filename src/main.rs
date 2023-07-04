@@ -15,7 +15,7 @@ pub mod render_device;
 pub mod stylus_events;
 pub mod tess;
 
-pub use id::FuzzID;
+pub use id::{FuzzID, WeakID};
 pub use tess::StrokeTessellator;
 
 const DOCUMENT_DIMENSION: u32 = 1024;
@@ -101,10 +101,10 @@ pub enum LayerNode {
     },
 }
 impl LayerNode {
-    pub fn id(&self) -> FuzzID<LayerNode> {
+    pub fn id(&self) -> &FuzzID<LayerNode> {
         match self {
-            Self::Group { id, .. } => *id,
-            Self::StrokeLayer { id, .. } => *id,
+            Self::Group { id, .. } => id,
+            Self::StrokeLayer { id, .. } => id,
         }
     }
 }
@@ -136,7 +136,7 @@ impl LayerGraph {
     fn find_recurse<'a>(
         &'a self,
         traverse_stack: &mut Vec<&'a LayerNode>,
-        at: FuzzID<LayerNode>,
+        at: WeakID<LayerNode>,
     ) -> bool {
         //Find search candidates
         let nodes_to_search = if traverse_stack.is_empty() {
@@ -177,7 +177,7 @@ impl LayerGraph {
     }
     /// Find the given layer ID in the tree, returning the path to it, if any.
     /// If a path is returned, the final element will be the layer itself.
-    fn find<'a>(&'a self, at: FuzzID<LayerNode>) -> Option<Vec<&'a LayerNode>> {
+    fn find<'a>(&'a self, at: WeakID<LayerNode>) -> Option<Vec<&'a LayerNode>> {
         let mut traverse_stack = Vec::new();
 
         if self.find_recurse(&mut traverse_stack, at) {
@@ -189,7 +189,7 @@ impl LayerGraph {
     fn insert_node(&mut self, node: LayerNode) {
         self.top_level.push(node);
     }
-    fn insert_node_at(&mut self, at: FuzzID<LayerNode>, node: LayerNode) {
+    fn insert_node_at(&mut self, at: WeakID<LayerNode>, node: LayerNode) {
         match self.find(at) {
             None => self.insert_node(node),
             Some(path) => {
@@ -250,9 +250,9 @@ impl LayerGraph {
         }
     }
     /// Insert the group at the highest position of the top level
-    pub fn insert_layer(&mut self, layer: impl Into<LayerNode>) -> FuzzID<LayerNode> {
-        let node = layer.into();
-        let node_id = node.id();
+    pub fn insert_layer(&mut self, layer: impl Into<LayerNode>) -> WeakID<LayerNode> {
+        let node : LayerNode = layer.into();
+        let node_id = node.id().weak();
         self.insert_node(node);
         node_id
     }
@@ -262,17 +262,17 @@ impl LayerGraph {
     /// If the position doesn't exist, behaves as `insert_group`.
     pub fn insert_layer_at(
         &mut self,
-        at: FuzzID<LayerNode>,
+        at: WeakID<LayerNode>,
         layer: impl Into<LayerNode>,
-    ) -> FuzzID<LayerNode> {
-        let node = layer.into();
-        let node_id = node.id();
+    ) -> WeakID<LayerNode> {
+        let node : LayerNode = layer.into();
+        let node_id = node.id().weak();
         self.insert_node_at(at, node);
         node_id
     }
     pub fn find_mut_children_of<'a>(
         &'a mut self,
-        parent: FuzzID<LayerNode>,
+        parent: WeakID<LayerNode>,
     ) -> Option<&'a mut [LayerNode]> {
         let path = self.find(parent)?;
 
@@ -288,7 +288,7 @@ impl LayerGraph {
         }
     }
     /// Remove and return the node of the given ID. None if not found.
-    pub fn remove(&mut self, at: FuzzID<LayerNode>) -> Option<LayerNode> {
+    pub fn remove(&mut self, at: WeakID<LayerNode>) -> Option<LayerNode> {
         let path = self.find(at)?;
 
         //Parent is top-level
@@ -356,8 +356,8 @@ struct PerDocumentInterface {
     zoom: f32,
     rotate: f32,
 
-    focused_subtree: Option<FuzzID<LayerNode>>,
-    cur_layer: Option<FuzzID<LayerNode>>,
+    focused_subtree: Option<WeakID<LayerNode>>,
+    cur_layer: Option<WeakID<LayerNode>>,
 }
 impl Default for PerDocumentInterface {
     fn default() -> Self {
@@ -373,13 +373,13 @@ pub struct DocumentUserInterface {
     color: egui::Color32,
 
     // modal_stack: Vec<Box<dyn FnMut(&mut egui::Ui) -> ()>>,
-    cur_brush: Option<brush::BrushID>,
+    cur_brush: Option<brush::WeakBrushID>,
     brushes: Vec<brush::Brush>,
 
-    cur_document: Option<FuzzID<Document>>,
+    cur_document: Option<WeakID<Document>>,
     documents: Vec<Document>,
 
-    document_interfaces: std::collections::HashMap<FuzzID<Document>, PerDocumentInterface>,
+    document_interfaces: std::collections::HashMap<WeakID<Document>, PerDocumentInterface>,
 
     viewport: egui::Rect,
 }
@@ -404,7 +404,7 @@ impl Default for DocumentUserInterface {
 }
 
 impl DocumentUserInterface {
-    fn target_layer(&self) -> Option<FuzzID<LayerNode>> {
+    fn target_layer(&self) -> Option<WeakID<LayerNode>> {
         let id = self.cur_document?;
         // Selected layer of the currently focused document, if any
         self.document_interfaces.get(&id)?.cur_layer
@@ -467,7 +467,7 @@ impl DocumentUserInterface {
                         id,
                     } => {
                         ui.horizontal(|ui| {
-                            ui.selectable_value(&mut document_interface.cur_layer, Some(*id), "🗀");
+                            ui.selectable_value(&mut document_interface.cur_layer, Some(id.weak()), "🗀");
                             ui.text_edit_singleline(&mut layer.name);
                         })
                         .response
@@ -482,14 +482,14 @@ impl DocumentUserInterface {
                             //Get or insert default is unstable? :V
                             let blend = layer.blend.get_or_insert_with(Default::default);
 
-                            Self::ui_layer_blend(ui, *id, blend);
+                            Self::ui_layer_blend(ui, &id, blend);
                         } else {
                             layer.blend = None;
                         }
 
                         let children = children.get_mut();
                         egui::CollapsingHeader::new("Children")
-                            .id_source(*id)
+                            .id_source(&id)
                             .default_open(true)
                             .enabled(!children.is_empty())
                             .show_unindented(ui, |ui| {
@@ -498,7 +498,7 @@ impl DocumentUserInterface {
                     }
                     LayerNode::StrokeLayer { layer, id } => {
                         ui.horizontal(|ui| {
-                            ui.selectable_value(&mut document_interface.cur_layer, Some(*id), "✏");
+                            ui.selectable_value(&mut document_interface.cur_layer, Some(id.weak()), "✏");
                             ui.text_edit_singleline(&mut layer.name);
                         })
                         .response
@@ -514,7 +514,7 @@ impl DocumentUserInterface {
             .response
             .context_menu(|ui| {
                 if ui.button("Focus Subtree...").clicked() {
-                    document_interface.focused_subtree = Some(layer.id());
+                    document_interface.focused_subtree = Some(layer.id().weak());
                 }
             });
         }
@@ -556,7 +556,7 @@ impl DocumentUserInterface {
                         if add_button(ui, "New", Some("Ctrl+N")).clicked() {
                             let document = Document::default();
                             self.document_interfaces
-                                .insert(document.id, Default::default());
+                                .insert(document.id.weak(), Default::default());
                             self.documents.push(document);
                         };
                         let _ = add_button(ui, "Save", Some("Ctrl+S"));
@@ -642,7 +642,7 @@ impl DocumentUserInterface {
             };
 
             // Find the document, otherwise clear selection
-            let Some(document) = self.documents.iter_mut().find(|doc| doc.id == document_id) else {
+            let Some(document) = self.documents.iter_mut().find(|doc| &doc.id == document_id) else {
                 self.cur_document = None;
                 return;
             };
@@ -735,7 +735,7 @@ impl DocumentUserInterface {
             for brush in self.brushes.iter_mut() {
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.cur_brush, Some(brush.id()), "");
+                        ui.radio_value(&mut self.cur_brush, Some(brush.id().weak()), "");
                         ui.text_edit_singleline(brush.name_mut());
                     })
                     .response
@@ -813,7 +813,7 @@ impl DocumentUserInterface {
                         egui::containers::Frame::group(ui.style())
                             .outer_margin(egui::Margin::symmetric(0.0, 0.0))
                             .inner_margin(egui::Margin::symmetric(0.0, 0.0))
-                            .multiply_with_opacity(if self.cur_document == Some(document.id) {
+                            .multiply_with_opacity(if self.cur_document == Some(document.id.weak()) {
                                 1.0
                             } else {
                                 0.0
@@ -826,13 +826,13 @@ impl DocumentUserInterface {
                             .show(ui, |ui| {
                                 ui.selectable_value(
                                     &mut self.cur_document,
-                                    Some(document.id),
+                                    Some(document.id.weak()),
                                     &document.name,
                                 );
                                 if ui.small_button("✖").clicked() {
-                                    deleted_ids.push(document.id);
+                                    deleted_ids.push(document.id.weak());
                                     //Disselect if deleted.
-                                    if self.cur_document == Some(document.id) {
+                                    if self.cur_document == Some(document.id.weak()) {
                                         self.cur_document = None;
                                     }
                                 }
@@ -843,7 +843,7 @@ impl DocumentUserInterface {
                             });
                     }
                     self.documents
-                        .retain(|document| !deleted_ids.contains(&document.id));
+                        .retain(|document| !deleted_ids.contains(&document.id.weak()));
                     for id in deleted_ids.into_iter() {
                         self.document_interfaces.remove(&id);
                     }
@@ -1163,7 +1163,7 @@ pub struct LayerNodeRenderer {
     layer_data: std::collections::HashMap<FuzzID<LayerNode>, LayerRenderData>,
 }
 pub struct StrokeBrushSettings {
-    brush: brush::BrushID,
+    brush: brush::WeakBrushID,
     /// `a` is flow, NOT opacity, since the stroke is blended continuously not blended as a group.
     color_modulate: [f32; 4],
     size_mul: f32,
@@ -1273,7 +1273,7 @@ fn listener(
                         tess_test.strokes.push(Stroke {
                             id: Default::default(),
                             brush: StrokeBrushSettings {
-                                brush: brush::todo_brush().id(),
+                                brush: brush::todo_brush().id().weak(),
                                 color_modulate: [0.0, 0.0, 0.0, 1.0],
                                 size_mul: 20.0,
                                 is_eraser: false,
@@ -1317,7 +1317,7 @@ fn listener(
                     tess_test.infos.resize_with(tess_test.strokes.len(), || {
                         tess::TessellatedStrokeInfo {
                             // safety: nothing reads this field yet, for testing.
-                            source: unsafe { FuzzID::dummy() },
+                            source: unsafe { FuzzID::dummy().weak() },
                             first_vertex: 0,
                             vertices: 0,
                             blend_constants: [0.0; 4],
