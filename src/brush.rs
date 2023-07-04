@@ -1,3 +1,5 @@
+//! # Brush
+
 pub type BrushID = crate::id::FuzzID<Brush>;
 
 #[derive(PartialEq, Eq, Hash, strum::AsRefStr, strum::EnumIter, Copy, Clone)]

@@ -1,3 +1,8 @@
+//! # Tessellator
+//! The tessellator is the component responsible for converting formatted stroke data into a GPU-renderable mesh.
+//! This is done via the `StrokeTessellator` trait. Currently, this is implemented in Rayon, however preparations
+//! have been made to do more efficient tessellation on the GPU directly. This pipeline may also be skipped by
+//! EXT_mesh_shader.
 pub mod rayon;
 
 #[derive(Debug, Clone)]
