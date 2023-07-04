@@ -8,9 +8,15 @@ pub mod window;
 use cgmath::{Matrix4, SquareMatrix};
 use vulkano::command_buffer;
 use vulkano_prelude::*;
+pub mod brush;
 pub mod document_viewport_proxy;
+pub mod id;
 pub mod render_device;
 pub mod stylus_events;
+pub mod tess;
+
+pub use id::FuzzID;
+pub use tess::StrokeTessellator;
 
 const DOCUMENT_DIMENSION: u32 = 1024;
 const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
@@ -41,93 +47,6 @@ impl Default for Blend {
             opacity: 1.0,
             alpha_clip: false,
         }
-    }
-}
-
-// Collection of pending IDs by type.
-static ID_SERVER: std::sync::OnceLock<
-    parking_lot::RwLock<std::collections::HashMap<std::any::TypeId, std::sync::atomic::AtomicU64>>,
-> = std::sync::OnceLock::new();
-
-/// ID that is guarunteed unique within this execution of the program.
-/// IDs with different types may share a value but should not be considered equal.
-pub struct FuzzID<T: std::any::Any> {
-    id: u64,
-    // Namespace marker
-    _phantom: std::marker::PhantomData<T>,
-}
-
-//Derivation of these traits fails, for some reason.
-impl<T: std::any::Any> Clone for FuzzID<T> {
-    fn clone(&self) -> Self {
-        FuzzID {
-            id: self.id,
-            _phantom: Default::default(),
-        }
-    }
-}
-impl<T: std::any::Any> Copy for FuzzID<T> {}
-impl<T: std::any::Any> std::cmp::PartialEq for FuzzID<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-impl<T: std::any::Any> std::cmp::Eq for FuzzID<T> {}
-impl<T: std::any::Any> std::hash::Hash for FuzzID<T> {
-    /// A note on hashes - this relies on the internal representation of TypeID,
-    /// which is unstable between compilations. Do NOT serialize or otherwise rely on
-    /// comparisons between hashes from different executions of the program.
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::any::TypeId::of::<T>().hash(state);
-        state.write_u64(self.id);
-    }
-}
-
-impl<T: std::any::Any> FuzzID<T> {
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-}
-impl<T: std::any::Any> Default for FuzzID<T> {
-    fn default() -> Self {
-        let map = ID_SERVER.get_or_init(Default::default);
-        // ID of zero will be invalid, start at one and go up.
-        let id = {
-            let read = map.upgradable_read();
-            let ty = std::any::TypeId::of::<T>();
-            if let Some(atomic) = read.get(&ty) {
-                //We don't really care about the order things happen in, it just needs
-                //to be unique.
-                atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            } else {
-                // We need to insert into the map - transition to exclusive access
-                let mut write = parking_lot::RwLockUpgradableReadGuard::upgrade(read);
-                // Initialize at 2, return ID 1
-                write.insert(ty, 2.into());
-                1
-            }
-        };
-
-        // Incredibly unrealistic - At one brush stroke per second, 24/7/365, it will take
-        // half a trillion years to overflow. This assert is debug-only, to catch exhaustion from some
-        // programming error.
-        debug_assert!(id != 0, "{} ID overflow!", std::any::type_name::<T>());
-
-        Self {
-            id,
-            _phantom: Default::default(),
-        }
-    }
-}
-impl<T: std::any::Any> std::fmt::Display for FuzzID<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        //Unwrap here is safe - the rsplit will always return at least one element, even for empty strings.
-        write!(
-            f,
-            "{}#{}",
-            std::any::type_name::<T>().rsplit("::").next().unwrap(),
-            self.id
-        )
     }
 }
 
@@ -410,56 +329,6 @@ impl Default for LayerGraph {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, strum::AsRefStr, strum::EnumIter, Copy, Clone)]
-pub enum BrushKind {
-    Stamped,
-    Rolled,
-}
-pub enum BrushStyle {
-    Stamped { spacing: f32 },
-    Rolled,
-}
-impl BrushStyle {
-    pub fn default_for(brush_kind: BrushKind) -> Self {
-        match brush_kind {
-            BrushKind::Stamped => Self::Stamped { spacing: 2.0 },
-            BrushKind::Rolled => Self::Rolled,
-        }
-    }
-    pub fn brush_kind(&self) -> BrushKind {
-        match self {
-            Self::Stamped { .. } => BrushKind::Stamped,
-            Self::Rolled => BrushKind::Rolled,
-        }
-    }
-}
-impl Default for BrushStyle {
-    fn default() -> Self {
-        Self::default_for(BrushKind::Stamped)
-    }
-}
-pub struct Brush {
-    name: String,
-
-    style: BrushStyle,
-
-    id: FuzzID<Brush>,
-
-    //Globally unique ID, for allowing files to be shared after serialization
-    universal_id: uuid::Uuid,
-}
-impl Default for Brush {
-    fn default() -> Self {
-        let id = FuzzID::default();
-        Self {
-            name: format!("Brush {}", id.id()),
-            style: Default::default(),
-            id,
-            universal_id: uuid::Uuid::new_v4(),
-        }
-    }
-}
-
 pub struct Document {
     /// The path from which the file was loaded, or None if opened as new.
     path: Option<std::path::PathBuf>,
@@ -504,8 +373,8 @@ pub struct DocumentUserInterface {
     color: egui::Color32,
 
     // modal_stack: Vec<Box<dyn FnMut(&mut egui::Ui) -> ()>>,
-    cur_brush: Option<FuzzID<Brush>>,
-    brushes: Vec<Brush>,
+    cur_brush: Option<brush::BrushID>,
+    brushes: Vec<brush::Brush>,
 
     cur_document: Option<FuzzID<Document>>,
     documents: Vec<Document>,
@@ -556,8 +425,11 @@ impl DocumentUserInterface {
     fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut Blend) {
         ui.horizontal(|ui| {
             //alpha symbol for clipping (allocates every frame - why??)
-            ui.toggle_value(&mut blend.alpha_clip, egui::RichText::new("α").monospace().strong())
-                .on_hover_text("Alpha clip");
+            ui.toggle_value(
+                &mut blend.alpha_clip,
+                egui::RichText::new("α").monospace().strong(),
+            )
+            .on_hover_text("Alpha clip");
 
             ui.add(
                 egui::DragValue::new(&mut blend.opacity)
@@ -849,12 +721,12 @@ impl DocumentUserInterface {
 
             ui.horizontal(|ui| {
                 if ui.button("➕").clicked() {
-                    let brush = Brush::default();
+                    let brush = brush::Brush::default();
                     self.brushes.push(brush);
                 }
                 if ui.button("✖").on_hover_text("Delete brush").clicked() {
                     if let Some(id) = self.cur_brush.take() {
-                        self.brushes.retain(|brush| brush.id != id);
+                        self.brushes.retain(|brush| brush.id() != id);
                     }
                 };
             });
@@ -863,39 +735,41 @@ impl DocumentUserInterface {
             for brush in self.brushes.iter_mut() {
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.cur_brush, Some(brush.id), "");
-                        ui.text_edit_singleline(&mut brush.name);
+                        ui.radio_value(&mut self.cur_brush, Some(brush.id()), "");
+                        ui.text_edit_singleline(brush.name_mut());
                     })
                     .response
                     .on_hover_ui(|ui| {
-                        ui.label(format!("{}", brush.id));
+                        ui.label(format!("{}", brush.id()));
 
                         //Smol optimization to avoid formatters
                         let mut buf = uuid::Uuid::encode_buffer();
-                        let uuid = brush.universal_id.as_hyphenated().encode_upper(&mut buf);
+                        let uuid = brush.universal_id().as_hyphenated().encode_upper(&mut buf);
                         ui.label(&uuid[..]);
                     });
                     egui::CollapsingHeader::new("Settings")
-                        .id_source(brush.id)
+                        .id_source(brush.id())
                         .default_open(true)
                         .show(ui, |ui| {
-                            let mut brush_kind = brush.style.brush_kind();
+                            let mut brush_kind = brush.style().brush_kind();
 
-                            egui::ComboBox::new(brush.id, "")
+                            egui::ComboBox::new(brush.id(), "")
                                 .selected_text(brush_kind.as_ref())
                                 .show_ui(ui, |ui| {
-                                    for kind in <BrushKind as strum::IntoEnumIterator>::iter() {
+                                    for kind in
+                                        <brush::BrushKind as strum::IntoEnumIterator>::iter()
+                                    {
                                         ui.selectable_value(&mut brush_kind, kind, kind.as_ref());
                                     }
                                 });
 
                             //Changed by user, switch to defaults for the new kind
-                            if brush_kind != brush.style.brush_kind() {
-                                brush.style = BrushStyle::default_for(brush_kind);
+                            if brush_kind != brush.style().brush_kind() {
+                                *brush.style_mut() = brush::BrushStyle::default_for(brush_kind);
                             }
 
-                            match &mut brush.style {
-                                BrushStyle::Stamped { spacing } => {
+                            match brush.style_mut() {
+                                brush::BrushStyle::Stamped { spacing } => {
                                     let slider = egui::widgets::Slider::new(spacing, 0.1..=200.0)
                                         .clamp_to_range(true)
                                         .logarithmic(true)
@@ -903,7 +777,7 @@ impl DocumentUserInterface {
 
                                     ui.add(slider);
                                 }
-                                BrushStyle::Rolled => {}
+                                brush::BrushStyle::Rolled => {}
                             }
                         })
                 });
@@ -981,37 +855,14 @@ impl DocumentUserInterface {
     }
 }
 
-#[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
-#[repr(C)]
-struct TessellatedStrokeVertex {
-    // Must be f32, as f16 only supports up to a 2048px document with pixel precision.
-    #[format(R32G32_SFLOAT)]
-    pos: [f32; 2],
-    // Could maybe be f16, as long as brush textures are <2048px.
-    #[format(R32G32_SFLOAT)]
-    uv: [f32; 2],
-    // Nearly 100% coverage on this vertex input type.
-    #[format(R16G16B16A16_SFLOAT)]
-    color: [vulkano::half::f16; 4],
-}
-
-/// All the data needed to render tessellated output.
-#[derive(Clone, Copy)]
-struct TessellatedStrokeInfo {
-    source: FuzzID<Stroke>,
-    first_vertex: u32,
-    vertices: u32,
-    blend_constants: [f32; 4],
-}
-
 pub struct LayerRenderData {
     /// For any layer that needs to be rendered separately
     /// (or can be used to optimize draws into a pre-rendered buffer)
     image: Option<Arc<vk::ImageView<vk::StorageImage>>>,
 
     // For stroke layers
-    tessellated_stroke_vertices: Option<vk::Subbuffer<[TessellatedStrokeVertex]>>,
-    tessellated_stroke_infos: Vec<TessellatedStrokeInfo>,
+    tessellated_stroke_vertices: Option<vk::Subbuffer<[tess::TessellatedStrokeVertex]>>,
+    tessellated_stroke_infos: Vec<tess::TessellatedStrokeInfo>,
 }
 /// A collection of images that have been merged, to skip re-blending them
 /// Useful for all layers below whatever the user is editting.
@@ -1030,10 +881,7 @@ mod stroke_renderer {
     use crate::vk;
     use anyhow::Result as AnyResult;
     use std::sync::Arc;
-    use vulkano::{
-        pipeline::{graphics::vertex_input::Vertex, Pipeline},
-        sync::GpuFuture,
-    };
+    use vulkano::{pipeline::graphics::vertex_input::Vertex, pipeline::Pipeline, sync::GpuFuture};
     mod vert {
         vulkano_shaders::shader! {
             ty: "vertex",
@@ -1184,7 +1032,7 @@ mod stroke_renderer {
             let pipeline = vk::GraphicsPipeline::start()
                 .fragment_shader(frag, frag::SpecializationConstants::default())
                 .vertex_shader(vert, vert::SpecializationConstants::default())
-                .vertex_input_state(super::TessellatedStrokeVertex::per_vertex())
+                .vertex_input_state(super::tess::TessellatedStrokeVertex::per_vertex())
                 .input_assembly_state(vk::InputAssemblyState::new()) //Triangle list, no prim restart
                 .color_blend_state(premul_dyn_constants)
                 .rasterization_state(vk::RasterizationState::new()) // No cull
@@ -1321,203 +1169,6 @@ mod stroke_renderer {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum TessellationError {
-    VertexBufferTooSmall { needed_size: usize },
-    InfosBufferTooSmall { needed_size: usize },
-    BufferError(vulkano::buffer::BufferError),
-}
-
-trait StrokeTessellator {
-    fn tessellate(
-        &self,
-        strokes: &[Stroke],
-        infos_into: &mut [crate::TessellatedStrokeInfo],
-        vertices_into: vk::Subbuffer<[crate::TessellatedStrokeVertex]>,
-        base_vertex: usize,
-    ) -> ::std::result::Result<(), TessellationError>;
-    /// Exact number of vertices to allocate and draw for this stroke.
-    /// No method for estimates for now.
-    fn num_vertices_of(&self, stroke: &Stroke) -> usize;
-    /// Exact number of vertices to allocate and draw for all strokes.
-    fn num_vertices_of_slice(&self, strokes: &[Stroke]) -> usize {
-        strokes.iter().map(|s| self.num_vertices_of(s)).sum()
-    }
-}
-
-fn todo_brush() -> Brush {
-    Brush {
-        name: "Todo".into(),
-        style: Default::default(),
-        id: FuzzID {
-            id: 0,
-            _phantom: Default::default(),
-        },
-        // Example UUID from wikipedia lol
-        universal_id: uuid::uuid!("123e4567-e89b-12d3-a456-426614174000"),
-    }
-}
-
-use rayon::prelude::*;
-pub struct RayonTessellator;
-
-impl RayonTessellator {
-    fn do_stamp(point: &StrokePoint, brush: &StrokeBrushSettings) -> [TessellatedStrokeVertex; 6] {
-        let size2 = (point.pressure * brush.size_mul) / 2.0;
-        let color = [
-            vulkano::half::f16::from_f32(brush.color_modulate[0]),
-            vulkano::half::f16::from_f32(brush.color_modulate[1]),
-            vulkano::half::f16::from_f32(brush.color_modulate[2]),
-            vulkano::half::f16::from_f32(brush.color_modulate[3]),
-        ];
-
-        let rand = (point.pos[0] * 100.0).cos() * std::f32::consts::PI;
-        let (sin, cos) = rand.sin_cos();
-        let cos = cos * size2;
-        let sin = sin * size2;
-
-        let tl = TessellatedStrokeVertex {
-            pos: [point.pos[0] - sin, point.pos[1] - cos],
-            uv: [0.0, 0.0],
-            color,
-        };
-        let tr = TessellatedStrokeVertex {
-            pos: [point.pos[0] + cos, point.pos[1] - sin],
-            uv: [1.0, 0.0],
-            color,
-        };
-        let bl = TessellatedStrokeVertex {
-            pos: [point.pos[0] - cos, point.pos[1] + sin],
-            uv: [0.0, 1.0],
-            color,
-        };
-        let br = TessellatedStrokeVertex {
-            pos: [point.pos[0] + sin, point.pos[1] + cos],
-            uv: [1.0, 1.0],
-            color,
-        };
-
-        [tl, tr.clone(), bl.clone(), bl, tr, br]
-    }
-}
-impl StrokeTessellator for RayonTessellator {
-    fn tessellate(
-        &self,
-        strokes: &[Stroke],
-        infos_into: &mut [crate::TessellatedStrokeInfo],
-        vertices_into: vk::Subbuffer<[crate::TessellatedStrokeVertex]>,
-        mut base_vertex: usize,
-    ) -> std::result::Result<(), TessellationError> {
-        if infos_into.len() < strokes.len() {
-            return Err(TessellationError::InfosBufferTooSmall {
-                needed_size: strokes.len(),
-            });
-        }
-        let mut vertices_into = match vertices_into.write() {
-            Ok(o) => o,
-            Err(e) => return Err(TessellationError::BufferError(e)),
-        };
-
-        for (stroke, info) in strokes.iter().zip(infos_into.iter_mut()) {
-            info.blend_constants = if stroke.brush.is_eraser {
-                [0.0; 4]
-            } else {
-                [1.0; 4]
-            };
-
-            let brush = todo_brush();
-
-            // Perform tessellation!
-            let points: Vec<TessellatedStrokeVertex> = match brush.style {
-                BrushStyle::Stamped { spacing } => {
-                    stroke
-                        .points
-                        .par_windows(2)
-                        // Type: optimize for 6, but more is allowable (spills to heap).
-                        // flat_map_iter, as each iter is small and thus wouldn't benifit from parallelization
-                        .flat_map_iter(|win| -> smallvec::SmallVec<[TessellatedStrokeVertex; 6]> {
-                            // Windows are always 2. no par_array_windows :V
-                            let [a, b] = win else { unreachable!() };
-
-                            // Sanity check - avoid division by zero and other weirdness.
-                            if b.dist - a.dist <= 0.0 {
-                                return Default::default();
-                            }
-
-                            // Offset of first stamp into this segment.
-                            let offs = a.dist % spacing;
-                            // Length of segment, after the first stamp (could be negative = no stamps)
-                            let len = (b.dist - a.dist) - offs;
-
-                            let mut current = 0.0;
-                            let mut vertices = smallvec::SmallVec::new();
-                            while current <= len {
-                                // fractional [0, 1] distance between a and b.
-                                let factor = (current + offs) / (b.dist - a.dist);
-
-                                let point = a.lerp(b, factor);
-
-                                vertices.extend(Self::do_stamp(&point, &stroke.brush).into_iter());
-
-                                current += spacing;
-                            }
-
-                            vertices
-                        })
-                        .collect()
-                }
-                BrushStyle::Rolled => unimplemented!(),
-            };
-
-            // Get some space in the buffer to write into
-            let Some(slice) = vertices_into.get_mut(base_vertex..(base_vertex + points.len()))
-            else {
-                return Err(TessellationError::VertexBufferTooSmall {
-                    needed_size: base_vertex + points.len(),
-                });
-            };
-
-            // Populate infos
-            info.first_vertex = base_vertex as u32;
-            info.vertices = points.len() as u32;
-
-            // Shift slice over for next stroke
-            base_vertex += points.len();
-
-            // Copy over.
-            slice
-                .iter_mut()
-                .zip(points.into_iter())
-                .for_each(|(into, from)| *into = from);
-        }
-
-        Ok(())
-    }
-    fn num_vertices_of(&self, stroke: &Stroke) -> usize {
-        // Somehow fetch the brush of this stroke
-        let brush: Brush = todo_brush();
-
-        match brush.style {
-            BrushStyle::Rolled => unimplemented!(),
-            BrushStyle::Stamped { spacing } => {
-                if spacing <= 0.0 {
-                    // Sanity check.
-                    0
-                } else {
-                    stroke
-                        .points
-                        .last()
-                        .map(|last| {
-                            let num_stamps = (last.dist / spacing).floor();
-                            num_stamps as usize * 6
-                        })
-                        .unwrap_or(0usize)
-                }
-            }
-        }
-    }
-}
-
 pub struct LayerNodeRenderer {
     context: Arc<render_device::RenderContext>,
 
@@ -1525,7 +1176,7 @@ pub struct LayerNodeRenderer {
     document_data: std::collections::HashMap<FuzzID<Document>, DocumentRenderData>,
 }
 pub struct StrokeBrushSettings {
-    brush: FuzzID<Brush>,
+    brush: brush::BrushID,
     /// `a` is flow, NOT opacity, since the stroke is blended continuously not blended as a group.
     color_modulate: [f32; 4],
     size_mul: f32,
@@ -1545,17 +1196,15 @@ impl StrokePoint {
         let inv_factor = 1.0 - factor;
 
         let s = std::simd::f32x4::from_array([self.pos[0], self.pos[1], self.pressure, self.dist]);
-        let o = std::simd::f32x4::from_array([other.pos[0], other.pos[1], other.pressure, other.dist]);
+        let o =
+            std::simd::f32x4::from_array([other.pos[0], other.pos[1], other.pressure, other.dist]);
 
         // FMA is planned but unimplemented ;w;
         let n = s * std::simd::f32x4::splat(inv_factor) + (o * std::simd::f32x4::splat(factor));
         Self {
-            pos: [
-                n[0],
-                n[1],
-            ],
+            pos: [n[0], n[1]],
             pressure: n[2],
-            dist: n[3]
+            dist: n[3],
         }
     }
 }
@@ -1586,8 +1235,8 @@ pub trait PreviewRenderProxy {
     fn surface_changed(&mut self, render_surface: &render_device::RenderSurface);
 }
 struct TessTest {
-    infos: Vec<TessellatedStrokeInfo>,
-    buf: vk::Subbuffer<[TessellatedStrokeVertex]>,
+    infos: Vec<tess::TessellatedStrokeInfo>,
+    buf: vk::Subbuffer<[tess::TessellatedStrokeVertex]>,
     strokes: Vec<Stroke>,
 }
 
@@ -1605,7 +1254,7 @@ fn listener(
     let mut tess_test = TessTest {
         strokes: Default::default(),
         infos: Default::default(),
-        buf: vk::Buffer::new_unsized::<[TessellatedStrokeVertex]>(
+        buf: vk::Buffer::new_unsized::<[tess::TessellatedStrokeVertex]>(
             renderer.allocators().memory(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::VERTEX_BUFFER,
@@ -1617,11 +1266,11 @@ fn listener(
                 usage: vk::MemoryUsage::Upload,
                 ..Default::default()
             },
-            65536*2,
+            65536 * 2,
         )
         .unwrap(),
     };
-    let tesselator = RayonTessellator;
+    let tesselator = tess::rayon::RayonTessellator;
     let stroke_renderer = stroke_renderer::StrokeLayerRenderer::new(renderer.clone()).unwrap();
 
     let mut was_pressed = false;
@@ -1637,10 +1286,7 @@ fn listener(
                         tess_test.strokes.push(Stroke {
                             id: Default::default(),
                             brush: StrokeBrushSettings {
-                                brush: FuzzID {
-                                    id: 0,
-                                    _phantom: Default::default(),
-                                },
+                                brush: brush::todo_brush().id(),
                                 color_modulate: [0.0, 0.0, 0.0, 1.0],
                                 size_mul: 20.0,
                                 is_eraser: false,
@@ -1655,7 +1301,7 @@ fn listener(
                             (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
                         ];
 
-                        let mut this_stroke = tess_test.strokes.last_mut().unwrap();
+                        let this_stroke = tess_test.strokes.last_mut().unwrap();
                         let last_point = this_stroke.points.last();
 
                         // Last point's dist plus new dist, or 0.0 if no last point.
@@ -1682,11 +1328,9 @@ fn listener(
                 if changed {
                     let buff = runtime.block_on(document_preview.read().get_writeable_buffer());
                     tess_test.infos.resize_with(tess_test.strokes.len(), || {
-                        TessellatedStrokeInfo {
-                            source: FuzzID {
-                                id: 0,
-                                _phantom: Default::default(),
-                            },
+                        tess::TessellatedStrokeInfo {
+                            // safety: nothing reads this field yet, for testing.
+                            source: unsafe { FuzzID::dummy() },
                             first_vertex: 0,
                             vertices: 0,
                             blend_constants: [0.0; 4],
