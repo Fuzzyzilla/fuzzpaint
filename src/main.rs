@@ -63,7 +63,7 @@ impl Default for GroupLayer {
     fn default() -> Self {
         let id = FuzzID::default();
         Self {
-            name: format!("Group {}", id.id().wrapping_add(1)),
+            name: format!("Group {}", id.id()),
             id,
             blend: None,
         }

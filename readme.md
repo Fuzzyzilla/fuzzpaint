@@ -26,8 +26,8 @@ To declare **0.2.0**, I would like to be able to somewhat freely draw a thing an
      - To document or to global repo? - resolved: both, with UUIDs! That way, files can be freely shared, and brushes can be easily re-used.
    - [ ] Tesselation engine capable of mixed brushes
    - [ ] Roller brushes
-   - [ ] Stamped brushes
-   - [ ] Efficient erasers
+   - [X] Stamped brushes
+   - [X] Efficient erasers
  - [ ] Layers
    - [X] Simple UI to manage layer creation, order, modes, etc.
    - [ ] Blending Über-compute-shader 
