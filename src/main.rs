@@ -251,7 +251,7 @@ impl LayerGraph {
     }
     /// Insert the group at the highest position of the top level
     pub fn insert_layer(&mut self, layer: impl Into<LayerNode>) -> WeakID<LayerNode> {
-        let node : LayerNode = layer.into();
+        let node: LayerNode = layer.into();
         let node_id = node.id().weak();
         self.insert_node(node);
         node_id
@@ -265,7 +265,7 @@ impl LayerGraph {
         at: WeakID<LayerNode>,
         layer: impl Into<LayerNode>,
     ) -> WeakID<LayerNode> {
-        let node : LayerNode = layer.into();
+        let node: LayerNode = layer.into();
         let node_id = node.id().weak();
         self.insert_node_at(at, node);
         node_id
@@ -467,7 +467,11 @@ impl DocumentUserInterface {
                         id,
                     } => {
                         ui.horizontal(|ui| {
-                            ui.selectable_value(&mut document_interface.cur_layer, Some(id.weak()), "🗀");
+                            ui.selectable_value(
+                                &mut document_interface.cur_layer,
+                                Some(id.weak()),
+                                "🗀",
+                            );
                             ui.text_edit_singleline(&mut layer.name);
                         })
                         .response
@@ -498,7 +502,11 @@ impl DocumentUserInterface {
                     }
                     LayerNode::StrokeLayer { layer, id } => {
                         ui.horizontal(|ui| {
-                            ui.selectable_value(&mut document_interface.cur_layer, Some(id.weak()), "✏");
+                            ui.selectable_value(
+                                &mut document_interface.cur_layer,
+                                Some(id.weak()),
+                                "✏",
+                            );
                             ui.text_edit_singleline(&mut layer.name);
                         })
                         .response
@@ -642,7 +650,8 @@ impl DocumentUserInterface {
             };
 
             // Find the document, otherwise clear selection
-            let Some(document) = self.documents.iter_mut().find(|doc| &doc.id == document_id) else {
+            let Some(document) = self.documents.iter_mut().find(|doc| &doc.id == document_id)
+            else {
                 self.cur_document = None;
                 return;
             };
@@ -813,11 +822,13 @@ impl DocumentUserInterface {
                         egui::containers::Frame::group(ui.style())
                             .outer_margin(egui::Margin::symmetric(0.0, 0.0))
                             .inner_margin(egui::Margin::symmetric(0.0, 0.0))
-                            .multiply_with_opacity(if self.cur_document == Some(document.id.weak()) {
-                                1.0
-                            } else {
-                                0.0
-                            })
+                            .multiply_with_opacity(
+                                if self.cur_document == Some(document.id.weak()) {
+                                    1.0
+                                } else {
+                                    0.0
+                                },
+                            )
                             .rounding(egui::Rounding {
                                 ne: 2.0,
                                 nw: 2.0,

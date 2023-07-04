@@ -1,7 +1,7 @@
 //! #IDs
 //! For many purposes, a unique ID is needed. This is implemented in this module via the FuzzID<T> type,
 //! which generates unique IDs namespaced by the type T. Order of IDs is not guaranteed.
-//! 
+//!
 //! As cloning and re-use of an ID is a logic error, a weak, clonable + Copyable version is provided with `FuzzID::weak`.
 
 // Collection of pending IDs by type.
@@ -73,7 +73,10 @@ impl<T: std::any::Any> FuzzID<T> {
     }
     /// Construct a weak clone of this ID.
     pub fn weak(&self) -> WeakID<T> {
-        WeakID { id: self.id, _phantom: self._phantom }
+        WeakID {
+            id: self.id,
+            _phantom: self._phantom,
+        }
     }
     /// Get a dummy ID. Useful for testing, but can be used for evil.
     pub unsafe fn dummy() -> Self {
@@ -129,7 +132,8 @@ impl<T: std::any::Any> std::fmt::Display for FuzzID<T> {
             self.id
         )
     }
-}impl<T: std::any::Any> std::fmt::Display for WeakID<T> {
+}
+impl<T: std::any::Any> std::fmt::Display for WeakID<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         //Unwrap here is safe - the rsplit will always return at least one element, even for empty strings.
         write!(
