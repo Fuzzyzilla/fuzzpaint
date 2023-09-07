@@ -116,22 +116,6 @@ impl From<StrokeLayer> for LayerNode {
     }
 }
 
-static IS_ERASER: std::sync::OnceLock<parking_lot::RwLock<bool>> = std::sync::OnceLock::new();
-static IS_UNDO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn is_eraser() -> bool {
-    *IS_ERASER.get_or_init(|| false.into()).read()
-}
-fn eraser_mut() -> parking_lot::RwLockWriteGuard<'static, bool> {
-    IS_ERASER.get_or_init(|| false.into()).write()
-}
-fn take_undo() -> bool {
-    IS_UNDO.swap(false, std::sync::atomic::Ordering::Relaxed)
-}
-fn set_undo() {
-    IS_UNDO.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
 pub struct LayerGraph {
     top_level: Vec<LayerNode>,
 }
@@ -643,9 +627,7 @@ impl DocumentUserInterface {
 
                 ui.add(egui::Separator::default().vertical());
 
-                if ui.button("⮪").clicked() {
-                    set_undo();
-                }
+                let _ = ui.button("⮪");
             });
         });
 
@@ -747,7 +729,7 @@ impl DocumentUserInterface {
                         self.brushes.retain(|brush| brush.id() != id);
                     }
                 };
-                let mut erase = eraser_mut();
+                let mut erase = false;
                 ui.toggle_value(&mut erase, "Erase");
             });
             ui.separator();
@@ -1239,11 +1221,6 @@ pub trait PreviewRenderProxy {
     fn render_complete(&mut self, idx: u32);
     fn surface_changed(&mut self, render_surface: &render_device::RenderSurface);
 }
-struct TessTest {
-    infos: Vec<tess::TessellatedStrokeInfo>,
-    buf: vk::Subbuffer<[tess::TessellatedStrokeVertex]>,
-    strokes: Vec<Stroke>,
-}
 
 fn listener(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
@@ -1256,25 +1233,6 @@ fn listener(
         .build()
         .unwrap();
 
-    let mut tess_test = TessTest {
-        strokes: Default::default(),
-        infos: Default::default(),
-        buf: vk::Buffer::new_unsized::<[tess::TessellatedStrokeVertex]>(
-            renderer.allocators().memory(),
-            vk::BufferCreateInfo {
-                usage: vk::BufferUsage::VERTEX_BUFFER,
-                sharing: vk::Sharing::Exclusive,
-                ..Default::default()
-            },
-            vk::AllocationCreateInfo {
-                allocate_preference: vulkano::memory::allocator::MemoryAllocatePreference::Unknown,
-                usage: vk::MemoryUsage::Upload,
-                ..Default::default()
-            },
-            65536 * 2,
-        )
-        .unwrap(),
-    };
     let tesselator = tess::rayon::RayonTessellator;
     let stroke_renderer = stroke_renderer::StrokeLayerRenderer::new(renderer.clone()).unwrap();
 
@@ -1286,26 +1244,6 @@ fn listener(
 
                 let matrix = document_preview.read().get_matrix().invert().unwrap();
                 for event in event_frame.iter() {
-                    if !event.pressed {
-                        if take_undo() {
-                            tess_test.strokes.pop();
-                            tess_test.infos.pop();
-                            changed = true;
-                        }
-                    }
-                    // just pressed - append a new stroke.
-                    if event.pressed && !was_pressed {
-                        tess_test.strokes.push(Stroke {
-                            id: Default::default(),
-                            brush: StrokeBrushSettings {
-                                brush: brush::todo_brush().id().weak(),
-                                color_modulate: [0.0, 0.0, 0.0, 1.0],
-                                size_mul: 20.0,
-                                is_eraser: is_eraser(),
-                            },
-                            points: Vec::new(),
-                        });
-                    }
                     if event.pressed {
                         let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
                         let pos = [
@@ -1313,67 +1251,11 @@ fn listener(
                             (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
                         ];
 
-                        let this_stroke = tess_test.strokes.last_mut().unwrap();
-                        let last_point = this_stroke.points.last();
-
-                        // Last point's dist plus new dist, or 0.0 if no last point.
-                        let new_dist = last_point
-                            .map(|point| {
-                                let delta = [pos[0] - point.pos[0], pos[1] - point.pos[1]];
-
-                                point.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
-                            })
-                            .unwrap_or(0.0);
-
-                        this_stroke.points.push(StrokePoint {
-                            pos,
-                            pressure: event.pressure.unwrap_or(1.0),
-                            dist: new_dist,
-                        });
 
                         changed = true;
                     }
 
                     was_pressed = event.pressed;
-                }
-
-                if changed {
-                    let buff = runtime.block_on(document_preview.read().get_writeable_buffer());
-                    tess_test.infos.resize_with(tess_test.strokes.len(), || {
-                        tess::TessellatedStrokeInfo {
-                            // safety: nothing reads this field yet, for testing.
-                            source: unsafe { FuzzID::dummy().weak() },
-                            first_vertex: 0,
-                            vertices: 0,
-                            blend_constants: [0.0; 4],
-                        }
-                    });
-
-                    tesselator
-                        .tessellate(
-                            &tess_test.strokes,
-                            &mut tess_test.infos,
-                            tess_test.buf.clone(),
-                            0,
-                        )
-                        .unwrap();
-
-                    let mut layer_output = LayerRenderData {
-                        image: Some(buff),
-                        tessellated_stroke_vertices: Some(tess_test.buf.clone()),
-                        tessellated_stroke_infos: tess_test.infos.clone(),
-                    };
-                    let cmd = stroke_renderer.render(&mut layer_output).unwrap();
-
-                    renderer
-                        .now()
-                        .then_execute(renderer.queues().graphics().queue().clone(), cmd)
-                        .unwrap()
-                        .then_signal_fence_and_flush()
-                        .unwrap()
-                        .wait(None)
-                        .unwrap();
-                    document_preview.read().swap();
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
