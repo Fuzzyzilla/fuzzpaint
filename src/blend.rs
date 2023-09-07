@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-#[derive(strum::AsRefStr, PartialEq, Eq, strum::EnumIter, Copy, Clone)]
+#[derive(strum::AsRefStr, PartialEq, Eq, strum::EnumIter, Copy, Clone, Hash)]
 #[repr(u8)]
 pub enum BlendMode {
     Normal,
@@ -15,9 +15,11 @@ impl Default for BlendMode {
 }
 
 mod shaders {
+    #[derive(Copy, Clone)]
     #[repr(C)]
     pub struct WorkgroupSizeConstants {
-        pub x: u32, pub y: u32,
+        pub x: u32,
+        pub y: u32,
     }
     // Safety: They all share the same source which unconditionally defines two constants:
     // workgroup size x:0, workgroup size y:1
@@ -38,15 +40,23 @@ mod shaders {
         }
     }
     pub mod normal {
-        vulkano_shaders::shader!{
+        vulkano_shaders::shader! {
             ty: "compute",
             path: "src/shaders/blend/blend_one.comp",
             include: ["src/shaders/blend"],
             define: [("BLEND_NORMAL", "."), ("MODE_FUNC", "blend_normal")],
         }
     }
+    pub mod add {
+        vulkano_shaders::shader! {
+            ty: "compute",
+            path: "src/shaders/blend/blend_one.comp",
+            include: ["src/shaders/blend"],
+            define: [("BLEND_ADD", "."), ("MODE_FUNC", "blend_add")],
+        }
+    }
     pub mod multiply {
-        vulkano_shaders::shader!{
+        vulkano_shaders::shader! {
             ty: "compute",
             path: "src/shaders/blend/blend_one.comp",
             include: ["src/shaders/blend"],
@@ -54,7 +64,7 @@ mod shaders {
         }
     }
     pub mod overlay {
-        vulkano_shaders::shader!{
+        vulkano_shaders::shader! {
             ty: "compute",
             path: "src/shaders/blend/blend_one.comp",
             include: ["src/shaders/blend"],
@@ -64,39 +74,33 @@ mod shaders {
 }
 
 use crate::vk;
-struct BlendEngine {
+pub struct BlendEngine {
     workgroup_size: (u32, u32),
     // Based on chosen workgroup_size and max workgroup count
     max_image_size: (usize, usize),
     shader_layout: Arc<vk::PipelineLayout>,
+    mode_pipelines: std::collections::HashMap<BlendMode, Arc<vk::ComputePipeline>>,
 }
 impl BlendEngine {
-    fn build_pipeline(device: Arc<vk::Device>, layout: Arc<vk::PipelineLayout>, size: shaders::WorkgroupSizeConstants, entry_point: vulkano::shader::EntryPoint) -> anyhow::Result<Arc<vk::ComputePipeline>> {
+    fn build_pipeline(
+        device: Arc<vk::Device>,
+        layout: Arc<vk::PipelineLayout>,
+        size: shaders::WorkgroupSizeConstants,
+        entry_point: vulkano::shader::EntryPoint,
+    ) -> anyhow::Result<Arc<vk::ComputePipeline>> {
         // Ensure that the unsafe assumptions of WorkgroupSizeConstants matches reality.
         #[cfg(Debug)]
         {
             use vulkano::shader::SpecializationConstantRequirements as Req;
             let mut constants = entry_point.specialization_constant_requirements();
-            debug_assert!(
-                matches!(
-                    constants.next(),
-                    Some(
-                        (1, Req{size: 4})
-                    ) | Some(
-                        (0, Req{size: 4})
-                    )
-                )
-            );
-            debug_assert!(
-                matches!(
-                    constants.next(),
-                    Some(
-                        (1, Req{size: 4})
-                    ) | Some(
-                        (0, Req{size: 4})
-                    )
-                )
-            );
+            debug_assert!(matches!(
+                constants.next(),
+                Some((1, Req { size: 4 })) | Some((0, Req { size: 4 }))
+            ));
+            debug_assert!(matches!(
+                constants.next(),
+                Some((1, Req { size: 4 })) | Some((0, Req { size: 4 }))
+            ));
             debug_assert!(matches!(constants.next(), None));
         };
 
@@ -130,13 +134,18 @@ impl BlendEngine {
 
         // Build fixed layout for all blend processes
         let mut input_image_bindings = std::collections::BTreeMap::new();
-        input_image_bindings.insert(0, vulkano::descriptor_set::layout::DescriptorSetLayoutBinding {
-            descriptor_count: 1,
-            variable_descriptor_count: false,
-            immutable_samplers: Default::default(),
-            stages: vulkano::shader::ShaderStages::COMPUTE,
-            ..vulkano::descriptor_set::layout::DescriptorSetLayoutBinding::descriptor_type(vulkano::descriptor_set::layout::DescriptorType::StorageImage)
-        });
+        input_image_bindings.insert(
+            0,
+            vulkano::descriptor_set::layout::DescriptorSetLayoutBinding {
+                descriptor_count: 1,
+                variable_descriptor_count: false,
+                immutable_samplers: Default::default(),
+                stages: vulkano::shader::ShaderStages::COMPUTE,
+                ..vulkano::descriptor_set::layout::DescriptorSetLayoutBinding::descriptor_type(
+                    vulkano::descriptor_set::layout::DescriptorType::StorageImage,
+                )
+            },
+        );
         let output_image_bindings = input_image_bindings.clone();
 
         let input_image_layout = vk::DescriptorSetLayout::new(
@@ -145,7 +154,7 @@ impl BlendEngine {
                 bindings: input_image_bindings,
                 push_descriptor: false,
                 ..Default::default()
-            }
+            },
         )?;
         let output_image_layout = vk::DescriptorSetLayout::new(
             device.clone(),
@@ -153,7 +162,7 @@ impl BlendEngine {
                 bindings: output_image_bindings,
                 push_descriptor: false,
                 ..Default::default()
-            }
+            },
         )?;
 
         let shader_layout = vk::PipelineLayout::new(
@@ -161,21 +170,64 @@ impl BlendEngine {
             vulkano::pipeline::layout::PipelineLayoutCreateInfo {
                 set_layouts: vec![input_image_layout, output_image_layout],
                 ..vulkano::pipeline::layout::PipelineLayoutCreateInfo::default()
-            }
+            },
         )?;
-        let size = shaders::WorkgroupSizeConstants{
+        let size = shaders::WorkgroupSizeConstants {
             x: workgroup_size.0,
             y: workgroup_size.1,
         };
 
-        let _ = Self::build_pipeline(device.clone(), shader_layout.clone(), size, shaders::normal::load(device.clone())?.entry_point("main").unwrap())?;
+        let mut modes = std::collections::HashMap::new();
 
-        Ok(
-            Self {
-                shader_layout,
-                max_image_size,
-                workgroup_size,
-            }
-        )
+        modes.insert(
+            BlendMode::Normal,
+            Self::build_pipeline(
+                device.clone(),
+                shader_layout.clone(),
+                size,
+                shaders::normal::load(device.clone())?
+                    .entry_point("main")
+                    .unwrap(),
+            )?,
+        );
+        modes.insert(
+            BlendMode::Add,
+            Self::build_pipeline(
+                device.clone(),
+                shader_layout.clone(),
+                size,
+                shaders::add::load(device.clone())?
+                    .entry_point("main")
+                    .unwrap(),
+            )?,
+        );
+        modes.insert(
+            BlendMode::Multiply,
+            Self::build_pipeline(
+                device.clone(),
+                shader_layout.clone(),
+                size,
+                shaders::multiply::load(device.clone())?
+                    .entry_point("main")
+                    .unwrap(),
+            )?,
+        );
+        modes.insert(
+            BlendMode::Overlay,
+            Self::build_pipeline(
+                device.clone(),
+                shader_layout.clone(),
+                size,
+                shaders::overlay::load(device.clone())?
+                    .entry_point("main")
+                    .unwrap(),
+            )?,
+        );
+        Ok(Self {
+            shader_layout,
+            max_image_size,
+            workgroup_size,
+            mode_pipelines: modes,
+        })
     }
 }

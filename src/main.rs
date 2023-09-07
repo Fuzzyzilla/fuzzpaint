@@ -1395,6 +1395,8 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
+    blend::BlendEngine::new(render_context.device().clone()).unwrap();
+
     // Test image generators.
     //let (image, future) = make_test_image(render_context.clone())?;
     //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("/home/aspen/Pictures/thesharc.png"))?;
