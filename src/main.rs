@@ -14,6 +14,7 @@ pub mod id;
 pub mod render_device;
 pub mod stylus_events;
 pub mod tess;
+pub mod blend;
 
 pub use id::{FuzzID, WeakID};
 pub use tess::StrokeTessellator;
@@ -23,20 +24,8 @@ const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 use anyhow::Result as AnyResult;
 
-#[derive(strum::AsRefStr, PartialEq, Eq, strum::EnumIter, Copy, Clone)]
-pub enum BlendMode {
-    Normal,
-    Screen,
-    Multiply,
-}
-impl Default for BlendMode {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
-
 pub struct Blend {
-    mode: BlendMode,
+    mode: blend::BlendMode,
     opacity: f32,
     alpha_clip: bool,
 }
@@ -456,7 +445,7 @@ impl DocumentUserInterface {
             egui::ComboBox::new(id, "")
                 .selected_text(blend.mode.as_ref())
                 .show_ui(ui, |ui| {
-                    for blend_mode in <crate::BlendMode as strum::IntoEnumIterator>::iter() {
+                    for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
                         ui.selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref());
                     }
                 });
