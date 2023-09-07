@@ -30,8 +30,9 @@ To declare **0.2.0**, I would like to be able to somewhat freely draw a thing an
    - [X] Efficient erasers
  - [ ] Layers
    - [X] Simple UI to manage layer creation, order, modes, etc.
-   - [ ] Blending Über-compute-shader 
+   - [X] Blending compute shaders
      - In the future, compile a document-specific compute shader to do the blending in a more optimizer-friendly manner.
+     - Also, take advantage of associativity and commutativity of blend modes to reduce number of distinct dispatches
      - fall forward on `EXT_blend_operation_advanced` or `EXT_fragment_shader_interlock`?
    - Groups + FX + self-populating layers (clone, fill, gradients) come later
  - [ ] UI
