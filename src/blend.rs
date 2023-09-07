@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
-#[derive(strum::AsRefStr, PartialEq, Eq, strum::EnumIter, Copy, Clone, Hash)]
+#[derive(strum::AsRefStr, PartialEq, Eq, strum::EnumIter, Copy, Clone, Hash, Debug)]
 #[repr(u8)]
 pub enum BlendMode {
     Normal,
@@ -15,6 +15,8 @@ impl Default for BlendMode {
 }
 
 mod shaders {
+    pub const INPUT_IMAGE_SET: u32 = 0;
+    pub const OUTPUT_IMAGE_SET: u32 = 1;
     #[derive(Copy, Clone)]
     #[repr(C)]
     pub struct WorkgroupSizeConstants {
@@ -73,11 +75,13 @@ mod shaders {
     }
 }
 
+use vulkano::image::ImageAccess;
+
 use crate::vk;
 pub struct BlendEngine {
     workgroup_size: (u32, u32),
-    // Based on chosen workgroup_size and max workgroup count
-    max_image_size: (usize, usize),
+    // Based on chosen workgroup_size and device's max workgroup count
+    max_image_size: (u32, u32),
     shader_layout: Arc<vk::PipelineLayout>,
     mode_pipelines: std::collections::HashMap<BlendMode, Arc<vk::ComputePipeline>>,
 }
@@ -89,7 +93,7 @@ impl BlendEngine {
         entry_point: vulkano::shader::EntryPoint,
     ) -> anyhow::Result<Arc<vk::ComputePipeline>> {
         // Ensure that the unsafe assumptions of WorkgroupSizeConstants matches reality.
-        #[cfg(Debug)]
+        #[cfg(debug_assertions)]
         {
             use vulkano::shader::SpecializationConstantRequirements as Req;
             let mut constants = entry_point.specialization_constant_requirements();
@@ -109,7 +113,7 @@ impl BlendEngine {
             entry_point,
             &size,
             layout,
-            None,
+            None, // Cache would be ideal here, todo!
         )?;
         Ok(pipeline)
     }
@@ -128,8 +132,15 @@ impl BlendEngine {
         };
         // Max image size, based on max num of workgroups and chosen workgroup size
         let max_image_size = (
-            workgroup_size.0 as usize * properties.max_compute_work_group_count[0] as usize,
-            workgroup_size.1 as usize * properties.max_compute_work_group_count[1] as usize,
+            (workgroup_size.0).saturating_mul(properties.max_compute_work_group_count[0]),
+            (workgroup_size.1).saturating_mul(properties.max_compute_work_group_count[1]),
+        );
+        log::info!(
+            "Blend workgroup size: {}x{}x1. Max image size {}x{}",
+            workgroup_size.0,
+            workgroup_size.1,
+            max_image_size.0,
+            max_image_size.1
         );
 
         // Build fixed layout for all blend processes
@@ -179,55 +190,110 @@ impl BlendEngine {
 
         let mut modes = std::collections::HashMap::new();
 
-        modes.insert(
-            BlendMode::Normal,
-            Self::build_pipeline(
-                device.clone(),
-                shader_layout.clone(),
-                size,
-                shaders::normal::load(device.clone())?
-                    .entry_point("main")
-                    .unwrap(),
-            )?,
-        );
-        modes.insert(
-            BlendMode::Add,
-            Self::build_pipeline(
-                device.clone(),
-                shader_layout.clone(),
-                size,
-                shaders::add::load(device.clone())?
-                    .entry_point("main")
-                    .unwrap(),
-            )?,
-        );
-        modes.insert(
-            BlendMode::Multiply,
-            Self::build_pipeline(
-                device.clone(),
-                shader_layout.clone(),
-                size,
-                shaders::multiply::load(device.clone())?
-                    .entry_point("main")
-                    .unwrap(),
-            )?,
-        );
-        modes.insert(
-            BlendMode::Overlay,
-            Self::build_pipeline(
-                device.clone(),
-                shader_layout.clone(),
-                size,
-                shaders::overlay::load(device.clone())?
-                    .entry_point("main")
-                    .unwrap(),
-            )?,
-        );
+        /// Very smol inflexible macro to compile and insert one blend mode program from the `shaders` module into the `modes` map.
+        macro_rules! build_mode {
+            ($mode:expr, $namespace:ident) => {
+                modes.insert(
+                    $mode,
+                    Self::build_pipeline(
+                        device.clone(),
+                        shader_layout.clone(),
+                        size,
+                        shaders::$namespace::load(device.clone())?
+                            .entry_point("main")
+                            .unwrap(),
+                    )?,
+                );
+            };
+        }
+        
+        build_mode!(BlendMode::Normal, normal);
+        build_mode!(BlendMode::Add, add);
+        build_mode!(BlendMode::Multiply, multiply);
+        build_mode!(BlendMode::Overlay, overlay);
+
         Ok(Self {
             shader_layout,
             max_image_size,
             workgroup_size,
             mode_pipelines: modes,
         })
+    }
+    /// Layers will be blended, in order, into mutable background.
+    /// Background can be initialized to solid color, transparent, first layer, precomp'd image, ect!
+    pub fn blend(
+        &self,
+        context: &crate::render_device::RenderContext,
+        background: Arc<vk::ImageView<vk::StorageImage>>,
+        layers: &[(BlendMode, Arc<vk::ImageView<vk::StorageImage>>)],
+    ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
+        if layers.is_empty() {
+            anyhow::bail!("No layers to blend.")
+        }
+
+        // Compute the number of workgroups to dispatch for a given image
+        // Or, None if the number of workgroups exceeds the maximum the device supports.
+        let output_size = background.image().dimensions();
+        let get_dispatch_size = |dimensions: vk::ImageDimensions| -> Option<[u32; 3]> {
+            let x = dimensions.width().min(output_size.width());
+            let y = dimensions.height().min(output_size.height());
+            if x > self.max_image_size.0 || y > self.max_image_size.1 {
+                None
+            } else {
+                Some([
+                    x.div_ceil(self.workgroup_size.0),
+                    y.div_ceil(self.workgroup_size.1),
+                    1,
+                ])
+            }
+        };
+
+        let mut commands = vk::AutoCommandBufferBuilder::primary(
+            context.allocators().command_buffer(),
+            context.queues().compute().idx(),
+            vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        let output_set = vk::PersistentDescriptorSet::new(
+            context.allocators().descriptor_set(),
+            self.shader_layout.set_layouts()[shaders::OUTPUT_IMAGE_SET as usize].clone(),
+            [vk::WriteDescriptorSet::image_view(0, background)],
+        )?;
+        commands.bind_descriptor_sets(
+            vulkano::pipeline::PipelineBindPoint::Compute,
+            self.shader_layout.clone(),
+            shaders::OUTPUT_IMAGE_SET,
+            vec![output_set],
+        );
+
+        let mut last_mode = None;
+        for (mode, image) in layers {
+            // Only bind a new pipeline if changed from last iter
+            if last_mode != Some(*mode) {
+                let Some(program) = self.mode_pipelines.get(mode).map(Arc::clone) else {
+                    anyhow::bail!("Blend mode {:?} unsupported", mode)
+                };
+                commands.bind_pipeline_compute(program);
+                last_mode = Some(*mode);
+            }
+
+            let input_set = vk::PersistentDescriptorSet::new(
+                context.allocators().descriptor_set(),
+                self.shader_layout.set_layouts()[shaders::INPUT_IMAGE_SET as usize].clone(),
+                [vk::WriteDescriptorSet::image_view(0, image.clone())],
+            )?;
+            commands
+                .bind_descriptor_sets(
+                    vulkano::pipeline::PipelineBindPoint::Compute,
+                    self.shader_layout.clone(),
+                    shaders::INPUT_IMAGE_SET,
+                    vec![input_set],
+                )
+                .dispatch(
+                    get_dispatch_size(image.image().dimensions())
+                        .ok_or_else(|| anyhow::anyhow!("Image too large to blend!"))?,
+                )?;
+        }
+        Ok(commands.build()?)
     }
 }
