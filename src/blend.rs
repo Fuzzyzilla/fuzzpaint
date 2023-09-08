@@ -14,9 +14,29 @@ impl Default for BlendMode {
     }
 }
 
+/// Blend mode for an object, including a mode, opacity modulate, and alpha clip
+pub struct Blend {
+    pub mode: BlendMode,
+    pub opacity: f32,
+    /// If alpha clip enabled, it should not affect background alpha, krita style!
+    pub alpha_clip: bool,
+}
+impl Default for Blend {
+    fn default() -> Self {
+        Self {
+            mode: Default::default(),
+            opacity: 1.0,
+            alpha_clip: false,
+        }
+    }
+}
+
 mod shaders {
     pub const INPUT_IMAGE_SET: u32 = 0;
     pub const OUTPUT_IMAGE_SET: u32 = 1;
+
+    /// Every blend shader specializes on the 2d size of workgroups to be selected at runtime.
+    /// Z size is always one (for now, maybe in multisampling z can represent sample index)
     #[derive(Copy, Clone)]
     #[repr(C)]
     pub struct WorkgroupSizeConstants {
@@ -24,7 +44,7 @@ mod shaders {
         pub y: u32,
     }
     // Safety: They all share the same source which unconditionally defines two constants:
-    // workgroup size x:0, workgroup size y:1
+    // workgroup size x@0, workgroup size y@1. This is explicitly checked in debug builds
     unsafe impl vulkano::shader::SpecializationConstants for WorkgroupSizeConstants {
         fn descriptors() -> &'static [vulkano::shader::SpecializationMapEntry] {
             &[
@@ -41,8 +61,10 @@ mod shaders {
             ]
         }
     }
-    // Noteably, NOT AnyBitPattern, bool32 has invalid states
-    #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, PartialEq)]
+    /// The push constants to customize blending. Corresponds to fields in super::Blend.
+    /// Every blend shader must accept this struct format!
+    // Noteably, NOT AnyBitPattern nor Pod, bool32 has invalid states
+    #[derive(bytemuck::Zeroable, vulkano::buffer::BufferContents, Clone, Copy, PartialEq)]
     #[repr(C)]
     pub struct BlendConstants {
         pub opacity : f32,
@@ -223,24 +245,28 @@ impl BlendEngine {
         };
 
         let mut modes = std::collections::HashMap::new();
-
         /// Very smol inflexible macro to compile and insert one blend mode program from the `shaders` module into the `modes` map.
         macro_rules! build_mode {
             ($mode:expr, $namespace:ident) => {
-                modes.insert(
-                    $mode,
+                let mode : BlendMode = $mode;
+                let prev = modes.insert(
+                    mode,
                     Self::build_pipeline(
                         device.clone(),
                         shader_layout.clone(),
                         size,
                         shaders::$namespace::load(device.clone())?
                             .entry_point("main")
+                            // Unwrap ok here, GLSL only allows "main" as entry point name.
+                            // No main = compile time failure!
                             .unwrap(),
                     )?,
                 );
+                assert!(prev.is_none(), "Overwrote blend program {mode:?}. Did you typo the name?");
             };
         }
 
+        // It is unreasonably cool how well the rust-analyzer autocomplete works here :O
         build_mode!(BlendMode::Normal, normal);
         build_mode!(BlendMode::Add, add);
         build_mode!(BlendMode::Multiply, multiply);
@@ -259,7 +285,7 @@ impl BlendEngine {
         &self,
         context: &crate::render_device::RenderContext,
         background: Arc<vk::ImageView<vk::StorageImage>>,
-        layers: &[(crate::Blend, Arc<vk::ImageView<vk::StorageImage>>)],
+        layers: &[(Blend, Arc<vk::ImageView<vk::StorageImage>>)],
     ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
         if layers.is_empty() {
             anyhow::bail!("No layers to blend.")
@@ -302,8 +328,8 @@ impl BlendEngine {
 
         let mut last_mode = None;
         let mut last_blend_settings = None;
-        for (crate::Blend{mode, alpha_clip, opacity}, image) in layers {
-            // Only bind a new pipeline if changed from last iter
+        for (Blend{mode, alpha_clip, opacity}, image) in layers {
+            // bind a new pipeline if changed from last iter
             if last_mode != Some(*mode) {
                 let Some(program) = self.mode_pipelines.get(mode).map(Arc::clone) else {
                     anyhow::bail!("Blend mode {:?} unsupported", mode)
@@ -312,11 +338,13 @@ impl BlendEngine {
                 last_mode = Some(*mode);
             }
             // Push new clip/alpha constants if different from last iter
+            // As per https://registry.khronos.org/vulkan/site/guide/latest/push_constants.html#pc-lifetime,
+            // I believe push constants should remain across compatible pipeline binds
             let constants = shaders::BlendConstants::new(*opacity, *alpha_clip);
             if Some(constants) != last_blend_settings {
                 commands.push_constants(self.shader_layout.clone(), 0, constants);
             }
-            
+
             let input_set = vk::PersistentDescriptorSet::new(
                 context.allocators().descriptor_set(),
                 self.shader_layout.set_layouts()[shaders::INPUT_IMAGE_SET as usize].clone(),

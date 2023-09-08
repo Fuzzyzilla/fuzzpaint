@@ -14,41 +14,25 @@ pub mod render_device;
 pub mod stylus_events;
 pub mod tess;
 pub mod blend;
+use blend::{Blend, BlendMode};
 
 pub use id::{FuzzID, WeakID};
 pub use tess::StrokeTessellator;
 
 /// Obviously will be user specified on a per-document basis, but for now...
 const DOCUMENT_DIMENSION: u32 = 1024;
-/// RGBA16F for interesting effects (negative + overbright colors and alpha) with
+/// Premultiplied RGBA16F for interesting effects (negative + overbright colors and alpha) with
 /// more than 11bit per channel precision in the [0,1] range.
 /// Will it be user specified in the future?
 const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 use anyhow::Result as AnyResult;
 
-/// Blend mode for an object, including a mode, opacity modulate, and alpha clip
-pub struct Blend {
-    mode: blend::BlendMode,
-    opacity: f32,
-    /// If alpha clip enabled, it should not affect background alpha, krita style!
-    alpha_clip: bool,
-}
-impl Default for Blend {
-    fn default() -> Self {
-        Self {
-            mode: Default::default(),
-            opacity: 1.0,
-            alpha_clip: false,
-        }
-    }
-}
-
 pub struct GroupLayer {
     name: String,
 
     /// Some - grouped rendering, None - Passthrough
-    blend: Option<Blend>,
+    blend: Option<blend::Blend>,
 
     /// ID that is unique within this execution of the program
     id: FuzzID<GroupLayer>,
@@ -65,7 +49,7 @@ impl Default for GroupLayer {
 }
 pub struct StrokeLayer {
     name: String,
-    blend: Blend,
+    blend: blend::Blend,
 
     /// ID that is unique within this execution of the program
     id: FuzzID<StrokeLayer>,
@@ -434,7 +418,7 @@ impl DocumentUserInterface {
             egui::ComboBox::new(id, "")
                 .selected_text(blend.mode.as_ref())
                 .show_ui(ui, |ui| {
-                    for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
+                    for blend_mode in <BlendMode as strum::IntoEnumIterator>::iter() {
                         ui.selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref());
                     }
                 });
@@ -1043,12 +1027,27 @@ mod stroke_renderer {
                 texture_descriptor: descriptor_set,
             })
         }
+        /// Render stroke from scratch - clear or create cached image, tesselate, and render all strokes.
+        pub fn render_all(
+            &self,
+            stroke_data: &mut super::StrokeLayerData,
+        ) -> AnyResult<()> {
+            todo!()
+        }
+        /// Render new strokes into and on top of current cached contents. If no content, initialize to empty then draw.
+        pub fn render_append(
+            &self,
+            render_data: &mut super::RenderData,
+            strokes: &[super::Stroke],
+        ) -> AnyResult<()> {
+            todo!()
+        }
         /// Render provided tessellated strokes from and into the provided buffer.
         /// Assumes the tessellated stroke infos match the contenst of the buffer.
         /// Some cursory checks are made to ensure this is the case, but don't rely on them.
         pub fn render(
             &self,
-            render_data: &mut super::LayerRenderData,
+            //render_data: &mut super::LayerRenderData,
         ) -> AnyResult<vk::PrimaryAutoCommandBuffer> {
             // Skip if no tessellated verts
             let Some(verts) = render_data.tessellated_stroke_vertices.clone() else {
