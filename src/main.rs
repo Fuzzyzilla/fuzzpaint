@@ -1,5 +1,4 @@
 #![feature(portable_simd)]
-
 use std::sync::Arc;
 mod egui_impl;
 pub mod gpu_err;
@@ -19,14 +18,20 @@ pub mod blend;
 pub use id::{FuzzID, WeakID};
 pub use tess::StrokeTessellator;
 
+/// Obviously will be user specified on a per-document basis, but for now...
 const DOCUMENT_DIMENSION: u32 = 1024;
+/// RGBA16F for interesting effects (negative + overbright colors and alpha) with
+/// more than 11bit per channel precision in the [0,1] range.
+/// Will it be user specified in the future?
 const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 use anyhow::Result as AnyResult;
 
+/// Blend mode for an object, including a mode, opacity modulate, and alpha clip
 pub struct Blend {
     mode: blend::BlendMode,
     opacity: f32,
+    /// If alpha clip enabled, it should not affect background alpha, krita style!
     alpha_clip: bool,
 }
 impl Default for Blend {
@@ -859,15 +864,6 @@ impl DocumentUserInterface {
     }
 }
 
-pub struct LayerRenderData {
-    /// For any layer that needs to be rendered separately
-    /// (or can be used to optimize draws into a pre-rendered buffer)
-    image: Option<Arc<vk::ImageView<vk::StorageImage>>>,
-
-    // For stroke layers
-    tessellated_stroke_vertices: Option<vk::Subbuffer<[tess::TessellatedStrokeVertex]>>,
-    tessellated_stroke_infos: Vec<tess::TessellatedStrokeInfo>,
-}
 
 mod stroke_renderer {
     use crate::vk;
@@ -1084,6 +1080,8 @@ mod stroke_renderer {
                 }
             };
 
+            let x =smallvec::smallvec![7,,,,];
+
             let framebuffer = vk::Framebuffer::new(
                 self.render_pass.clone(),
                 vk::FramebufferCreateInfo {
@@ -1157,11 +1155,6 @@ mod stroke_renderer {
     }
 }
 
-pub struct LayerNodeRenderer {
-    context: Arc<render_device::RenderContext>,
-
-    layer_data: std::collections::HashMap<FuzzID<LayerNode>, LayerRenderData>,
-}
 pub struct StrokeBrushSettings {
     brush: brush::WeakBrushID,
     /// `a` is flow, NOT opacity, since the stroke is blended continuously not blended as a group.
@@ -1202,10 +1195,22 @@ pub struct Stroke {
     brush: StrokeBrushSettings,
     points: Vec<StrokePoint>,
 }
+/// The data managed by the renderer.
+/// For now, in persuit of actually getting a working product one day,
+/// this is a very coarse caching sceme. In the future, perhaps a bit more granular
+/// control can occur, should performance become an issue:
+///  * Caching images of incrementally older states, reducing work to get to any given state (performant undo)
+///  * Caching tesselation output
+pub struct RenderData {
+    image: Arc<vk::StorageImage>,
+}
 /// Decoupled data from header, stored in separate manager. Header managed by UI.
+/// Stores the strokes generated from pen input, with optional render data inserted by renderer.
 pub struct StrokeLayerData {
     strokes: Vec<Stroke>,
+    render_data: Option<RenderData>,
 }
+/// Collection of layer data (stroke contents and render data) mapped from ID
 pub struct StrokeLayerManager {
     layers: std::collections::HashMap<FuzzID<StrokeLayer>, StrokeLayerData>,
 }

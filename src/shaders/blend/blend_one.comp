@@ -2,6 +2,9 @@
 #extension GL_GOOGLE_include_directive: require
 
 #ifndef MODE_FUNC
+// For testing...:
+/*#define MODE_FUNC blend_add
+#define BLEND_ADD*/
 #error "must define a mode!"
 #endif
 
@@ -14,6 +17,10 @@
 // Different sets since only inputImage will change per call
 layout(set = 0, binding = 0, RGBA16F) uniform restrict readonly image2D inputImage;
 layout(set = 1, binding = 0, RGBA16F) uniform restrict /*readwrite*/ image2D backgroundImage;
+layout(push_constant) uniform InputBlend {
+    float opacity;
+    bool clip;
+};
 // Specialize at runtime to however much concurrancy we can get!
 // For multisample we could use z for each sample, for now we set to 1
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
@@ -35,9 +42,10 @@ void main() {
     ivec2 coordinate = ivec2(gl_GlobalInvocationID.xy);
     // Blend unmultiplied input onto unmultiplied background
     vec4 result = MODE_FUNC(
-        unmultiply(imageLoad(inputImage, coordinate)),
+        unmultiply(imageLoad(inputImage, coordinate) * opacity),
         unmultiply(imageLoad(backgroundImage, coordinate))
     );
     // Store result into background as premultipled
+    // TODO: clip
     imageStore(backgroundImage, coordinate, vec4(result.rgb, 1.0) * result.a);
 }

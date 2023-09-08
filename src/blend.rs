@@ -41,6 +41,22 @@ mod shaders {
             ]
         }
     }
+    // Noteably, NOT AnyBitPattern, bool32 has invalid states
+    #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, PartialEq)]
+    #[repr(C)]
+    pub struct BlendConstants {
+        pub opacity : f32,
+        /// Bool32: only 1 and 0 are valid!!
+        clip : u32,
+    }
+    impl BlendConstants {
+        pub fn new(opacity: f32, clip: bool) -> Self {
+            Self {
+                opacity,
+                clip: if clip {1} else {0}
+            }
+        }
+    }
     pub mod normal {
         vulkano_shaders::shader! {
             ty: "compute",
@@ -105,6 +121,17 @@ impl BlendEngine {
                 constants.next(),
                 Some((1, Req { size: 4 })) | Some((0, Req { size: 4 }))
             ));
+            let mut push = entry_point.push_constant_requirements().map(|&v| v);
+            debug_assert_eq!(
+                push,
+                Some(
+                    vulkano::pipeline::layout::PushConstantRange {
+                        stages: vulkano::shader::ShaderStages::COMPUTE,
+                        offset: 0,
+                        size: 8, // f32 + bool32
+                    }
+                )
+            );
             debug_assert!(matches!(constants.next(), None));
         };
 
@@ -180,6 +207,13 @@ impl BlendEngine {
             device.clone(),
             vulkano::pipeline::layout::PipelineLayoutCreateInfo {
                 set_layouts: vec![input_image_layout, output_image_layout],
+                push_constant_ranges: vec![
+                    vulkano::pipeline::layout::PushConstantRange{
+                        offset: 0,
+                        size: 8, // f32 + bool32
+                        stages: vulkano::shader::ShaderStages::COMPUTE,
+                    }
+                ],
                 ..vulkano::pipeline::layout::PipelineLayoutCreateInfo::default()
             },
         )?;
@@ -206,7 +240,7 @@ impl BlendEngine {
                 );
             };
         }
-        
+
         build_mode!(BlendMode::Normal, normal);
         build_mode!(BlendMode::Add, add);
         build_mode!(BlendMode::Multiply, multiply);
@@ -225,7 +259,7 @@ impl BlendEngine {
         &self,
         context: &crate::render_device::RenderContext,
         background: Arc<vk::ImageView<vk::StorageImage>>,
-        layers: &[(BlendMode, Arc<vk::ImageView<vk::StorageImage>>)],
+        layers: &[(crate::Blend, Arc<vk::ImageView<vk::StorageImage>>)],
     ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
         if layers.is_empty() {
             anyhow::bail!("No layers to blend.")
@@ -267,7 +301,8 @@ impl BlendEngine {
         );
 
         let mut last_mode = None;
-        for (mode, image) in layers {
+        let mut last_blend_settings = None;
+        for (crate::Blend{mode, alpha_clip, opacity}, image) in layers {
             // Only bind a new pipeline if changed from last iter
             if last_mode != Some(*mode) {
                 let Some(program) = self.mode_pipelines.get(mode).map(Arc::clone) else {
@@ -276,7 +311,12 @@ impl BlendEngine {
                 commands.bind_pipeline_compute(program);
                 last_mode = Some(*mode);
             }
-
+            // Push new clip/alpha constants if different from last iter
+            let constants = shaders::BlendConstants::new(*opacity, *alpha_clip);
+            if Some(constants) != last_blend_settings {
+                commands.push_constants(self.shader_layout.clone(), 0, constants);
+            }
+            
             let input_set = vk::PersistentDescriptorSet::new(
                 context.allocators().descriptor_set(),
                 self.shader_layout.set_layouts()[shaders::INPUT_IMAGE_SET as usize].clone(),
