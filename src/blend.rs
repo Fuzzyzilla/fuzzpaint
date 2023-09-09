@@ -79,6 +79,14 @@ mod shaders {
             }
         }
     }
+    /// Push constants to specify the rectangle to blend. Todo!
+    #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
+    #[repr(C)]
+    pub struct BlendRect {
+        pub origin: [u32; 2],
+        pub size: [u32; 2],
+    }
+
     pub mod normal {
         vulkano_shaders::shader! {
             ty: "compute",
@@ -131,6 +139,7 @@ impl BlendEngine {
         entry_point: vulkano::shader::EntryPoint,
     ) -> anyhow::Result<Arc<vk::ComputePipeline>> {
         // Ensure that the unsafe assumptions of WorkgroupSizeConstants matches reality.
+        // As well as making sure that push constant layouts are correct.
         #[cfg(debug_assertions)]
         {
             use vulkano::shader::SpecializationConstantRequirements as Req;
@@ -143,6 +152,9 @@ impl BlendEngine {
                 constants.next(),
                 Some((1, Req { size: 4 })) | Some((0, Req { size: 4 }))
             ));
+            debug_assert!(matches!(constants.next(), None));
+
+            // Ensure that push constants are acceptable
             let mut push = entry_point.push_constant_requirements().map(|&v| v);
             debug_assert_eq!(
                 push,
@@ -150,11 +162,10 @@ impl BlendEngine {
                     vulkano::pipeline::layout::PushConstantRange {
                         stages: vulkano::shader::ShaderStages::COMPUTE,
                         offset: 0,
-                        size: 8, // f32 + bool32
+                        size: 24, // Blend: (f32 + bool32), Rect:(u32 * 4)
                     }
                 )
             );
-            debug_assert!(matches!(constants.next(), None));
         };
 
         let pipeline = vk::ComputePipeline::with_pipeline_layout(
@@ -281,11 +292,16 @@ impl BlendEngine {
     }
     /// Layers will be blended, in order, into mutable background.
     /// Background can be initialized to solid color, transparent, first layer, precomp'd image, ect!
+    /// `background` must not be aliased by any image view of `layers` (will it panic or error?)
+    /// (unimplemented) Texels outside of the rectangle specified by `origin` and `extent` will not be touched.
+    /// The rectangle may be beyond the bounds, but that's kinda useless uwu
     pub fn blend(
         &self,
         context: &crate::render_device::RenderContext,
         background: Arc<vk::ImageView<vk::StorageImage>>,
         layers: &[(Blend, Arc<vk::ImageView<vk::StorageImage>>)],
+        origin: [u32;2],
+        extent: [u32;2],
     ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
         if layers.is_empty() {
             anyhow::bail!("No layers to blend.")

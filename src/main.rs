@@ -850,6 +850,16 @@ impl DocumentUserInterface {
 
 
 mod stroke_renderer {
+    /// The data managed by the renderer.
+    /// For now, in persuit of actually getting a working product one day,
+    /// this is a very coarse caching sceme. In the future, perhaps a bit more granular
+    /// control can occur, should performance become an issue:
+    ///  * Caching images of incrementally older states, reducing work to get to any given state (performant undo)
+    ///  * Caching tesselation output
+    pub struct RenderData {
+        image: Arc<vk::StorageImage>,
+    }
+
     use crate::vk;
     use anyhow::Result as AnyResult;
     use std::sync::Arc;
@@ -1028,16 +1038,16 @@ mod stroke_renderer {
             })
         }
         /// Render stroke from scratch - clear or create cached image, tesselate, and render all strokes.
-        pub fn render_all(
+        pub async fn render_all(
             &self,
             stroke_data: &mut super::StrokeLayerData,
         ) -> AnyResult<()> {
             todo!()
         }
         /// Render new strokes into and on top of current cached contents. If no content, initialize to empty then draw.
-        pub fn render_append(
+        pub async fn render_append(
             &self,
-            render_data: &mut super::RenderData,
+            render_data: &mut RenderData,
             strokes: &[super::Stroke],
         ) -> AnyResult<()> {
             todo!()
@@ -1194,20 +1204,11 @@ pub struct Stroke {
     brush: StrokeBrushSettings,
     points: Vec<StrokePoint>,
 }
-/// The data managed by the renderer.
-/// For now, in persuit of actually getting a working product one day,
-/// this is a very coarse caching sceme. In the future, perhaps a bit more granular
-/// control can occur, should performance become an issue:
-///  * Caching images of incrementally older states, reducing work to get to any given state (performant undo)
-///  * Caching tesselation output
-pub struct RenderData {
-    image: Arc<vk::StorageImage>,
-}
 /// Decoupled data from header, stored in separate manager. Header managed by UI.
 /// Stores the strokes generated from pen input, with optional render data inserted by renderer.
 pub struct StrokeLayerData {
     strokes: Vec<Stroke>,
-    render_data: Option<RenderData>,
+    render_data: Option<stroke_renderer::RenderData>,
 }
 /// Collection of layer data (stroke contents and render data) mapped from ID
 pub struct StrokeLayerManager {

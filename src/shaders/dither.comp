@@ -1,0 +1,58 @@
+#version 450
+
+layout(set = 0, binding = 0, RGBA16F) uniform
+    restrict readonly image2D inputImage;
+
+layout(set = 0, binding = 1, RGBA8UI) uniform
+    restrict writeonly uimage2D ditheredImage;
+
+// Specialize on kernel width and height, allocate one vec4 for each invocation
+// (Thus, size_x * size_y * sizeof(vec4) must be less than
+// maxComputeSharedMemorySize)
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
+shared vec4[gl_WorkGroupSize.x][gl_WorkGroupSize.y] mem;
+
+vec4 posterize_u8(vec4 val) {
+    return clamp(
+        round(val * 255.0),
+        vec4(0.0),
+        vec4(255.0)
+    );
+}
+vec4 unposterize_u8(vec4 val) {
+    return val / vec4(255.0);
+}
+
+void main() {
+    ivec2 coordinate = ivec2(gl_GlobalInvocationID.xy);
+    // We cannot simply early return due to memoryBarriers,
+    // all workers must execute the whole program - ones
+    // outside either image will simply work on dummy data and discard it.
+    // (I believe I read that before, but can't find it in the docs?)
+    bool outside = any(
+        greaterThanEqual(
+            gl_GlobalInvocationID.xy,
+            min(imageSize(inputImage), imageSize(ditheredImage))
+        )
+    );
+
+    // Todo: Tonemapping for overbright and negative colors. For now, hard clamp to 0..1
+    vec4 true_color = outside ? vec4(0.0) : imageLoad(inputImage, coordinate);
+    vec4 color = posterize_u8(true_color);
+    vec4 error = true_color - unposterize_u8(color);
+
+    // Share local error with friends
+    mem[gl_LocalInvocationID.x][gl_LocalInvocationID.y] = error;
+    // Wait until everyone has shared
+    memoryBarrierShared();
+
+    // Two possible error distribution methods:
+    // Each thread looks at shared mem, sums up neighbors
+    //   downside: need to recalc neighborhood weight for each neighbor
+    // Each thread atomically broadcasts it's error to neighbors
+    //   only need to calc self's neighborhood weight
+    //   VK_EXT_shader_atomic_float -> shaderSharedFloat32AtomicAdd has a measly 15.3% coverage, however
+
+    // There needs to be some biased weighting - if every neighbor has
+    // the same weight, we can literally never acummulate enough error to adjust posterized color to the next step
+}

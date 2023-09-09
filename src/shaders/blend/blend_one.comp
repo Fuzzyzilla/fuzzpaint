@@ -3,9 +3,9 @@
 
 #ifndef MODE_FUNC
 // For testing...:
-/*#define MODE_FUNC blend_add
-#define BLEND_ADD*/
-#error "must define a mode!"
+#define MODE_FUNC blend_add
+#define BLEND_ADD
+//#error "must define a mode!"
 #endif
 
 #include "modes.glsl"
@@ -18,8 +18,11 @@
 layout(set = 0, binding = 0, RGBA16F) uniform restrict readonly image2D inputImage;
 layout(set = 1, binding = 0, RGBA16F) uniform restrict /*readwrite*/ image2D backgroundImage;
 layout(push_constant) uniform InputBlend {
-    float opacity;
-    bool clip;
+    layout(offset = 0) float opacity;
+    layout(offset = 4) bool clip;
+    // Todo! Left undefined by rust side
+    layout(offset = 8) uvec2 origin;
+    layout(offset = 16) uvec2 size;
 };
 // Specialize at runtime to however much concurrancy we can get!
 // For multisample we could use z for each sample, for now we set to 1
@@ -38,13 +41,22 @@ void main() {
             )
         )
     ) return;
-
     ivec2 coordinate = ivec2(gl_GlobalInvocationID.xy);
-    // Blend unmultiplied input onto unmultiplied background
+    vec4 inputColor = imageLoad(inputImage, coordinate) * opacity;
+
+    #ifdef EARLY_RETURNS
+    // Early return if alpha is 0.0 (by all the impls, a zero alpha just results in background color unchanged)
+    // However, includes an extra branch.
+    if (inputColor.a == 0.0) return;
+    // Similarly, if bg alpha is zero, it just results in inputColor alone.
+    // however, checking for that wouldn't save any work, so no special case for it
+    #endif
+
     vec4 result = MODE_FUNC(
-        unmultiply(imageLoad(inputImage, coordinate) * opacity),
+        unmultiply(inputColor),
         unmultiply(imageLoad(backgroundImage, coordinate))
     );
+
     // Store result into background as premultipled
     // TODO: clip
     imageStore(backgroundImage, coordinate, vec4(result.rgb, 1.0) * result.a);
