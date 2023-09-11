@@ -1120,66 +1120,93 @@ mod stroke_renderer {
             // Wait until we have single access.
             let buf_access_permit = self.tess_buffer_mutex.acquire().await?;
 
-            // (waits for tess to be done writing, waits for buffers to be done reading)
-            // We can assume that all buffers are available initially for the tesselator to write
-            // due to the wait above ^
-            // use Notifies instead of mutexes because of the sync/async dichotomy between this and the worker
-            let (wait_tess_complete, wait_buff_available): (
-                [_; Self::TESS_BUFFER_COUNT as usize],
-                [_; Self::TESS_BUFFER_COUNT as usize],
-            ) = {
-                let tess_waits: Vec<_> = std::iter::repeat_with(tokio::sync::Notify::new)
-                    .take(Self::TESS_BUFFER_COUNT as usize)
-                    .collect();
-                let buff_waits: Vec<_> = std::iter::repeat_with(tokio::sync::Notify::new)
-                    .take(Self::TESS_BUFFER_COUNT as usize)
-                    .collect();
-
-                // This is infallible, we create the exact number of notifies to fit each array
-                (
-                    tess_waits.try_into().unwrap(),
-                    buff_waits.try_into().unwrap(),
-                )
-            };
-
-            // We spawn a thread to do the tess. The borrow checker doesn't like this and for good reason,
+            // We spawn a thread to do the tess on borrowed data. The borrow checker doesn't like this and for good reason,
             // as if the future is dropped it can then be mutably accessed by the caller while the thread is
-            // still reading. I do notttt know how to fix this, aside from disallowing the future to be cancelled.
-            struct DoNotCancel {
-                armed : bool,
+            // still reading. So, we must join the thread before we can exit! This can only be detected by a struct with Drop impl.
+            struct Worker<'data> {
+                thread: Option<std::thread::JoinHandle<()>>,
+                cancel_flag: Arc<std::sync::atomic::AtomicBool>,
+                data: std::marker::PhantomData<&'data Self>,
             }
-            impl Drop for DoNotCancel {
-                fn drop(&mut self) {
-                    if self.armed {
-                        // Ok to panic if we're already panicking because the unsafety condition from dropping this
-                        // future is abort-worthy. Could also kill the offending thread here instead of panicking,
-                        // but since tessellators contain unknown code this could lead to resource leaks and later deadlocks.
-                        panic!("render_all dropped before finished. Fixme!")
+            impl<'data> Worker<'data> {
+                /// Create a worker from a closure that returns the worker closure.
+                /// Outer closure takes a copy of the atomic bool that will be used to signal
+                /// if the thread has been cancelled, and the thread should promptly respond by returning ASAP.
+                /// Takes a reference to dummy data, which the worker will pretend to borrow for it's lifetime.
+                fn new<Outer, Inner, Data>(f: Outer, data: &'data Data) -> Self
+                where
+                    Outer: FnOnce(Arc<std::sync::atomic::AtomicBool>) -> Inner,
+                    Inner: FnOnce() -> () + Send,
+                {
+                    let cancel_flag: Arc<std::sync::atomic::AtomicBool> = Arc::new(false.into());
+                    // Let user code build their closure around this atomic:
+                    let thread_fn = f(cancel_flag.clone());
+                    Worker {
+                        thread: Some(std::thread::spawn(thread_fn)),
+                        cancel_flag,
+                        data: Default::default(),
+                    }
+                }
+                /// Explicitly join the thread without cancellation, disabling the automatic Drop catch.
+                /// Useful for when the thread exits on it's own accord.
+                /// Does NOT notify tokio runtime of potentially long wait.
+                fn join(self) -> Result<(), Box<dyn std::any::Any + Send>> {
+                    match self.thread.take() {
+                        None => Ok(()),
+                        Some(t) => t.join(),
                     }
                 }
             }
-            let mut do_not_cancel = DoNotCancel{armed:true};
-            let task = std::thread::spawn(|| {
-                stroke_data.render_data = None;
-            });
+            impl<'data> Drop for Worker<'data> {
+                fn drop(&mut self) {
+                    // Get handle, or bail if already handled.
+                    let Some(thread) = self.thread.take() else {
+                        return;
+                    };
 
-            let mut vertices = [TessellatedStrokeVertex {
-                color: [vulkano::half::f16::ZERO; 4],
-                pos: [0.0; 2],
-                uv: [0.0; 2],
-            }; 1024];
+                    // Tell worker to stop working and return (thus stop accessing the borrowed mem)
+                    // and join it before we release our borrow, to prevent races.
+                    self.cancel_flag
+                        .store(false, std::sync::atomic::Ordering::Acquire);
+                    // Join thread - notify tokio that this operation may take a moment to return
+                    tokio::task::block_in_place(|| {
+                        log::warn!("Dropping tess thread!");
+                        if thread.join().is_err() {
+                            // The error type is highly useless so there's not much more to say
+                            log::error!("Cancelled tess worker thread returned with error.");
+                        }
+                    })
+                }
+            }
 
-            // Spawn a high-compute task to do the tesselation, while calling thread asynchronously submits the verts to be rendered
-            let mut stream = tessellator.stream(&stroke_data.strokes);
-            stream.tessellate(&mut vertices);
+            // Split the borrow into immutable and mutable parts, to share with worker thread
+            // without violating rust's aliasing rules. Worker will borrow `strokes` immutably to statically ensure this.
+            let render_data = &mut stroke_data.render_data;
+            let strokes = &stroke_data.strokes;
 
-            let thread_result = task.join();
-            // Task is not borrowing slice anymore, ok to cancel/exit
-            do_not_cancel.armed = false;
-            if thread_result.is_err() {
-                // The err type is so... unusable?
-                anyhow::bail!("Tess thread died!")
+            let worker = {
+                unsafe {
+                    // Allow the worker to borrow the data by extending the lifetime to 'static.
+                    // Safety: the worker *must* be joined before render_all ends, either normally
+                    // or by future cancellation, to prevent use-after-free and race conditions!
+                    // This is ensured by Worker::drop.
+                    let static_strokes = std::mem::transmute::<
+                        &[super::Stroke],
+                        &'static [super::Stroke],
+                    >(strokes);
+                    Worker::new(move |cancel_flag| {
+                        move || {
+                            while !cancel_flag.load(std::sync::atomic::Ordering::Release) {
+                                std::hint::spin_loop()
+                            }
+                            log::info!("{}", strokes.len());
+                        }
+                        // borrow a dummy reference to prevent outer scope from violating aliasing rules.
+                    }, strokes)
+                }
             };
+
+
             todo!()
         }
         /// Render new strokes into and on top of current cached contents. If no content, initialize to empty then draw.
