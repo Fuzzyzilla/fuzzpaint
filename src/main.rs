@@ -859,7 +859,10 @@ mod stroke_renderer {
         image: Arc<vk::StorageImage>,
     }
 
-    use crate::vk;
+    use crate::{
+        tess::{StreamStrokeTessellator, TessellatedStrokeVertex},
+        vk,
+    };
     use anyhow::Result as AnyResult;
     use std::sync::Arc;
     use vulkano::{pipeline::graphics::vertex_input::Vertex, pipeline::Pipeline, sync::GpuFuture};
@@ -1071,12 +1074,12 @@ mod stroke_renderer {
                     ..Default::default()
                 },
                 vulkano::memory::allocator::DeviceLayout::new(
-                    std::num::NonZeroU64::new(
-                        Self::TESS_BUFFER_SIZE * Self::TESS_BUFFER_COUNT,
-                    ).unwrap(),
+                    std::num::NonZeroU64::new(Self::TESS_BUFFER_SIZE * Self::TESS_BUFFER_COUNT)
+                        .unwrap(),
                     // Panics if >64, checked earlier
                     non_coherent_atom_size,
-                ).unwrap()
+                )
+                .unwrap(),
             )?;
             // Subdivide the large buffer into TESS_BUFFER_COUNT smaller, [f32] buffers
             let whole_buffer = vk::Subbuffer::<[u8]>::new(tess_buffer.clone());
@@ -1108,6 +1111,7 @@ mod stroke_renderer {
             })
         }
         /// Render stroke from scratch - clear or create cached image, tesselate, and render all strokes.
+        /// This future is NOT cancelable, and may panic if you try. very yucky. Todo!
         pub async fn render_all<T: super::tess::StrokeTessellator + Sync>(
             &self,
             stroke_data: &mut super::StrokeLayerData,
@@ -1119,6 +1123,7 @@ mod stroke_renderer {
             // (waits for tess to be done writing, waits for buffers to be done reading)
             // We can assume that all buffers are available initially for the tesselator to write
             // due to the wait above ^
+            // use Notifies instead of mutexes because of the sync/async dichotomy between this and the worker
             let (wait_tess_complete, wait_buff_available): (
                 [_; Self::TESS_BUFFER_COUNT as usize],
                 [_; Self::TESS_BUFFER_COUNT as usize],
@@ -1137,9 +1142,44 @@ mod stroke_renderer {
                 )
             };
 
-            // Spawn a high-compute task to do the tesselation, while calling thread asynchronously submits the verts to be rendered
-            // bleh
+            // We spawn a thread to do the tess. The borrow checker doesn't like this and for good reason,
+            // as if the future is dropped it can then be mutably accessed by the caller while the thread is
+            // still reading. I do notttt know how to fix this, aside from disallowing the future to be cancelled.
+            struct DoNotCancel {
+                armed : bool,
+            }
+            impl Drop for DoNotCancel {
+                fn drop(&mut self) {
+                    if self.armed {
+                        // Ok to panic if we're already panicking because the unsafety condition from dropping this
+                        // future is abort-worthy. Could also kill the offending thread here instead of panicking,
+                        // but since tessellators contain unknown code this could lead to resource leaks and later deadlocks.
+                        panic!("render_all dropped before finished. Fixme!")
+                    }
+                }
+            }
+            let mut do_not_cancel = DoNotCancel{armed:true};
+            let task = std::thread::spawn(|| {
+                stroke_data.render_data = None;
+            });
 
+            let mut vertices = [TessellatedStrokeVertex {
+                color: [vulkano::half::f16::ZERO; 4],
+                pos: [0.0; 2],
+                uv: [0.0; 2],
+            }; 1024];
+
+            // Spawn a high-compute task to do the tesselation, while calling thread asynchronously submits the verts to be rendered
+            let mut stream = tessellator.stream(&stroke_data.strokes);
+            stream.tessellate(&mut vertices);
+
+            let thread_result = task.join();
+            // Task is not borrowing slice anymore, ok to cancel/exit
+            do_not_cancel.armed = false;
+            if thread_result.is_err() {
+                // The err type is so... unusable?
+                anyhow::bail!("Tess thread died!")
+            };
             todo!()
         }
         /// Render new strokes into and on top of current cached contents. If no content, initialize to empty then draw.

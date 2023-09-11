@@ -12,8 +12,9 @@ pub enum TessellationError {
 }
 
 pub trait StrokeTessellator {
-    type Stream<'a> : StreamStrokeTessellator<'a>
-        where Self : 'a; // I do not understand the implications of this bound :V
+    type Stream<'a>: StreamStrokeTessellator<'a>
+    where
+        Self: 'a; // I do not understand the implications of this bound :V
     /// Tessellate all the strokes into the given subbuffer.
     fn tessellate(
         &self,
@@ -24,11 +25,8 @@ pub trait StrokeTessellator {
     /// Construct a stream tessellator, which can tessellate many strokes into a
     /// smaller buffer. Repeatedly call `StreamStrokeTessellator::tessellate` to continuously fill new buffers
     // Stream does not borrow self. This makes sense in rayon and vulkano, where the
-    // stream maintains all the internals within itself. 
-    fn stream<'a>(
-        &self,
-        strokes: &'a [crate::Stroke],
-    ) -> Self::Stream<'a>;
+    // stream maintains all the internals within itself.
+    fn stream<'a>(&self, strokes: &'a [crate::Stroke]) -> Self::Stream<'a>;
     /// Exact number of vertices to allocate and draw for this stroke.
     /// No method for estimates for now.
     fn num_vertices_of(&self, stroke: &crate::Stroke) -> usize;
@@ -42,10 +40,8 @@ pub trait StreamStrokeTessellator<'a> {
     /// Tessellate as many as possible into a buffer.
     /// Returns the number of vertices generated, or None if complete.
     /// Repeated calls to tessellate will continue to make forward progress.
-    fn tessellate(
-        &mut self,
-        vertices: &mut [TessellatedStrokeVertex],
-    ) -> Option<usize>;
+    /// Some overhead is expected for a tessellation pass, so call with a large-ish buffer!
+    fn tessellate(&mut self, vertices: &mut [TessellatedStrokeVertex]) -> Option<usize>;
 }
 
 /// All the data needed to render tessellated output.
