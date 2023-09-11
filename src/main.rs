@@ -7,13 +7,13 @@ pub mod window;
 use cgmath::{Matrix4, SquareMatrix};
 use vulkano::command_buffer;
 use vulkano_prelude::*;
+pub mod blend;
 pub mod brush;
 pub mod document_viewport_proxy;
 pub mod id;
 pub mod render_device;
 pub mod stylus_events;
 pub mod tess;
-pub mod blend;
 use blend::{Blend, BlendMode};
 
 pub use id::{FuzzID, WeakID};
@@ -848,7 +848,6 @@ impl DocumentUserInterface {
     }
 }
 
-
 mod stroke_renderer {
     /// The data managed by the renderer.
     /// For now, in persuit of actually getting a working product one day,
@@ -911,10 +910,24 @@ mod stroke_renderer {
         context: Arc<crate::render_device::RenderContext>,
         texture_descriptor: Arc<vk::PersistentDescriptorSet>,
 
+        /// Three host-visible buffers of size TESS_BUFFER_SIZE for swapping work between
+        /// Graphics pipeline and cpu tesselator
+        tess_buffer: Arc<vk::Buffer>,
+        tess_subbuffers: [vk::Subbuffer<[f32]>; Self::TESS_BUFFER_COUNT as usize],
+        /// For now, only single access. Future could have more granular access control.
+        tess_buffer_mutex: tokio::sync::Semaphore,
+
         render_pass: Arc<vk::RenderPass>,
         pipeline: Arc<vk::GraphicsPipeline>,
     }
     impl StrokeLayerRenderer {
+        /// Size of one tess buffer. Must align to nonCoherentAtomSize.
+        /// nonCoherentAtomSize is always a power of two and universally < 1kiB,
+        /// so 4MiB will certainly always work.
+        const TESS_BUFFER_FLOATS: u64 = 1024 * 1024;
+        const TESS_BUFFER_SIZE: u64 = Self::TESS_BUFFER_FLOATS * std::mem::size_of::<f32>() as u64;
+        const TESS_BUFFER_COUNT: u64 = 3;
+
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {
             let render_pass = vulkano::single_pass_renderpass!(
                 context.device().clone(),
@@ -998,6 +1011,7 @@ mod stroke_renderer {
 
             // Premultiplied blending with blend constants specified at rendertime.
             // constant of [1.0; 4] is normal, constant of [0.0; 4] is eraser. [r,g,b,1.0] can be used to modulate color, but not alpha.
+            // DualSrcBlend (~75% coverage) can be used to control this from within the fragment shader instead :O
             let mut premul_dyn_constants = vk::ColorBlendState::new(1);
             premul_dyn_constants.blend_constants = vk::StateMode::Dynamic;
             premul_dyn_constants.attachments[0].blend = Some(vk::AttachmentBlend {
@@ -1030,18 +1044,102 @@ mod stroke_renderer {
                 )],
             )?;
 
+            // Allocate tesselation buffer
+            // Align to a nonCoherentAtomSize (may be greater than 64, vulkano no likey that)
+            let non_coherent_atom_size = context
+                .device()
+                .physical_device()
+                .properties()
+                .non_coherent_atom_size;
+            if Self::TESS_BUFFER_SIZE % non_coherent_atom_size.as_devicesize() != 0 {
+                anyhow::bail!("Tess buffer size is not aligned for non-coherently use")
+            }
+            // This is an unreasonable assumption - about 1/8 of devices will fail here. what do? todo!
+            if non_coherent_atom_size.as_devicesize() > 64u64 {
+                anyhow::bail!("Device nonCoherentAtomSize too strict to allocate")
+            }
+            let tess_buffer = vk::Buffer::new(
+                context.allocators().memory(),
+                vk::BufferCreateInfo {
+                    usage: vk::BufferUsage::VERTEX_BUFFER,
+                    ..Default::default()
+                },
+                vk::AllocationCreateInfo {
+                    allocate_preference:
+                        vulkano::memory::allocator::MemoryAllocatePreference::AlwaysAllocate,
+                    usage: vulkano::memory::allocator::MemoryUsage::Upload,
+                    ..Default::default()
+                },
+                vulkano::memory::allocator::DeviceLayout::new(
+                    std::num::NonZeroU64::new(
+                        Self::TESS_BUFFER_SIZE * Self::TESS_BUFFER_COUNT,
+                    ).unwrap(),
+                    // Panics if >64, checked earlier
+                    non_coherent_atom_size,
+                ).unwrap()
+            )?;
+            // Subdivide the large buffer into TESS_BUFFER_COUNT smaller, [f32] buffers
+            let whole_buffer = vk::Subbuffer::<[u8]>::new(tess_buffer.clone());
+            let mut tess_subbuffers: Result<Vec<_>, _> = (0..Self::TESS_BUFFER_COUNT)
+                .into_iter()
+                .map(|idx| {
+                    whole_buffer
+                        .clone()
+                        .slice(idx * Self::TESS_BUFFER_SIZE..(idx + 1) * Self::TESS_BUFFER_SIZE)
+                        .try_cast_slice::<f32>()
+                })
+                .collect();
+            let tess_subbuffers = match tess_subbuffers {
+                Ok(o) => o,
+                // bytemuck's Pod error doesn't impl Error -w-
+                Err(e) => anyhow::bail!("{:?}", e),
+            };
+
             Ok(Self {
                 context,
                 pipeline,
                 render_pass,
+                tess_buffer,
+                // We create exactly the right amount of buffers, this is fine uwu
+                // If any failed to create, we will have bailed early.
+                tess_subbuffers: tess_subbuffers.try_into().unwrap(),
+                tess_buffer_mutex: tokio::sync::Semaphore::new(1),
                 texture_descriptor: descriptor_set,
             })
         }
         /// Render stroke from scratch - clear or create cached image, tesselate, and render all strokes.
-        pub async fn render_all(
+        pub async fn render_all<T: super::tess::StrokeTessellator + Sync>(
             &self,
             stroke_data: &mut super::StrokeLayerData,
-        ) -> AnyResult<()> {
+            tessellator: &T,
+        ) -> AnyResult<Box<dyn vk::sync::GpuFuture>> {
+            // Wait until we have single access.
+            let buf_access_permit = self.tess_buffer_mutex.acquire().await?;
+
+            // (waits for tess to be done writing, waits for buffers to be done reading)
+            // We can assume that all buffers are available initially for the tesselator to write
+            // due to the wait above ^
+            let (wait_tess_complete, wait_buff_available): (
+                [_; Self::TESS_BUFFER_COUNT as usize],
+                [_; Self::TESS_BUFFER_COUNT as usize],
+            ) = {
+                let tess_waits: Vec<_> = std::iter::repeat_with(tokio::sync::Notify::new)
+                    .take(Self::TESS_BUFFER_COUNT as usize)
+                    .collect();
+                let buff_waits: Vec<_> = std::iter::repeat_with(tokio::sync::Notify::new)
+                    .take(Self::TESS_BUFFER_COUNT as usize)
+                    .collect();
+
+                // This is infallible, we create the exact number of notifies to fit each array
+                (
+                    tess_waits.try_into().unwrap(),
+                    buff_waits.try_into().unwrap(),
+                )
+            };
+
+            // Spawn a high-compute task to do the tesselation, while calling thread asynchronously submits the verts to be rendered
+            // bleh
+
             todo!()
         }
         /// Render new strokes into and on top of current cached contents. If no content, initialize to empty then draw.
@@ -1089,7 +1187,7 @@ mod stroke_renderer {
                 }
             };
 
-            let x =smallvec::smallvec![7,,,,];
+            let x = smallvec::smallvec![7,,,,];
 
             let framebuffer = vk::Framebuffer::new(
                 self.render_pass.clone(),
@@ -1255,7 +1353,6 @@ fn listener(
                             pos.x * DOCUMENT_DIMENSION as f32,
                             (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
                         ];
-
 
                         changed = true;
                     }

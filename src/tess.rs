@@ -8,18 +8,27 @@ pub mod rayon;
 #[derive(Debug, Clone)]
 pub enum TessellationError {
     VertexBufferTooSmall { needed_size: usize },
-    InfosBufferTooSmall { needed_size: usize },
     BufferError(vulkano::buffer::BufferError),
 }
 
 pub trait StrokeTessellator {
+    type Stream<'a> : StreamStrokeTessellator<'a>
+        where Self : 'a; // I do not understand the implications of this bound :V
+    /// Tessellate all the strokes into the given subbuffer.
     fn tessellate(
         &self,
         strokes: &[crate::Stroke],
-        infos_into: &mut [TessellatedStrokeInfo],
         vertices_into: crate::vk::Subbuffer<[TessellatedStrokeVertex]>,
         base_vertex: usize,
     ) -> ::std::result::Result<(), TessellationError>;
+    /// Construct a stream tessellator, which can tessellate many strokes into a
+    /// smaller buffer. Repeatedly call `StreamStrokeTessellator::tessellate` to continuously fill new buffers
+    // Stream does not borrow self. This makes sense in rayon and vulkano, where the
+    // stream maintains all the internals within itself. 
+    fn stream<'a>(
+        &self,
+        strokes: &'a [crate::Stroke],
+    ) -> Self::Stream<'a>;
     /// Exact number of vertices to allocate and draw for this stroke.
     /// No method for estimates for now.
     fn num_vertices_of(&self, stroke: &crate::Stroke) -> usize;
@@ -27,6 +36,16 @@ pub trait StrokeTessellator {
     fn num_vertices_of_slice(&self, strokes: &[crate::Stroke]) -> usize {
         strokes.iter().map(|s| self.num_vertices_of(s)).sum()
     }
+}
+
+pub trait StreamStrokeTessellator<'a> {
+    /// Tessellate as many as possible into a buffer.
+    /// Returns the number of vertices generated, or None if complete.
+    /// Repeated calls to tessellate will continue to make forward progress.
+    fn tessellate(
+        &mut self,
+        vertices: &mut [TessellatedStrokeVertex],
+    ) -> Option<usize>;
 }
 
 /// All the data needed to render tessellated output.

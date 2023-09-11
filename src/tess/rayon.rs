@@ -1,8 +1,27 @@
 use crate::brush;
 use rayon::prelude::*;
 pub struct RayonTessellator;
+pub struct RayonStreamTessellator<'data> {
+    cur_stroke : usize,
+    cur_point : usize,
+    cur_progress : f32,
+    strokes: &'data [crate::Stroke],
+}
+impl<'data> RayonStreamTessellator<'data> {
+    fn new(strokes: &'data [crate::Stroke]) -> Self {
+        Self { cur_stroke: 0, cur_point: 0, cur_progress: 0.0, strokes }
+    }
+}
+impl<'data> StreamStrokeTessellator<'data> for RayonStreamTessellator<'data> {  
+    fn tessellate(
+            &mut self,
+            vertices: &mut [TessellatedStrokeVertex],
+        ) -> Option<usize> {
+        todo!()
+    }
+}
 
-use super::{TessellatedStrokeInfo, TessellatedStrokeVertex, TessellationError};
+use super::{TessellatedStrokeInfo, TessellatedStrokeVertex, TessellationError, StreamStrokeTessellator};
 use crate::{StrokeBrushSettings, StrokePoint};
 
 impl RayonTessellator {
@@ -45,30 +64,25 @@ impl RayonTessellator {
     }
 }
 impl super::StrokeTessellator for RayonTessellator {
+    type Stream<'a> = RayonStreamTessellator<'a>;
+    fn stream<'a>(
+            &self,
+            strokes: &'a [crate::Stroke],
+        ) -> Self::Stream<'a> {
+        RayonStreamTessellator::new(strokes)
+    }
     fn tessellate(
         &self,
         strokes: &[crate::Stroke],
-        infos_into: &mut [TessellatedStrokeInfo],
         vertices_into: crate::vk::Subbuffer<[TessellatedStrokeVertex]>,
         mut base_vertex: usize,
     ) -> std::result::Result<(), TessellationError> {
-        if infos_into.len() < strokes.len() {
-            return Err(TessellationError::InfosBufferTooSmall {
-                needed_size: strokes.len(),
-            });
-        }
         let mut vertices_into = match vertices_into.write() {
             Ok(o) => o,
             Err(e) => return Err(TessellationError::BufferError(e)),
         };
 
-        for (stroke, info) in strokes.iter().zip(infos_into.iter_mut()) {
-            info.blend_constants = if stroke.brush.is_eraser {
-                [0.0; 4]
-            } else {
-                [1.0; 4]
-            };
-
+        for stroke in strokes.iter() {
             let brush = brush::todo_brush();
 
             // Perform tessellation!
@@ -120,11 +134,6 @@ impl super::StrokeTessellator for RayonTessellator {
                     needed_size: base_vertex + points.len(),
                 });
             };
-
-            // Populate infos
-            info.first_vertex = base_vertex as u32;
-            info.vertices = points.len() as u32;
-
             // Shift slice over for next stroke
             base_vertex += points.len();
 
