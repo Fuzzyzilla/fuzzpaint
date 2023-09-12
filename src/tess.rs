@@ -12,9 +12,7 @@ pub enum TessellationError {
 }
 
 pub trait StrokeTessellator {
-    type Stream<'a>: StreamStrokeTessellator<'a>
-    where
-        Self: 'a; // I do not understand the implications of this bound :V
+    type Stream<'a>: StreamStrokeTessellator<'a>;
     /// Tessellate all the strokes into the given subbuffer.
     fn tessellate(
         &self,
@@ -26,7 +24,7 @@ pub trait StrokeTessellator {
     /// smaller buffer. Repeatedly call `StreamStrokeTessellator::tessellate` to continuously fill new buffers
     // Stream does not borrow self. This makes sense in rayon and vulkano, where the
     // stream maintains all the internals within itself.
-    fn stream<'a>(&self, strokes: &'a [crate::Stroke]) -> Self::Stream<'a>;
+    fn stream<'s, 'a>(&'s self, strokes: &'a [crate::Stroke]) -> Self::Stream<'a>;
     /// Exact number of vertices to allocate and draw for this stroke.
     /// No method for estimates for now.
     fn num_vertices_of(&self, stroke: &crate::Stroke) -> usize;

@@ -1112,31 +1112,40 @@ mod stroke_renderer {
         }
         /// Render stroke from scratch - clear or create cached image, tesselate, and render all strokes.
         /// This future is NOT cancelable, and may panic if you try. very yucky. Todo!
-        pub async fn render_all<T: super::tess::StrokeTessellator + Sync>(
+        pub async fn render_all<'a, Tess: super::tess::StrokeTessellator + 'static>(
             &self,
             stroke_data: &mut super::StrokeLayerData,
-            tessellator: &T,
-        ) -> AnyResult<Box<dyn vk::sync::GpuFuture>> {
+            tessellator: &Tess,
+        ) -> AnyResult<Box<dyn vk::sync::GpuFuture>>
+        where
+            for<'data> Tess::Stream<'data>: Send,
+        {
             // Wait until we have single access.
-            let buf_access_permit = self.tess_buffer_mutex.acquire().await?;
+            // Arc'd so that it can be shared with worker.
+            let buf_access_permit = Arc::new(self.tess_buffer_mutex.acquire().await?);
 
             // We spawn a thread to do the tess on borrowed data. The borrow checker doesn't like this and for good reason,
             // as if the future is dropped it can then be mutably accessed by the caller while the thread is
             // still reading. So, we must join the thread before we can exit! This can only be detected by a struct with Drop impl.
-            struct Worker<'data> {
+            struct Worker<'data, 'permit> {
                 thread: Option<std::thread::JoinHandle<()>>,
                 cancel_flag: Arc<std::sync::atomic::AtomicBool>,
                 data: std::marker::PhantomData<&'data Self>,
+                permit: Arc<tokio::sync::SemaphorePermit<'permit>>,
             }
-            impl<'data> Worker<'data> {
+            impl<'data, 'permit> Worker<'data, 'permit> {
                 /// Create a worker from a closure that returns the worker closure.
                 /// Outer closure takes a copy of the atomic bool that will be used to signal
                 /// if the thread has been cancelled, and the thread should promptly respond by returning ASAP.
                 /// Takes a reference to dummy data, which the worker will pretend to borrow for it's lifetime.
-                fn new<Outer, Inner, Data>(f: Outer, data: &'data Data) -> Self
+                fn new<Outer, Inner, Data>(
+                    f: Outer,
+                    data: &'data Data,
+                    permit: Arc<tokio::sync::SemaphorePermit<'permit>>,
+                ) -> Self
                 where
                     Outer: FnOnce(Arc<std::sync::atomic::AtomicBool>) -> Inner,
-                    Inner: FnOnce() -> () + Send,
+                    Inner: FnOnce() -> () + Send + 'static,
                 {
                     let cancel_flag: Arc<std::sync::atomic::AtomicBool> = Arc::new(false.into());
                     // Let user code build their closure around this atomic:
@@ -1145,19 +1154,20 @@ mod stroke_renderer {
                         thread: Some(std::thread::spawn(thread_fn)),
                         cancel_flag,
                         data: Default::default(),
+                        permit,
                     }
                 }
                 /// Explicitly join the thread without cancellation, disabling the automatic Drop catch.
                 /// Useful for when the thread exits on it's own accord.
                 /// Does NOT notify tokio runtime of potentially long wait.
-                fn join(self) -> Result<(), Box<dyn std::any::Any + Send>> {
+                fn join(mut self) -> Result<(), Box<dyn std::any::Any + Send>> {
                     match self.thread.take() {
                         None => Ok(()),
                         Some(t) => t.join(),
                     }
                 }
             }
-            impl<'data> Drop for Worker<'data> {
+            impl<'data, 'permit> Drop for Worker<'data, 'permit> {
                 fn drop(&mut self) {
                     // Get handle, or bail if already handled.
                     let Some(thread) = self.thread.take() else {
@@ -1167,7 +1177,7 @@ mod stroke_renderer {
                     // Tell worker to stop working and return (thus stop accessing the borrowed mem)
                     // and join it before we release our borrow, to prevent races.
                     self.cancel_flag
-                        .store(false, std::sync::atomic::Ordering::Acquire);
+                        .store(false, std::sync::atomic::Ordering::Release);
                     // Join thread - notify tokio that this operation may take a moment to return
                     tokio::task::block_in_place(|| {
                         log::warn!("Dropping tess thread!");
@@ -1190,22 +1200,35 @@ mod stroke_renderer {
                     // Safety: the worker *must* be joined before render_all ends, either normally
                     // or by future cancellation, to prevent use-after-free and race conditions!
                     // This is ensured by Worker::drop.
-                    let static_strokes = std::mem::transmute::<
-                        &[super::Stroke],
-                        &'static [super::Stroke],
-                    >(strokes);
-                    Worker::new(move |cancel_flag| {
-                        move || {
-                            while !cancel_flag.load(std::sync::atomic::Ordering::Release) {
-                                std::hint::spin_loop()
+                    let static_strokes =
+                        std::mem::transmute::<&[super::Stroke], &'static [super::Stroke]>(strokes);
+                    // I *think* this is fine. Is there a way for the Tessellator impl to remember this
+                    // 'static ref and cause unsoundness?
+                    let static_tesselator = tessellator.stream(static_strokes);
+                    let worker_permit = buf_access_permit.clone();
+                    Worker::new(
+                        move |cancel_flag| {
+                            move || {
+                                // Helper macro to early return if work gets cancelled
+                                macro_rules! check_cancel {
+                                    () => {
+                                        if cancel_flag.load(std::sync::atomic::Ordering::Acquire) {
+                                            return;
+                                        }
+                                    };
+                                }
+
+                                std::hint::black_box(static_tesselator);
+                                check_cancel!()
                             }
-                            log::info!("{}", strokes.len());
-                        }
+                        },
                         // borrow a dummy reference to prevent outer scope from violating aliasing rules.
-                    }, strokes)
+                        strokes,
+                        // Take a permit, to prevent other invocations from using the buffer as long as the worker lives.
+                        worker_permit,
+                    )
                 }
             };
-
 
             todo!()
         }
@@ -1224,6 +1247,8 @@ mod stroke_renderer {
             &self,
             //render_data: &mut super::LayerRenderData,
         ) -> AnyResult<vk::PrimaryAutoCommandBuffer> {
+            todo!()
+            /*
             // Skip if no tessellated verts
             let Some(verts) = render_data.tessellated_stroke_vertices.clone() else {
                 anyhow::bail!("No vertices to render.");
@@ -1324,7 +1349,7 @@ mod stroke_renderer {
             }
 
             command_buffer.end_render_pass()?;
-            Ok(command_buffer.build()?)
+            Ok(command_buffer.build()?)*/
         }
     }
 }
