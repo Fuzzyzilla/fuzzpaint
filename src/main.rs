@@ -1113,7 +1113,7 @@ mod stroke_renderer {
         /// Render stroke from scratch - clear or create cached image, tesselate, and render all strokes.
         /// This future is NOT cancelable, and may panic if you try. very yucky. Todo!
         pub async fn render_all<'a, Tess: super::tess::StrokeTessellator + 'static>(
-            &self,
+            &'a self,
             stroke_data: &mut super::StrokeLayerData,
             tessellator: &Tess,
         ) -> AnyResult<Box<dyn vk::sync::GpuFuture>>
@@ -1123,6 +1123,18 @@ mod stroke_renderer {
             // Wait until we have single access.
             // Arc'd so that it can be shared with worker.
             let buf_access_permit = Arc::new(self.tess_buffer_mutex.acquire().await?);
+
+            // Collect waits. They should be available immediately, based on the permit.
+            let writes: Result<Vec<_>, _> = self
+                .tess_subbuffers
+                .iter()
+                .map(
+                    |buf| -> Result<vulkano::buffer::subbuffer::BufferWriteGuard<'a, [f32]>, _> {
+                        buf.write()
+                    },
+                )
+                .collect();
+            let writes = writes?;
 
             // We spawn a thread to do the tess on borrowed data. The borrow checker doesn't like this and for good reason,
             // as if the future is dropped it can then be mutably accessed by the caller while the thread is
@@ -1219,7 +1231,8 @@ mod stroke_renderer {
                                 }
 
                                 std::hint::black_box(static_tesselator);
-                                check_cancel!()
+                                check_cancel!();
+                                todo!()
                             }
                         },
                         // borrow a dummy reference to prevent outer scope from violating aliasing rules.
