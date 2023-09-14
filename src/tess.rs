@@ -35,11 +35,13 @@ pub trait StrokeTessellator {
 }
 
 pub trait StreamStrokeTessellator<'a> {
-    /// Tessellate as many as possible into a buffer.
-    /// Returns the number of vertices generated, or None if complete.
+    /// Tessellate many vertices into a buffer.
+    /// Must be a whole number of primitives! (Eg. TRIANGLE_LIST must have a multiple of 3 verts)
+    /// Returns a status - which buffer was exhausted, or it completed successfully.
     /// Repeated calls to tessellate will continue to make forward progress.
     /// Some overhead is expected for a tessellation pass, so call with a large-ish buffer!
-    fn tessellate(&mut self, vertices: &mut [TessellatedStrokeVertex]) -> Option<usize>;
+    /// infos are always in order, but there may be any number of infos (including zero) per stroke!
+    fn tessellate(&mut self, vertices: &mut [TessellatedStrokeVertex], infos: &mut [TessellatedStrokeInfo]) -> StreamStatus;
 }
 
 /// All the data needed to render tessellated output.
@@ -48,10 +50,35 @@ pub struct TessellatedStrokeInfo {
     pub source: crate::WeakID<crate::Stroke>,
     pub first_vertex: u32,
     pub vertices: u32,
-    pub blend_constants: [f32; 4],
+}
+impl TessellatedStrokeInfo {
+    pub fn empty() -> Self {
+        Self {
+            source: crate::WeakID::empty(),
+            first_vertex: 0,
+            vertices: 0
+        }
+    }
+}
+impl From<TessellatedStrokeInfo> for vulkano::command_buffer::DrawIndirectCommand {
+    fn from(value: TessellatedStrokeInfo) -> Self {
+        Self {
+            first_instance: 0,
+            instance_count: 1,
+            vertex_count: value.vertices,
+            first_vertex: value.first_vertex,
+        }
+    }
 }
 
-#[derive(crate::vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
+#[derive(PartialEq, Eq)]
+pub enum StreamStatus {
+    VerticesFull,
+    InfosFull,
+    Complete,
+}
+
+#[derive(crate::vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug)]
 #[repr(C)]
 pub struct TessellatedStrokeVertex {
     // Must be f32, as f16 only supports up to a 2048px document with pixel precision.

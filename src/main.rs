@@ -4,6 +4,7 @@ mod egui_impl;
 pub mod gpu_err;
 pub mod vulkano_prelude;
 pub mod window;
+use brush::BrushStyle;
 use cgmath::{Matrix4, SquareMatrix};
 use vulkano::command_buffer;
 use vulkano_prelude::*;
@@ -857,6 +858,7 @@ mod stroke_renderer {
     ///  * Caching tesselation output
     pub struct RenderData {
         image: Arc<vk::StorageImage>,
+        view: Arc<vk::ImageView<vk::StorageImage>>,
     }
 
     use crate::{
@@ -916,9 +918,8 @@ mod stroke_renderer {
         /// Three host-visible buffers of size TESS_BUFFER_SIZE for swapping work between
         /// Graphics pipeline and cpu tesselator
         tess_buffer: Arc<vk::Buffer>,
-        tess_subbuffers: [vk::Subbuffer<[f32]>; Self::TESS_BUFFER_COUNT as usize],
         /// For now, only single access. Future could have more granular access control.
-        tess_buffer_mutex: tokio::sync::Semaphore,
+        tess_subbuffer: std::sync::Mutex<vk::Subbuffer<[TessellatedStrokeVertex]>>,
 
         render_pass: Arc<vk::RenderPass>,
         pipeline: Arc<vk::GraphicsPipeline>,
@@ -927,8 +928,9 @@ mod stroke_renderer {
         /// Size of one tess buffer. Must align to nonCoherentAtomSize.
         /// nonCoherentAtomSize is always a power of two and universally < 1kiB,
         /// so 4MiB will certainly always work.
-        const TESS_BUFFER_FLOATS: u64 = 1024 * 1024;
-        const TESS_BUFFER_SIZE: u64 = Self::TESS_BUFFER_FLOATS * std::mem::size_of::<f32>() as u64;
+        const TESS_BUFFER_VERTS: u64 = 1024 * 1024;
+        const TESS_BUFFER_SIZE: u64 =
+            Self::TESS_BUFFER_VERTS * std::mem::size_of::<TessellatedStrokeVertex>() as u64;
         const TESS_BUFFER_COUNT: u64 = 3;
 
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {
@@ -1035,7 +1037,13 @@ mod stroke_renderer {
                 .input_assembly_state(vk::InputAssemblyState::new()) //Triangle list, no prim restart
                 .color_blend_state(premul_dyn_constants)
                 .rasterization_state(vk::RasterizationState::new()) // No cull
-                .viewport_state(vk::ViewportState::viewport_dynamic_scissor_irrelevant())
+                .viewport_state(vk::ViewportState::viewport_fixed_scissor_irrelevant([
+                    vk::Viewport {
+                        depth_range: 0.0..1.0,
+                        dimensions: [super::DOCUMENT_DIMENSION as f32; 2],
+                        origin: [0.0; 2],
+                    },
+                ]))
                 .render_pass(render_pass.clone().first_subpass())
                 .build(context.device().clone())?;
 
@@ -1083,38 +1091,169 @@ mod stroke_renderer {
             )?;
             // Subdivide the large buffer into TESS_BUFFER_COUNT smaller, [f32] buffers
             let whole_buffer = vk::Subbuffer::<[u8]>::new(tess_buffer.clone());
-            let mut tess_subbuffers: Result<Vec<_>, _> = (0..Self::TESS_BUFFER_COUNT)
-                .into_iter()
-                .map(|idx| {
-                    whole_buffer
-                        .clone()
-                        .slice(idx * Self::TESS_BUFFER_SIZE..(idx + 1) * Self::TESS_BUFFER_SIZE)
-                        .try_cast_slice::<f32>()
-                })
-                .collect();
-            let tess_subbuffers = match tess_subbuffers {
-                Ok(o) => o,
-                // bytemuck's Pod error doesn't impl Error -w-
-                Err(e) => anyhow::bail!("{:?}", e),
-            };
+            let tess_subbuffer = whole_buffer
+                .try_cast_slice::<TessellatedStrokeVertex>()
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
             Ok(Self {
                 context,
                 pipeline,
                 render_pass,
                 tess_buffer,
-                // We create exactly the right amount of buffers, this is fine uwu
-                // If any failed to create, we will have bailed early.
-                tess_subbuffers: tess_subbuffers.try_into().unwrap(),
-                tess_buffer_mutex: tokio::sync::Semaphore::new(1),
+                tess_subbuffer: tess_subbuffer.into(),
                 texture_descriptor: descriptor_set,
             })
         }
+        /// Allocate a new RenderData object. Initial contents are undefined!
+        pub fn empty_render_data(&self) -> anyhow::Result<RenderData> {
+            let image = vk::StorageImage::with_usage(
+                self.context.allocators().memory(),
+                vulkano::image::ImageDimensions::Dim2d {
+                    width: super::DOCUMENT_DIMENSION,
+                    height: super::DOCUMENT_DIMENSION,
+                    array_layers: 1,
+                },
+                super::DOCUMENT_FORMAT,
+                vk::ImageUsage::COLOR_ATTACHMENT | vk::ImageUsage::STORAGE,
+                vk::ImageCreateFlags::empty(),
+                [
+                    // Todo: if these are the same queue, what happen?
+                    self.context.queues().graphics().idx(),
+                    self.context.queues().compute().idx(),
+                ]
+                .into_iter(),
+            )?;
+            let view = vk::ImageView::new_default(image.clone())?;
+
+            Ok(RenderData { image, view })
+        }
+        // Synchronously render into a given buffer. Depending on the number of strokes, this could be a long op!
+        // Todo: the async one was doing my head in >:O
+        pub fn render_into(
+            &self,
+            strokes: &[super::Stroke],
+            into: &mut RenderData,
+            clear_buf: bool,
+            tessellator: &impl super::StrokeTessellator,
+        ) -> anyhow::Result<
+            vulkano::sync::future::SemaphoreSignalFuture<Box<dyn vk::sync::GpuFuture>>,
+        > {
+            let buff = self
+                .tess_subbuffer
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Mutex poisoned!"))?;
+            let mut infos = vec![crate::tess::TessellatedStrokeInfo::empty(); strokes.len()];
+            let mut stream = tessellator.stream(strokes);
+            // keep track of which stroke we're reading - stream will produce any number of draws per stroke,
+            // so we gotta figure out which is which!
+            let mut cursor = 0;
+
+            let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
+                self.context.allocators().command_buffer(),
+                self.context.queues().graphics().idx(),
+                vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+            )?;
+
+            // Set up renderpass!
+            command_buffer
+                .begin_rendering(vulkano::command_buffer::RenderingInfo {
+                    color_attachments: vec![Some(
+                        vulkano::command_buffer::RenderingAttachmentInfo {
+                            clear_value: if clear_buf {
+                                Some([0.0, 0.0, 0.0, 0.0].into())
+                            } else {
+                                None
+                            },
+                            load_op: if clear_buf {
+                                vulkano::render_pass::LoadOp::Clear
+                            } else {
+                                vulkano::render_pass::LoadOp::Load
+                            },
+                            store_op: vulkano::render_pass::StoreOp::Store,
+                            ..vulkano::command_buffer::RenderingAttachmentInfo::image_view(
+                                into.view.clone(),
+                            )
+                        },
+                    )],
+                    contents: vulkano::command_buffer::SubpassContents::Inline,
+                    depth_attachment: None,
+                    ..Default::default()
+                })?
+                .bind_pipeline_graphics(self.pipeline.clone());
+
+            let mut last_constants = None;
+            // Repeatedly tessellate a full buffer's worth of data, render, sync, repeat.
+            loop {
+                // Lock, tess, unlock
+                let status = {
+                    let mut write = buff.write()?;
+
+                    stream.tessellate(&mut write, &mut infos)
+                };
+
+                for info in std::mem::take(&mut infos).into_iter() {
+                    // Filler info, we're done :3
+                    if info.source == crate::WeakID::empty() {
+                        break;
+                    }
+
+                    // Previous stroke continues, nothing to do!
+                    let changed = if info.source == strokes[cursor].id {
+                        false
+                    } else {
+                        // advance cursor until we find the one this info comes from.
+                        while info.source
+                            != strokes
+                                .get(cursor)
+                                .ok_or_else(|| anyhow::anyhow!("Tess produced unknown stroke ID"))?
+                                .id
+                        {
+                            cursor += 1;
+                        }
+                        true
+                    };
+
+                    // Update brush, if needed
+                    if changed {
+                        let stroke = &strokes[cursor];
+                        let erase = stroke.brush.is_eraser;
+
+                        let constants = if erase {
+                            [0.0; 4]
+                        } else {
+                            // guh.. why no swizzle
+                            [
+                                stroke.brush.color_modulate[0],
+                                stroke.brush.color_modulate[1],
+                                stroke.brush.color_modulate[2],
+                                1.0,
+                            ]
+                        };
+                        if last_constants != Some(constants) {
+                            command_buffer.set_blend_constants(constants);
+                            last_constants = Some(constants)
+                        }
+                    }
+
+                    command_buffer.draw(info.vertices, 1, info.first_vertex, 0)?;
+                }
+
+                match status {
+                    crate::tess::StreamStatus::Complete => break,
+                    _ => (),
+                }
+                // Clear all infos in preparation for next iter
+                // (not infos.clear(), as we need all to be init and available)
+                infos.fill(crate::tess::TessellatedStrokeInfo::empty())
+            }
+
+            todo!()
+        }
         /// Render stroke from scratch - clear or create cached image, tesselate, and render all strokes.
         /// This future is NOT cancelable, and may panic if you try. very yucky. Todo!
-        pub async fn render_all<'a, Tess: super::tess::StrokeTessellator + 'static>(
+        pub async fn render_all_async<'a, Tess: super::tess::StrokeTessellator + 'static>(
             &'a self,
-            stroke_data: &mut super::StrokeLayerData,
+            strokes: &[super::ImmutableStroke],
             tessellator: &Tess,
         ) -> AnyResult<Box<dyn vk::sync::GpuFuture>>
         where
@@ -1122,19 +1261,20 @@ mod stroke_renderer {
         {
             // Wait until we have single access.
             // Arc'd so that it can be shared with worker.
-            let buf_access_permit = Arc::new(self.tess_buffer_mutex.acquire().await?);
+            /*let buf_access_permit = Arc::new(self.tess_buffer_mutex.acquire().await?);
 
             // Collect waits. They should be available immediately, based on the permit.
             let writes: Result<Vec<_>, _> = self
                 .tess_subbuffers
                 .iter()
                 .map(
-                    |buf| -> Result<vulkano::buffer::subbuffer::BufferWriteGuard<'a, [f32]>, _> {
-                        buf.write()
-                    },
+                    |buf| -> Result<
+                        vulkano::buffer::subbuffer::BufferWriteGuard<'a, [TessellatedStrokeVertex]>,
+                        _,
+                    > { buf.write() },
                 )
                 .collect();
-            let writes = writes?;
+            let writes = writes?;*/
 
             // We spawn a thread to do the tess on borrowed data. The borrow checker doesn't like this and for good reason,
             // as if the future is dropped it can then be mutably accessed by the caller while the thread is
@@ -1203,8 +1343,8 @@ mod stroke_renderer {
 
             // Split the borrow into immutable and mutable parts, to share with worker thread
             // without violating rust's aliasing rules. Worker will borrow `strokes` immutably to statically ensure this.
-            let render_data = &mut stroke_data.render_data;
-            let strokes = &stroke_data.strokes;
+            let render_data = &todo!();
+            let strokes = &todo!();
 
             let worker = {
                 unsafe {
@@ -1213,11 +1353,11 @@ mod stroke_renderer {
                     // or by future cancellation, to prevent use-after-free and race conditions!
                     // This is ensured by Worker::drop.
                     let static_strokes =
-                        std::mem::transmute::<&[super::Stroke], &'static [super::Stroke]>(strokes);
+                        std::mem::transmute::<&[super::Stroke], &'static [super::Stroke]>(todo!());
                     // I *think* this is fine. Is there a way for the Tessellator impl to remember this
                     // 'static ref and cause unsoundness?
                     let static_tesselator = tessellator.stream(static_strokes);
-                    let worker_permit = buf_access_permit.clone();
+                    //let worker_permit = buf_access_permit.clone();
                     Worker::new(
                         move |cancel_flag| {
                             move || {
@@ -1238,7 +1378,7 @@ mod stroke_renderer {
                         // borrow a dummy reference to prevent outer scope from violating aliasing rules.
                         strokes,
                         // Take a permit, to prevent other invocations from using the buffer as long as the worker lives.
-                        worker_permit,
+                        todo!(), //worker_permit,
                     )
                 }
             };
@@ -1367,6 +1507,7 @@ mod stroke_renderer {
     }
 }
 
+#[derive(Clone)]
 pub struct StrokeBrushSettings {
     brush: brush::WeakBrushID,
     /// `a` is flow, NOT opacity, since the stroke is blended continuously not blended as a group.
@@ -1375,7 +1516,8 @@ pub struct StrokeBrushSettings {
     /// If true, the blend constants must be set to generate an erasing effect.
     is_eraser: bool,
 }
-#[derive(Clone, Copy)]
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
+#[repr(C)]
 pub struct StrokePoint {
     pos: [f32; 2],
     pressure: f32,
@@ -1390,7 +1532,6 @@ impl StrokePoint {
         let s = std::simd::f32x4::from_array([self.pos[0], self.pos[1], self.pressure, self.dist]);
         let o =
             std::simd::f32x4::from_array([other.pos[0], other.pos[1], other.pressure, other.dist]);
-
         // FMA is planned but unimplemented ;w;
         let n = s * std::simd::f32x4::splat(inv_factor) + (o * std::simd::f32x4::splat(factor));
         Self {
@@ -1410,13 +1551,73 @@ pub struct Stroke {
 /// Decoupled data from header, stored in separate manager. Header managed by UI.
 /// Stores the strokes generated from pen input, with optional render data inserted by renderer.
 pub struct StrokeLayerData {
-    strokes: Vec<Stroke>,
+    strokes: Vec<ImmutableStroke>,
     render_data: Option<stroke_renderer::RenderData>,
 }
 /// Collection of layer data (stroke contents and render data) mapped from ID
 pub struct StrokeLayerManager {
     layers: std::collections::HashMap<FuzzID<StrokeLayer>, StrokeLayerData>,
 }
+impl Default for StrokeLayerManager {
+    fn default() -> Self {
+        Self {
+            layers: Default::default(),
+        }
+    }
+}
+
+pub struct ImmutableStroke {
+    id: FuzzID<Stroke>,
+    brush: StrokeBrushSettings,
+    points: Arc<[StrokePoint]>,
+}
+#[derive(Clone)]
+pub struct WeakStroke {
+    id: WeakID<Stroke>,
+    brush: StrokeBrushSettings,
+    points: Arc<[StrokePoint]>,
+}
+impl From<Stroke> for ImmutableStroke {
+    fn from(value: Stroke) -> Self {
+        Self {
+            id: value.id,
+            brush: value.brush,
+            points: value.points.into(),
+        }
+    }
+}
+impl From<&ImmutableStroke> for WeakStroke {
+    fn from(value: &ImmutableStroke) -> Self {
+        Self {
+            id: value.id.weak(),
+            brush: value.brush.clone(),
+            points: value.points.clone(),
+        }
+    }
+}
+
+// Icky. with a planned client-server architecture, we won't have as many globals -w-;;
+// (well, a server is still a global, but the interface will be much less hacked-)
+struct Globals {
+    stroke_layers: tokio::sync::RwLock<StrokeLayerManager>,
+    // Todo: LayerGraph (and thus Document) is currently !Sync due to UnsafeCell in the graph implementation.
+    documents: tokio::sync::RwLock<Vec<()>>,
+}
+impl Globals {
+    fn new() -> Self {
+        Self {
+            stroke_layers: tokio::sync::RwLock::new(Default::default()),
+            documents: tokio::sync::RwLock::new(Vec::new()),
+        }
+    }
+    fn strokes(&'_ self) -> &'_ tokio::sync::RwLock<StrokeLayerManager> {
+        &self.stroke_layers
+    }
+    fn documents(&'_ self) -> &'_ tokio::sync::RwLock<Vec<()>> {
+        &self.documents
+    }
+}
+static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
 
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
 /// behind the Egui content.
@@ -1441,36 +1642,67 @@ fn listener(
         .build()
         .unwrap();
 
-    let tesselator = tess::rayon::RayonTessellator;
-    let stroke_renderer = stroke_renderer::StrokeLayerRenderer::new(renderer.clone()).unwrap();
+    runtime.block_on(async {
+        let tesselator = tess::rayon::RayonTessellator;
+        let mut current_stroke = None::<Stroke>;
+        let brush = StrokeBrushSettings {
+            brush: brush::todo_brush().id().weak(),
+            color_modulate: [1.0; 4],
+            size_mul: 5.0,
+            is_eraser: false,
+        };
 
-    let mut was_pressed = false;
-    loop {
-        match runtime.block_on(event_stream.recv()) {
-            Ok(event_frame) => {
-                let mut changed = false;
+        loop {
+            match event_stream.recv().await {
+                Ok(event_frame) => {
+                    let matrix = { document_preview.read().get_matrix() }.invert().unwrap();
+                    for event in event_frame.iter() {
+                        if event.pressed {
+                            // Get stroke-in-progress or start anew.
+                            let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
+                                brush: brush.clone(),
+                                id: Default::default(),
+                                points: Vec::new(),
+                            });
+                            let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
+                            let pos = [
+                                pos.x * DOCUMENT_DIMENSION as f32,
+                                (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
+                            ];
 
-                let matrix = document_preview.read().get_matrix().invert().unwrap();
-                for event in event_frame.iter() {
-                    if event.pressed {
-                        let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
-                        let pos = [
-                            pos.x * DOCUMENT_DIMENSION as f32,
-                            (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
-                        ];
+                            // Calc cumulative distance from the start, or 0.0 if this is the first point.
+                            let dist = this_stroke
+                                .points
+                                .last()
+                                .map(|last| {
+                                    // I should really be using a linalg library lmao
+                                    let delta = [last.pos[0] - pos[0], last.pos[1] - pos[1]];
+                                    last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
+                                })
+                                .unwrap_or(0.0);
 
-                        changed = true;
+                            this_stroke.points.push(StrokePoint {
+                                pos,
+                                pressure: event.pressure.unwrap_or(1.0),
+                                dist,
+                            })
+                        } else {
+                            if let Some(stroke) = current_stroke.take() {
+                                // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
+                                let immutable: ImmutableStroke = stroke.into();
+                                todo!()
+                            }
+                        }
                     }
-
-                    was_pressed = event.pressed;
                 }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
+                    log::warn!("Lost {num} stylus frames!");
+                }
+                // Stream closed, no more data to handle - we're done here!
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
-                log::warn!("Lost {num} stylus frames!");
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
         }
-    }
+    })
 }
 
 //If we return, it was due to an error.
@@ -1485,6 +1717,8 @@ fn main() -> AnyResult<std::convert::Infallible> {
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
     blend::BlendEngine::new(render_context.device().clone()).unwrap();
+
+    GLOBALS.get_or_init(Globals::new);
 
     // Test image generators.
     //let (image, future) = make_test_image(render_context.clone())?;

@@ -243,7 +243,7 @@ impl BlendEngine {
                 push_constant_ranges: vec![
                     vulkano::pipeline::layout::PushConstantRange{
                         offset: 0,
-                        size: 8, // f32 + bool32
+                        size: 24, // f32 + bool32 + Rect:(u32 * 4)
                         stages: vulkano::shader::ShaderStages::COMPUTE,
                     }
                 ],

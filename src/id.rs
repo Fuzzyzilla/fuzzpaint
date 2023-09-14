@@ -42,6 +42,14 @@ pub struct WeakID<T: std::any::Any> {
     // Namespace marker
     _phantom: std::marker::PhantomData<T>,
 }
+impl<T: std::any::Any> WeakID<T> {
+    pub fn empty() -> Self {
+        Self {
+            id : 0,
+            _phantom: Default::default(),
+        }
+    }
+}
 impl<T: std::any::Any> Clone for WeakID<T> {
     fn clone(&self) -> Self {
         Self {
