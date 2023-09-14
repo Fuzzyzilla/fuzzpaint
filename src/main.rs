@@ -15,6 +15,7 @@ pub mod id;
 pub mod render_device;
 pub mod stylus_events;
 pub mod tess;
+pub mod gpu_tess;
 use blend::{Blend, BlendMode};
 
 pub use id::{FuzzID, WeakID};
@@ -850,6 +851,7 @@ impl DocumentUserInterface {
 }
 
 mod stroke_renderer {
+    use crate::gpu_tess;
     /// The data managed by the renderer.
     /// For now, in persuit of actually getting a working product one day,
     /// this is a very coarse caching sceme. In the future, perhaps a bit more granular

@@ -1,9 +1,9 @@
-#version 450
+#version 440
 
 const uint VERTICES_PER_WORKER = 6;
 const float PI = 3.1415926535897932384;
 
-layout(std430) struct InputStrokeInfo {
+struct InputStrokeInfo {
     // Indices into inputStrokeVertices buffer
     uint start_point_idx;
     uint num_points;
@@ -23,30 +23,24 @@ layout(std430) struct InputStrokeInfo {
     vec4 modulate;
     bool is_eraser;
 };
-layout(std430) struct InputStrokeVertex {
+struct InputStrokeVertex {
     vec2 pos;
     float pressure;
     float dist;
 };
 
 // Corresponds to VkDrawIndirectCommand
-layout(std430) struct OutputStrokeInfo {
-    uint vertex_count;
-    uint instance_count;
-    uint first_vertex;
-    uint first_instance;
-};
 const uint OUTPUT_INFO_SIZE = 4;
 const uint OUTPUT_INFO_VERTEX_COUNT = 0;
 const uint OUTPUT_INFO_INSTANCE_COUNT = 1;
 const uint OUTPUT_INFO_FIRST_VERTEX = 2;
 const uint OUTPUT_INFO_FIRST_INSTANCE = 3;
 
-layout(std430) struct OutputStrokeVertex {
+struct OutputStrokeVertex {
     vec2 pos;
     vec2 uv;
     vec4 color;
-    vec4 secondary_color;
+    float erase;
 };
 // Input data - corresponding to [crate::ImmutableStroke] and [crate::StrokePoint]
 layout(set = 0, binding = 0) restrict readonly buffer inputStrokeInfo {
@@ -60,7 +54,7 @@ layout(set = 0, binding = 1) restrict readonly buffer inputStrokeVertices {
 // Infos *must* be zeroed beforehand. No way around this ;3
 // We rely on workers performing atomicMax operations into the vertex_count field of these, so they must be pre-init to zero.
 // Dubious whether `coherent` is needed here.
-layout(set = 1, binding = 0) restrict coherent /*readwrite - for atomics*/ buffer outputStrokeInfo {
+layout(set = 1, binding = 0) restrict /*readwrite - for atomics*/ buffer outputStrokeInfo {
     // Should be a multiple of 4 in length.
     uint out_info_fields[];
 };
@@ -173,31 +167,31 @@ void main() {
     const float rotation = rand(interp.pos) * 2.0 * PI;
     const vec2 cossin = vec2(cos(rotation), sin(rotation));
     const mat2 rotation_matrix = mat2(cossin.xy, vec2(-cossin.y, cossin.x));
-    const vec4 secondary_color = info.is_eraser ? vec4(0.0) : vec4(1.0);
+    const float vertex_erase = info.is_eraser ? 0.0 : 1.0;
 
     const OutputStrokeVertex topleft = OutputStrokeVertex(
         rotation_matrix * vec2(-1.0),
         vec2(0.0, 1.0),
         info.modulate,
-        secondary_color
+        vertex_erase
     );
     const OutputStrokeVertex topright = OutputStrokeVertex(
         rotation_matrix * vec2(1.0, -1.0),
         vec2(1.0, 1.0),
         info.modulate,
-        secondary_color
+        vertex_erase
     );
     const OutputStrokeVertex bottomleft = OutputStrokeVertex(
         rotation_matrix * vec2(-1.0, 1.0),
         vec2(0.0, 0.0),
         info.modulate,
-        secondary_color
+        vertex_erase
     );
     const OutputStrokeVertex bottomright = OutputStrokeVertex(
         rotation_matrix * vec2(1.0),
         vec2(1.0, 0.0),
         info.modulate,
-        secondary_color
+        vertex_erase
     );
 
     // Output two triangles for the stamp
@@ -209,8 +203,9 @@ void main() {
     out_vertices[output_into_idx + 4] = topright;
     out_vertices[output_into_idx + 5] = bottomright;
 
+
     // Share with everyone the highest number of vertices written for this stroke
-    atomicMax(stroke_idx * OUTPUT_INFO_SIZE + OUTPUT_INFO_VERTEX_COUNT, (stroke_local_id + 1) * VERTICES_PER_WORKER);
+    atomicMax(out_info_fields[stroke_idx * OUTPUT_INFO_SIZE + OUTPUT_INFO_VERTEX_COUNT], (stroke_local_id + 1) * VERTICES_PER_WORKER);
 
     if (is_global_leader) {
         // we do not touch OUTPUT_INFO_VERTEX_COUNT - every group coordinates the calculation of it atomically.
