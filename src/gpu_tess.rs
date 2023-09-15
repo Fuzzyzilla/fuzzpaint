@@ -55,6 +55,15 @@ pub mod interface {
         #[format(R32_SFLOAT)]
         pub dist: f32,
     }
+    impl From<crate::StrokePoint> for InputStrokeVertex {
+        fn from(value: crate::StrokePoint) -> Self {
+            Self {
+                dist: value.dist,
+                pos: value.pos,
+                pressure: value.pressure,
+            }
+        }
+    }
     pub type OutputStrokeInfo = vulkano::command_buffer::DrawIndirectCommand;
 }
 
@@ -147,10 +156,49 @@ impl GpuStampTess {
             output_descriptor,
         })
     }
+    /// Tessellate some strokes
+    /// Will automatically load stroke points into a buffer.
+    pub fn tess(
+        &self,
+        strokes: &[crate::ImmutableStroke],
+    ) -> anyhow::Result<(
+        vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
+        vk::Subbuffer<[interface::OutputStrokeVertex]>,
+        vk::Subbuffer<[interface::OutputStrokeInfo]>,
+    )> {
+        let count = strokes
+            .iter()
+            .map(|stroke| stroke.points.len() as u64)
+            .try_fold(0, u64::checked_add);
+        let count = count.ok_or_else(|| anyhow::anyhow!("Packed point buffer too long!"))?;
+
+        let packed_points = vk::Buffer::new_slice::<interface::InputStrokeVertex>(
+            self.context.allocators().memory(),
+            vk::BufferCreateInfo {
+                usage: vk::BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+            vk::AllocationCreateInfo {
+                usage: vk::MemoryUsage::Upload,
+                ..Default::default()
+            },
+            count,
+        )?;
+        // Copy every vertex in order (in a block so that the write guard is dropped asap)
+        {
+            packed_points
+                .write()?
+                .iter_mut()
+                .zip(strokes.iter().flat_map(|stroke| stroke.points.iter()))
+                .for_each(|(output, input)| *output = (*input).into());
+        }
+
+        self.tess_buffer(strokes, packed_points)
+    }
     /// Tessellate some strokes!
     /// `packed_points` should contain all the stroke data back-to-back, in order.
     /// Returns a semaphore for when the compute completes, the vertex buffer, and the draw indirection buffer.
-    pub fn tess(
+    pub fn tess_buffer(
         &self,
         strokes: &[crate::ImmutableStroke],
         packed_points: vulkano::buffer::subbuffer::Subbuffer<[interface::InputStrokeVertex]>,
@@ -169,6 +217,8 @@ impl GpuStampTess {
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
+                // We create it as mapped, so it's OK to upload into device mem.
+                usage: vk::MemoryUsage::DeviceOnly,
                 ..Default::default()
             },
             strokes.iter().map(|stroke| {
@@ -208,6 +258,7 @@ impl GpuStampTess {
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
+                usage: vk::MemoryUsage::DeviceOnly,
                 ..Default::default()
             },
             strokes.len() as u64,
@@ -219,6 +270,7 @@ impl GpuStampTess {
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
+                usage: vk::MemoryUsage::DeviceOnly,
                 ..Default::default()
             },
             vertex_output_index_counter as u64,
@@ -234,7 +286,7 @@ impl GpuStampTess {
         )?;
         let output_descriptor = vk::PersistentDescriptorSet::new(
             self.context.allocators().descriptor_set(),
-            self.input_descriptor.clone(),
+            self.output_descriptor.clone(),
             [
                 vk::WriteDescriptorSet::buffer(0, output_infos.clone()),
                 vk::WriteDescriptorSet::buffer(1, output_verts.clone()),
