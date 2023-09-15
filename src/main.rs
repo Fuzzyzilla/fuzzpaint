@@ -1198,21 +1198,24 @@ fn listener(
     document_preview: Arc<
         parking_lot::RwLock<document_viewport_proxy::DocumentViewportPreviewProxy>,
     >,
-) {
+) -> AnyResult<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
 
-    runtime.block_on(async {
-        let tesselator = tess::rayon::RayonTessellator;
-        let mut current_stroke = None::<Stroke>;
-        let brush = StrokeBrushSettings {
-            brush: brush::todo_brush().id().weak(),
-            color_modulate: [1.0; 4],
-            size_mul: 5.0,
-            is_eraser: false,
-        };
+    let mut strokes = Vec::new();
 
+    let layer_render = stroke_renderer::StrokeLayerRenderer::new(renderer.clone())?;
+    let layer = layer_render.empty_render_data()?;
+
+    let mut current_stroke = None::<Stroke>;
+    let brush = StrokeBrushSettings {
+        brush: brush::todo_brush().id().weak(),
+        color_modulate: [1.0; 4],
+        size_mul: 5.0,
+        is_eraser: false,
+    };
+    runtime.block_on(async {
         loop {
             match event_stream.recv().await {
                 Ok(event_frame) => {
@@ -1251,7 +1254,9 @@ fn listener(
                             if let Some(stroke) = current_stroke.take() {
                                 // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
                                 let immutable: ImmutableStroke = stroke.into();
-                                todo!()
+                                strokes.push(immutable);
+
+                                layer_render.draw(&strokes, &layer, true)?;
                             }
                         }
                     }
@@ -1260,7 +1265,7 @@ fn listener(
                     log::warn!("Lost {num} stylus frames!");
                 }
                 // Stream closed, no more data to handle - we're done here!
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
             }
         }
     })
