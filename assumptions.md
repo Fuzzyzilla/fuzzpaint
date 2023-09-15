@@ -2,3 +2,4 @@ To ease development, for now several assumptions are made about the device. Of c
 
 * VK1.3 OR maintenance4 (workgroup size specialization)
 * dualSrcBlend (~100% on desktop)
+* dynamicRendering

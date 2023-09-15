@@ -386,6 +386,7 @@ impl RenderContext {
                     wide_lines: true,
                     rectangular_lines: true,
                     dual_src_blend: true,
+                    dynamic_rendering: true,
                     ..vk::Features::empty()
                 },
                 queue_create_infos: create_infos,
