@@ -1,7 +1,7 @@
 use crate::vk;
 use std::sync::Arc;
 pub mod interface {
-    #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone)]
+    #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone, Debug)]
     #[repr(C)]
     pub struct OutputStrokeVertex {
         #[format(R32G32_SFLOAT)]
@@ -12,6 +12,9 @@ pub mod interface {
         pub color: [f32; 4],
         #[format(R32_SFLOAT)]
         pub erase: f32,
+        #[format(R32G32B32_SFLOAT)]
+        pub pad: [f32; 3],
+
     }
     #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone)]
     #[repr(C)]
@@ -39,11 +42,11 @@ pub mod interface {
         pub num_groups: u32,
 
         // Color and eraser settings
-        #[format(R32G32B32A32_SFLOAT)]
-        pub modulate: [f32; 4],
         // Bool32
         #[format(R32_UINT)]
         pub eraser: u32,
+        #[format(R32G32B32A32_SFLOAT)]
+        pub modulate: [f32; 4],
     }
     #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone)]
     #[repr(C)]
@@ -162,7 +165,7 @@ impl GpuStampTess {
         &self,
         strokes: &[crate::ImmutableStroke],
     ) -> anyhow::Result<(
-        vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
+        vulkano::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
@@ -203,7 +206,7 @@ impl GpuStampTess {
         strokes: &[crate::ImmutableStroke],
         packed_points: vulkano::buffer::subbuffer::Subbuffer<[interface::InputStrokeVertex]>,
     ) -> anyhow::Result<(
-        vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
+        vulkano::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
@@ -213,16 +216,15 @@ impl GpuStampTess {
         let input_infos = vk::Buffer::from_iter(
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
-                usage: vk::BufferUsage::STORAGE_BUFFER | vk::BufferUsage::INDIRECT_BUFFER,
+                usage: vk::BufferUsage::STORAGE_BUFFER,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                // We create it as mapped, so it's OK to upload into device mem.
-                usage: vk::MemoryUsage::DeviceOnly,
+                usage: vk::MemoryUsage::Upload,
                 ..Default::default()
             },
             strokes.iter().map(|stroke| {
-                const DENSITY: f32 = 1.0;
+                const DENSITY: f32 = 10.0;
 
                 let num_expected_stamps = stroke
                     .points
@@ -254,11 +256,12 @@ impl GpuStampTess {
         let output_infos = vk::Buffer::new_slice::<interface::OutputStrokeInfo>(
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
-                usage: vk::BufferUsage::STORAGE_BUFFER | vk::BufferUsage::INDIRECT_BUFFER,
+                // Transfer dest for clearing
+                usage: vk::BufferUsage::STORAGE_BUFFER | vk::BufferUsage::INDIRECT_BUFFER | vk::BufferUsage::TRANSFER_DST,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::DeviceOnly,
+                usage: vk::MemoryUsage::Download,
                 ..Default::default()
             },
             strokes.len() as u64,
@@ -270,7 +273,7 @@ impl GpuStampTess {
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::DeviceOnly,
+                usage: vk::MemoryUsage::Download,
                 ..Default::default()
             },
             vertex_output_index_counter as u64,
@@ -312,13 +315,15 @@ impl GpuStampTess {
             .dispatch([group_index_counter, 1, 1])?;
         let command_buffer = command_buffer.build()?;
 
+        log::info!("Dispatched {} tessellation workgroups!", group_index_counter);
+
         use vk::sync::GpuFuture;
         let future = vk::sync::now(self.context.device().clone())
             .then_execute(
                 self.context.queues().compute().queue().clone(),
                 command_buffer,
             )?
-            .then_signal_semaphore_and_flush()?;
+            .then_signal_fence_and_flush()?;
 
         Ok((future, output_verts, output_infos))
     }

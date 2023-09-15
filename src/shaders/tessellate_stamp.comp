@@ -19,9 +19,9 @@ struct InputStrokeInfo {
     uint start_group;
     uint num_groups;
 
+    bool is_eraser;
     // Color and eraser settings
     vec4 modulate;
-    bool is_eraser;
 };
 struct InputStrokeVertex {
     vec2 pos;
@@ -41,6 +41,7 @@ struct OutputStrokeVertex {
     vec2 uv;
     vec4 color;
     float erase;
+    float pad[3];
 };
 // Input data - corresponding to [crate::ImmutableStroke] and [crate::StrokePoint]
 layout(set = 0, binding = 0) restrict readonly buffer inputStrokeInfo {
@@ -165,33 +166,37 @@ void main() {
 
     // Create a stamp
     const float rotation = rand(interp.pos) * 2.0 * PI;
-    const vec2 cossin = vec2(cos(rotation), sin(rotation));
+    const vec2 cossin = vec2(cos(rotation), sin(rotation)) * interp.pressure * 9.0;
     const mat2 rotation_matrix = mat2(cossin.xy, vec2(-cossin.y, cossin.x));
     const float vertex_erase = info.is_eraser ? 0.0 : 1.0;
 
     const OutputStrokeVertex topleft = OutputStrokeVertex(
-        rotation_matrix * vec2(-1.0),
+        rotation_matrix * vec2(-1.0) + interp.pos,
         vec2(0.0, 1.0),
         info.modulate,
-        vertex_erase
+        vertex_erase,
+        float[3](0.0, 0.0, 0.0)
     );
     const OutputStrokeVertex topright = OutputStrokeVertex(
-        rotation_matrix * vec2(1.0, -1.0),
+        rotation_matrix * vec2(1.0, -1.0) + interp.pos,
         vec2(1.0, 1.0),
         info.modulate,
-        vertex_erase
+        vertex_erase,
+        float[3](0.0, 0.0, 0.0)
     );
     const OutputStrokeVertex bottomleft = OutputStrokeVertex(
-        rotation_matrix * vec2(-1.0, 1.0),
+        rotation_matrix * vec2(-1.0, 1.0) + interp.pos,
         vec2(0.0, 0.0),
         info.modulate,
-        vertex_erase
+        vertex_erase,
+        float[3](0.0, 0.0, 0.0)
     );
     const OutputStrokeVertex bottomright = OutputStrokeVertex(
-        rotation_matrix * vec2(1.0),
+        rotation_matrix * vec2(1.0) + interp.pos,
         vec2(1.0, 0.0),
         info.modulate,
-        vertex_erase
+        vertex_erase,
+        float[3](0.0, 0.0, 0.0)
     );
 
     // Output two triangles for the stamp

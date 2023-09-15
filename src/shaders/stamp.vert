@@ -10,12 +10,12 @@ layout(location = 2) in vec4 color;
 layout(location = 3) in float erase;
 
 layout(location = 0) out vec4 out_color;
-layout(location = 1) out vec4 blend_constants;
+//layout(location = 1) out vec4 blend_constants;
 layout(location = 2) out vec2 out_uv;
 
 void main() {
     out_color = color;
-    blend_constants = erase.xxxx;
+    //blend_constants = erase.xxxx;
     out_uv = uv;
 
     vec4 position_2d = push_matrix.mvp * vec4(pos, 0.0, 1.0);
