@@ -956,8 +956,8 @@ mod stroke_renderer {
             let mut premul_dyn_constants = vk::ColorBlendState::new(1);
             premul_dyn_constants.blend_constants = vk::StateMode::Fixed([1.0; 4]);
             premul_dyn_constants.attachments[0].blend = Some(vk::AttachmentBlend {
-                alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::ConstantColor,
-                color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::ConstantAlpha,
+                alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+                color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
                 alpha_destination:
                     vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
                 color_destination:
@@ -1051,11 +1051,11 @@ mod stroke_renderer {
 
             future.wait(None)?;
             {
-                let vertices = vertices.read()?;
-                let indirects = indirects.read()?;
+                //let vertices = vertices.read()?;
+                //let indirects = indirects.read()?;
 
-                log::trace!("{:?}", &vertices.to_vec()[0..20]);
-            }
+                //log::trace!("{:?}", &vertices.to_vec()[0..20]);
+            };
 
             let mut matrix = cgmath::Matrix4::from_scale(2.0/super::DOCUMENT_DIMENSION as f32);
             matrix.y *= -1.0;
@@ -1256,7 +1256,7 @@ fn listener(
     let mut current_stroke = None::<Stroke>;
     let brush = StrokeBrushSettings {
         brush: brush::todo_brush().id().weak(),
-        color_modulate: [0.0, 0.0, 0.0, 1.0],
+        color_modulate: [0.0, 0.2, 0.5, 1.0],
         size_mul: 5.0,
         is_eraser: false,
     };
@@ -1304,7 +1304,8 @@ fn listener(
                                 log::info!("Tessellating {} strokes", strokes.len());
                                 let write = document_preview.write();
                                 let buf = write.get_writeable_buffer().await;
-                                layer_render.draw(&strokes, buf, true)?;
+                                layer_render.draw(&strokes[strokes.len().saturating_sub(2)..], buf, strokes.len() < 3)?;
+                                log::trace!("Done tessellating.");
                                 write.swap();
                             }
                         }

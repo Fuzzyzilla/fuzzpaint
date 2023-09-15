@@ -47,7 +47,10 @@ struct OutputStrokeVertex {
 layout(set = 0, binding = 0) restrict readonly buffer inputStrokeInfo {
     InputStrokeInfo in_info[];
 };
-layout(set = 0, binding = 1) restrict readonly buffer inputStrokeVertices {
+layout(set = 0, binding = 1) restrict readonly buffer inputWorkgroupAssignments {
+    uint in_assignments[];
+};
+layout(set = 0, binding = 2) restrict readonly buffer inputStrokeVertices {
     InputStrokeVertex in_vertices[];
 };
 
@@ -86,6 +89,7 @@ float rand(vec2 co){
     return fract(sin(dot(co.xy,vec2(12.9898,78.233))) * 43758.5453);
 }
 void main() {
+    /*
     uint stroke_idx = 0;
     InputStrokeInfo info;
     const uint workgroup_idx = gl_WorkGroupID.x;
@@ -111,7 +115,15 @@ void main() {
             stroke_idx = mid;
             break;
         }
-    }
+    }*/
+    // Collect and verify this workgroup's assignment from the assignment buffer.
+    const uint workgroup_idx = gl_WorkGroupID.x;
+    if (workgroup_idx >= in_assignments.length()) return;
+    const uint stroke_idx = in_assignments[workgroup_idx];
+    if (stroke_idx > in_info.length()) return;
+    const InputStrokeInfo info = in_info[stroke_idx];
+    if (info.num_points <= 2) return;
+
 
     // 0 at the start of the stroke given by `info`
     const uint stroke_local_id = (workgroup_idx - info.start_group) * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
@@ -128,28 +140,33 @@ void main() {
     // One worker per group is the local leader, coordinates writes to vertex_count in infos.
     const bool is_local_leader = gl_LocalInvocationID.x == 0;
 
+    const float end_dist = in_vertices[info.start_point_idx + info.num_points - 1].dist;
+
+    // const float local_dist = float(stroke_local_id) * (end_dist / float(info.num_groups * gl_WorkGroupSize.x));
     const float local_dist = float(stroke_local_id) * info.density;
 
     // Binary search for the vertex this worker starts from
     // A worker cannot work after the last vertex, so -2 here.
-    bail = 0; low = 0; high = info.num_points - 2;
+    uint bail = 0, low = info.start_point_idx, high = info.start_point_idx + info.num_points - 2;
     uint before_vert = 0;
     while (true) {
-        if (low > high || bail++ > 32) return;
+        if (low > high || bail++ > 32) {
+            return;
+        };
         const uint mid = (low + high) / 2;
 
         // Next point exists and is too early
         // (mid+1 is safe because upper bound is num_points-2)
-        const bool strictly_less = (in_vertices[info.start_point_idx + mid + 1].dist < local_dist);
+        const bool strictly_less = (in_vertices[mid + 1].dist < local_dist);
         // This point is too far
-        const bool strictly_greater = in_vertices[info.start_point_idx + mid].dist > local_dist;
+        const bool strictly_greater = in_vertices[mid].dist > local_dist;
 
         if (strictly_less) {
             low = mid + 1;
         } else if (strictly_greater) {
             high = mid - 1;
         } else {
-            before_vert = info.start_point_idx + mid;
+            before_vert = mid;
             break;
         }
     }
@@ -215,7 +232,7 @@ void main() {
     if (is_global_leader) {
         // we do not touch OUTPUT_INFO_VERTEX_COUNT - every group coordinates the calculation of it atomically.
         out_info_fields[stroke_idx * OUTPUT_INFO_SIZE + OUTPUT_INFO_INSTANCE_COUNT] = 1;
-        out_info_fields[stroke_idx * OUTPUT_INFO_SIZE + OUTPUT_INFO_FIRST_VERTEX] = 0;
+        out_info_fields[stroke_idx * OUTPUT_INFO_SIZE + OUTPUT_INFO_FIRST_VERTEX] = info.out_vert_offset;
         out_info_fields[stroke_idx * OUTPUT_INFO_SIZE + OUTPUT_INFO_FIRST_INSTANCE] = 0;
     }
 }

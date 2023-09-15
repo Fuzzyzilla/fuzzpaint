@@ -94,7 +94,7 @@ impl GpuStampTess {
         Arc<vk::DescriptorSetLayout>,
         Arc<vk::DescriptorSetLayout>,
     )> {
-        // Interface consists of two sets, each with a two storage buffers.
+        // Interface consists of two sets. Input with three buffers, output with two.
         let buffer_binding = vulkano::descriptor_set::layout::DescriptorSetLayoutBinding {
             descriptor_count: 1,
             variable_descriptor_count: false,
@@ -108,6 +108,8 @@ impl GpuStampTess {
         input_bindings.insert(0, buffer_binding.clone());
         input_bindings.insert(1, buffer_binding.clone());
         let output_bindings = input_bindings.clone();
+        input_bindings.insert(2, buffer_binding.clone());
+
         let inputs = vulkano::descriptor_set::layout::DescriptorSetLayout::new(
             device.clone(),
             vulkano::descriptor_set::layout::DescriptorSetLayoutCreateInfo {
@@ -213,6 +215,9 @@ impl GpuStampTess {
         let mut point_index_counter = 0;
         let mut group_index_counter = 0;
         let mut vertex_output_index_counter = 0;
+
+        let mut num_groups_per_info = Vec::new();
+
         let input_infos = vk::Buffer::from_iter(
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
@@ -224,15 +229,16 @@ impl GpuStampTess {
                 ..Default::default()
             },
             strokes.iter().map(|stroke| {
-                const DENSITY: f32 = 10.0;
+                const DENSITY: f32 = 2.0;
 
                 let num_expected_stamps = stroke
                     .points
                     .last()
                     .map(|last| (last.dist / DENSITY).ceil() as u32)
                     .unwrap_or(0);
-                let num_expected_verts = num_expected_stamps * 6;
-                let num_groups = num_expected_stamps.div_ceil(32);
+                let num_groups = num_expected_stamps.div_ceil(256);
+                let num_expected_stamps = num_groups * 256;
+                let num_expected_verts = (num_expected_stamps) * 6;
 
                 let info = interface::InputStrokeInfo {
                     start_point_idx: point_index_counter,
@@ -246,6 +252,8 @@ impl GpuStampTess {
                     eraser: if stroke.brush.is_eraser { 1 } else { 0 },
                 };
 
+                log::info!("Stroke {} given workgroups {}..{}", stroke.id, group_index_counter, group_index_counter + num_groups);
+                num_groups_per_info.push(num_groups);
                 point_index_counter += stroke.points.len() as u32;
                 group_index_counter += num_groups;
                 vertex_output_index_counter += num_expected_verts;
@@ -253,6 +261,36 @@ impl GpuStampTess {
                 info
             }),
         )?;
+        // One element per workgroup, telling it which info to work on.
+        let input_map = vk::Buffer::new_slice::<u32>(
+            self.context.allocators().memory(),
+            vk::BufferCreateInfo {
+                // Transfer dest for clearing
+                usage: vk::BufferUsage::STORAGE_BUFFER | vk::BufferUsage::INDIRECT_BUFFER | vk::BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            vk::AllocationCreateInfo {
+                usage: vk::MemoryUsage::Upload,
+                ..Default::default()
+            },
+            group_index_counter as u64,
+        )?;
+        let mut current_idx = 0u32;
+        input_map.write()?
+            .iter_mut()
+            .zip(
+                num_groups_per_info
+                    .into_iter()
+                    .flat_map(|num| {
+                        // For this stroke, a `num` groups are created.
+                        // Repeat `num` identical "pointers" to the info.
+                        current_idx += 1;
+                        std::iter::repeat(current_idx-1)
+                            .take(num as usize)
+                    })
+            )
+            .for_each(|(map, info_idx)| *map = info_idx);
+
         let output_infos = vk::Buffer::new_slice::<interface::OutputStrokeInfo>(
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
@@ -284,7 +322,8 @@ impl GpuStampTess {
             self.input_descriptor.clone(),
             [
                 vk::WriteDescriptorSet::buffer(0, input_infos),
-                vk::WriteDescriptorSet::buffer(1, packed_points),
+                vk::WriteDescriptorSet::buffer(1, input_map),
+                vk::WriteDescriptorSet::buffer(2, packed_points),
             ],
         )?;
         let output_descriptor = vk::PersistentDescriptorSet::new(
