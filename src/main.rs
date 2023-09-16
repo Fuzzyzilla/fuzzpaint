@@ -259,7 +259,7 @@ impl DocumentUserInterface {
     pub fn ui(&mut self, ctx: &egui::Context) {
         let globals = GLOBALS.get_or_init(Globals::new);
         let mut documents = globals.documents().blocking_write();
-        let mut selections = globals.selections().write().unwrap();
+        let mut selections = globals.selections().blocking_write();
         egui::TopBottomPanel::top("file").show(&ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
@@ -311,8 +311,6 @@ impl DocumentUserInterface {
 
                 // Get (or create) the document interface
                 let interface = self.document_interfaces.entry(document).or_default();
-                let document_selections =
-                    selections.document_selections.entry(document).or_default();
 
                 //Zoom controls
                 if ui.small_button("⟲").clicked() {
@@ -371,7 +369,6 @@ impl DocumentUserInterface {
                 return;
             };
 
-            let document_interface = self.document_interfaces.entry(document_id).or_default();
             let document_selections = selections
                 .document_selections
                 .entry(document_id)
@@ -537,7 +534,7 @@ impl DocumentUserInterface {
                             }
 
                             match brush.style_mut() {
-                                brush::BrushStyle::Stamped { spacing } => {
+                                brush::BrushStyle::Stamped { .. } => {
                                     let slider = egui::widgets::Slider::new(
                                         &mut selections.brush_settings.size_mul,
                                         2.0..=50.0,
@@ -962,27 +959,12 @@ pub struct ImmutableStroke {
     brush: StrokeBrushSettings,
     points: Arc<[StrokePoint]>,
 }
-#[derive(Clone)]
-pub struct WeakStroke {
-    id: WeakID<Stroke>,
-    brush: StrokeBrushSettings,
-    points: Arc<[StrokePoint]>,
-}
 impl From<Stroke> for ImmutableStroke {
     fn from(value: Stroke) -> Self {
         Self {
             id: value.id,
             brush: value.brush,
             points: value.points.into(),
-        }
-    }
-}
-impl From<&ImmutableStroke> for WeakStroke {
-    fn from(value: &ImmutableStroke) -> Self {
-        Self {
-            id: value.id.weak(),
-            brush: value.brush.clone(),
-            points: value.points.clone(),
         }
     }
 }
@@ -1023,7 +1005,7 @@ impl Default for Selections {
 struct Globals {
     stroke_layers: tokio::sync::RwLock<StrokeLayerManager>,
     documents: tokio::sync::RwLock<Vec<Document>>,
-    selections: std::sync::RwLock<Selections>,
+    selections: tokio::sync::RwLock<Selections>,
 }
 impl Globals {
     fn new() -> Self {
@@ -1039,7 +1021,7 @@ impl Globals {
     fn documents(&'_ self) -> &'_ tokio::sync::RwLock<Vec<Document>> {
         &self.documents
     }
-    fn selections(&'_ self) -> &'_ std::sync::RwLock<Selections> {
+    fn selections(&'_ self) -> &'_ tokio::sync::RwLock<Selections> {
         &self.selections
     }
 }
@@ -1068,27 +1050,48 @@ fn listener(
         .build()
         .unwrap();
 
-    let mut strokes = Vec::new();
-
+    let mut manager = StrokeLayerManager::default();
     let layer_render = stroke_renderer::StrokeLayerRenderer::new(renderer.clone())?;
 
     let mut current_stroke = None::<Stroke>;
     runtime.block_on(async {
-        loop {
+        'guh: loop {
             match event_stream.recv().await {
                 Ok(event_frame) => {
                     let matrix = { document_preview.read().get_matrix() }.invert().unwrap();
+                    let globals = GLOBALS.get_or_init(Globals::new);
+
+                    let selections = globals.selections().read().await;
+                    let documents = globals.documents().read().await;
+
+                    let Some(layer) = selections
+                        .cur_document
+                        .and_then(|document| selections.document_selections.get(&document))
+                        .and_then(|document| document.cur_layer)
+                    else {
+                        // No layer to work on
+                        continue;
+                    };
+
+                    let layer_data = manager.layers.entry(layer).or_insert_with(|| {
+                        let render_data = match layer_render.empty_render_data() {
+                            Ok(d) => Some(d),
+                            Err(e) => {
+                                log::warn!("Failed to create render data");
+                                None
+                            }
+                        };
+                        StrokeLayerData {
+                            strokes: vec![],
+                            render_data,
+                        }
+                    });
+
                     for event in event_frame.iter() {
                         if event.pressed {
                             // Get stroke-in-progress or start anew.
                             let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
-                                brush: GLOBALS
-                                    .get_or_init(Globals::new)
-                                    .selections()
-                                    .read()
-                                    .unwrap()
-                                    .brush_settings
-                                    .clone(),
+                                brush: selections.brush_settings.clone(),
                                 id: Default::default(),
                                 points: Vec::new(),
                             });
@@ -1118,16 +1121,19 @@ fn listener(
                             if let Some(stroke) = current_stroke.take() {
                                 // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
                                 let immutable: ImmutableStroke = stroke.into();
-                                strokes.push(immutable);
+                                layer_data.strokes.push(immutable);
 
-                                let write = document_preview.write();
-                                let buf = write.get_writeable_buffer().await;
-                                layer_render.draw(
-                                    &strokes[strokes.len().saturating_sub(50)..],
-                                    buf,
-                                    true,
-                                )?;
-                                write.swap();
+                                if let Some(buf) = layer_data.render_data.as_ref() {
+                                    let write = document_preview.write();
+                                    let buf = write.get_writeable_buffer().await;
+                                    layer_render.draw(
+                                        &layer_data.strokes
+                                            [layer_data.strokes.len().saturating_sub(50)..],
+                                        buf,
+                                        true,
+                                    )?;
+                                    write.swap();
+                                }
                             }
                         }
                     }
