@@ -1225,13 +1225,6 @@ impl From<&ImmutableStroke> for WeakStroke {
     }
 }
 
-struct Selections {
-    document: WeakID<Document>,
-    brush: brush::WeakBrushID,
-    layer: WeakID<LayerNode>,
-    stroke_layer: Option<WeakID<LayerNode>>,
-}
-
 // Icky. with a planned client-server architecture, we won't have as many globals -w-;;
 // (well, a server is still a global, but the interface will be much less hacked-)
 struct Globals {
@@ -1289,16 +1282,8 @@ fn listener(
     let mut strokes = Vec::new();
 
     let layer_render = stroke_renderer::StrokeLayerRenderer::new(renderer.clone())?;
-    let layer = layer_render.empty_render_data()?;
 
     let mut current_stroke = None::<Stroke>;
-    let brush = StrokeBrushSettings {
-        brush: brush::todo_brush().id().weak(),
-        color_modulate: [0.0, 0.2, 0.5, 1.0],
-        size_mul: 5.0,
-        spacing_px: 1.0,
-        is_eraser: false,
-    };
     runtime.block_on(async {
         loop {
             match event_stream.recv().await {
