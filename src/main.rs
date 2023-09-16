@@ -36,275 +36,37 @@ pub struct GroupLayer {
     /// Some - grouped rendering, None - Passthrough
     blend: Option<blend::Blend>,
 
-    /// ID that is unique within this execution of the program
-    id: FuzzID<GroupLayer>,
+    children: Vec<LayerID>,
 }
 impl Default for GroupLayer {
     fn default() -> Self {
-        let id = FuzzID::default();
         Self {
-            name: format!("Group {}", id.id()),
-            id,
+            name: "New group".into(),
             blend: None,
+            children: Vec::new(),
         }
     }
 }
 pub struct StrokeLayer {
     name: String,
     blend: blend::Blend,
+}
 
-    /// ID that is unique within this execution of the program
-    id: FuzzID<StrokeLayer>,
+#[derive(Hash, PartialEq, Eq)]
+pub enum LayerID {
+    StrokeLayer(WeakID<StrokeLayer>),
+    GroupLayer(WeakID<GroupLayer>),
+}
+pub enum LayerRef<'layer> {
+    StrokeLayer(WeakID<StrokeLayer>, &'layer StrokeLayer),
+    GroupLayer(WeakID<GroupLayer>, &'layer GroupLayer),
 }
 
 impl Default for StrokeLayer {
     fn default() -> Self {
-        let id = FuzzID::default();
         Self {
-            name: format!("Layer {}", id.id().wrapping_add(1)),
-            id,
+            name: "New layer".into(),
             blend: Default::default(),
-        }
-    }
-}
-
-pub enum LayerNode {
-    Group {
-        layer: GroupLayer,
-        // Make a tree in rust without unsafe challenge ((very hard))
-        children: std::cell::UnsafeCell<Vec<LayerNode>>,
-        id: FuzzID<LayerNode>,
-    },
-    StrokeLayer {
-        layer: StrokeLayer,
-        id: FuzzID<LayerNode>,
-    },
-}
-impl LayerNode {
-    pub fn id(&self) -> &FuzzID<LayerNode> {
-        match self {
-            Self::Group { id, .. } => id,
-            Self::StrokeLayer { id, .. } => id,
-        }
-    }
-}
-
-impl From<GroupLayer> for LayerNode {
-    fn from(layer: GroupLayer) -> Self {
-        Self::Group {
-            layer,
-            children: Vec::new().into(),
-            id: Default::default(),
-        }
-    }
-}
-impl From<StrokeLayer> for LayerNode {
-    fn from(layer: StrokeLayer) -> Self {
-        Self::StrokeLayer {
-            layer,
-            id: Default::default(),
-        }
-    }
-}
-
-pub struct LayerGraph {
-    top_level: Vec<LayerNode>,
-}
-impl LayerGraph {
-    // Maybe this is a silly way to do things. It ended up causing a domino effect that caused the need
-    // for unsafe code, maybe I should rethink this. Regardless, it's an implementation detail, so it'll do for now.
-    fn find_recurse<'a>(
-        &'a self,
-        traverse_stack: &mut Vec<&'a LayerNode>,
-        at: WeakID<LayerNode>,
-    ) -> bool {
-        //Find search candidates
-        let nodes_to_search = if traverse_stack.is_empty() {
-            self.top_level.as_slice()
-        } else {
-            // Return false if last element is not a group (shouldn't occur)
-            let LayerNode::Group { children, .. } = traverse_stack.last().clone().unwrap() else {
-                return false;
-            };
-
-            //Safety - We hold an immutable reference to self, thus no mutable access to `children` can occur as well.
-            unsafe { &*children.get() }.as_slice()
-        };
-
-        for node in nodes_to_search.iter() {
-            //Found it!
-            if node.id() == at {
-                traverse_stack.push(node);
-                return true;
-            }
-
-            //Traverse deeper...
-            match node {
-                LayerNode::Group { .. } => {
-                    traverse_stack.push(node);
-                    if self.find_recurse(traverse_stack, at) {
-                        return true;
-                    }
-                    //Done traversing subtree and it wasn't found, remove subtree.
-                    traverse_stack.pop();
-                }
-                _ => (),
-            }
-        }
-
-        // Did not find it and did not early return, must not have been found.
-        return false;
-    }
-    /// Find the given layer ID in the tree, returning the path to it, if any.
-    /// If a path is returned, the final element will be the layer itself.
-    fn find<'a>(&'a self, at: WeakID<LayerNode>) -> Option<Vec<&'a LayerNode>> {
-        let mut traverse_stack = Vec::new();
-
-        if self.find_recurse(&mut traverse_stack, at) {
-            Some(traverse_stack)
-        } else {
-            None
-        }
-    }
-    fn insert_node(&mut self, node: LayerNode) {
-        self.top_level.push(node);
-    }
-    fn insert_node_at(&mut self, at: WeakID<LayerNode>, node: LayerNode) {
-        match self.find(at) {
-            None => self.insert_node(node),
-            Some(path) => {
-                match path.last().unwrap() {
-                    LayerNode::Group { children, .. } => {
-                        //`at` is a group - insert as highest child of `at`.
-                        //Forget borrows
-                        drop(path);
-                        //reinterprit as mutable (uh oh)
-                        //Safety - We hold exclusive access to self, thus no concurrent access to the tree can occur
-                        //and no other references exist.
-                        let children = unsafe { &mut *children.get() };
-
-                        children.push(node);
-                    }
-                    _ => {
-                        //`at` is something else - insert on the same level, immediately above `at`.'
-
-                        //Parent is just top level
-                        let siblings = if path.len() < 2 {
-                            drop(path);
-                            &mut self.top_level
-                        } else {
-                            //Find siblings
-                            let Some(LayerNode::Group {
-                                children: siblings, ..
-                            }) = path.get(path.len() - 2)
-                            else {
-                                //(should be impossible) parent doesn't exist or isn't a group, add to top level instead.
-                                self.insert_node(node);
-                                return;
-                            };
-
-                            drop(path);
-
-                            //reinterprit as mutable (uh oh)
-                            //Safety - We hold exclusive access to self, thus no concurrent access to the tree can occur
-                            //and no other references exist.
-                            unsafe { &mut *siblings.get() }
-                        };
-
-                        //Find idx of `at`
-                        let Some((idx, _)) = siblings
-                            .iter()
-                            .enumerate()
-                            .find(|(_, node)| node.id() == at)
-                        else {
-                            //`at` isn't a child of `at`'s parent - should be impossible! add to top of siblings instead.
-                            siblings.push(node);
-                            return;
-                        };
-
-                        //Insert after idx.
-                        siblings.insert(idx, node);
-                    }
-                }
-            }
-        }
-    }
-    /// Insert the group at the highest position of the top level
-    pub fn insert_layer(&mut self, layer: impl Into<LayerNode>) -> WeakID<LayerNode> {
-        let node: LayerNode = layer.into();
-        let node_id = node.id().weak();
-        self.insert_node(node);
-        node_id
-    }
-    /// Insert the group at the given position
-    /// If the position is a group, insert at the highest position in the group
-    /// If the position is a layer, insert above it.
-    /// If the position doesn't exist, behaves as `insert_group`.
-    pub fn insert_layer_at(
-        &mut self,
-        at: WeakID<LayerNode>,
-        layer: impl Into<LayerNode>,
-    ) -> WeakID<LayerNode> {
-        let node: LayerNode = layer.into();
-        let node_id = node.id().weak();
-        self.insert_node_at(at, node);
-        node_id
-    }
-    pub fn find_mut_children_of<'a>(
-        &'a mut self,
-        parent: WeakID<LayerNode>,
-    ) -> Option<&'a mut [LayerNode]> {
-        let path = self.find(parent)?;
-
-        // Get children, or return none if not found or not a group
-        let Some(LayerNode::Group { children, .. }) = path.last() else {
-            return None;
-        };
-
-        unsafe {
-            // Safety - the return value continues to mutably borrow self,
-            // so no other access can occur.
-            Some((*children.get()).as_mut_slice())
-        }
-    }
-    /// Remove and return the node of the given ID. None if not found.
-    pub fn remove(&mut self, at: WeakID<LayerNode>) -> Option<LayerNode> {
-        let path = self.find(at)?;
-
-        //Parent is top-level
-        if path.len() < 2 {
-            let (idx, _) = self
-                .top_level
-                .iter()
-                .enumerate()
-                .find(|(_, node)| node.id() == at)?;
-            Some(self.top_level.remove(idx))
-        } else {
-            let LayerNode::Group {
-                children: siblings, ..
-            } = path.get(path.len() - 2)?
-            else {
-                return None;
-            };
-
-            //Safety - has exclusive access to self, so the graph cannot be concurrently accessed
-            unsafe {
-                let siblings = &mut *siblings.get();
-
-                let (idx, _) = siblings
-                    .iter()
-                    .enumerate()
-                    .find(|(_, node)| node.id() == at)?;
-
-                Some(siblings.remove(idx))
-            }
-        }
-    }
-}
-impl Default for LayerGraph {
-    fn default() -> Self {
-        Self {
-            top_level: Vec::new(),
         }
     }
 }
@@ -315,8 +77,12 @@ pub struct Document {
     /// Name of the document, from its path or generated.
     name: String,
 
+    stroke_layers: std::collections::HashMap<WeakID<StrokeLayer>, StrokeLayer>,
+    group_layers: std::collections::HashMap<WeakID<GroupLayer>, GroupLayer>,
+
+    // In structure, a document is rather similar to a GroupLayer :O
     /// Layers that make up this document
-    layers: LayerGraph,
+    layer_top_level: Vec<LayerID>,
 
     /// ID that is unique within this execution of the program
     id: FuzzID<Document>,
@@ -326,18 +92,52 @@ impl Default for Document {
         let id = FuzzID::default();
         Self {
             path: None,
-            layers: Default::default(),
+            stroke_layers: Default::default(),
+            group_layers: Default::default(),
+            layer_top_level: Vec::new(),
             name: format!("New Document {}", id.id()),
             id,
         }
     }
 }
+impl Document {
+    pub fn iter_group(
+        &'_ self,
+        group: WeakID<GroupLayer>,
+    ) -> Option<impl Iterator<Item = LayerRef<'_>> + '_> {
+        Some(
+            self.group_layers
+                .get(&group)?
+                .children
+                .iter()
+                .filter_map(|id| {
+                    Some(match *id {
+                        LayerID::GroupLayer(g) => {
+                            LayerRef::GroupLayer(g, self.group_layers.get(&g)?)
+                        }
+                        LayerID::StrokeLayer(s) => {
+                            LayerRef::StrokeLayer(s, self.stroke_layers.get(&s)?)
+                        }
+                    })
+                }),
+        )
+    }
+    pub fn iter_top_level(&'_ self) -> impl Iterator<Item = LayerRef<'_>> + '_ {
+        self.layer_top_level.iter().filter_map(|id| {
+            Some(match *id {
+                LayerID::GroupLayer(g) => LayerRef::GroupLayer(g, self.group_layers.get(&g)?),
+                LayerID::StrokeLayer(s) => LayerRef::StrokeLayer(s, self.stroke_layers.get(&s)?),
+            })
+        })
+    }
+}
+
 struct PerDocumentInterface {
     zoom: f32,
     rotate: f32,
 
-    focused_subtree: Option<WeakID<LayerNode>>,
-    cur_layer: Option<WeakID<LayerNode>>,
+    focused_subtree: Option<WeakID<GroupLayer>>,
+    cur_layer: Option<LayerID>,
 }
 impl Default for PerDocumentInterface {
     fn default() -> Self {
@@ -386,7 +186,7 @@ impl Default for DocumentUserInterface {
 }
 
 impl DocumentUserInterface {
-    fn target_layer(&self) -> Option<WeakID<LayerNode>> {
+    fn target_layer(&self) -> Option<LayerID> {
         let id = self.cur_document?;
         // Selected layer of the currently focused document, if any
         self.document_interfaces.get(&id)?.cur_layer
@@ -428,7 +228,7 @@ impl DocumentUserInterface {
                 });
         });
     }
-    fn ui_layer_slice(
+    fn ui_layer_iter(
         ui: &mut egui::Ui,
         document_interface: &mut PerDocumentInterface,
         layers: &mut [LayerNode],
@@ -509,27 +309,7 @@ impl DocumentUserInterface {
             });
         }
     }
-    /*
-    fn do_modal(&mut self, ctx: &egui::Context, add_contents: &Box<dyn FnMut(&mut egui::Ui) -> ()>) {
-        egui::Area::new("Modal")
-            .order(egui::Order::TOP)
-            .movable(true)
-            .show(&ctx, |ui| {
-                egui::Frame::window(ui.style())
-                    .show(ui, *add_contents)
-            });
-    }
-    fn push_modal(&mut self, add_contents: impl FnMut(&mut egui::Ui) -> ()) {
-        self.modal_stack.push(Box::new(add_contents))
-    }*/
     pub fn ui(&mut self, ctx: &egui::Context) {
-        /*
-        if !self.modal_stack.is_empty() {
-            for modal in self.modal_stack.iter() {
-                self.do_modal(&ctx, modal);
-            }
-        }*/
-
         egui::TopBottomPanel::top("file").show(&ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
