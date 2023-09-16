@@ -79,15 +79,12 @@ impl Document {
 struct PerDocumentInterface {
     zoom: f32,
     rotate: f32,
-
-    cur_layer: Option<WeakID<StrokeLayer>>,
 }
 impl Default for PerDocumentInterface {
     fn default() -> Self {
         Self {
             zoom: 100.0,
             rotate: 0.0,
-            cur_layer: None,
         }
     }
 }
@@ -95,11 +92,7 @@ pub struct DocumentUserInterface {
     color: egui::Color32,
 
     // modal_stack: Vec<Box<dyn FnMut(&mut egui::Ui) -> ()>>,
-    cur_brush: Option<brush::WeakBrushID>,
     brushes: Vec<brush::Brush>,
-
-    cur_document: Option<WeakID<Document>>,
-    documents: Vec<Document>,
 
     document_interfaces: std::collections::HashMap<WeakID<Document>, PerDocumentInterface>,
 
@@ -108,15 +101,9 @@ pub struct DocumentUserInterface {
 impl Default for DocumentUserInterface {
     fn default() -> Self {
         let new_brush = brush::Brush::default();
-        let new_document = Document::default();
         Self {
             color: egui::Color32::BLUE,
-            //modal_stack: Vec::new(),
-            cur_brush: Some(new_brush.id().weak()),
             brushes: vec![new_brush],
-
-            cur_document: Some(new_document.id.weak()),
-            documents: vec![new_document],
             document_interfaces: Default::default(),
 
             viewport: egui::Rect {
@@ -164,14 +151,14 @@ impl DocumentUserInterface {
                 });
         });
     }
-    fn layer_edit(ui: &mut egui::Ui, document_interface: &mut PerDocumentInterface, layer: &mut StrokeLayer) {
+    fn layer_edit(
+        ui: &mut egui::Ui,
+        cur_layer: &mut Option<WeakID<StrokeLayer>>,
+        layer: &mut StrokeLayer,
+    ) {
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(
-                    &mut document_interface.cur_layer,
-                    Some(layer.id.weak()),
-                    "✏",
-                );
+                ui.selectable_value(cur_layer, Some(layer.id.weak()), "✏");
                 ui.text_edit_singleline(&mut layer.name);
             })
             .response
@@ -270,6 +257,9 @@ impl DocumentUserInterface {
         }
     }*/
     pub fn ui(&mut self, ctx: &egui::Context) {
+        let globals = GLOBALS.get_or_init(Globals::new);
+        let mut documents = globals.documents().blocking_write();
+        let mut selections = globals.selections().write().unwrap();
         egui::TopBottomPanel::top("file").show(&ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
@@ -287,7 +277,7 @@ impl DocumentUserInterface {
                             let document = Document::default();
                             self.document_interfaces
                                 .insert(document.id.weak(), Default::default());
-                            self.documents.push(document);
+                            documents.push(document);
                         };
                         let _ = add_button(ui, "Save", Some("Ctrl+S"));
                         let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
@@ -315,12 +305,14 @@ impl DocumentUserInterface {
                 ui.add(egui::Separator::default().vertical());
 
                 // if there is no current document, there is nothing for us to do here
-                let Some(document) = self.cur_document else {
+                let Some(document) = selections.cur_document else {
                     return;
                 };
 
                 // Get (or create) the document interface
                 let interface = self.document_interfaces.entry(document).or_default();
+                let document_selections =
+                    selections.document_selections.entry(document).or_default();
 
                 //Zoom controls
                 if ui.small_button("⟲").clicked() {
@@ -369,24 +361,27 @@ impl DocumentUserInterface {
             ui.separator();
 
             // if there is no current document, there is nothing for us to do here
-            let Some(document_id) = self.cur_document else {
+            let Some(document_id) = selections.cur_document else {
                 return;
             };
 
             // Find the document, otherwise clear selection
-            let Some(document) = self.documents.iter_mut().find(|doc| &doc.id == document_id)
-            else {
-                self.cur_document = None;
+            let Some(document) = documents.iter_mut().find(|doc| &doc.id == document_id) else {
+                selections.cur_document = None;
                 return;
             };
 
             let document_interface = self.document_interfaces.entry(document_id).or_default();
+            let document_selections = selections
+                .document_selections
+                .entry(document_id)
+                .or_default();
 
             ui.horizontal(|ui| {
                 if ui.button("➕").clicked() {
                     let layer = StrokeLayer::default();
                     let new_weak_id = layer.id.weak();
-                    if let Some(selected) = document_interface.cur_layer {
+                    if let Some(selected) = document_selections.cur_layer {
                         let layers = document.layers_mut();
                         let selected_index = layers
                             .iter()
@@ -404,7 +399,7 @@ impl DocumentUserInterface {
                         document.layers_mut().push(layer)
                     }
                     // Select the new layer
-                    document_interface.cur_layer = Some(new_weak_id);
+                    document_selections.cur_layer = Some(new_weak_id);
                 }
 
                 let folder_button = egui::Button::new("🗀");
@@ -412,7 +407,7 @@ impl DocumentUserInterface {
 
                 let _ = ui.button("⤵").on_hover_text("Merge down");
                 if ui.button("✖").on_hover_text("Delete layer").clicked() {
-                    if let Some(selected) = document_interface.cur_layer.take() {
+                    if let Some(selected) = document_selections.cur_layer.take() {
                         let layers = document.layers_mut();
                         // Find the index of the selected layer
                         let selected_index = layers
@@ -442,7 +437,7 @@ impl DocumentUserInterface {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let layers = document.layers_mut();
                 for layer in layers.iter_mut().rev() {
-                    Self::layer_edit(ui, document_interface, layer);
+                    Self::layer_edit(ui, &mut document_selections.cur_layer, layer);
                 }
                 /*
                 match document_interface
@@ -465,25 +460,27 @@ impl DocumentUserInterface {
         });
 
         egui::SidePanel::left("Color picker").show(&ctx, |ui| {
-            let mut settings = GLOBALS.get_or_init(Globals::new).settings.write().unwrap();
-            ui.label("Color");
-            ui.separator();
-            // Why..
-            let mut color = egui::Rgba::from_rgba_premultiplied(
-                settings.color_modulate[0],
-                settings.color_modulate[1],
-                settings.color_modulate[2],
-                settings.color_modulate[3],
-            );
-            if egui::color_picker::color_edit_button_rgba(
-                ui,
-                &mut color,
-                egui::color_picker::Alpha::OnlyBlend,
-            )
-            .changed()
             {
-                settings.color_modulate = color.to_array();
-            };
+                let settings = &mut selections.brush_settings;
+                ui.label("Color");
+                ui.separator();
+                // Why..
+                let mut color = egui::Rgba::from_rgba_premultiplied(
+                    settings.color_modulate[0],
+                    settings.color_modulate[1],
+                    settings.color_modulate[2],
+                    settings.color_modulate[3],
+                );
+                if egui::color_picker::color_edit_button_rgba(
+                    ui,
+                    &mut color,
+                    egui::color_picker::Alpha::OnlyBlend,
+                )
+                .changed()
+                {
+                    settings.color_modulate = color.to_array();
+                };
+            }
 
             ui.separator();
             ui.label("Brushes");
@@ -495,18 +492,18 @@ impl DocumentUserInterface {
                     self.brushes.push(brush);
                 }
                 if ui.button("✖").on_hover_text("Delete brush").clicked() {
-                    if let Some(id) = self.cur_brush.take() {
+                    if let Some(id) = selections.cur_brush.take() {
                         self.brushes.retain(|brush| brush.id() != id);
                     }
                 };
-                ui.toggle_value(&mut settings.is_eraser, "Erase");
+                ui.toggle_value(&mut selections.brush_settings.is_eraser, "Erase");
             });
             ui.separator();
 
             for brush in self.brushes.iter_mut() {
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.cur_brush, Some(brush.id().weak()), "");
+                        ui.radio_value(&mut selections.cur_brush, Some(brush.id().weak()), "");
                         ui.text_edit_singleline(brush.name_mut());
                     })
                     .response
@@ -542,7 +539,7 @@ impl DocumentUserInterface {
                             match brush.style_mut() {
                                 brush::BrushStyle::Stamped { spacing } => {
                                     let slider = egui::widgets::Slider::new(
-                                        &mut settings.size_mul,
+                                        &mut selections.brush_settings.size_mul,
                                         2.0..=50.0,
                                     )
                                     .clamp_to_range(true)
@@ -552,7 +549,7 @@ impl DocumentUserInterface {
                                     ui.add(slider);
 
                                     let slider2 = egui::widgets::Slider::new(
-                                        &mut settings.spacing_px,
+                                        &mut selections.brush_settings.spacing_px,
                                         0.1..=10.0,
                                     )
                                     .clamp_to_range(true)
@@ -593,12 +590,12 @@ impl DocumentUserInterface {
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let mut deleted_ids = smallvec::SmallVec::<[_; 1]>::new();
-                    for document in self.documents.iter() {
+                    for document in documents.iter() {
                         egui::containers::Frame::group(ui.style())
                             .outer_margin(egui::Margin::symmetric(0.0, 0.0))
                             .inner_margin(egui::Margin::symmetric(0.0, 0.0))
                             .multiply_with_opacity(
-                                if self.cur_document == Some(document.id.weak()) {
+                                if selections.cur_document == Some(document.id.weak()) {
                                     1.0
                                 } else {
                                     0.0
@@ -611,15 +608,15 @@ impl DocumentUserInterface {
                             })
                             .show(ui, |ui| {
                                 ui.selectable_value(
-                                    &mut self.cur_document,
+                                    &mut selections.cur_document,
                                     Some(document.id.weak()),
                                     &document.name,
                                 );
                                 if ui.small_button("✖").clicked() {
                                     deleted_ids.push(document.id.weak());
                                     //Disselect if deleted.
-                                    if self.cur_document == Some(document.id.weak()) {
-                                        self.cur_document = None;
+                                    if selections.cur_document == Some(document.id.weak()) {
+                                        selections.cur_document = None;
                                     }
                                 }
                             })
@@ -628,8 +625,7 @@ impl DocumentUserInterface {
                                 ui.label(format!("{}", document.id));
                             });
                     }
-                    self.documents
-                        .retain(|document| !deleted_ids.contains(&document.id.weak()));
+                    documents.retain(|document| !deleted_ids.contains(&document.id.weak()));
                     for id in deleted_ids.into_iter() {
                         self.document_interfaces.remove(&id);
                     }
@@ -951,7 +947,7 @@ pub struct StrokeLayerData {
 }
 /// Collection of layer data (stroke contents and render data) mapped from ID
 pub struct StrokeLayerManager {
-    layers: std::collections::HashMap<FuzzID<StrokeLayer>, StrokeLayerData>,
+    layers: std::collections::HashMap<WeakID<StrokeLayer>, StrokeLayerData>,
 }
 impl Default for StrokeLayerManager {
     fn default() -> Self {
@@ -991,33 +987,60 @@ impl From<&ImmutableStroke> for WeakStroke {
     }
 }
 
+struct DocumentSelections {
+    pub cur_layer: Option<WeakID<StrokeLayer>>,
+}
+impl Default for DocumentSelections {
+    fn default() -> Self {
+        Self { cur_layer: None }
+    }
+}
+struct Selections {
+    pub cur_document: Option<WeakID<Document>>,
+    pub document_selections: std::collections::HashMap<WeakID<Document>, DocumentSelections>,
+    pub cur_brush: Option<brush::WeakBrushID>,
+    pub brush_settings: StrokeBrushSettings,
+}
+impl Default for Selections {
+    fn default() -> Self {
+        Self {
+            cur_document: None,
+            document_selections: Default::default(),
+            cur_brush: None,
+            brush_settings: StrokeBrushSettings {
+                brush: brush::todo_brush().id().weak(),
+                color_modulate: [0.0, 0.0, 0.0, 1.0],
+                size_mul: 15.0,
+                spacing_px: 0.75,
+                is_eraser: false,
+            },
+        }
+    }
+}
+
 // Icky. with a planned client-server architecture, we won't have as many globals -w-;;
 // (well, a server is still a global, but the interface will be much less hacked-)
 struct Globals {
     stroke_layers: tokio::sync::RwLock<StrokeLayerManager>,
-    // Todo: LayerGraph (and thus Document) is currently !Sync due to UnsafeCell in the graph implementation.
-    documents: tokio::sync::RwLock<Vec<()>>,
-    settings: std::sync::RwLock<StrokeBrushSettings>,
+    documents: tokio::sync::RwLock<Vec<Document>>,
+    selections: std::sync::RwLock<Selections>,
 }
 impl Globals {
     fn new() -> Self {
         Self {
             stroke_layers: tokio::sync::RwLock::new(Default::default()),
             documents: tokio::sync::RwLock::new(Vec::new()),
-            settings: std::sync::RwLock::new(StrokeBrushSettings {
-                brush: brush::todo_brush().id().weak(),
-                color_modulate: [0.0, 0.0, 0.0, 1.0],
-                size_mul: 5.0,
-                spacing_px: 1.0,
-                is_eraser: false,
-            }),
+            selections: Default::default(),
         }
     }
     fn strokes(&'_ self) -> &'_ tokio::sync::RwLock<StrokeLayerManager> {
         &self.stroke_layers
     }
-    fn documents(&'_ self) -> &'_ tokio::sync::RwLock<Vec<()>> {
+    fn documents(&'_ self) -> &'_ tokio::sync::RwLock<Vec<Document>> {
         &self.documents
+    }
+    fn selections(&'_ self) -> &'_ std::sync::RwLock<Selections> {
+        &self.selections
     }
 }
 static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
@@ -1061,9 +1084,10 @@ fn listener(
                             let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
                                 brush: GLOBALS
                                     .get_or_init(Globals::new)
-                                    .settings
+                                    .selections()
                                     .read()
                                     .unwrap()
+                                    .brush_settings
                                     .clone(),
                                 id: Default::default(),
                                 points: Vec::new(),
