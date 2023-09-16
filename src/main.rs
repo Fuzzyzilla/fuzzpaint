@@ -1051,14 +1051,36 @@ fn listener(
     let layer_render = stroke_renderer::StrokeLayerRenderer::new(renderer.clone())?;
     let blend = blend::BlendEngine::new(renderer.device().clone())?;
 
+    let globals = GLOBALS.get_or_init(Globals::new);
+    // Create a document and a few layers and select them, to speed up testing iterations :P
+    {
+        let (default_document, default_layer) = {
+            let mut document = Document::default();
+            let document_id = document.id.weak();
+
+            let layer = StrokeLayer::default();
+            let layer_id = layer.id.weak();
+            document.layer_top_level.push(layer);
+
+            globals.documents.blocking_write().push(document);
+            (document_id, layer_id)
+        };
+
+        let mut selections = globals.selections().blocking_write();
+        selections.cur_document = Some(default_document);
+        let document_selections = selections.document_selections.entry(default_document).or_default();
+        document_selections.cur_layer = Some(default_layer);
+    }
+
     let mut current_stroke = None::<Stroke>;
     runtime.block_on(async {
         loop {
             match event_stream.recv().await {
                 Ok(event_frame) => {
                     let matrix = { document_preview.read().get_matrix() }.invert().unwrap();
-                    let globals = GLOBALS.get_or_init(Globals::new);
 
+                    // Deadlock warning - the interface locks these same two -w-
+                    // Make sure they're locked in the same order in both. Whoopsie.
                     let selections = globals.selections().read().await;
                     let documents = globals.documents().read().await;
 
@@ -1137,7 +1159,7 @@ fn listener(
                     if layer_needs_redraw {
                         if let Some(buf) = layer_data.render_data.as_ref() {
                             let future = layer_render.draw(
-                                &layer_data.strokes,
+                                &layer_data.strokes[layer_data.strokes.len().saturating_sub(1)..],
                                 buf,
                                 layer_data.strokes.len() == 1,
                             )?;

@@ -24,18 +24,24 @@
             /* keep alpha of onto*/\
             mix(\
                 /* Fade between blended and original based on from.a*/\
-                expr,\
                 onto.rgb,\
+                expr,\
                 from.a\
             ),\
-            onto.a\
+            1.0\
         ),\
         onto.a\
     )\
 
 #ifdef BLEND_NORMAL
 vec4 blend_normal(vec4 from, vec4 onto) {
-    return vec4(from.rgb * from.a, from.a) + onto * (1.0 - from.a);
+    return mix(
+        from,
+        // Keep alpha of onto. Mix between rgb multiplied color and unchanged bg based on from.a
+        vec4(mix(onto.rgb, from.rgb, from.a), 1.0),
+        // Transparent bg = use from as-is.
+        onto.a
+    );
 }
 #endif
 
@@ -44,7 +50,7 @@ vec4 blend_multiply(vec4 from, vec4 onto) {
     return mix(
         from,
         // Keep alpha of onto. Mix between rgb multiplied color and unchanged bg based on from.a
-        vec4(mix(onto.rgb * from.rgb, onto.rgb, from.a), onto.a),
+        vec4(mix(onto.rgb, onto.rgb * from.rgb, from.a), 1.0),
         // Transparent bg = use from as-is.
         onto.a
     );
@@ -75,7 +81,7 @@ vec4 blend_add(vec4 from, vec4 onto) {
     return mix(
         from,
         // Keep alpha of onto. Mix between rgb added color and unchanged bg based on from.a
-        vec4(mix(onto.rgb + from.rgb, onto.rgb, from.a), onto.a),
+        vec4(mix(onto.rgb, onto.rgb + from.rgb, from.a), 1.0),
         // Transparent bg = use from as-is.
         onto.a
     );
