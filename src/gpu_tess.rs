@@ -252,7 +252,6 @@ impl GpuStampTess {
                     size_mul: stroke.brush.size_mul,
                 };
 
-                log::info!("Stroke {} given workgroups {}..{}", stroke.id, group_index_counter, group_index_counter + num_groups);
                 num_groups_per_info.push(num_groups);
                 point_index_counter += stroke.points.len() as u32;
                 group_index_counter += num_groups;
@@ -266,7 +265,7 @@ impl GpuStampTess {
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
                 // Transfer dest for clearing
-                usage: vk::BufferUsage::STORAGE_BUFFER | vk::BufferUsage::INDIRECT_BUFFER | vk::BufferUsage::TRANSFER_DST,
+                usage: vk::BufferUsage::STORAGE_BUFFER,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
@@ -299,7 +298,7 @@ impl GpuStampTess {
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Download,
+                usage: vk::MemoryUsage::DeviceOnly,
                 ..Default::default()
             },
             strokes.len() as u64,
@@ -311,7 +310,7 @@ impl GpuStampTess {
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Download,
+                usage: vk::MemoryUsage::DeviceOnly,
                 ..Default::default()
             },
             vertex_output_index_counter as u64,
@@ -354,7 +353,7 @@ impl GpuStampTess {
             .dispatch([group_index_counter, 1, 1])?;
         let command_buffer = command_buffer.build()?;
 
-        log::info!("Dispatched {} tessellation workgroups!", group_index_counter);
+        log::trace!("Dispatched {} tessellation workgroups for {} strokes", group_index_counter, strokes.len());
 
         use vk::sync::GpuFuture;
         let future = vk::sync::now(self.context.device().clone())

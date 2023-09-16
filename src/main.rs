@@ -1345,7 +1345,6 @@ fn listener(
                                 let immutable: ImmutableStroke = stroke.into();
                                 strokes.push(immutable);
 
-                                log::info!("Tessellating {} strokes", strokes.len());
                                 let write = document_preview.write();
                                 let buf = write.get_writeable_buffer().await;
                                 layer_render.draw(
@@ -1353,7 +1352,6 @@ fn listener(
                                     buf,
                                     true,
                                 )?;
-                                log::trace!("Done tessellating.");
                                 write.swap();
                             }
                         }
