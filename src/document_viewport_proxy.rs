@@ -35,8 +35,6 @@ mod document_preview_shaders {
 
             void main() {
                 vec4 col = texture(image, uv);
-                col.rgb *= col.rgb;
-                col.rgb *= col.a;
                 color = col;
             }"
         }

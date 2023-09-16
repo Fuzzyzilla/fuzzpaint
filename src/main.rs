@@ -11,6 +11,7 @@ use vulkano_prelude::*;
 pub mod blend;
 pub mod brush;
 pub mod document_viewport_proxy;
+pub mod gpu_tess;
 pub mod id;
 pub mod render_device;
 pub mod stylus_events;
@@ -364,14 +365,16 @@ pub struct DocumentUserInterface {
 }
 impl Default for DocumentUserInterface {
     fn default() -> Self {
+        let new_brush = brush::Brush::default();
+        let new_document = Document::default();
         Self {
             color: egui::Color32::BLUE,
             //modal_stack: Vec::new(),
-            cur_brush: None,
-            brushes: Vec::new(),
+            cur_brush: Some(new_brush.id().weak()),
+            brushes: vec![new_brush],
 
-            cur_document: None,
-            documents: Vec::new(),
+            cur_document: Some(new_document.id.weak()),
+            documents: vec![new_document],
             document_interfaces: Default::default(),
 
             viewport: egui::Rect {
@@ -696,14 +699,25 @@ impl DocumentUserInterface {
         });
 
         egui::SidePanel::left("Color picker").show(&ctx, |ui| {
+            let mut settings = GLOBALS.get_or_init(Globals::new).settings.write().unwrap();
             ui.label("Color");
             ui.separator();
-
-            egui::color_picker::color_picker_color32(
-                ui,
-                &mut self.color,
-                egui::color_picker::Alpha::OnlyBlend,
+            // Why..
+            let mut color = egui::Rgba::from_rgba_premultiplied(
+                settings.color_modulate[0],
+                settings.color_modulate[1],
+                settings.color_modulate[2],
+                settings.color_modulate[3],
             );
+            if egui::color_picker::color_edit_button_rgba(
+                ui,
+                &mut color,
+                egui::color_picker::Alpha::OnlyBlend,
+            )
+            .changed()
+            {
+                settings.color_modulate = color.to_array();
+            };
 
             ui.separator();
             ui.label("Brushes");
@@ -719,8 +733,7 @@ impl DocumentUserInterface {
                         self.brushes.retain(|brush| brush.id() != id);
                     }
                 };
-                let mut erase = false;
-                ui.toggle_value(&mut erase, "Erase");
+                ui.toggle_value(&mut settings.is_eraser, "Erase");
             });
             ui.separator();
 
@@ -762,12 +775,25 @@ impl DocumentUserInterface {
 
                             match brush.style_mut() {
                                 brush::BrushStyle::Stamped { spacing } => {
-                                    let slider = egui::widgets::Slider::new(spacing, 0.1..=200.0)
-                                        .clamp_to_range(true)
-                                        .logarithmic(true)
-                                        .suffix("px");
+                                    let slider = egui::widgets::Slider::new(
+                                        &mut settings.size_mul,
+                                        2.0..=50.0,
+                                    )
+                                    .clamp_to_range(true)
+                                    .logarithmic(true)
+                                    .suffix("px");
 
                                     ui.add(slider);
+
+                                    let slider2 = egui::widgets::Slider::new(
+                                        &mut settings.spacing_px,
+                                        0.1..=10.0,
+                                    )
+                                    .clamp_to_range(true)
+                                    .logarithmic(true)
+                                    .suffix("px");
+
+                                    ui.add(slider2);
                                 }
                                 brush::BrushStyle::Rolled => {}
                             }
@@ -861,96 +887,25 @@ mod stroke_renderer {
         view: Arc<vk::ImageView<vk::StorageImage>>,
     }
 
-    use crate::{
-        tess::{StreamStrokeTessellator, TessellatedStrokeVertex},
-        vk,
-    };
+    use crate::vk;
     use anyhow::Result as AnyResult;
     use std::sync::Arc;
     use vulkano::{pipeline::graphics::vertex_input::Vertex, pipeline::Pipeline, sync::GpuFuture};
     mod vert {
         vulkano_shaders::shader! {
             ty: "vertex",
-            src: r"
-            #version 460
-    
-            layout(push_constant) uniform Matrix {
-                mat4 mvp;
-            } push_matrix;
-    
-            layout(location = 0) in vec2 pos;
-            layout(location = 1) in vec2 uv;
-            layout(location = 2) in vec4 color;
-    
-            layout(location = 0) out vec4 out_color;
-            layout(location = 1) out vec2 out_uv;
-    
-            void main() {
-                out_color = color;
-                out_uv = uv;
-                vec4 position_2d = push_matrix.mvp * vec4(pos, 0.0, 1.0);
-                gl_Position = vec4(position_2d.xy, 0.0, 1.0);
-            }"
-        }
-    }
-    mod frag {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            src: r"
-            #version 460
-            layout(set = 0, binding = 0) uniform sampler2D brush_tex;
-
-            layout(location = 0) in vec4 color;
-            layout(location = 1) in vec2 uv;
-    
-            layout(location = 0) out vec4 out_color;
-    
-            void main() {
-                out_color = color * texture(brush_tex, uv);
-            }"
+            path: "src/shaders/stamp.vert",
         }
     }
 
     pub struct StrokeLayerRenderer {
         context: Arc<crate::render_device::RenderContext>,
         texture_descriptor: Arc<vk::PersistentDescriptorSet>,
-
-        /// Three host-visible buffers of size TESS_BUFFER_SIZE for swapping work between
-        /// Graphics pipeline and cpu tesselator
-        tess_buffer: Arc<vk::Buffer>,
-        /// For now, only single access. Future could have more granular access control.
-        tess_subbuffer: std::sync::Mutex<vk::Subbuffer<[TessellatedStrokeVertex]>>,
-
-        render_pass: Arc<vk::RenderPass>,
+        gpu_tess: super::gpu_tess::GpuStampTess,
         pipeline: Arc<vk::GraphicsPipeline>,
     }
     impl StrokeLayerRenderer {
-        /// Size of one tess buffer. Must align to nonCoherentAtomSize.
-        /// nonCoherentAtomSize is always a power of two and universally < 1kiB,
-        /// so 4MiB will certainly always work.
-        const TESS_BUFFER_VERTS: u64 = 1024 * 1024;
-        const TESS_BUFFER_SIZE: u64 =
-            Self::TESS_BUFFER_VERTS * std::mem::size_of::<TessellatedStrokeVertex>() as u64;
-        const TESS_BUFFER_COUNT: u64 = 3;
-
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {
-            let render_pass = vulkano::single_pass_renderpass!(
-                context.device().clone(),
-                attachments: {
-                    output_image: {
-                        // TODO: An optimized render sequence could involve this being a load.
-                        load: Clear,
-                        store: Store,
-                        format: crate::DOCUMENT_FORMAT,
-                        samples: 1,
-                    },
-                },
-                pass: {
-                    color: [output_image],
-                    depth_stencil: {},
-                },
-            )?;
-
             let image = image::open("brushes/splotch.png")
                 .unwrap()
                 .into_luma_alpha8();
@@ -1008,20 +963,26 @@ mod stroke_renderer {
                 (view, sampler)
             };
 
-            let frag = frag::load(context.device().clone())?;
+            // Safety: dual_src_blend currently broken in vulkano - pull request submitted, for now
+            // no erase U_U
+            let frag = unsafe {
+                vulkano::shader::ShaderModule::from_bytes(
+                    context.device().clone(),
+                    include_bytes!("shaders/stamp.frag.spv"),
+                )
+            }?;
             let vert = vert::load(context.device().clone())?;
             // Unwraps ok here, using GLSL where "main" is the only allowed entry point.
             let frag = frag.entry_point("main").unwrap();
             let vert = vert.entry_point("main").unwrap();
 
-            // Premultiplied blending with blend constants specified at rendertime.
-            // constant of [1.0; 4] is normal, constant of [0.0; 4] is eraser. [r,g,b,1.0] can be used to modulate color, but not alpha.
-            // DualSrcBlend (~75% coverage) can be used to control this from within the fragment shader instead :O
+            // DualSrcBlend (~75% coverage) is used to control whether to erase or draw on a per-fragment basis
+            // [1.0; 4] = draw, [0.0; 4] = erase.
             let mut premul_dyn_constants = vk::ColorBlendState::new(1);
-            premul_dyn_constants.blend_constants = vk::StateMode::Dynamic;
+            premul_dyn_constants.blend_constants = vk::StateMode::Fixed([1.0; 4]);
             premul_dyn_constants.attachments[0].blend = Some(vk::AttachmentBlend {
-                alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::ConstantColor,
-                color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::ConstantAlpha,
+                alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+                color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
                 alpha_destination:
                     vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
                 color_destination:
@@ -1031,9 +992,9 @@ mod stroke_renderer {
             });
 
             let pipeline = vk::GraphicsPipeline::start()
-                .fragment_shader(frag, frag::SpecializationConstants::default())
-                .vertex_shader(vert, vert::SpecializationConstants::default())
-                .vertex_input_state(super::tess::TessellatedStrokeVertex::per_vertex())
+                .fragment_shader(frag, ())
+                .vertex_shader(vert, ())
+                .vertex_input_state(super::gpu_tess::interface::OutputStrokeVertex::per_vertex())
                 .input_assembly_state(vk::InputAssemblyState::new()) //Triangle list, no prim restart
                 .color_blend_state(premul_dyn_constants)
                 .rasterization_state(vk::RasterizationState::new()) // No cull
@@ -1044,7 +1005,17 @@ mod stroke_renderer {
                         origin: [0.0; 2],
                     },
                 ]))
-                .render_pass(render_pass.clone().first_subpass())
+                .render_pass(
+                    vulkano::pipeline::graphics::render_pass::PipelineRenderPassType::BeginRendering(
+                        vulkano::pipeline::graphics::render_pass::PipelineRenderingCreateInfo {
+                            view_mask: 0,
+                            color_attachment_formats: vec![Some(super::DOCUMENT_FORMAT)],
+                            depth_attachment_format: None,
+                            stencil_attachment_format: None,
+                            ..Default::default()
+                        }
+                    )
+                )
                 .build(context.device().clone())?;
 
             let descriptor_set = vk::PersistentDescriptorSet::new(
@@ -1055,52 +1026,12 @@ mod stroke_renderer {
                 )],
             )?;
 
-            // Allocate tesselation buffer
-            // Align to a nonCoherentAtomSize (may be greater than 64, vulkano no likey that)
-            let non_coherent_atom_size = context
-                .device()
-                .physical_device()
-                .properties()
-                .non_coherent_atom_size;
-            if Self::TESS_BUFFER_SIZE % non_coherent_atom_size.as_devicesize() != 0 {
-                anyhow::bail!("Tess buffer size is not aligned for non-coherently use")
-            }
-            // This is an unreasonable assumption - about 1/8 of devices will fail here. what do? todo!
-            if non_coherent_atom_size.as_devicesize() > 64u64 {
-                anyhow::bail!("Device nonCoherentAtomSize too strict to allocate")
-            }
-            let tess_buffer = vk::Buffer::new(
-                context.allocators().memory(),
-                vk::BufferCreateInfo {
-                    usage: vk::BufferUsage::VERTEX_BUFFER,
-                    ..Default::default()
-                },
-                vk::AllocationCreateInfo {
-                    allocate_preference:
-                        vulkano::memory::allocator::MemoryAllocatePreference::AlwaysAllocate,
-                    usage: vulkano::memory::allocator::MemoryUsage::Upload,
-                    ..Default::default()
-                },
-                vulkano::memory::allocator::DeviceLayout::new(
-                    std::num::NonZeroU64::new(Self::TESS_BUFFER_SIZE * Self::TESS_BUFFER_COUNT)
-                        .unwrap(),
-                    // Panics if >64, checked earlier
-                    non_coherent_atom_size,
-                )
-                .unwrap(),
-            )?;
-            // Subdivide the large buffer into TESS_BUFFER_COUNT smaller, [f32] buffers
-            let whole_buffer = vk::Subbuffer::<[u8]>::new(tess_buffer.clone());
-            let tess_subbuffer = whole_buffer
-                .try_cast_slice::<TessellatedStrokeVertex>()
-                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            let tess = super::gpu_tess::GpuStampTess::new(context.clone())?;
 
             Ok(Self {
                 context,
                 pipeline,
-                render_pass,
-                tess_buffer,
-                tess_subbuffer: tess_subbuffer.into(),
+                gpu_tess: tess,
                 texture_descriptor: descriptor_set,
             })
         }
@@ -1125,53 +1056,46 @@ mod stroke_renderer {
             )?;
             let view = vk::ImageView::new_default(image.clone())?;
 
+            use vulkano::VulkanObject;
+            log::info!("Made render data at id{:?}", view.handle());
+
             Ok(RenderData { image, view })
         }
-        // Synchronously render into a given buffer. Depending on the number of strokes, this could be a long op!
-        // Todo: the async one was doing my head in >:O
-        pub fn render_into(
+        pub fn draw(
             &self,
-            strokes: &[super::Stroke],
-            into: &mut RenderData,
-            clear_buf: bool,
-            tessellator: &impl super::StrokeTessellator,
-        ) -> anyhow::Result<
-            vulkano::sync::future::SemaphoreSignalFuture<Box<dyn vk::sync::GpuFuture>>,
-        > {
-            let buff = self
-                .tess_subbuffer
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Mutex poisoned!"))?;
-            let mut infos = vec![crate::tess::TessellatedStrokeInfo::empty(); strokes.len()];
-            let mut stream = tessellator.stream(strokes);
-            // keep track of which stroke we're reading - stream will produce any number of draws per stroke,
-            // so we gotta figure out which is which!
-            let mut cursor = 0;
-
+            strokes: &[super::ImmutableStroke],
+            renderbuf: Arc<vk::ImageView<vk::StorageImage>>,
+            clear: bool,
+        ) -> AnyResult<()> {
+            let (future, vertices, indirects) = self.gpu_tess.tess(strokes)?;
             let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
                 self.context.allocators().command_buffer(),
                 self.context.queues().graphics().idx(),
                 vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
             )?;
 
-            // Set up renderpass!
+            let mut matrix = cgmath::Matrix4::from_scale(2.0 / super::DOCUMENT_DIMENSION as f32);
+            matrix.y *= -1.0;
+            matrix.w.x -= 1.0;
+            matrix.w.y += 1.0;
+
             command_buffer
                 .begin_rendering(vulkano::command_buffer::RenderingInfo {
                     color_attachments: vec![Some(
                         vulkano::command_buffer::RenderingAttachmentInfo {
-                            clear_value: if clear_buf {
+                            clear_value: if clear {
                                 Some([0.0, 0.0, 0.0, 0.0].into())
                             } else {
                                 None
                             },
-                            load_op: if clear_buf {
+                            load_op: if clear {
                                 vulkano::render_pass::LoadOp::Clear
                             } else {
                                 vulkano::render_pass::LoadOp::Load
                             },
                             store_op: vulkano::render_pass::StoreOp::Store,
                             ..vulkano::command_buffer::RenderingAttachmentInfo::image_view(
-                                into.view.clone(),
+                                renderbuf.clone(),
                             )
                         },
                     )],
@@ -1179,330 +1103,34 @@ mod stroke_renderer {
                     depth_attachment: None,
                     ..Default::default()
                 })?
-                .bind_pipeline_graphics(self.pipeline.clone());
-
-            let mut last_constants = None;
-            // Repeatedly tessellate a full buffer's worth of data, render, sync, repeat.
-            loop {
-                // Lock, tess, unlock
-                let status = {
-                    let mut write = buff.write()?;
-
-                    stream.tessellate(&mut write, &mut infos)
-                };
-
-                for info in std::mem::take(&mut infos).into_iter() {
-                    // Filler info, we're done :3
-                    if info.source == crate::WeakID::empty() {
-                        break;
-                    }
-
-                    // Previous stroke continues, nothing to do!
-                    let changed = if info.source == strokes[cursor].id {
-                        false
-                    } else {
-                        // advance cursor until we find the one this info comes from.
-                        while info.source
-                            != strokes
-                                .get(cursor)
-                                .ok_or_else(|| anyhow::anyhow!("Tess produced unknown stroke ID"))?
-                                .id
-                        {
-                            cursor += 1;
-                        }
-                        true
-                    };
-
-                    // Update brush, if needed
-                    if changed {
-                        let stroke = &strokes[cursor];
-                        let erase = stroke.brush.is_eraser;
-
-                        let constants = if erase {
-                            [0.0; 4]
-                        } else {
-                            // guh.. why no swizzle
-                            [
-                                stroke.brush.color_modulate[0],
-                                stroke.brush.color_modulate[1],
-                                stroke.brush.color_modulate[2],
-                                1.0,
-                            ]
-                        };
-                        if last_constants != Some(constants) {
-                            command_buffer.set_blend_constants(constants);
-                            last_constants = Some(constants)
-                        }
-                    }
-
-                    command_buffer.draw(info.vertices, 1, info.first_vertex, 0)?;
-                }
-
-                match status {
-                    crate::tess::StreamStatus::Complete => break,
-                    _ => (),
-                }
-                // Clear all infos in preparation for next iter
-                // (not infos.clear(), as we need all to be init and available)
-                infos.fill(crate::tess::TessellatedStrokeInfo::empty())
-            }
-
-            todo!()
-        }
-        /// Render stroke from scratch - clear or create cached image, tesselate, and render all strokes.
-        /// This future is NOT cancelable, and may panic if you try. very yucky. Todo!
-        pub async fn render_all_async<'a, Tess: super::tess::StrokeTessellator + 'static>(
-            &'a self,
-            strokes: &[super::ImmutableStroke],
-            tessellator: &Tess,
-        ) -> AnyResult<Box<dyn vk::sync::GpuFuture>>
-        where
-            for<'data> Tess::Stream<'data>: Send,
-        {
-            // Wait until we have single access.
-            // Arc'd so that it can be shared with worker.
-            /*let buf_access_permit = Arc::new(self.tess_buffer_mutex.acquire().await?);
-
-            // Collect waits. They should be available immediately, based on the permit.
-            let writes: Result<Vec<_>, _> = self
-                .tess_subbuffers
-                .iter()
-                .map(
-                    |buf| -> Result<
-                        vulkano::buffer::subbuffer::BufferWriteGuard<'a, [TessellatedStrokeVertex]>,
-                        _,
-                    > { buf.write() },
-                )
-                .collect();
-            let writes = writes?;*/
-
-            // We spawn a thread to do the tess on borrowed data. The borrow checker doesn't like this and for good reason,
-            // as if the future is dropped it can then be mutably accessed by the caller while the thread is
-            // still reading. So, we must join the thread before we can exit! This can only be detected by a struct with Drop impl.
-            struct Worker<'data, 'permit> {
-                thread: Option<std::thread::JoinHandle<()>>,
-                cancel_flag: Arc<std::sync::atomic::AtomicBool>,
-                data: std::marker::PhantomData<&'data Self>,
-                permit: Arc<tokio::sync::SemaphorePermit<'permit>>,
-            }
-            impl<'data, 'permit> Worker<'data, 'permit> {
-                /// Create a worker from a closure that returns the worker closure.
-                /// Outer closure takes a copy of the atomic bool that will be used to signal
-                /// if the thread has been cancelled, and the thread should promptly respond by returning ASAP.
-                /// Takes a reference to dummy data, which the worker will pretend to borrow for it's lifetime.
-                fn new<Outer, Inner, Data>(
-                    f: Outer,
-                    data: &'data Data,
-                    permit: Arc<tokio::sync::SemaphorePermit<'permit>>,
-                ) -> Self
-                where
-                    Outer: FnOnce(Arc<std::sync::atomic::AtomicBool>) -> Inner,
-                    Inner: FnOnce() -> () + Send + 'static,
-                {
-                    let cancel_flag: Arc<std::sync::atomic::AtomicBool> = Arc::new(false.into());
-                    // Let user code build their closure around this atomic:
-                    let thread_fn = f(cancel_flag.clone());
-                    Worker {
-                        thread: Some(std::thread::spawn(thread_fn)),
-                        cancel_flag,
-                        data: Default::default(),
-                        permit,
-                    }
-                }
-                /// Explicitly join the thread without cancellation, disabling the automatic Drop catch.
-                /// Useful for when the thread exits on it's own accord.
-                /// Does NOT notify tokio runtime of potentially long wait.
-                fn join(mut self) -> Result<(), Box<dyn std::any::Any + Send>> {
-                    match self.thread.take() {
-                        None => Ok(()),
-                        Some(t) => t.join(),
-                    }
-                }
-            }
-            impl<'data, 'permit> Drop for Worker<'data, 'permit> {
-                fn drop(&mut self) {
-                    // Get handle, or bail if already handled.
-                    let Some(thread) = self.thread.take() else {
-                        return;
-                    };
-
-                    // Tell worker to stop working and return (thus stop accessing the borrowed mem)
-                    // and join it before we release our borrow, to prevent races.
-                    self.cancel_flag
-                        .store(false, std::sync::atomic::Ordering::Release);
-                    // Join thread - notify tokio that this operation may take a moment to return
-                    tokio::task::block_in_place(|| {
-                        log::warn!("Dropping tess thread!");
-                        if thread.join().is_err() {
-                            // The error type is highly useless so there's not much more to say
-                            log::error!("Cancelled tess worker thread returned with error.");
-                        }
-                    })
-                }
-            }
-
-            // Split the borrow into immutable and mutable parts, to share with worker thread
-            // without violating rust's aliasing rules. Worker will borrow `strokes` immutably to statically ensure this.
-            let render_data = &todo!();
-            let strokes = &todo!();
-
-            let worker = {
-                unsafe {
-                    // Allow the worker to borrow the data by extending the lifetime to 'static.
-                    // Safety: the worker *must* be joined before render_all ends, either normally
-                    // or by future cancellation, to prevent use-after-free and race conditions!
-                    // This is ensured by Worker::drop.
-                    let static_strokes =
-                        std::mem::transmute::<&[super::Stroke], &'static [super::Stroke]>(todo!());
-                    // I *think* this is fine. Is there a way for the Tessellator impl to remember this
-                    // 'static ref and cause unsoundness?
-                    let static_tesselator = tessellator.stream(static_strokes);
-                    //let worker_permit = buf_access_permit.clone();
-                    Worker::new(
-                        move |cancel_flag| {
-                            move || {
-                                // Helper macro to early return if work gets cancelled
-                                macro_rules! check_cancel {
-                                    () => {
-                                        if cancel_flag.load(std::sync::atomic::Ordering::Acquire) {
-                                            return;
-                                        }
-                                    };
-                                }
-
-                                std::hint::black_box(static_tesselator);
-                                check_cancel!();
-                                todo!()
-                            }
-                        },
-                        // borrow a dummy reference to prevent outer scope from violating aliasing rules.
-                        strokes,
-                        // Take a permit, to prevent other invocations from using the buffer as long as the worker lives.
-                        todo!(), //worker_permit,
-                    )
-                }
-            };
-
-            todo!()
-        }
-        /// Render new strokes into and on top of current cached contents. If no content, initialize to empty then draw.
-        pub async fn render_append(
-            &self,
-            render_data: &mut RenderData,
-            strokes: &[super::Stroke],
-        ) -> AnyResult<()> {
-            todo!()
-        }
-        /// Render provided tessellated strokes from and into the provided buffer.
-        /// Assumes the tessellated stroke infos match the contenst of the buffer.
-        /// Some cursory checks are made to ensure this is the case, but don't rely on them.
-        pub fn render(
-            &self,
-            //render_data: &mut super::LayerRenderData,
-        ) -> AnyResult<vk::PrimaryAutoCommandBuffer> {
-            todo!()
-            /*
-            // Skip if no tessellated verts
-            let Some(verts) = render_data.tessellated_stroke_vertices.clone() else {
-                anyhow::bail!("No vertices to render.");
-            };
-
-            // "Get or try insert with" - make the image if it doesn't already exist.
-            let render_view = match render_data.image {
-                Some(ref image) => image.clone(),
-                None => {
-                    let new_image = vk::StorageImage::with_usage(
-                        self.context.allocators().memory(),
-                        vulkano::image::ImageDimensions::Dim2d {
-                            width: crate::DOCUMENT_DIMENSION,
-                            height: crate::DOCUMENT_DIMENSION,
-                            array_layers: 1,
-                        },
-                        crate::DOCUMENT_FORMAT,
-                        vk::ImageUsage::COLOR_ATTACHMENT,
-                        vk::ImageCreateFlags::empty(),
-                        [
-                            self.context.queues().graphics().idx(),
-                            self.context.queues().compute().idx(),
-                        ],
-                    )?;
-                    let view = vk::ImageView::new_default(new_image)?;
-                    render_data.image = Some(view.clone());
-                    view
-                }
-            };
-
-            let x = smallvec::smallvec![7,,,,];
-
-            let framebuffer = vk::Framebuffer::new(
-                self.render_pass.clone(),
-                vk::FramebufferCreateInfo {
-                    attachments: vec![render_view],
-                    ..Default::default()
-                },
-            )?;
-
-            let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
-                self.context.allocators().command_buffer(),
-                self.context.queues().graphics().idx(),
-                vk::CommandBufferUsage::OneTimeSubmit,
-            )?;
-
-            let push_matrix = cgmath::ortho(
-                0.0,
-                crate::DOCUMENT_DIMENSION as f32,
-                crate::DOCUMENT_DIMENSION as f32,
-                0.0,
-                -1.0,
-                1.0,
-            );
-
-            let mut prev_blend_constants = [1.0; 4];
-
-            command_buffer
-                .begin_render_pass(
-                    vk::RenderPassBeginInfo {
-                        clear_values: vec![Some([0.0; 4].into())],
-                        ..vk::RenderPassBeginInfo::framebuffer(framebuffer)
-                    },
-                    vk::SubpassContents::Inline,
-                )?
                 .bind_pipeline_graphics(self.pipeline.clone())
-                .bind_vertex_buffers(0, [verts])
+                .push_constants(
+                    self.pipeline.layout().clone(),
+                    0,
+                    Into::<[[f32; 4]; 4]>::into(matrix),
+                )
                 .bind_descriptor_sets(
                     vulkano::pipeline::PipelineBindPoint::Graphics,
                     self.pipeline.layout().clone(),
                     0,
-                    vec![self.texture_descriptor.clone()],
+                    self.texture_descriptor.clone(),
                 )
-                .set_viewport(
-                    0,
-                    [vk::Viewport {
-                        depth_range: 0.0..1.0,
-                        dimensions: [crate::DOCUMENT_DIMENSION as f32; 2],
-                        origin: [0.0; 2],
-                    }],
-                )
-                .push_constants(
-                    self.pipeline.layout().clone(),
-                    0,
-                    vert::Matrix {
-                        mvp: push_matrix.into(),
-                    },
-                )
-                .set_blend_constants(prev_blend_constants);
+                .bind_vertex_buffers(0, vertices)
+                .draw_indirect(indirects)?
+                .end_rendering()?;
 
-            for info in render_data.tessellated_stroke_infos.iter() {
-                // Draws can further be batched here. For now, just avoid resetting all the time.
-                if info.blend_constants != prev_blend_constants {
-                    prev_blend_constants = info.blend_constants;
-                    command_buffer.set_blend_constants(info.blend_constants);
-                }
-                command_buffer.draw(info.vertices, 1, info.first_vertex, 0)?;
-            }
+            let command_buffer = command_buffer.build()?;
 
-            command_buffer.end_render_pass()?;
-            Ok(command_buffer.build()?)*/
+            // After tessellation finishes, render.
+            future
+                .then_execute(
+                    self.context.queues().graphics().queue().clone(),
+                    command_buffer,
+                )?
+                .then_signal_fence_and_flush()?
+                .wait(None)?;
+
+            Ok(())
         }
     }
 }
@@ -1512,6 +1140,7 @@ pub struct StrokeBrushSettings {
     brush: brush::WeakBrushID,
     /// `a` is flow, NOT opacity, since the stroke is blended continuously not blended as a group.
     color_modulate: [f32; 4],
+    spacing_px: f32,
     size_mul: f32,
     /// If true, the blend constants must be set to generate an erasing effect.
     is_eraser: bool,
@@ -1596,18 +1225,33 @@ impl From<&ImmutableStroke> for WeakStroke {
     }
 }
 
+struct Selections {
+    document: WeakID<Document>,
+    brush: brush::WeakBrushID,
+    layer: WeakID<LayerNode>,
+    stroke_layer: Option<WeakID<LayerNode>>,
+}
+
 // Icky. with a planned client-server architecture, we won't have as many globals -w-;;
 // (well, a server is still a global, but the interface will be much less hacked-)
 struct Globals {
     stroke_layers: tokio::sync::RwLock<StrokeLayerManager>,
     // Todo: LayerGraph (and thus Document) is currently !Sync due to UnsafeCell in the graph implementation.
     documents: tokio::sync::RwLock<Vec<()>>,
+    settings: std::sync::RwLock<StrokeBrushSettings>,
 }
 impl Globals {
     fn new() -> Self {
         Self {
             stroke_layers: tokio::sync::RwLock::new(Default::default()),
             documents: tokio::sync::RwLock::new(Vec::new()),
+            settings: std::sync::RwLock::new(StrokeBrushSettings {
+                brush: brush::todo_brush().id().weak(),
+                color_modulate: [0.0, 0.0, 0.0, 1.0],
+                size_mul: 5.0,
+                spacing_px: 1.0,
+                is_eraser: false,
+            }),
         }
     }
     fn strokes(&'_ self) -> &'_ tokio::sync::RwLock<StrokeLayerManager> {
@@ -1637,21 +1281,25 @@ fn listener(
     document_preview: Arc<
         parking_lot::RwLock<document_viewport_proxy::DocumentViewportPreviewProxy>,
     >,
-) {
+) -> AnyResult<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
 
-    runtime.block_on(async {
-        let tesselator = tess::rayon::RayonTessellator;
-        let mut current_stroke = None::<Stroke>;
-        let brush = StrokeBrushSettings {
-            brush: brush::todo_brush().id().weak(),
-            color_modulate: [1.0; 4],
-            size_mul: 5.0,
-            is_eraser: false,
-        };
+    let mut strokes = Vec::new();
 
+    let layer_render = stroke_renderer::StrokeLayerRenderer::new(renderer.clone())?;
+    let layer = layer_render.empty_render_data()?;
+
+    let mut current_stroke = None::<Stroke>;
+    let brush = StrokeBrushSettings {
+        brush: brush::todo_brush().id().weak(),
+        color_modulate: [0.0, 0.2, 0.5, 1.0],
+        size_mul: 5.0,
+        spacing_px: 1.0,
+        is_eraser: false,
+    };
+    runtime.block_on(async {
         loop {
             match event_stream.recv().await {
                 Ok(event_frame) => {
@@ -1660,7 +1308,12 @@ fn listener(
                         if event.pressed {
                             // Get stroke-in-progress or start anew.
                             let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
-                                brush: brush.clone(),
+                                brush: GLOBALS
+                                    .get_or_init(Globals::new)
+                                    .settings
+                                    .read()
+                                    .unwrap()
+                                    .clone(),
                                 id: Default::default(),
                                 points: Vec::new(),
                             });
@@ -1690,7 +1343,16 @@ fn listener(
                             if let Some(stroke) = current_stroke.take() {
                                 // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
                                 let immutable: ImmutableStroke = stroke.into();
-                                todo!()
+                                strokes.push(immutable);
+
+                                let write = document_preview.write();
+                                let buf = write.get_writeable_buffer().await;
+                                layer_render.draw(
+                                    &strokes[strokes.len().saturating_sub(50)..],
+                                    buf,
+                                    true,
+                                )?;
+                                write.swap();
                             }
                         }
                     }
@@ -1699,7 +1361,7 @@ fn listener(
                     log::warn!("Lost {num} stylus frames!");
                 }
                 // Stream closed, no more data to handle - we're done here!
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
             }
         }
     })
@@ -1737,7 +1399,9 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let event_stream = window_renderer.stylus_events();
 
     std::thread::spawn(move || {
-        listener(event_stream, render_context.clone(), document_view.clone())
+        if let Err(e) = listener(event_stream, render_context.clone(), document_view.clone()) {
+            log::error!("Helper thread exited with err:\n{e:?}")
+        }
     });
 
     window_renderer.run();
