@@ -30,59 +30,30 @@ const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 use anyhow::Result as AnyResult;
 
-pub struct GroupLayer {
-    name: String,
-
-    /// Some - grouped rendering, None - Passthrough
-    blend: Option<blend::Blend>,
-
-    children: Vec<LayerID>,
-}
-impl Default for GroupLayer {
-    fn default() -> Self {
-        Self {
-            name: "New group".into(),
-            blend: None,
-            children: Vec::new(),
-        }
-    }
-}
 pub struct StrokeLayer {
+    id: FuzzID<Self>,
     name: String,
     blend: blend::Blend,
 }
-
-#[derive(Hash, PartialEq, Eq)]
-pub enum LayerID {
-    StrokeLayer(WeakID<StrokeLayer>),
-    GroupLayer(WeakID<GroupLayer>),
-}
-pub enum LayerRef<'layer> {
-    StrokeLayer(WeakID<StrokeLayer>, &'layer StrokeLayer),
-    GroupLayer(WeakID<GroupLayer>, &'layer GroupLayer),
-}
-
 impl Default for StrokeLayer {
     fn default() -> Self {
+        let id = Default::default();
         Self {
-            name: "New layer".into(),
+            name: format!("Layer {}", id),
+            id,
             blend: Default::default(),
         }
     }
 }
-
 pub struct Document {
     /// The path from which the file was loaded, or None if opened as new.
     path: Option<std::path::PathBuf>,
     /// Name of the document, from its path or generated.
     name: String,
 
-    stroke_layers: std::collections::HashMap<WeakID<StrokeLayer>, StrokeLayer>,
-    group_layers: std::collections::HashMap<WeakID<GroupLayer>, GroupLayer>,
-
     // In structure, a document is rather similar to a GroupLayer :O
     /// Layers that make up this document
-    layer_top_level: Vec<LayerID>,
+    layer_top_level: Vec<StrokeLayer>,
 
     /// ID that is unique within this execution of the program
     id: FuzzID<Document>,
@@ -92,8 +63,6 @@ impl Default for Document {
         let id = FuzzID::default();
         Self {
             path: None,
-            stroke_layers: Default::default(),
-            group_layers: Default::default(),
             layer_top_level: Vec::new(),
             name: format!("New Document {}", id.id()),
             id,
@@ -101,34 +70,9 @@ impl Default for Document {
     }
 }
 impl Document {
-    pub fn iter_group(
-        &'_ self,
-        group: WeakID<GroupLayer>,
-    ) -> Option<impl Iterator<Item = LayerRef<'_>> + '_> {
-        Some(
-            self.group_layers
-                .get(&group)?
-                .children
-                .iter()
-                .filter_map(|id| {
-                    Some(match *id {
-                        LayerID::GroupLayer(g) => {
-                            LayerRef::GroupLayer(g, self.group_layers.get(&g)?)
-                        }
-                        LayerID::StrokeLayer(s) => {
-                            LayerRef::StrokeLayer(s, self.stroke_layers.get(&s)?)
-                        }
-                    })
-                }),
-        )
-    }
-    pub fn iter_top_level(&'_ self) -> impl Iterator<Item = LayerRef<'_>> + '_ {
-        self.layer_top_level.iter().filter_map(|id| {
-            Some(match *id {
-                LayerID::GroupLayer(g) => LayerRef::GroupLayer(g, self.group_layers.get(&g)?),
-                LayerID::StrokeLayer(s) => LayerRef::StrokeLayer(s, self.stroke_layers.get(&s)?),
-            })
-        })
+    // Internal structure in public interface???
+    pub fn layers_mut(&mut self) -> &mut Vec<StrokeLayer> {
+        &mut self.layer_top_level
     }
 }
 
@@ -136,8 +80,7 @@ struct PerDocumentInterface {
     zoom: f32,
     rotate: f32,
 
-    focused_subtree: Option<WeakID<GroupLayer>>,
-    cur_layer: Option<LayerID>,
+    cur_layer: Option<WeakID<StrokeLayer>>,
 }
 impl Default for PerDocumentInterface {
     fn default() -> Self {
@@ -145,7 +88,6 @@ impl Default for PerDocumentInterface {
             zoom: 100.0,
             rotate: 0.0,
             cur_layer: None,
-            focused_subtree: None,
         }
     }
 }
@@ -186,12 +128,6 @@ impl Default for DocumentUserInterface {
 }
 
 impl DocumentUserInterface {
-    fn target_layer(&self) -> Option<LayerID> {
-        let id = self.cur_document?;
-        // Selected layer of the currently focused document, if any
-        self.document_interfaces.get(&id)?.cur_layer
-    }
-
     /// Get the available area for document rendering, in logical pixels.
     /// None if there is no space for a viewport.
     pub fn get_document_viewport(&self) -> Option<egui::Rect> {
@@ -227,6 +163,30 @@ impl DocumentUserInterface {
                     }
                 });
         });
+    }
+    fn layer_edit(ui: &mut egui::Ui, document_interface: &mut PerDocumentInterface, layer: &mut StrokeLayer) {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(
+                    &mut document_interface.cur_layer,
+                    Some(layer.id.weak()),
+                    "✏",
+                );
+                ui.text_edit_singleline(&mut layer.name);
+            })
+            .response
+            .on_hover_ui(|ui| {
+                ui.label(format!("{}", layer.id));
+            });
+
+            Self::ui_layer_blend(ui, &layer.id, &mut layer.blend);
+        });
+    }
+    /*
+    fn target_layer(&self) -> Option<LayerID> {
+        let id = self.cur_document?;
+        // Selected layer of the currently focused document, if any
+        self.document_interfaces.get(&id)?.cur_layer
     }
     fn ui_layer_iter(
         ui: &mut egui::Ui,
@@ -308,7 +268,7 @@ impl DocumentUserInterface {
                 }
             });
         }
-    }
+    }*/
     pub fn ui(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("file").show(&ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -425,28 +385,49 @@ impl DocumentUserInterface {
             ui.horizontal(|ui| {
                 if ui.button("➕").clicked() {
                     let layer = StrokeLayer::default();
+                    let new_weak_id = layer.id.weak();
                     if let Some(selected) = document_interface.cur_layer {
-                        document.layers.insert_layer_at(selected, layer);
+                        let layers = document.layers_mut();
+                        let selected_index = layers
+                            .iter()
+                            .enumerate()
+                            .find(|(_, layer)| layer.id.weak() == selected)
+                            .map(|(idx, _)| idx);
+                        if let Some(index) = selected_index {
+                            // Insert atop selected index
+                            document.layers_mut().insert(index + 1, layer)
+                        } else {
+                            // Selected layer not found! Just insert at top
+                            document.layers_mut().push(layer)
+                        }
                     } else {
-                        document.layers.insert_layer(layer);
+                        document.layers_mut().push(layer)
                     }
+                    // Select the new layer
+                    document_interface.cur_layer = Some(new_weak_id);
                 }
-                if ui.button("🗀").clicked() {
-                    let group = GroupLayer::default();
-                    if let Some(selected) = document_interface.cur_layer {
-                        document.layers.insert_layer_at(selected, group);
-                    } else {
-                        document.layers.insert_layer(group);
-                    }
-                }
+
+                let folder_button = egui::Button::new("🗀");
+                ui.add_enabled(false, folder_button);
+
                 let _ = ui.button("⤵").on_hover_text("Merge down");
                 if ui.button("✖").on_hover_text("Delete layer").clicked() {
-                    if let Some(layer_id) = document_interface.cur_layer.take() {
-                        document.layers.remove(layer_id);
+                    if let Some(selected) = document_interface.cur_layer.take() {
+                        let layers = document.layers_mut();
+                        // Find the index of the selected layer
+                        let selected_index = layers
+                            .iter()
+                            .enumerate()
+                            .find(|(_, layer)| layer.id.weak() == selected)
+                            .map(|(idx, _)| idx);
+                        // Remove, if found
+                        if let Some(idx) = selected_index {
+                            layers.remove(idx);
+                        }
                     }
                 };
             });
-
+            /*
             if let Some(subtree) = document_interface.focused_subtree {
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -455,10 +436,15 @@ impl DocumentUserInterface {
                     }
                     ui.label(format!("Viewing subtree of {subtree}"));
                 });
-            }
+            }*/
 
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
+                let layers = document.layers_mut();
+                for layer in layers.iter_mut().rev() {
+                    Self::layer_edit(ui, document_interface, layer);
+                }
+                /*
                 match document_interface
                     .focused_subtree
                     .and_then(|tree| document.layers.find_mut_children_of(tree))
@@ -474,7 +460,7 @@ impl DocumentUserInterface {
                             &mut document.layers.top_level,
                         );
                     }
-                }
+                }*/
             });
         });
 
