@@ -1181,6 +1181,10 @@ fn listener(
                                 })
                                 .collect();
 
+                            // Unlock before long potentially long awaits.
+                            drop(selections);
+                            drop(documents);
+
                             let write = document_preview.write();
                             let buf = write.get_writeable_buffer().await;
                             let commands =
