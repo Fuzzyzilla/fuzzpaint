@@ -41,10 +41,9 @@ pub mod interface {
         #[format(R32_UINT)]
         pub num_groups: u32,
 
-        // Color and eraser settings
-        // Bool32
         #[format(R32_UINT)]
-        pub eraser: u32,
+        pub size_mul: f32,
+        // Color and eraser settings
         #[format(R32G32B32A32_SFLOAT)]
         pub modulate: [f32; 4],
     }
@@ -85,6 +84,7 @@ pub struct GpuStampTess {
     input_descriptor: Arc<vk::DescriptorSetLayout>,
     output_descriptor: Arc<vk::DescriptorSetLayout>,
     layout: Arc<vk::PipelineLayout>,
+    work_size: u32,
 }
 impl GpuStampTess {
     fn make_layout(
@@ -159,6 +159,7 @@ impl GpuStampTess {
             pipeline,
             input_descriptor,
             output_descriptor,
+            work_size: 1024,
         })
     }
     /// Tessellate some strokes
@@ -167,7 +168,7 @@ impl GpuStampTess {
         &self,
         strokes: &[crate::ImmutableStroke],
     ) -> anyhow::Result<(
-        vulkano::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>,
+        vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
@@ -208,7 +209,7 @@ impl GpuStampTess {
         strokes: &[crate::ImmutableStroke],
         packed_points: vulkano::buffer::subbuffer::Subbuffer<[interface::InputStrokeVertex]>,
     ) -> anyhow::Result<(
-        vulkano::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>,
+        vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
@@ -229,16 +230,15 @@ impl GpuStampTess {
                 ..Default::default()
             },
             strokes.iter().map(|stroke| {
-                const DENSITY: f32 = 2.0;
+                let density = stroke.brush.spacing_px;
 
                 let num_expected_stamps = stroke
                     .points
                     .last()
-                    .map(|last| (last.dist / DENSITY).ceil() as u32)
+                    .map(|last| (last.dist / density).ceil() as u32)
                     .unwrap_or(0);
-                let num_groups = num_expected_stamps.div_ceil(256);
-                let num_expected_stamps = num_groups * 256;
-                let num_expected_verts = (num_expected_stamps) * 6;
+                let num_expected_verts = num_expected_stamps * 6;
+                let num_groups = num_expected_stamps.div_ceil(self.work_size);
 
                 let info = interface::InputStrokeInfo {
                     start_point_idx: point_index_counter,
@@ -248,8 +248,8 @@ impl GpuStampTess {
                     start_group: group_index_counter,
                     num_groups,
                     modulate: stroke.brush.color_modulate,
-                    density: DENSITY,
-                    eraser: if stroke.brush.is_eraser { 1 } else { 0 },
+                    density,
+                    size_mul: stroke.brush.size_mul,
                 };
 
                 log::info!("Stroke {} given workgroups {}..{}", stroke.id, group_index_counter, group_index_counter + num_groups);
@@ -362,7 +362,7 @@ impl GpuStampTess {
                 self.context.queues().compute().queue().clone(),
                 command_buffer,
             )?
-            .then_signal_fence_and_flush()?;
+            .then_signal_semaphore_and_flush()?;
 
         Ok((future, output_verts, output_infos))
     }

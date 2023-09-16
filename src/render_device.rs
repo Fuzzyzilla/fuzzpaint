@@ -383,11 +383,10 @@ impl RenderContext {
             vk::DeviceCreateInfo {
                 enabled_extensions: extensions,
                 enabled_features: vk::Features {
-                    wide_lines: true,
-                    rectangular_lines: true,
                     dual_src_blend: true,
                     dynamic_rendering: true,
                     multi_draw_indirect: true,
+                    maintenance4: true,
                     ..vk::Features::empty()
                 },
                 queue_create_infos: create_infos,

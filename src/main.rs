@@ -365,14 +365,16 @@ pub struct DocumentUserInterface {
 }
 impl Default for DocumentUserInterface {
     fn default() -> Self {
+        let new_brush = brush::Brush::default();
+        let new_document = Document::default();
         Self {
             color: egui::Color32::BLUE,
             //modal_stack: Vec::new(),
-            cur_brush: None,
-            brushes: Vec::new(),
+            cur_brush: Some(new_brush.id().weak()),
+            brushes: vec![new_brush],
 
-            cur_document: None,
-            documents: Vec::new(),
+            cur_document: Some(new_document.id.weak()),
+            documents: vec![new_document],
             document_interfaces: Default::default(),
 
             viewport: egui::Rect {
@@ -697,14 +699,25 @@ impl DocumentUserInterface {
         });
 
         egui::SidePanel::left("Color picker").show(&ctx, |ui| {
+            let mut settings = GLOBALS.get_or_init(Globals::new).settings.write().unwrap();
             ui.label("Color");
             ui.separator();
-
-            egui::color_picker::color_picker_color32(
-                ui,
-                &mut self.color,
-                egui::color_picker::Alpha::OnlyBlend,
+            // Why..
+            let mut color = egui::Rgba::from_rgba_premultiplied(
+                settings.color_modulate[0],
+                settings.color_modulate[1],
+                settings.color_modulate[2],
+                settings.color_modulate[3],
             );
+            if egui::color_picker::color_edit_button_rgba(
+                ui,
+                &mut color,
+                egui::color_picker::Alpha::OnlyBlend,
+            )
+            .changed()
+            {
+                settings.color_modulate = color.to_array();
+            };
 
             ui.separator();
             ui.label("Brushes");
@@ -720,8 +733,7 @@ impl DocumentUserInterface {
                         self.brushes.retain(|brush| brush.id() != id);
                     }
                 };
-                let mut erase = false;
-                ui.toggle_value(&mut erase, "Erase");
+                ui.toggle_value(&mut settings.is_eraser, "Erase");
             });
             ui.separator();
 
@@ -763,12 +775,25 @@ impl DocumentUserInterface {
 
                             match brush.style_mut() {
                                 brush::BrushStyle::Stamped { spacing } => {
-                                    let slider = egui::widgets::Slider::new(spacing, 0.1..=200.0)
-                                        .clamp_to_range(true)
-                                        .logarithmic(true)
-                                        .suffix("px");
+                                    let slider = egui::widgets::Slider::new(
+                                        &mut settings.size_mul,
+                                        2.0..=50.0,
+                                    )
+                                    .clamp_to_range(true)
+                                    .logarithmic(true)
+                                    .suffix("px");
 
                                     ui.add(slider);
+
+                                    let slider2 = egui::widgets::Slider::new(
+                                        &mut settings.spacing_px,
+                                        0.1..=10.0,
+                                    )
+                                    .clamp_to_range(true)
+                                    .logarithmic(true)
+                                    .suffix("px");
+
+                                    ui.add(slider2);
                                 }
                                 brush::BrushStyle::Rolled => {}
                             }
@@ -1049,15 +1074,7 @@ mod stroke_renderer {
                 vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
             )?;
 
-            future.wait(None)?;
-            {
-                //let vertices = vertices.read()?;
-                //let indirects = indirects.read()?;
-
-                //log::trace!("{:?}", &vertices.to_vec()[0..20]);
-            };
-
-            let mut matrix = cgmath::Matrix4::from_scale(2.0/super::DOCUMENT_DIMENSION as f32);
+            let mut matrix = cgmath::Matrix4::from_scale(2.0 / super::DOCUMENT_DIMENSION as f32);
             matrix.y *= -1.0;
             matrix.w.x -= 1.0;
             matrix.w.y += 1.0;
@@ -1087,7 +1104,11 @@ mod stroke_renderer {
                     ..Default::default()
                 })?
                 .bind_pipeline_graphics(self.pipeline.clone())
-                .push_constants(self.pipeline.layout().clone(), 0, Into::<[[f32;4];4]>::into(matrix))
+                .push_constants(
+                    self.pipeline.layout().clone(),
+                    0,
+                    Into::<[[f32; 4]; 4]>::into(matrix),
+                )
                 .bind_descriptor_sets(
                     vulkano::pipeline::PipelineBindPoint::Graphics,
                     self.pipeline.layout().clone(),
@@ -1100,7 +1121,8 @@ mod stroke_renderer {
 
             let command_buffer = command_buffer.build()?;
 
-            vk::sync::now(self.context.device().clone())
+            // After tessellation finishes, render.
+            future
                 .then_execute(
                     self.context.queues().graphics().queue().clone(),
                     command_buffer,
@@ -1118,6 +1140,7 @@ pub struct StrokeBrushSettings {
     brush: brush::WeakBrushID,
     /// `a` is flow, NOT opacity, since the stroke is blended continuously not blended as a group.
     color_modulate: [f32; 4],
+    spacing_px: f32,
     size_mul: f32,
     /// If true, the blend constants must be set to generate an erasing effect.
     is_eraser: bool,
@@ -1202,18 +1225,33 @@ impl From<&ImmutableStroke> for WeakStroke {
     }
 }
 
+struct Selections {
+    document: WeakID<Document>,
+    brush: brush::WeakBrushID,
+    layer: WeakID<LayerNode>,
+    stroke_layer: Option<WeakID<LayerNode>>,
+}
+
 // Icky. with a planned client-server architecture, we won't have as many globals -w-;;
 // (well, a server is still a global, but the interface will be much less hacked-)
 struct Globals {
     stroke_layers: tokio::sync::RwLock<StrokeLayerManager>,
     // Todo: LayerGraph (and thus Document) is currently !Sync due to UnsafeCell in the graph implementation.
     documents: tokio::sync::RwLock<Vec<()>>,
+    settings: std::sync::RwLock<StrokeBrushSettings>,
 }
 impl Globals {
     fn new() -> Self {
         Self {
             stroke_layers: tokio::sync::RwLock::new(Default::default()),
             documents: tokio::sync::RwLock::new(Vec::new()),
+            settings: std::sync::RwLock::new(StrokeBrushSettings {
+                brush: brush::todo_brush().id().weak(),
+                color_modulate: [0.0, 0.0, 0.0, 1.0],
+                size_mul: 5.0,
+                spacing_px: 1.0,
+                is_eraser: false,
+            }),
         }
     }
     fn strokes(&'_ self) -> &'_ tokio::sync::RwLock<StrokeLayerManager> {
@@ -1258,6 +1296,7 @@ fn listener(
         brush: brush::todo_brush().id().weak(),
         color_modulate: [0.0, 0.2, 0.5, 1.0],
         size_mul: 5.0,
+        spacing_px: 1.0,
         is_eraser: false,
     };
     runtime.block_on(async {
@@ -1269,7 +1308,12 @@ fn listener(
                         if event.pressed {
                             // Get stroke-in-progress or start anew.
                             let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
-                                brush: brush.clone(),
+                                brush: GLOBALS
+                                    .get_or_init(Globals::new)
+                                    .settings
+                                    .read()
+                                    .unwrap()
+                                    .clone(),
                                 id: Default::default(),
                                 points: Vec::new(),
                             });
@@ -1304,7 +1348,11 @@ fn listener(
                                 log::info!("Tessellating {} strokes", strokes.len());
                                 let write = document_preview.write();
                                 let buf = write.get_writeable_buffer().await;
-                                layer_render.draw(&strokes[strokes.len().saturating_sub(2)..], buf, strokes.len() < 3)?;
+                                layer_render.draw(
+                                    &strokes[strokes.len().saturating_sub(50)..],
+                                    buf,
+                                    true,
+                                )?;
                                 log::trace!("Done tessellating.");
                                 write.swap();
                             }
