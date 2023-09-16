@@ -15,6 +15,7 @@ impl Default for BlendMode {
 }
 
 /// Blend mode for an object, including a mode, opacity modulate, and alpha clip
+#[derive(Copy, Clone)]
 pub struct Blend {
     pub mode: BlendMode,
     pub opacity: f32,
@@ -299,6 +300,7 @@ impl BlendEngine {
         &self,
         context: &crate::render_device::RenderContext,
         background: Arc<vk::ImageView<vk::StorageImage>>,
+        clear_background: bool,
         layers: &[(Blend, Arc<vk::ImageView<vk::StorageImage>>)],
         origin: [u32;2],
         extent: [u32;2],
@@ -333,8 +335,16 @@ impl BlendEngine {
         let output_set = vk::PersistentDescriptorSet::new(
             context.allocators().descriptor_set(),
             self.shader_layout.set_layouts()[shaders::OUTPUT_IMAGE_SET as usize].clone(),
-            [vk::WriteDescriptorSet::image_view(0, background)],
+            [vk::WriteDescriptorSet::image_view(0, background.clone())],
         )?;
+        if clear_background {
+            // Hmmm... The clearing of the whole image kinda breaks the contract, but not
+            // much for me to do :V
+            commands.clear_color_image(vk::ClearColorImageInfo {
+                clear_value: [0.0;4].into(),
+                ..vulkano::command_buffer::ClearColorImageInfo::image(background.image().clone())
+            })?;
+        }
         commands.bind_descriptor_sets(
             vulkano::pipeline::PipelineBindPoint::Compute,
             self.shader_layout.clone(),

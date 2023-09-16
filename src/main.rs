@@ -258,8 +258,8 @@ impl DocumentUserInterface {
     }*/
     pub fn ui(&mut self, ctx: &egui::Context) {
         let globals = GLOBALS.get_or_init(Globals::new);
-        let mut documents = globals.documents().blocking_write();
         let mut selections = globals.selections().blocking_write();
+        let mut documents = globals.documents().blocking_write();
         egui::TopBottomPanel::top("file").show(&ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
@@ -643,7 +643,7 @@ mod stroke_renderer {
     ///  * Caching tesselation output
     pub struct RenderData {
         image: Arc<vk::StorageImage>,
-        view: Arc<vk::ImageView<vk::StorageImage>>,
+        pub view: Arc<vk::ImageView<vk::StorageImage>>,
     }
 
     use crate::vk;
@@ -795,7 +795,7 @@ mod stroke_renderer {
             })
         }
         /// Allocate a new RenderData object. Initial contents are undefined!
-        pub fn empty_render_data(&self) -> anyhow::Result<RenderData> {
+        pub fn uninit_render_data(&self) -> anyhow::Result<RenderData> {
             let image = vk::StorageImage::with_usage(
                 self.context.allocators().memory(),
                 vulkano::image::ImageDimensions::Dim2d {
@@ -823,9 +823,9 @@ mod stroke_renderer {
         pub fn draw(
             &self,
             strokes: &[super::ImmutableStroke],
-            renderbuf: Arc<vk::ImageView<vk::StorageImage>>,
+            renderbuf: &RenderData,
             clear: bool,
-        ) -> AnyResult<()> {
+        ) -> AnyResult<vk::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>> {
             let (future, vertices, indirects) = self.gpu_tess.tess(strokes)?;
             let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
                 self.context.allocators().command_buffer(),
@@ -854,7 +854,7 @@ mod stroke_renderer {
                             },
                             store_op: vulkano::render_pass::StoreOp::Store,
                             ..vulkano::command_buffer::RenderingAttachmentInfo::image_view(
-                                renderbuf.clone(),
+                                renderbuf.view.clone(),
                             )
                         },
                     )],
@@ -881,15 +881,12 @@ mod stroke_renderer {
             let command_buffer = command_buffer.build()?;
 
             // After tessellation finishes, render.
-            future
+            Ok(future
                 .then_execute(
                     self.context.queues().graphics().queue().clone(),
                     command_buffer,
                 )?
-                .then_signal_fence_and_flush()?
-                .wait(None)?;
-
-            Ok(())
+                .then_signal_semaphore_and_flush()?)
         }
     }
 }
@@ -1052,10 +1049,11 @@ fn listener(
 
     let mut manager = StrokeLayerManager::default();
     let layer_render = stroke_renderer::StrokeLayerRenderer::new(renderer.clone())?;
+    let blend = blend::BlendEngine::new(renderer.device().clone())?;
 
     let mut current_stroke = None::<Stroke>;
     runtime.block_on(async {
-        'guh: loop {
+        loop {
             match event_stream.recv().await {
                 Ok(event_frame) => {
                     let matrix = { document_preview.read().get_matrix() }.invert().unwrap();
@@ -1063,6 +1061,15 @@ fn listener(
 
                     let selections = globals.selections().read().await;
                     let documents = globals.documents().read().await;
+
+                    let Some(document) = selections.cur_document.and_then(|selection| {
+                        documents
+                            .iter()
+                            .find(|document| document.id.weak() == selection)
+                    }) else {
+                        // No document to work on.
+                        continue;
+                    };
 
                     let Some(layer) = selections
                         .cur_document
@@ -1072,9 +1079,8 @@ fn listener(
                         // No layer to work on
                         continue;
                     };
-
                     let layer_data = manager.layers.entry(layer).or_insert_with(|| {
-                        let render_data = match layer_render.empty_render_data() {
+                        let render_data = match layer_render.uninit_render_data() {
                             Ok(d) => Some(d),
                             Err(e) => {
                                 log::warn!("Failed to create render data");
@@ -1086,6 +1092,8 @@ fn listener(
                             render_data,
                         }
                     });
+
+                    let mut layer_needs_redraw = false;
 
                     for event in event_frame.iter() {
                         if event.pressed {
@@ -1122,19 +1130,48 @@ fn listener(
                                 // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
                                 let immutable: ImmutableStroke = stroke.into();
                                 layer_data.strokes.push(immutable);
-
-                                if let Some(buf) = layer_data.render_data.as_ref() {
-                                    let write = document_preview.write();
-                                    let buf = write.get_writeable_buffer().await;
-                                    layer_render.draw(
-                                        &layer_data.strokes
-                                            [layer_data.strokes.len().saturating_sub(50)..],
-                                        buf,
-                                        true,
-                                    )?;
-                                    write.swap();
-                                }
+                                layer_needs_redraw = true;
                             }
+                        }
+                    }
+                    if layer_needs_redraw {
+                        if let Some(buf) = layer_data.render_data.as_ref() {
+                            let future = layer_render.draw(
+                                &layer_data.strokes,
+                                buf,
+                                layer_data.strokes.len() == 1,
+                            )?;
+
+                            let blend_info: Vec<_> = document
+                                .layer_top_level
+                                .iter()
+                                .filter_map(|layer| {
+                                    Some((
+                                        layer.blend.clone(),
+                                        manager
+                                            .layers
+                                            .get(&layer.id.weak())?
+                                            .render_data
+                                            .as_ref()?
+                                            .view
+                                            .clone(),
+                                    ))
+                                })
+                                .collect();
+
+                            let write = document_preview.write();
+                            let buf = write.get_writeable_buffer().await;
+                            let commands =
+                                blend.blend(&renderer, buf, true, &blend_info, [0; 2], [0; 2])?;
+                            future
+                                .then_execute(
+                                    renderer.queues().compute().queue().clone(),
+                                    commands,
+                                )?
+                                .then_signal_fence_and_flush()?
+                                .await?;
+
+                            write.swap();
                         }
                     }
                 }
@@ -1158,8 +1195,6 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let window_surface = window::WindowSurface::new()?;
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
-
-    blend::BlendEngine::new(render_context.device().clone()).unwrap();
 
     GLOBALS.get_or_init(Globals::new);
 
