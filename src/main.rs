@@ -1028,24 +1028,10 @@ impl Globals {
 }
 static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
 
-/// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
-/// behind the Egui content.
-pub trait PreviewRenderProxy {
-    /// Create the render commands for this frame. Assume used resources are borrowed until a matching "render_complete" for this
-    /// frame idx is called.
-    fn render(&mut self, swapchain_image_idx: u32) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>>;
-
-    /// When the future of a previous render has completed
-    fn render_complete(&mut self, idx: u32);
-    fn surface_changed(&mut self, render_surface: &render_device::RenderSurface);
-}
-
 fn listener(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     renderer: Arc<render_device::RenderContext>,
-    document_preview: Arc<
-        parking_lot::RwLock<document_viewport_proxy::DocumentViewportPreviewProxy>,
-    >,
+    document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
 ) -> AnyResult<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -1084,7 +1070,9 @@ fn listener(
         loop {
             match event_stream.recv().await {
                 Ok(event_frame) => {
-                    let matrix = { document_preview.read().get_matrix() }.invert().unwrap();
+                    // Silly silly block_in_place. This will wait at most the time taken to write one pointer. >:V
+                    // Tokio will panic though in order to force good form.
+                    let matrix = document_preview.get_matrix().await.invert().unwrap();
 
                     // Deadlock warning - the interface locks these same two -w-
                     // Make sure they're locked in the same order in both. Whoopsie.
@@ -1203,16 +1191,20 @@ fn listener(
                         // Unlock before long potentially long awaits.
                         drop(documents);
 
-                        let write = document_preview.write();
-                        let buf = write.get_writeable_buffer().await;
-                        let commands =
-                            blend.blend(&renderer, buf, true, &blend_info, [0; 2], [0; 2])?;
-                        future
+                        let proxy = document_preview.write().await;
+                        let commands = blend.blend(
+                            &renderer,
+                            proxy.clone(),
+                            true,
+                            &blend_info,
+                            [0; 2],
+                            [0; 2],
+                        )?;
+                        let fence = future
                             .then_execute(renderer.queues().compute().queue().clone(), commands)?
-                            .then_signal_fence_and_flush()?
-                            .await?;
-
-                        write.swap();
+                            .boxed_send()
+                            .then_signal_fence_and_flush()?;
+                        proxy.submit_with_fence(fence);
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
@@ -1243,9 +1235,9 @@ fn main() -> AnyResult<std::convert::Infallible> {
     //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("/home/aspen/Pictures/thesharc.png"))?;
     //future.wait(None)?;
 
-    let document_view = Arc::new(parking_lot::RwLock::new(
-        document_viewport_proxy::DocumentViewportPreviewProxy::new(&render_surface)?,
-    ));
+    let document_view = Arc::new(document_viewport_proxy::DocumentViewportPreviewProxy::new(
+        &render_surface,
+    )?);
     let window_renderer = window_surface.with_render_surface(
         render_surface,
         render_context.clone(),
