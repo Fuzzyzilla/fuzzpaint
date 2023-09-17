@@ -17,6 +17,7 @@ log = "0.4.18"
 parking_lot = "0.12.1"
 rayon = "1.7.0"
 rfd = "0.11.4"
+ron = "0.8.1"
 serde = { version = "1.0.188", features = ["derive", "rc"] }
 smallvec = { version = "1.10.0", features = ["serde"] }
 strum = { version = "0.25.0", features = ["derive"] }

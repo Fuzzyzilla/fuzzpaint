@@ -8,6 +8,7 @@ use brush::BrushStyle;
 use cgmath::{Matrix4, SquareMatrix};
 use vulkano::command_buffer;
 use vulkano_prelude::*;
+pub mod actions;
 pub mod blend;
 pub mod brush;
 pub mod document_viewport_proxy;
@@ -16,7 +17,6 @@ pub mod id;
 pub mod render_device;
 pub mod stylus_events;
 pub mod tess;
-pub mod actions;
 use blend::{Blend, BlendMode};
 
 pub use id::{FuzzID, WeakID};
@@ -30,6 +30,49 @@ const DOCUMENT_DIMENSION: u32 = 1024;
 const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 use anyhow::Result as AnyResult;
+
+pub struct GlobalHotkeys {
+    failed_to_load: bool,
+    actions_to_keys: actions::hotkeys::ActionsToKeys,
+    keys_to_actions: actions::hotkeys::KeysToActions,
+}
+impl GlobalHotkeys {
+    pub fn load_or_default(path: &std::path::Path) -> Self {
+        use actions::hotkeys::*;
+        let mappings: anyhow::Result<(ActionsToKeys, KeysToActions)> = try_block::try_block! {
+            let string = std::fs::read_to_string(path)?;
+            let actions_to_keys : ActionsToKeys = ron::from_str(&string)?;
+            let keys_to_actions : KeysToActions = (&actions_to_keys).try_into()?;
+
+            Ok((actions_to_keys,keys_to_actions))
+        };
+
+        let failed_to_load = mappings.is_err();
+
+        let (actions_to_keys, keys_to_actions) = mappings.unwrap_or_else(|e| {
+            log::warn!("Hotkeys weren't available, defaulting:\n{e:?}");
+            let default = ActionsToKeys::default();
+            // Default action map is reversable - this is assured by the default impl when debugging.
+            let reverse = (&default).try_into().unwrap();
+
+            (default, reverse)
+        });
+
+        Self {
+            failed_to_load,
+            keys_to_actions,
+            actions_to_keys,
+        }
+    }
+    pub fn save(&self, to_path: &std::path::Path) -> anyhow::Result<()> {
+        let writer = std::io::BufWriter::new(std::fs::File::create(to_path)?);
+        Ok(ron::ser::to_writer_pretty(
+            writer,
+            &self.actions_to_keys,
+            Default::default(),
+        )?)
+    }
+}
 
 pub struct StrokeLayer {
     id: FuzzID<Self>,

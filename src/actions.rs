@@ -10,7 +10,7 @@
 pub mod hotkeys;
 
 #[derive(
-    serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq, strum::AsRefStr, Clone, Copy,
+    serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq, strum::AsRefStr, Clone, Copy, Debug
 )]
 pub enum Action {
     Undo,

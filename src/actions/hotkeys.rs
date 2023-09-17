@@ -15,7 +15,7 @@ pub trait HotkeyShadow {
     fn shadows(&self, other: &Self::Other) -> bool;
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq, Clone, Debug)]
 pub struct KeyboardHotkey {
     pub ctrl: bool,
     pub alt: bool,
@@ -36,13 +36,13 @@ impl HotkeyShadow for KeyboardHotkey {
     }
 }
 /// Todo: how to identify a pad across program invocations?
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug)]
 pub struct PadID;
 /// Todo: how to identify a pen across program invocations?
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug)]
 pub struct PenID;
 /// Pads are not yet implemented, but looking forward:
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug)]
 pub struct PadHotkey {
     /// Which tablet does this come from? (if multiple)
     pub pad: PadID,
@@ -60,7 +60,7 @@ impl HotkeyShadow for PadHotkey {
 /// Pens are not yet implemented, but looking forward:
 /// Allows many pens, and different functionality per-pen
 /// depending on which pad it is interacting with. (wacom functionality)
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug)]
 pub struct PenHotkey {
     /// Which tablet does this come from? (if multiple)
     pub pad: PadID,
@@ -102,7 +102,7 @@ impl HotkeyCollection {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub enum AnyHotkey {
     Key(KeyboardHotkey),
     Pad(PadHotkey),
@@ -261,9 +261,11 @@ impl Default for ActionsToKeys {
 
 /// Derived from ActionsToKeys, maps each hotkey onto at most one action.
 pub struct KeysToActions(std::collections::HashMap<AnyHotkey, super::Action>);
+#[derive(thiserror::Error, Debug)]
 pub enum KeysToActionsError {
     /// A single key was bound to multiple actions.
     /// Only the first two encountered (in arbitrary order) are reported.
+    #[error("Hotkey {key:?} used for more than one action: {actions:?}")]
     DuplicateBinding {
         key: AnyHotkey,
         actions: [super::Action; 2],
