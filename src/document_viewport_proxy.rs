@@ -126,7 +126,8 @@ impl DocumentViewportPreviewProxy {
             vk::Format::R16G16B16A16_SFLOAT,
             vk::ImageUsage::COLOR_ATTACHMENT
                 | vk::ImageUsage::SAMPLED
-                | vk::ImageUsage::TRANSFER_DST,
+                | vk::ImageUsage::TRANSFER_DST
+                | vk::ImageUsage::STORAGE,
             vk::ImageCreateFlags::empty(),
             [render_surface.context().queues().graphics().idx()],
         )?;

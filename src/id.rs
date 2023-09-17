@@ -16,7 +16,12 @@ pub struct FuzzID<T: std::any::Any> {
     // Namespace marker
     _phantom: std::marker::PhantomData<T>,
 }
-
+impl<T: std::any::Any> std::cmp::PartialEq<FuzzID<T>> for FuzzID<T> {
+    fn eq(&self, other: &FuzzID<T>) -> bool {
+        self.weak() == other.weak()
+    }
+}
+impl<T: std::any::Any> std::cmp::Eq for FuzzID<T>{}
 impl<T: std::any::Any> std::cmp::PartialEq<WeakID<T>> for &FuzzID<T> {
     fn eq(&self, other: &WeakID<T>) -> bool {
         self.weak() == *other
