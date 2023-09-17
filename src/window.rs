@@ -134,7 +134,9 @@ impl WindowRenderer {
             use winit::event::{Event, WindowEvent};
 
             //Weird ownership problems here.
-            let Some(event) = event.to_static() else {return};
+            let Some(event) = event.to_static() else {
+                return;
+            };
             self.egui_ctx.push_winit_event(&event);
 
             match event {
@@ -247,8 +249,9 @@ impl WindowRenderer {
         // Free up resources from the last time this frame index was rendered
         // Todo: call much much sooner.
         let preview_commands = {
-            self.preview_renderer.render_complete(idx);
-            let preview_commands = self.preview_renderer.render(idx)?;
+            // Safety - we synchronize on the previous frame above.
+            // The commands from last render will be done now :3
+            let preview_commands = unsafe { self.preview_renderer.render(idx)? };
             preview_commands
         };
 

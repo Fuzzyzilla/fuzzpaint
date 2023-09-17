@@ -1031,9 +1031,7 @@ static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
 fn listener(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     renderer: Arc<render_device::RenderContext>,
-    document_preview: Arc<
-        document_viewport_proxy::DocumentViewportPreviewProxy,
-    >,
+    document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
 ) -> AnyResult<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -1073,7 +1071,7 @@ fn listener(
             match event_stream.recv().await {
                 Ok(event_frame) => {
                     // Silly silly block_in_place. This will wait at most the time taken to write one pointer. >:V
-                    // Tokio will panic though in order to force good form. 
+                    // Tokio will panic though in order to force good form.
                     let matrix = document_preview.get_matrix().await.invert().unwrap();
 
                     // Deadlock warning - the interface locks these same two -w-
@@ -1194,8 +1192,14 @@ fn listener(
                         drop(documents);
 
                         let proxy = document_preview.write().await;
-                        let commands =
-                            blend.blend(&renderer, proxy.clone(), true, &blend_info, [0; 2], [0; 2])?;
+                        let commands = blend.blend(
+                            &renderer,
+                            proxy.clone(),
+                            true,
+                            &blend_info,
+                            [0; 2],
+                            [0; 2],
+                        )?;
                         let fence = future
                             .then_execute(renderer.queues().compute().queue().clone(), commands)?
                             .boxed_send()
@@ -1231,7 +1235,9 @@ fn main() -> AnyResult<std::convert::Infallible> {
     //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("/home/aspen/Pictures/thesharc.png"))?;
     //future.wait(None)?;
 
-    let document_view = Arc::new(document_viewport_proxy::DocumentViewportPreviewProxy::new(&render_surface)?);
+    let document_view = Arc::new(document_viewport_proxy::DocumentViewportPreviewProxy::new(
+        &render_surface,
+    )?);
     let window_renderer = window_surface.with_render_surface(
         render_surface,
         render_context.clone(),

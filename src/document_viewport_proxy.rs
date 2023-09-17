@@ -7,10 +7,13 @@ use crate::*;
 pub trait PreviewRenderProxy {
     /// Create the render commands for this frame. Assume used resources are borrowed until a matching "render_complete" for this
     /// frame idx is called.
-    fn render(&self, swapchain_image_idx: u32) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>>;
-
-    /// When the future of a previous render has completed
-    fn render_complete(&self, idx: u32);
+    /// # Safety
+    ///
+    /// the previous render should be finished before the return result is executed.
+    unsafe fn render(
+        &self,
+        swapchain_image_idx: u32,
+    ) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>>;
     fn surface_changed(&self, render_surface: &render_device::RenderSurface);
 }
 
@@ -133,14 +136,12 @@ impl<Future: GpuFuture> SwapAfter<Future> {
     }
 }
 
-// Collection of all the data that is derived from the surface.
-// Everything else is """immutable""", whereas this all needs to be mutable.
+/// Collection of all the data that is derived from the surface.
+/// Everything else is """immutable""", whereas this all needs to be mutable.
+/// When the surface changes, a new one is made and a quick Arc pointer swap is all that is needed.
 struct ProxySurfaceData {
-    framebuffers: Vec<Arc<vk::Framebuffer>>,
     prerecorded_command_buffers: Vec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>,
-    viewport_dimensions: [u32; 2],
     document_to_preview_matrix: cgmath::Matrix4<f32>,
-    transform_matrix: [[f32; 4]; 4],
 }
 impl ProxySurfaceData {
     fn new(
@@ -261,11 +262,8 @@ impl ProxySurfaceData {
         let command_buffers = command_buffers.unwrap();
 
         Self {
-            framebuffers,
             prerecorded_command_buffers: command_buffers,
-            viewport_dimensions,
             document_to_preview_matrix,
-            transform_matrix,
         }
     }
 }
@@ -382,8 +380,6 @@ impl DocumentViewportPreviewProxy {
         let mut no_blend = vk::ColorBlendState::new(1);
         no_blend.attachments[0].blend = None;
 
-        let size = render_surface.extent();
-
         let pipeline = vk::GraphicsPipeline::start()
             .vertex_shader(vertex_shader.clone(), ())
             .fragment_shader(fragment_shader, ())
@@ -459,7 +455,9 @@ impl DocumentViewportPreviewProxy {
         idx
     }
     /// Read the proxy - returns the index of the current read buffer. Internally swaps if a render is complete.
-    /// Safety: A call to `read` implies any use of the read image is complete. This must be synchronized externally!!
+    /// # Safety
+    ///
+    /// A call to `read` implies any use of previously read image is complete. This must be synchronized externally!!
     pub unsafe fn read(&self) -> usize {
         let mut lock = self.swap_after.write().unwrap();
         match &*lock {
@@ -498,24 +496,32 @@ impl DocumentViewportPreviewProxy {
     /// This should not be async (will wait ~the time it takes to write one pointer),
     /// but tokio panics to enforce good form >:V
     pub async fn get_matrix(&self) -> cgmath::Matrix4<f32> {
-        self.surface_data.read().await.clone().document_to_preview_matrix
+        self.surface_data
+            .read()
+            .await
+            .clone()
+            .document_to_preview_matrix
     }
 }
 impl PreviewRenderProxy for DocumentViewportPreviewProxy {
-    fn render(&self, idx: u32) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>> {
+    #[deny(unsafe_op_in_unsafe_fn)]
+    unsafe fn render(&self, idx: u32) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>> {
         let data = self.surface_data.blocking_read().clone();
         let Some(buffer) = data.prerecorded_command_buffers.get(idx as usize) else {
             anyhow::bail!("No buffer found for swapchain image {idx}!")
         };
 
-        // Uh
-        // Protected by waiting on the future in window.rs
-        // Horrible horrible, needs fix asap
+        // Safety: contract forwarded to the contract of this fn.
         Ok(buffer[unsafe { self.read() }].clone())
     }
-    fn render_complete(&self, _idx: u32) {}
     fn surface_changed(&self, render_surface: &render_device::RenderSurface) {
-        let new = Arc::new(ProxySurfaceData::new(&self.render_context, render_surface, &self.render_pass, &self.pipeline, &self.document_image_bindings));
+        let new = Arc::new(ProxySurfaceData::new(
+            &self.render_context,
+            render_surface,
+            &self.render_pass,
+            &self.pipeline,
+            &self.document_image_bindings,
+        ));
         *self.surface_data.blocking_write() = new;
     }
 }
