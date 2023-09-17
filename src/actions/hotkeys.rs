@@ -1,5 +1,5 @@
 //! Collections of hotkeys, for keyboard, mouse, pad, and pen.
-//! 
+//!
 //! Actions can have potentially many hotkeys bound to them, and hotkeys can be bound to at most one action.
 //! Mapping in both directions is useful, but for disk storage the one-to-many relation of Actions to keys is
 //! easier to edit for the end user. Thus, the reverse many-to-one mapping of keys to actions will be built dynamically.
@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub trait HotkeyShadow {
     type Other;
     /// Returns true if this event is "more specific" than the other.
-    /// i.e., uses the same key but has stricter modifiers, or same pad differnt key.
+    /// i.e., uses the same key but has stricter modifiers, or same pad different key.
     /// *Not assymetric* - a.shadows(b) and b.shadows(a) are both allowed to return true.
     /// In that case, it makes sense to shadow the older one and favor the new.
     fn shadows(&self, other: &Self::Other) -> bool;
@@ -17,13 +17,13 @@ pub trait HotkeyShadow {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct KeyboardHotkey {
-    pub ctrl : bool,
-    pub alt : bool,
-    pub shift : bool,
-    pub key : winit::event::VirtualKeyCode,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub key: winit::event::VirtualKeyCode,
 }
 impl KeyboardHotkey {
-    /// Get an arbitrary score of how specific this key is - 
+    /// Get an arbitrary score of how specific this key is -
     /// Hotkeys with higher specificity shadow those with lower.
     pub fn specificity(&self) -> u8 {
         self.ctrl as u8 + self.alt as u8 + self.shift as u8
@@ -104,6 +104,125 @@ impl HotkeyShadow for AnyHotkey {
 /// Maps each action onto potentially many hotkeys.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ActionsToKeys(std::collections::HashMap<super::Action, HotkeyCollection>);
+impl Default for ActionsToKeys {
+    fn default() -> Self {
+        use winit::event::VirtualKeyCode;
+        let mut keys = std::collections::HashMap::new();
+        keys.insert(
+            super::Action::Undo,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
+                    alt: false,
+                    ctrl: true,
+                    shift: false,
+                    key: VirtualKeyCode::Z,
+                }])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        keys.insert(
+            super::Action::Redo,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([
+                    KeyboardHotkey {
+                        alt: false,
+                        ctrl: true,
+                        shift: false,
+                        key: VirtualKeyCode::Y,
+                    },
+                    KeyboardHotkey {
+                        alt: false,
+                        ctrl: true,
+                        shift: true,
+                        key: VirtualKeyCode::Z,
+                    },
+                ])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        keys.insert(
+            super::Action::ViewportPan,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
+                    alt: false,
+                    ctrl: false,
+                    shift: false,
+                    key: VirtualKeyCode::Space,
+                }])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        keys.insert(
+            super::Action::ViewportScrub,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
+                    alt: false,
+                    ctrl: true,
+                    shift: false,
+                    key: VirtualKeyCode::Space,
+                }])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        keys.insert(
+            super::Action::LayerNew,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
+                    alt: false,
+                    ctrl: true,
+                    shift: false,
+                    key: VirtualKeyCode::T,
+                }])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        keys.insert(
+            super::Action::LayerDelete,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
+                    alt: false,
+                    ctrl: false,
+                    shift: false,
+                    key: VirtualKeyCode::Delete,
+                }])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        keys.insert(
+            super::Action::LayerUp,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
+                    alt: false,
+                    ctrl: true,
+                    shift: false,
+                    key: VirtualKeyCode::Up,
+                }])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        keys.insert(
+            super::Action::LayerDown,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
+                    alt: false,
+                    ctrl: true,
+                    shift: false,
+                    key: VirtualKeyCode::Down,
+                }])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        Self(keys)
+    }
+}
 
 /// Derived from ActionsToKeys, maps each hotkey onto at most one action.
 pub struct KeysToActions(std::collections::HashMap<AnyHotkey, super::Action>);

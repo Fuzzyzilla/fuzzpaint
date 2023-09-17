@@ -1,7 +1,7 @@
 //! # Actions API
-//! 
+//!
 //! (certainly inspired by Godot's `Input`!)
-//! 
+//!
 //! Provides an `ActionStream` to be written into by many asynchronous hotkey sources.
 //! Many `ActionListener`s can then be attatched, which maintain their own state. These
 //! listeners provide `ActionFrame`s that describe, on a per-listener basis, which actions
@@ -138,7 +138,7 @@ impl ActionFrame {
     /// For actions that trigger once on press - like undo.
     /// Will return multiple counts if the OS repeats the key, +1 on the releasing edge.
     ///
-    /// If the action has ever become shadowed in it's lifetime, it will stop
+    /// If the action has ever became shadowed in it's lifetime, it will stop
     /// counting triggers permanently until released and repressed.
     pub fn action_trigger_count(&self, action: Action) -> usize {
         let mut count = 0;
@@ -150,7 +150,9 @@ impl ActionFrame {
 
         for event in self.actions.iter() {
             // Skip unrelated events
-            if event.1 != action {continue};
+            if event.1 != action {
+                continue;
+            };
 
             // Tiny state machine - if shadowed, we only care about release events.
             if is_ever_shadowed {
@@ -166,7 +168,7 @@ impl ActionFrame {
                     ActionEvent::Release => count += 1,
                     // Begin shadowing
                     ActionEvent::Shadowed => is_ever_shadowed = true,
-                    _ => ()
+                    _ => (),
                 }
             }
         }
@@ -183,7 +185,9 @@ impl ActionFrame {
 
         for event in self.actions.iter() {
             // skip unrelated events
-            if event.1 != action {continue}
+            if event.1 != action {
+                continue;
+            }
 
             match event.0 {
                 ActionEvent::Press => is_held = true,
@@ -203,21 +207,21 @@ impl ActionFrame {
             match action {
                 (ActionEvent::Press, action) => {
                     future.held.insert(*action);
-                },
+                }
                 (ActionEvent::Release, action) => {
                     // Upon release, shadow and ever_shadowed state get reset.
                     future.held.remove(action);
                     future.shadowed.remove(action);
                     future.was_ever_shadowed.remove(action);
-                },
+                }
                 (ActionEvent::Repeat, action) => {
                     // Shouldn't be necessary, but just in case!
                     future.held.insert(*action);
-                },
+                }
                 (ActionEvent::Shadowed, action) => {
                     future.shadowed.insert(*action);
                     future.was_ever_shadowed.insert(*action);
-                },
+                }
                 (ActionEvent::Unshadowed, action) => {
                     future.shadowed.remove(action);
                     // Leave `was_ever_shadowed`
