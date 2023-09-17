@@ -6,6 +6,15 @@
 
 use std::sync::Arc;
 
+pub trait HotkeyShadow {
+    type Other;
+    /// Returns true if this event is "more specific" than the other.
+    /// i.e., uses the same key but has stricter modifiers, or same pad differnt key.
+    /// *Not assymetric* - a.shadows(b) and b.shadows(a) are both allowed to return true.
+    /// In that case, it makes sense to shadow the older one and favor the new.
+    fn shadows(&self, other: &Self::Other) -> bool;
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct KeyboardHotkey {
     pub ctrl : bool,
@@ -13,11 +22,24 @@ pub struct KeyboardHotkey {
     pub shift : bool,
     pub key : winit::event::VirtualKeyCode,
 }
+impl KeyboardHotkey {
+    /// Get an arbitrary score of how specific this key is - 
+    /// Hotkeys with higher specificity shadow those with lower.
+    pub fn specificity(&self) -> u8 {
+        self.ctrl as u8 + self.alt as u8 + self.shift as u8
+    }
+}
+impl HotkeyShadow for KeyboardHotkey {
+    type Other = Self;
+    fn shadows(&self, other: &Self::Other) -> bool {
+        other.key == self.key && (other.specificity() <= self.specificity())
+    }
+}
 /// Todo: how to identify a pad across program invocations?
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PadID;
 /// Todo: how to identify a pen across program invocations?
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PenID;
 /// Pads are not yet implemented, but looking forward:
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -28,6 +50,12 @@ pub struct PadHotkey {
     pub layer: u32,
     /// Which key index?
     pub key: u32,
+}
+impl HotkeyShadow for PadHotkey {
+    type Other = Self;
+    fn shadows(&self, other: &Self::Other) -> bool {
+        other.pad == self.pad && other.layer == self.layer
+    }
 }
 /// Pens are not yet implemented, but looking forward:
 /// Allows many pens, and different functionality per-pen
@@ -40,6 +68,12 @@ pub struct PenHotkey {
     pub pen: PenID,
     /// Which button index?
     pub key: u32,
+}
+impl HotkeyShadow for PenHotkey {
+    type Other = Self;
+    fn shadows(&self, other: &Self::Other) -> bool {
+        other.pad == self.pad && other.pad == self.pad
+    }
 }
 /// A collection of many various hotkeys. Contained as Arc'd slices,
 /// as it is not intended to change frequently.
@@ -54,6 +88,18 @@ pub enum AnyHotkey {
     Key(KeyboardHotkey),
     Pad(PadHotkey),
     Pen(PenHotkey),
+}
+impl HotkeyShadow for AnyHotkey {
+    type Other = Self;
+    fn shadows(&self, other: &Self::Other) -> bool {
+        match (self, other) {
+            (AnyHotkey::Key(k1), AnyHotkey::Key(k2)) => k1.shadows(k2),
+            (AnyHotkey::Pad(k1), AnyHotkey::Pad(k2)) => k1.shadows(k2),
+            (AnyHotkey::Pen(k1), AnyHotkey::Pen(k2)) => k1.shadows(k2),
+            // Different types do not shadow each other
+            _ => false,
+        }
+    }
 }
 /// Maps each action onto potentially many hotkeys.
 #[derive(serde::Serialize, serde::Deserialize)]
