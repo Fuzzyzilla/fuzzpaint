@@ -52,12 +52,14 @@ void main() {
     // however, checking for that wouldn't save any work, so no special case for it
     #endif
 
+    vec4 bg = unmultiply(imageLoad(backgroundImage, coordinate));
+
     vec4 result = MODE_FUNC(
         unmultiply(inputColor),
-        unmultiply(imageLoad(backgroundImage, coordinate))
+        bg
     );
 
     // Store result into background as premultipled
     // TODO: clip
-    imageStore(backgroundImage, coordinate, vec4(result.rgb, 1.0) * result.a);
+    imageStore(backgroundImage, coordinate, vec4(result.rgb, 1.0) * (clip ? bg.a : result.a));
 }

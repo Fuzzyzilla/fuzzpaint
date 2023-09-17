@@ -1165,6 +1165,10 @@ fn listener(
                             }
                         }
                     }
+
+                    // Unlock before long potentially long compute.
+                    drop(selections);
+
                     if layer_needs_redraw {
                         // Delete render_data if empty.
                         // Create if render_data absent and layer not empty.
@@ -1197,7 +1201,6 @@ fn listener(
                             .collect();
 
                         // Unlock before long potentially long awaits.
-                        drop(selections);
                         drop(documents);
 
                         let write = document_preview.write();
