@@ -238,6 +238,11 @@ impl WindowRenderer {
                 Ok(r) => r,
             };
 
+        let commands = self.egui_ctx.build_commands(idx);
+
+        //Wait for previous frame to end. (required for safety of preview render proxy)
+        self.last_frame_fence.take().map(|fence| fence.wait(None));
+
         // Lmao
         // Free up resources from the last time this frame index was rendered
         // Todo: call much much sooner.
@@ -246,10 +251,6 @@ impl WindowRenderer {
             let preview_commands = self.preview_renderer.render(idx)?;
             preview_commands
         };
-        let commands = self.egui_ctx.build_commands(idx);
-
-        //Wait for previous frame to end.
-        self.last_frame_fence.take().map(|fence| fence.wait(None));
 
         let render_complete = match commands {
             Some((Some(transfer), draw)) => {

@@ -1072,7 +1072,9 @@ fn listener(
         loop {
             match event_stream.recv().await {
                 Ok(event_frame) => {
-                    let matrix = document_preview.get_matrix().invert().unwrap();
+                    // Silly silly block_in_place. This will wait at most the time taken to write one pointer. >:V
+                    // Tokio will panic though in order to force good form. 
+                    let matrix = document_preview.get_matrix().await.invert().unwrap();
 
                     // Deadlock warning - the interface locks these same two -w-
                     // Make sure they're locked in the same order in both. Whoopsie.

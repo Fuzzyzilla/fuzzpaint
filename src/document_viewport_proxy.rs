@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::*;
 
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
@@ -131,6 +133,143 @@ impl<Future: GpuFuture> SwapAfter<Future> {
     }
 }
 
+// Collection of all the data that is derived from the surface.
+// Everything else is """immutable""", whereas this all needs to be mutable.
+struct ProxySurfaceData {
+    framebuffers: Vec<Arc<vk::Framebuffer>>,
+    prerecorded_command_buffers: Vec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>,
+    viewport_dimensions: [u32; 2],
+    document_to_preview_matrix: cgmath::Matrix4<f32>,
+    transform_matrix: [[f32; 4]; 4],
+}
+impl ProxySurfaceData {
+    fn new(
+        context: &Arc<render_device::RenderContext>,
+        render_surface: &render_device::RenderSurface,
+        render_pass: &Arc<vk::RenderPass>,
+        pipeline: &Arc<vk::GraphicsPipeline>,
+        document_image_bindings: &[Arc<vk::PersistentDescriptorSet>; 2],
+    ) -> Self {
+        let viewport_dimensions = render_surface.extent();
+        let margin = 25.0;
+        //Total size, to "fit" image. Use the smallest of both dimensions.
+        let image_size_px =
+            viewport_dimensions[0].min(viewport_dimensions[1]) as f32 - (2.0 * margin);
+        let x = (viewport_dimensions[0] as f32 - image_size_px) / 2.0;
+        let y = (viewport_dimensions[1] as f32 - image_size_px) / 2.0;
+        let document_to_preview_matrix =
+            Matrix4::from_translation(cgmath::Vector3 { x, y, z: 0.0 })
+                * Matrix4::from_scale(image_size_px as f32);
+
+        let transform_matrix = cgmath::ortho(
+            0.0,
+            viewport_dimensions[0] as f32,
+            viewport_dimensions[1] as f32,
+            0.0,
+            -1.0,
+            1.0,
+        ) * document_to_preview_matrix;
+
+        let transform_matrix: [[f32; 4]; 4] = transform_matrix.into();
+
+        let framebuffers: AnyResult<Vec<_>> = render_surface
+            .swapchain_images()
+            .iter()
+            .map(|image| -> AnyResult<_> {
+                // Todo: duplication of view resources.
+                let view = vk::ImageView::new_default(image.clone())?;
+
+                let framebuffer = vk::Framebuffer::new(
+                    render_pass.clone(),
+                    vk::FramebufferCreateInfo {
+                        attachments: vec![view],
+                        ..Default::default()
+                    },
+                );
+
+                Ok(framebuffer?)
+            })
+            .collect();
+        let framebuffers = framebuffers.unwrap();
+
+        let command_buffers: AnyResult<Vec<_>> = framebuffers
+            .iter()
+            .map(
+                |framebuffer| -> AnyResult<[Arc<vk::PrimaryAutoCommandBuffer>; 2]> {
+                    let command_buffers = [
+                        vk::AutoCommandBufferBuilder::primary(
+                            context.allocators().command_buffer(),
+                            context.queues().graphics().idx(),
+                            command_buffer::CommandBufferUsage::MultipleSubmit,
+                        )?,
+                        vk::AutoCommandBufferBuilder::primary(
+                            context.allocators().command_buffer(),
+                            context.queues().graphics().idx(),
+                            command_buffer::CommandBufferUsage::MultipleSubmit,
+                        )?,
+                    ];
+
+                    let mut command_buffers = command_buffers.into_iter().enumerate().map(
+                        |(idx, mut buffer)| -> AnyResult<vk::PrimaryAutoCommandBuffer> {
+                            buffer
+                                .begin_render_pass(
+                                    vk::RenderPassBeginInfo {
+                                        clear_values: vec![Some([0.05, 0.05, 0.05, 1.0].into())],
+                                        ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
+                                    },
+                                    command_buffer::SubpassContents::Inline,
+                                )?
+                                .bind_pipeline_graphics(pipeline.clone())
+                                .bind_descriptor_sets(
+                                    vulkano::pipeline::PipelineBindPoint::Graphics,
+                                    pipeline.layout().clone(),
+                                    0,
+                                    vec![document_image_bindings[idx].clone()],
+                                )
+                                .set_viewport(
+                                    0,
+                                    [vk::Viewport {
+                                        depth_range: 0.0..1.0,
+                                        dimensions: [
+                                            viewport_dimensions[0] as f32,
+                                            viewport_dimensions[1] as f32,
+                                        ],
+                                        origin: [0.0; 2],
+                                    }],
+                                )
+                                .push_constants(
+                                    pipeline.layout().clone(),
+                                    0,
+                                    shaders::vertex::Matrix {
+                                        mat: transform_matrix,
+                                    },
+                                )
+                                .draw(6, 1, 0, 0)?
+                                .end_render_pass()?;
+
+                            Ok(buffer.build()?)
+                        },
+                    );
+
+                    Ok([
+                        Arc::new(command_buffers.next().unwrap()?),
+                        Arc::new(command_buffers.next().unwrap()?),
+                    ])
+                },
+            )
+            .collect();
+        let command_buffers = command_buffers.unwrap();
+
+        Self {
+            framebuffers,
+            prerecorded_command_buffers: command_buffers,
+            viewport_dimensions,
+            document_to_preview_matrix,
+            transform_matrix,
+        }
+    }
+}
+
 /// An double-buffering interface between the asynchronous edit->render pipeline of documents
 /// and the synchronous redrawing of the many swapchain images.
 /// (Because dealing with one image is easier than potentially many, as we don't care about excess framerate)
@@ -139,9 +278,11 @@ impl<Future: GpuFuture> SwapAfter<Future> {
 pub struct DocumentViewportPreviewProxy {
     render_context: Arc<render_device::RenderContext>,
 
+    // Double buffer data =========
     document_images: [Arc<vk::ImageView<vk::StorageImage>>; 2],
     document_image_bindings: [Arc<vk::PersistentDescriptorSet>; 2],
 
+    // Sync + Swap data ===========
     /// After this fence is completed, a swap occurs.
     /// If this is not none, it implies both buffers are in use.
     swap_after: std::sync::RwLock<SwapAfter<Box<dyn GpuFuture + Send>>>,
@@ -150,17 +291,12 @@ pub struct DocumentViewportPreviewProxy {
     /// Which buffer is the swapchain reading from?
     read_buf: std::sync::atomic::AtomicU8,
 
+    // Static render data ============
     render_pass: Arc<vk::RenderPass>,
-    // List of framebuffers for the swapchain, lazily created as they're needed.
-    framebuffers: Vec<Arc<vk::Framebuffer>>,
-    prerecorded_command_buffers: Vec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>,
-
-    viewport_dimensions: [u32; 2],
-
     pipeline: Arc<vk::GraphicsPipeline>,
 
-    document_to_preview_matrix: cgmath::Matrix4<f32>,
-    transform_matrix: [[f32; 4]; 4],
+    // Surface-derived render data ===============
+    surface_data: tokio::sync::RwLock<Arc<ProxySurfaceData>>,
 }
 
 impl DocumentViewportPreviewProxy {
@@ -285,143 +421,32 @@ impl DocumentViewportPreviewProxy {
             )?,
         ];
 
-        let margin = 25.0;
+        let surface_data = Arc::new(ProxySurfaceData::new(
+            render_surface.context(),
+            render_surface,
+            &render_pass,
+            &pipeline,
+            &document_image_bindings,
+        ));
 
-        //Total size, to "fit" image. Use the smallest of both dimensions.
-        let image_size_px = size[0].min(size[1]) as f32 - (2.0 * margin);
-        let x = (size[0] as f32 - image_size_px) / 2.0;
-        let y = (size[1] as f32 - image_size_px) / 2.0;
-        let document_to_preview_matrix =
-            Matrix4::from_translation(cgmath::Vector3 { x, y, z: 0.0 })
-                * Matrix4::from_scale(image_size_px as f32);
+        let notify = tokio::sync::Notify::new();
+        // Start as notified - write buffer is available immediately.
+        notify.notify_one();
 
-        let xform = cgmath::ortho(0.0, size[0] as f32, size[1] as f32, 0.0, -1.0, 1.0)
-            * document_to_preview_matrix;
-
-        let mut s = Self {
+        Ok(Self {
             render_context: render_surface.context().clone(),
-            framebuffers: Vec::new(),
-            prerecorded_command_buffers: Vec::new(),
             pipeline,
             render_pass,
-            transform_matrix: xform.into(),
-            document_to_preview_matrix: document_to_preview_matrix,
-            viewport_dimensions: size,
 
             swap_after: SwapAfter::Empty.into(),
             read_buf: 0.into(),
-            write_ready_notify: Default::default(),
+            write_ready_notify: notify,
 
             document_images: document_image_views,
             document_image_bindings,
-        };
-        s.surface_changed(render_surface);
 
-        Ok(s)
-    }
-    fn recalc_matrix(&mut self) {
-        let size = self.viewport_dimensions;
-        let margin = 25.0;
-        //Total size, to "fit" image. Use the smallest of both dimensions.
-        let image_size_px = size[0].min(size[1]) as f32 - (2.0 * margin);
-        let x = (size[0] as f32 - image_size_px) / 2.0;
-        let y = (size[1] as f32 - image_size_px) / 2.0;
-        let document_to_preview_matrix =
-            Matrix4::from_translation(cgmath::Vector3 { x, y, z: 0.0 })
-                * Matrix4::from_scale(image_size_px as f32);
-
-        let xform = cgmath::ortho(0.0, size[0] as f32, size[1] as f32, 0.0, -1.0, 1.0)
-            * document_to_preview_matrix;
-
-        self.document_to_preview_matrix = document_to_preview_matrix;
-        self.transform_matrix = xform.into();
-    }
-    fn record_commandbuffers(&mut self) {
-        //Drop old buffers-- RESOURCES MIGHT STILL BE IN USE ON ANOTHER THREAD!
-        self.prerecorded_command_buffers = Vec::new();
-
-        if self.framebuffers.is_empty() {
-            log::error!("Cannot record commandbuffers with no framebuffers");
-        }
-        let command_buffers: AnyResult<Vec<_>> = self
-            .framebuffers
-            .iter()
-            .map(
-                |framebuffer| -> AnyResult<[vk::PrimaryAutoCommandBuffer; 2]> {
-                    let command_buffers = [
-                        vk::AutoCommandBufferBuilder::primary(
-                            self.render_context.allocators().command_buffer(),
-                            self.render_context.queues().graphics().idx(),
-                            command_buffer::CommandBufferUsage::MultipleSubmit,
-                        )?,
-                        vk::AutoCommandBufferBuilder::primary(
-                            self.render_context.allocators().command_buffer(),
-                            self.render_context.queues().graphics().idx(),
-                            command_buffer::CommandBufferUsage::MultipleSubmit,
-                        )?,
-                    ];
-
-                    let mut command_buffers = command_buffers.into_iter().enumerate().map(
-                        |(idx, mut buffer)| -> AnyResult<vk::PrimaryAutoCommandBuffer> {
-                            buffer
-                                .begin_render_pass(
-                                    vk::RenderPassBeginInfo {
-                                        clear_values: vec![Some([0.05, 0.05, 0.05, 1.0].into())],
-                                        ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
-                                    },
-                                    command_buffer::SubpassContents::Inline,
-                                )?
-                                .bind_pipeline_graphics(self.pipeline.clone())
-                                .bind_descriptor_sets(
-                                    vulkano::pipeline::PipelineBindPoint::Graphics,
-                                    self.pipeline.layout().clone(),
-                                    0,
-                                    vec![self.document_image_bindings[idx].clone()],
-                                )
-                                .set_viewport(
-                                    0,
-                                    [vk::Viewport {
-                                        depth_range: 0.0..1.0,
-                                        dimensions: [
-                                            self.viewport_dimensions[0] as f32,
-                                            self.viewport_dimensions[1] as f32,
-                                        ],
-                                        origin: [0.0; 2],
-                                    }],
-                                )
-                                .push_constants(
-                                    self.pipeline.layout().clone(),
-                                    0,
-                                    shaders::vertex::Matrix {
-                                        mat: self.transform_matrix,
-                                    },
-                                )
-                                .draw(6, 1, 0, 0)?
-                                .end_render_pass()?;
-
-                            Ok(buffer.build()?)
-                        },
-                    );
-
-                    Ok([
-                        command_buffers.next().unwrap()?,
-                        command_buffers.next().unwrap()?,
-                    ])
-                },
-            )
-            .collect();
-
-        match command_buffers {
-            Ok(buffers) => {
-                self.prerecorded_command_buffers = buffers
-                    .into_iter()
-                    .map(|[a, b]| [Arc::new(a), Arc::new(b)])
-                    .collect();
-            }
-            Err(e) => {
-                log::error!("Failed to record preview command buffers: {e:?}");
-            }
-        }
+            surface_data: surface_data.into(),
+        })
     }
     /// Internal use only. After the user's buffer is deemed swappable, the read index in switched over and returned.
     /// Furthermore, the old read buffer is signalled as being writable to any waiting users. New read idx is returned.
@@ -434,7 +459,7 @@ impl DocumentViewportPreviewProxy {
         idx
     }
     /// Read the proxy - returns the index of the current read buffer. Internally swaps if a render is complete.
-    /// A call to `read` implies the last use of the read image is complete. This must be synchronized externally!!
+    /// Safety: A call to `read` implies any use of the read image is complete. This must be synchronized externally!!
     pub unsafe fn read(&self) -> usize {
         let mut lock = self.swap_after.write().unwrap();
         match &*lock {
@@ -469,50 +494,28 @@ impl DocumentViewportPreviewProxy {
             proxy: &self,
         }
     }
-    pub fn get_matrix(&self) -> cgmath::Matrix4<f32> {
-        self.document_to_preview_matrix
+    /// get the document space to window space matrix.
+    /// This should not be async (will wait ~the time it takes to write one pointer),
+    /// but tokio panics to enforce good form >:V
+    pub async fn get_matrix(&self) -> cgmath::Matrix4<f32> {
+        self.surface_data.read().await.clone().document_to_preview_matrix
     }
 }
 impl PreviewRenderProxy for DocumentViewportPreviewProxy {
     fn render(&self, idx: u32) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>> {
-        let Some(buffer) = self.prerecorded_command_buffers.get(idx as usize) else {
+        let data = self.surface_data.blocking_read().clone();
+        let Some(buffer) = data.prerecorded_command_buffers.get(idx as usize) else {
             anyhow::bail!("No buffer found for swapchain image {idx}!")
         };
 
         // Uh
+        // Protected by waiting on the future in window.rs
+        // Horrible horrible, needs fix asap
         Ok(buffer[unsafe { self.read() }].clone())
     }
     fn render_complete(&self, _idx: u32) {}
     fn surface_changed(&self, render_surface: &render_device::RenderSurface) {
-        if render_surface.context().device() != self.pipeline.device() {
-            panic!("Wrong device used to recreate preview proxy!")
-        }
-
-        self.framebuffers = Vec::new();
-        let framebuffers: AnyResult<Vec<_>> = render_surface
-            .swapchain_images()
-            .iter()
-            .map(|image| -> AnyResult<_> {
-                // Todo: duplication of view resources.
-                let view = vk::ImageView::new_default(image.clone())?;
-
-                let framebuffer = vk::Framebuffer::new(
-                    self.render_pass.clone(),
-                    vk::FramebufferCreateInfo {
-                        attachments: vec![view],
-                        ..Default::default()
-                    },
-                );
-
-                Ok(framebuffer?)
-            })
-            .collect();
-
-        self.framebuffers = framebuffers.expect("Failed to create proxy framebuffers.");
-
-        self.viewport_dimensions = render_surface.extent();
-        self.recalc_matrix();
-        //Todo: rebuild pipeline with new format/size, if changed.
-        self.record_commandbuffers();
+        let new = Arc::new(ProxySurfaceData::new(&self.render_context, render_surface, &self.render_pass, &self.pipeline, &self.document_image_bindings));
+        *self.surface_data.blocking_write() = new;
     }
 }
