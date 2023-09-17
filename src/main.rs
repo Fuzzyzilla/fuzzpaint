@@ -350,7 +350,9 @@ impl DocumentUserInterface {
 
                 ui.add(egui::Separator::default().vertical());
 
-                let _ = ui.button("⮪");
+                if ui.button("⮪").clicked() {
+                    selections.undos += 1;
+                };
             });
         });
 
@@ -979,6 +981,7 @@ struct Selections {
     pub document_selections: std::collections::HashMap<WeakID<Document>, DocumentSelections>,
     pub cur_brush: Option<brush::WeakBrushID>,
     pub brush_settings: StrokeBrushSettings,
+    pub undos: u32,
 }
 impl Default for Selections {
     fn default() -> Self {
@@ -993,6 +996,7 @@ impl Default for Selections {
                 spacing_px: 0.75,
                 is_eraser: false,
             },
+            undos: 0,
         }
     }
 }
@@ -1068,7 +1072,10 @@ fn listener(
 
         let mut selections = globals.selections().blocking_write();
         selections.cur_document = Some(default_document);
-        let document_selections = selections.document_selections.entry(default_document).or_default();
+        let document_selections = selections
+            .document_selections
+            .entry(default_document)
+            .or_default();
         document_selections.cur_layer = Some(default_layer);
     }
 
@@ -1081,7 +1088,7 @@ fn listener(
 
                     // Deadlock warning - the interface locks these same two -w-
                     // Make sure they're locked in the same order in both. Whoopsie.
-                    let selections = globals.selections().read().await;
+                    let mut selections = globals.selections().write().await;
                     let documents = globals.documents().read().await;
 
                     let Some(document) = selections.cur_document.and_then(|selection| {
@@ -1101,21 +1108,23 @@ fn listener(
                         // No layer to work on
                         continue;
                     };
-                    let layer_data = manager.layers.entry(layer).or_insert_with(|| {
-                        let render_data = match layer_render.uninit_render_data() {
-                            Ok(d) => Some(d),
-                            Err(e) => {
-                                log::warn!("Failed to create render data");
-                                None
-                            }
-                        };
-                        StrokeLayerData {
-                            strokes: vec![],
-                            render_data,
-                        }
-                    });
+                    let layer_data =
+                        manager
+                            .layers
+                            .entry(layer)
+                            .or_insert_with(|| StrokeLayerData {
+                                strokes: vec![],
+                                render_data: None,
+                            });
 
+                    let undos = std::mem::take(&mut selections.undos);
                     let mut layer_needs_redraw = false;
+                    if undos > 0 {
+                        layer_data
+                            .strokes
+                            .drain(layer_data.strokes.len().saturating_sub(undos as usize)..);
+                        layer_needs_redraw = true;
+                    }
 
                     for event in event_frame.iter() {
                         if event.pressed {
@@ -1157,48 +1166,50 @@ fn listener(
                         }
                     }
                     if layer_needs_redraw {
-                        if let Some(buf) = layer_data.render_data.as_ref() {
-                            let future = layer_render.draw(
-                                &layer_data.strokes[layer_data.strokes.len().saturating_sub(1)..],
-                                buf,
-                                layer_data.strokes.len() == 1,
-                            )?;
-
-                            let blend_info: Vec<_> = document
-                                .layer_top_level
-                                .iter()
-                                .filter_map(|layer| {
-                                    Some((
-                                        layer.blend.clone(),
-                                        manager
-                                            .layers
-                                            .get(&layer.id.weak())?
-                                            .render_data
-                                            .as_ref()?
-                                            .view
-                                            .clone(),
-                                    ))
-                                })
-                                .collect();
-
-                            // Unlock before long potentially long awaits.
-                            drop(selections);
-                            drop(documents);
-
-                            let write = document_preview.write();
-                            let buf = write.get_writeable_buffer().await;
-                            let commands =
-                                blend.blend(&renderer, buf, true, &blend_info, [0; 2], [0; 2])?;
-                            future
-                                .then_execute(
-                                    renderer.queues().compute().queue().clone(),
-                                    commands,
-                                )?
-                                .then_signal_fence_and_flush()?
-                                .await?;
-
-                            write.swap();
+                        // Delete render_data if empty.
+                        // Create if render_data absent and layer not empty.
+                        if layer_data.strokes.len() == 0 {
+                            layer_data.render_data = None;
+                            continue;
+                        } else if layer_data.render_data.is_none() {
+                            // Get or try insert with? owo
+                            layer_data.render_data = Some(layer_render.uninit_render_data()?)
                         }
+                        let buf = layer_data.render_data.as_ref().unwrap();
+
+                        let future = layer_render.draw(&layer_data.strokes, buf, true)?;
+
+                        let blend_info: Vec<_> = document
+                            .layer_top_level
+                            .iter()
+                            .filter_map(|layer| {
+                                Some((
+                                    layer.blend.clone(),
+                                    manager
+                                        .layers
+                                        .get(&layer.id.weak())?
+                                        .render_data
+                                        .as_ref()?
+                                        .view
+                                        .clone(),
+                                ))
+                            })
+                            .collect();
+
+                        // Unlock before long potentially long awaits.
+                        drop(selections);
+                        drop(documents);
+
+                        let write = document_preview.write();
+                        let buf = write.get_writeable_buffer().await;
+                        let commands =
+                            blend.blend(&renderer, buf, true, &blend_info, [0; 2], [0; 2])?;
+                        future
+                            .then_execute(renderer.queues().compute().queue().clone(), commands)?
+                            .then_signal_fence_and_flush()?
+                            .await?;
+
+                        write.swap();
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
