@@ -1,0 +1,239 @@
+#version 440
+
+const uint VERTICES_PER_WORKER = 6;
+const float PI = 3.1415926535897932384;
+
+struct InputStrokeInfo {
+    // Indices into inputStrokeVertices buffer
+    uint start_point_idx;
+    uint num_points;
+
+    // Indices into outputStrokeVertices
+    uint out_vert_offset;
+    uint out_vert_limit;
+
+    // Number of pixels between each stamp
+    float density;
+    // The CPU will dictate how many groups to allocate to this work.
+    // Mesh shaders would make this all nicer ;)
+    uint start_group;
+    uint num_groups;
+
+    float size_mul;
+    // Color and eraser settings
+    vec4 modulate;
+};
+struct InputStrokeVertex {
+    vec2 pos;
+    float pressure;
+    float dist;
+};
+
+// Corresponds to VkDrawIndirectCommand
+const uint OUTPUT_INFO_SIZE = 4;
+const uint OUTPUT_INFO_VERTEX_COUNT = 0;
+const uint OUTPUT_INFO_INSTANCE_COUNT = 1;
+const uint OUTPUT_INFO_FIRST_VERTEX = 2;
+const uint OUTPUT_INFO_FIRST_INSTANCE = 3;
+
+struct OutputStrokeVertex {
+    vec2 pos;
+    vec2 uv;
+    vec4 color;
+    float erase;
+    float pad[3];
+};
+// Input data - corresponding to [crate::ImmutableStroke] and [crate::StrokePoint]
+layout(set = 0, binding = 0) restrict readonly buffer inputStrokeInfo {
+    InputStrokeInfo in_info[];
+};
+layout(set = 0, binding = 1) restrict readonly buffer inputWorkgroupAssignments {
+    uint in_assignments[];
+};
+layout(set = 0, binding = 2) restrict readonly buffer inputStrokeVertices {
+    InputStrokeVertex in_vertices[];
+};
+
+// Input data - corresponding to [tess::TessellatedStrokeInfo] and [tess::TessellatedStrokeVertex]
+// Infos *must* be zeroed beforehand. No way around this ;3
+// We rely on workers performing atomicMax operations into the vertex_count field of these, so they must be pre-init to zero.
+// Dubious whether `coherent` is needed here.
+layout(set = 1, binding = 0) restrict /*readwrite - for atomics*/ buffer outputStrokeInfo {
+    // Should be a multiple of 4 in length.
+    uint out_info_fields[];
+};
+layout(set = 1, binding = 1) restrict writeonly buffer outputStrokeVertices {
+    OutputStrokeVertex out_vertices[];
+};
+
+// Each workgroup works on only one stroke, many workgroups may work on the same stroke.
+// The worker responsible for the first vertex is the "leader"
+layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
+
+vec4 vert_to_simd(in InputStrokeVertex v) {
+    return vec4(
+        v.pos.xy,
+        v.pressure,
+        v.dist
+    );
+}
+InputStrokeVertex simd_to_vert(in vec4 v) {
+    // A yucky icky typo-prone syntax!
+    return InputStrokeVertex (
+        v.xy,
+        v.z,
+        v.w
+    );
+}
+float rand(vec2 co){
+    return fract(sin(dot(co.xy,vec2(12.9898,78.233))) * 43758.5453);
+}
+void main() {
+    /*
+    uint stroke_idx = 0;
+    InputStrokeInfo info;
+    const uint workgroup_idx = gl_WorkGroupID.x;
+    // Binary search for the input stroke this workgroup applies to.
+    uint low = 0, high = in_info.length() - 1;
+    uint bail = 0;
+    while (true) {
+        // I am 5% sure this search has no edge cases. Just in case, plz don't brick my pc:
+        if (low > high || bail++ > 32) return;
+        const uint mid = (low + high) / 2;
+        const InputStrokeInfo mid_info = in_info[mid];
+
+        const bool strictly_less = (mid_info.start_group + mid_info.num_groups) <= workgroup_idx;
+        const bool strictly_greater = mid_info.start_group > workgroup_idx;
+
+        if (strictly_less) {
+            low = mid + 1;
+        } else if (strictly_greater) {
+            high = mid - 1;
+        } else {
+            // We assume there's no gaps, that'd be stupid. :P
+            info = mid_info;
+            stroke_idx = mid;
+            break;
+        }
+    }*/
+    // Collect and verify this workgroup's assignment from the assignment buffer.
+    const uint workgroup_idx = gl_WorkGroupID.x;
+    if (workgroup_idx >= in_assignments.length()) return;
+    const uint stroke_idx = in_assignments[workgroup_idx];
+    if (stroke_idx > in_info.length()) return;
+    const InputStrokeInfo info = in_info[stroke_idx];
+    if (info.num_points <= 2) return;
+
+
+    // 0 at the start of the stroke given by `info`
+    const uint stroke_local_id = (workgroup_idx - info.start_group) * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
+    // Calculate index to write our vertices into
+    const uint local_output_idx = stroke_local_id * VERTICES_PER_WORKER;
+    const uint output_into_idx = local_output_idx + info.out_vert_offset;
+    // Make sure we don't overwrite our local buffer nor overwrite the buffer as a whole.
+    if (local_output_idx >= info.out_vert_limit || output_into_idx >= out_vertices.length()) return;
+    // Make sure we don't overwrite the output infos buffer
+    if (stroke_idx * OUTPUT_INFO_SIZE > out_info_fields.length()) return;
+
+    // One worker per stroke is the global leader, writes the output infos.
+    const bool is_global_leader = stroke_local_id == 0;
+    // One worker per group is the local leader, coordinates writes to vertex_count in infos.
+    const bool is_local_leader = gl_LocalInvocationID.x == 0;
+
+    const float end_dist = in_vertices[info.start_point_idx + info.num_points - 1].dist;
+
+    // const float local_dist = float(stroke_local_id) * (end_dist / float(info.num_groups * gl_WorkGroupSize.x));
+    const float local_dist = float(stroke_local_id) * info.density;
+
+    // Binary search for the vertex this worker starts from
+    // A worker cannot work after the last vertex, so -2 here.
+    uint bail = 0, low = info.start_point_idx, high = info.start_point_idx + info.num_points - 2;
+    uint before_vert = 0;
+    while (true) {
+        if (low > high || bail++ > 32) {
+            return;
+        };
+        const uint mid = (low + high) / 2;
+
+        // Next point exists and is too early
+        // (mid+1 is safe because upper bound is num_points-2)
+        const bool strictly_less = (in_vertices[mid + 1].dist < local_dist);
+        // This point is too far
+        const bool strictly_greater = in_vertices[mid].dist > local_dist;
+
+        if (strictly_less) {
+            low = mid + 1;
+        } else if (strictly_greater) {
+            high = mid - 1;
+        } else {
+            before_vert = mid;
+            break;
+        }
+    }
+
+    // We've now done all the very expensive work to figure out what to work on.
+    // Now to do some bulk work to amortize that expense xP
+    const InputStrokeVertex a_vert = in_vertices[before_vert];
+    const InputStrokeVertex b_vert = in_vertices[before_vert + 1];
+    const vec4 a = vert_to_simd(a_vert);
+    const vec4 b = vert_to_simd(b_vert);
+    // 0.0..1.0 range of where this worker falls between previous and next vert
+    const float factor = (local_dist - a_vert.dist) / (b_vert.dist - a_vert.dist);
+    const InputStrokeVertex interp = simd_to_vert(mix(a, b, factor));
+
+    // Create a stamp
+    const float rotation = rand(interp.pos) * 2.0 * PI;
+    const float radius = mix(info.density, info.size_mul * 0.5, interp.pressure);
+    const vec2 cossin = vec2(cos(rotation), sin(rotation)) * radius;
+    const mat2 rotation_matrix = mat2(cossin.xy, vec2(-cossin.y, cossin.x));
+    const float vertex_erase = 0.0;
+
+    const OutputStrokeVertex topleft = OutputStrokeVertex(
+        rotation_matrix * vec2(-1.0) + interp.pos,
+        vec2(0.0, 1.0),
+        info.modulate,
+        vertex_erase,
+        float[3](0.0, 0.0, 0.0)
+    );
+    const OutputStrokeVertex topright = OutputStrokeVertex(
+        rotation_matrix * vec2(1.0, -1.0) + interp.pos,
+        vec2(1.0, 1.0),
+        info.modulate,
+        vertex_erase,
+        float[3](0.0, 0.0, 0.0)
+    );
+    const OutputStrokeVertex bottomleft = OutputStrokeVertex(
+        rotation_matrix * vec2(-1.0, 1.0) + interp.pos,
+        vec2(0.0, 0.0),
+        info.modulate,
+        vertex_erase,
+        float[3](0.0, 0.0, 0.0)
+    );
+    const OutputStrokeVertex bottomright = OutputStrokeVertex(
+        rotation_matrix * vec2(1.0) + interp.pos,
+        vec2(1.0, 0.0),
+        info.modulate,
+        vertex_erase,
+        float[3](0.0, 0.0, 0.0)
+    );
+
+    // Output two triangles for the stamp
+    out_vertices[output_into_idx + 0] = topleft;
+    out_vertices[output_into_idx + 1] = topright;
+    out_vertices[output_into_idx + 2] = bottomleft;
+
+    out_vertices[output_into_idx + 3] = bottomleft;
+    out_vertices[output_into_idx + 4] = topright;
+    out_vertices[output_into_idx + 5] = bottomright;
+
+
+    // Share with everyone the highest number of vertices written for this stroke
+    atomicMax(out_info_fields[stroke_idx * OUTPUT_INFO_SIZE + OUTPUT_INFO_VERTEX_COUNT], (stroke_local_id + 1) * VERTICES_PER_WORKER);
+
+    if (is_global_leader) {
+        // we do not touch OUTPUT_INFO_VERTEX_COUNT - every group coordinates the calculation of it atomically.
+        out_info_fields[stroke_idx * OUTPUT_INFO_SIZE + OUTPUT_INFO_INSTANCE_COUNT] = 1;
+        out_info_fields[stroke_idx * OUTPUT_INFO_SIZE + OUTPUT_INFO_FIRST_VERTEX] = info.out_vert_offset;
+        out_info_fields[stroke_idx * OUTPUT_INFO_SIZE + OUTPUT_INFO_FIRST_INSTANCE] = 0;
+    }
+}

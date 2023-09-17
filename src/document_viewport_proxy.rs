@@ -35,8 +35,6 @@ mod document_preview_shaders {
 
             void main() {
                 vec4 col = texture(image, uv);
-                col.rgb *= col.rgb;
-                col.rgb *= col.a;
                 color = col;
             }"
         }
@@ -128,7 +126,8 @@ impl DocumentViewportPreviewProxy {
             vk::Format::R16G16B16A16_SFLOAT,
             vk::ImageUsage::COLOR_ATTACHMENT
                 | vk::ImageUsage::SAMPLED
-                | vk::ImageUsage::TRANSFER_DST,
+                | vk::ImageUsage::TRANSFER_DST
+                | vk::ImageUsage::STORAGE,
             vk::ImageCreateFlags::empty(),
             [render_surface.context().queues().graphics().idx()],
         )?;

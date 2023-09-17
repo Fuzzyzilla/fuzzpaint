@@ -7,6 +7,7 @@ pub use vulkano::{
 //Types and such
 pub mod vk {
     pub use vulkano::{
+        DeviceSize,
         buffer::{
             view::{BufferView, BufferViewCreateInfo},
             Buffer, BufferContents, BufferCreateInfo, BufferUsage,

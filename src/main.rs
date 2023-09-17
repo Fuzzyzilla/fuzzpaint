@@ -1,449 +1,59 @@
-#![feature(array_chunks)]
-
+#![feature(portable_simd)]
 use std::sync::Arc;
 mod egui_impl;
 pub mod gpu_err;
 pub mod vulkano_prelude;
 pub mod window;
+use brush::BrushStyle;
 use cgmath::{Matrix4, SquareMatrix};
 use vulkano::command_buffer;
 use vulkano_prelude::*;
+pub mod blend;
+pub mod brush;
 pub mod document_viewport_proxy;
+pub mod gpu_tess;
+pub mod id;
 pub mod render_device;
 pub mod stylus_events;
+pub mod tess;
+use blend::{Blend, BlendMode};
+
+pub use id::{FuzzID, WeakID};
+pub use tess::StrokeTessellator;
+
+/// Obviously will be user specified on a per-document basis, but for now...
+const DOCUMENT_DIMENSION: u32 = 1024;
+/// Premultiplied RGBA16F for interesting effects (negative + overbright colors and alpha) with
+/// more than 11bit per channel precision in the [0,1] range.
+/// Will it be user specified in the future?
+const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 use anyhow::Result as AnyResult;
 
-#[derive(strum::AsRefStr, PartialEq, Eq, strum::EnumIter, Copy, Clone)]
-pub enum BlendMode {
-    Normal,
-    Screen,
-    Multiply,
-}
-impl Default for BlendMode {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
-
-pub struct Blend {
-    mode: BlendMode,
-    opacity: f32,
-    alpha_clip: bool,
-}
-impl Default for Blend {
-    fn default() -> Self {
-        Self {
-            mode: Default::default(),
-            opacity: 1.0,
-            alpha_clip: false,
-        }
-    }
-}
-
-// Collection of pending IDs by type.
-static ID_SERVER: std::sync::OnceLock<
-    parking_lot::RwLock<std::collections::HashMap<std::any::TypeId, std::sync::atomic::AtomicU64>>,
-> = std::sync::OnceLock::new();
-
-/// ID that is unique within this execution of the program.
-/// IDs with different types may share a value but should not be considered equal.
-pub struct FuzzID<T: std::any::Any> {
-    id: u64,
-    // Namespace marker
-    _phantom: std::marker::PhantomData<T>,
-}
-
-//Derivation of these traits fails, for some reason.
-impl<T: std::any::Any> Clone for FuzzID<T> {
-    fn clone(&self) -> Self {
-        FuzzID {
-            id: self.id,
-            _phantom: Default::default(),
-        }
-    }
-}
-impl<T: std::any::Any> Copy for FuzzID<T> {}
-impl<T: std::any::Any> std::cmp::PartialEq for FuzzID<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-impl<T: std::any::Any> std::cmp::Eq for FuzzID<T> {}
-impl<T: std::any::Any> std::hash::Hash for FuzzID<T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::any::TypeId::of::<T>().hash(state);
-        state.write_u64(self.id);
-    }
-}
-
-impl<T: std::any::Any> FuzzID<T> {
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-}
-impl<T: std::any::Any> Default for FuzzID<T> {
-    fn default() -> Self {
-        let map = ID_SERVER.get_or_init(Default::default);
-        let id = {
-            let read = map.upgradable_read();
-            let ty = std::any::TypeId::of::<T>();
-            if let Some(atomic) = read.get(&ty) {
-                //We don't really care about the order things happen in, it just needs
-                //to be unique.
-                atomic.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            } else {
-                // We need to insert into the map - transition to exclusive access
-                let mut write = parking_lot::RwLockUpgradableReadGuard::upgrade(read);
-                // Initialize at 1, return ID 0
-                write.insert(ty, 1.into());
-                0
-            }
-        };
-
-        Self {
-            id,
-            _phantom: Default::default(),
-        }
-    }
-}
-impl<T: std::any::Any> std::fmt::Display for FuzzID<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        //Unwrap here is safe - the rsplit will always return at least one element, even for empty strings.
-        write!(
-            f,
-            "{}#{}",
-            std::any::type_name::<T>().rsplit("::").next().unwrap(),
-            self.id
-        )
-    }
-}
-
-pub struct GroupLayer {
-    name: String,
-
-    /// Some - grouped rendering, None - Passthrough
-    blend: Option<Blend>,
-
-    /// ID that is unique within this execution of the program
-    id: FuzzID<GroupLayer>,
-}
-impl Default for GroupLayer {
-    fn default() -> Self {
-        let id = FuzzID::default();
-        Self {
-            name: format!("Group {}", id.id().wrapping_add(1)),
-            id,
-            blend: None,
-        }
-    }
-}
 pub struct StrokeLayer {
+    id: FuzzID<Self>,
     name: String,
-    blend: Blend,
-
-    /// ID that is unique within this execution of the program
-    id: FuzzID<StrokeLayer>,
+    blend: blend::Blend,
 }
-
 impl Default for StrokeLayer {
     fn default() -> Self {
-        let id = FuzzID::default();
+        let id = Default::default();
         Self {
-            name: format!("Layer {}", id.id().wrapping_add(1)),
+            name: format!("Layer {}", id),
             id,
             blend: Default::default(),
         }
     }
 }
-
-pub enum LayerNode {
-    Group {
-        layer: GroupLayer,
-        // Make a tree in rust without unsafe challenge ((very hard))
-        children: std::cell::UnsafeCell<Vec<LayerNode>>,
-        id: FuzzID<LayerNode>,
-    },
-    StrokeLayer {
-        layer: StrokeLayer,
-        id: FuzzID<LayerNode>,
-    },
-}
-impl LayerNode {
-    pub fn id(&self) -> FuzzID<LayerNode> {
-        match self {
-            Self::Group { id, .. } => *id,
-            Self::StrokeLayer { id, .. } => *id,
-        }
-    }
-}
-
-impl From<GroupLayer> for LayerNode {
-    fn from(layer: GroupLayer) -> Self {
-        Self::Group {
-            layer,
-            children: Vec::new().into(),
-            id: Default::default(),
-        }
-    }
-}
-impl From<StrokeLayer> for LayerNode {
-    fn from(layer: StrokeLayer) -> Self {
-        Self::StrokeLayer {
-            layer,
-            id: Default::default(),
-        }
-    }
-}
-
-pub struct LayerGraph {
-    top_level: Vec<LayerNode>,
-}
-impl LayerGraph {
-    // Maybe this is a silly way to do things. It ended up causing a domino effect that caused the need
-    // for unsafe code, maybe I should rethink this. Regardless, it's an implementation detail, so it'll do for now.
-    fn find_recurse<'a>(
-        &'a self,
-        traverse_stack: &mut Vec<&'a LayerNode>,
-        at: FuzzID<LayerNode>,
-    ) -> bool {
-        //Find search candidates
-        let nodes_to_search = if traverse_stack.is_empty() {
-            self.top_level.as_slice()
-        } else {
-            // Return false if last element is not a group (shouldn't occur)
-            let LayerNode::Group{children, ..} = traverse_stack.last().clone().unwrap() else {return false};
-
-            //Safety - We hold an immutable reference to self, thus no mutable access to `children` can occur as well.
-            unsafe { &*children.get() }.as_slice()
-        };
-
-        for node in nodes_to_search.iter() {
-            //Found it!
-            if node.id() == at {
-                traverse_stack.push(node);
-                return true;
-            }
-
-            //Traverse deeper...
-            match node {
-                LayerNode::Group { .. } => {
-                    traverse_stack.push(node);
-                    if self.find_recurse(traverse_stack, at) {
-                        return true;
-                    }
-                    //Done traversing subtree and it wasn't found, remove subtree.
-                    traverse_stack.pop();
-                }
-                _ => (),
-            }
-        }
-
-        // Did not find it and did not early return, must not have been found.
-        return false;
-    }
-    /// Find the given layer ID in the tree, returning the path to it, if any.
-    /// If a path is returned, the final element will be the layer itself.
-    fn find<'a>(&'a self, at: FuzzID<LayerNode>) -> Option<Vec<&'a LayerNode>> {
-        let mut traverse_stack = Vec::new();
-
-        if self.find_recurse(&mut traverse_stack, at) {
-            Some(traverse_stack)
-        } else {
-            None
-        }
-    }
-    fn insert_node(&mut self, node: LayerNode) {
-        self.top_level.push(node);
-    }
-    fn insert_node_at(&mut self, at: FuzzID<LayerNode>, node: LayerNode) {
-        match self.find(at) {
-            None => self.insert_node(node),
-            Some(path) => {
-                match path.last().unwrap() {
-                    LayerNode::Group { children, .. } => {
-                        //`at` is a group - insert as highest child of `at`.
-                        //Forget borrows
-                        drop(path);
-                        //reinterprit as mutable (uh oh)
-                        //Safety - We hold exclusive access to self, thus no concurrent access to the tree can occur
-                        //and no other references exist.
-                        let children = unsafe { &mut *children.get() };
-
-                        children.push(node);
-                    }
-                    _ => {
-                        //`at` is something else - insert on the same level, immediately above `at`.'
-
-                        //Parent is just top level
-                        let siblings = if path.len() < 2 {
-                            drop(path);
-                            &mut self.top_level
-                        } else {
-                            //Find siblings
-                            let Some(LayerNode::Group { children: siblings, .. }) = path.get(path.len() - 2)
-                            else {
-                                //(should be impossible) parent doesn't exist or isn't a group, add to top level instead.
-                                self.insert_node(node);
-                                return;
-                            };
-
-                            drop(path);
-
-                            //reinterprit as mutable (uh oh)
-                            //Safety - We hold exclusive access to self, thus no concurrent access to the tree can occur
-                            //and no other references exist.
-                            unsafe { &mut *siblings.get() }
-                        };
-
-                        //Find idx of `at`
-                        let Some((idx, _)) = siblings.iter().enumerate().find(|(_, node)| node.id() == at)
-                            else {
-                                //`at` isn't a child of `at`'s parent - should be impossible! add to top of siblings instead.
-                                siblings.push(node);
-                                return;
-                            };
-
-                        //Insert after idx.
-                        siblings.insert(idx, node);
-                    }
-                }
-            }
-        }
-    }
-    /// Insert the group at the highest position of the top level
-    pub fn insert_layer(&mut self, layer: impl Into<LayerNode>) -> FuzzID<LayerNode> {
-        let node = layer.into();
-        let node_id = node.id();
-        self.insert_node(node);
-        node_id
-    }
-    /// Insert the group at the given position
-    /// If the position is a group, insert at the highest position in the group
-    /// If the position is a layer, insert above it.
-    /// If the position doesn't exist, behaves as `insert_group`.
-    pub fn insert_layer_at(
-        &mut self,
-        at: FuzzID<LayerNode>,
-        layer: impl Into<LayerNode>,
-    ) -> FuzzID<LayerNode> {
-        let node = layer.into();
-        let node_id = node.id();
-        self.insert_node_at(at, node);
-        node_id
-    }
-    pub fn mut_children_of<'a>(
-        &'a mut self,
-        parent: FuzzID<LayerNode>,
-    ) -> Option<&'a mut [LayerNode]> {
-        let path = self.find(parent)?;
-
-        // Get children, or return none if not found or not a group
-        let Some(LayerNode::Group { children, ..}) = path.last()
-            else {return None};
-
-        unsafe {
-            // Safety - the return value continues to mutably borrow self,
-            // so no other access can occur.
-            Some((*children.get()).as_mut_slice())
-        }
-    }
-    /// Remove and return the node of the given ID. None if not found.
-    pub fn remove(&mut self, at: FuzzID<LayerNode>) -> Option<LayerNode> {
-        let path = self.find(at)?;
-
-        //Parent is top-level
-        if path.len() < 2 {
-            let (idx, _) = self
-                .top_level
-                .iter()
-                .enumerate()
-                .find(|(_, node)| node.id() == at)?;
-            Some(self.top_level.remove(idx))
-        } else {
-            let LayerNode::Group { children: siblings, .. } = path.get(path.len() - 2)?
-                else {return None};
-
-            //Safety - has exclusive access to self, so the graph cannot be concurrently accessed
-            unsafe {
-                let siblings = &mut *siblings.get();
-
-                let (idx, _) = siblings
-                    .iter()
-                    .enumerate()
-                    .find(|(_, node)| node.id() == at)?;
-
-                Some(siblings.remove(idx))
-            }
-        }
-    }
-}
-impl Default for LayerGraph {
-    fn default() -> Self {
-        Self {
-            top_level: Vec::new(),
-        }
-    }
-}
-
-#[derive(PartialEq, Eq, Hash, strum::AsRefStr, strum::EnumIter, Copy, Clone)]
-pub enum BrushKind {
-    Stamped,
-    Rolled,
-}
-pub enum BrushStyle {
-    Stamped { spacing: f32 },
-    Rolled,
-}
-impl BrushStyle {
-    pub fn default_for(brush_kind: BrushKind) -> Self {
-        match brush_kind {
-            BrushKind::Stamped => Self::Stamped { spacing: 5.0 },
-            BrushKind::Rolled => Self::Rolled,
-        }
-    }
-    pub fn brush_kind(&self) -> BrushKind {
-        match self {
-            Self::Stamped { .. } => BrushKind::Stamped,
-            Self::Rolled => BrushKind::Rolled,
-        }
-    }
-}
-impl Default for BrushStyle {
-    fn default() -> Self {
-        Self::default_for(BrushKind::Stamped)
-    }
-}
-pub struct Brush {
-    name: String,
-
-    style: BrushStyle,
-
-    id: FuzzID<Brush>,
-
-    //Globally unique ID, for allowing files to be shared after serialization
-    universal_id: uuid::Uuid,
-}
-impl Default for Brush {
-    fn default() -> Self {
-        let id = FuzzID::default();
-        Self {
-            name: format!("Brush {}", id.id()),
-            style: Default::default(),
-            id,
-            universal_id: uuid::Uuid::new_v4(),
-        }
-    }
-}
-
 pub struct Document {
     /// The path from which the file was loaded, or None if opened as new.
     path: Option<std::path::PathBuf>,
     /// Name of the document, from its path or generated.
     name: String,
 
+    // In structure, a document is rather similar to a GroupLayer :O
     /// Layers that make up this document
-    layers: LayerGraph,
+    layer_top_level: Vec<StrokeLayer>,
 
     /// ID that is unique within this execution of the program
     id: FuzzID<Document>,
@@ -453,26 +63,28 @@ impl Default for Document {
         let id = FuzzID::default();
         Self {
             path: None,
-            layers: Default::default(),
-            name: format!("New Document {}", id.id().wrapping_add(1)),
+            layer_top_level: Vec::new(),
+            name: format!("New Document {}", id.id()),
             id,
         }
     }
 }
+impl Document {
+    // Internal structure in public interface???
+    pub fn layers_mut(&mut self) -> &mut Vec<StrokeLayer> {
+        &mut self.layer_top_level
+    }
+}
+
 struct PerDocumentInterface {
     zoom: f32,
     rotate: f32,
-
-    focused_subtree: Option<FuzzID<LayerNode>>,
-    cur_layer: Option<FuzzID<LayerNode>>,
 }
 impl Default for PerDocumentInterface {
     fn default() -> Self {
         Self {
             zoom: 100.0,
             rotate: 0.0,
-            cur_layer: None,
-            focused_subtree: None,
         }
     }
 }
@@ -480,40 +92,49 @@ pub struct DocumentUserInterface {
     color: egui::Color32,
 
     // modal_stack: Vec<Box<dyn FnMut(&mut egui::Ui) -> ()>>,
-    cur_brush: Option<FuzzID<Brush>>,
-    brushes: Vec<Brush>,
+    brushes: Vec<brush::Brush>,
 
-    cur_document: Option<FuzzID<Document>>,
-    documents: Vec<Document>,
+    document_interfaces: std::collections::HashMap<WeakID<Document>, PerDocumentInterface>,
 
-    document_interfaces: std::collections::HashMap<FuzzID<Document>, PerDocumentInterface>,
+    viewport: egui::Rect,
 }
 impl Default for DocumentUserInterface {
     fn default() -> Self {
+        let new_brush = brush::Brush::default();
         Self {
             color: egui::Color32::BLUE,
-            //modal_stack: Vec::new(),
-            cur_brush: None,
-            brushes: Vec::new(),
-
-            cur_document: None,
-            documents: Vec::new(),
+            brushes: vec![new_brush],
             document_interfaces: Default::default(),
+
+            viewport: egui::Rect {
+                min: egui::Pos2::ZERO,
+                max: egui::Pos2::ZERO,
+            },
         }
     }
 }
 
 impl DocumentUserInterface {
-    fn target_layer(&self) -> Option<FuzzID<LayerNode>> {
-        let id = self.cur_document?;
-        // Selected layer of the currently focused document, if any
-        self.document_interfaces.get(&id)?.cur_layer
+    /// Get the available area for document rendering, in logical pixels.
+    /// None if there is no space for a viewport.
+    pub fn get_document_viewport(&self) -> Option<egui::Rect> {
+        // Avoid giving a zero or negative size viewport.
+        let size = self.viewport.size();
+
+        if size.x > 0.0 && size.y > 0.0 {
+            Some(self.viewport)
+        } else {
+            None
+        }
     }
     fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut Blend) {
         ui.horizontal(|ui| {
-            //Checkerboard icon, for alpha clipping
-            ui.toggle_value(&mut blend.alpha_clip, "▓")
-                .on_hover_text("Alpha clip");
+            //alpha symbol for clipping (allocates every frame - why??)
+            ui.toggle_value(
+                &mut blend.alpha_clip,
+                egui::RichText::new("α").monospace().strong(),
+            )
+            .on_hover_text("Alpha clip");
 
             ui.add(
                 egui::DragValue::new(&mut blend.opacity)
@@ -524,13 +145,37 @@ impl DocumentUserInterface {
             egui::ComboBox::new(id, "")
                 .selected_text(blend.mode.as_ref())
                 .show_ui(ui, |ui| {
-                    for blend_mode in <crate::BlendMode as strum::IntoEnumIterator>::iter() {
+                    for blend_mode in <BlendMode as strum::IntoEnumIterator>::iter() {
                         ui.selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref());
                     }
                 });
         });
     }
-    fn ui_layer_slice(
+    fn layer_edit(
+        ui: &mut egui::Ui,
+        cur_layer: &mut Option<WeakID<StrokeLayer>>,
+        layer: &mut StrokeLayer,
+    ) {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(cur_layer, Some(layer.id.weak()), "✏");
+                ui.text_edit_singleline(&mut layer.name);
+            })
+            .response
+            .on_hover_ui(|ui| {
+                ui.label(format!("{}", layer.id));
+            });
+
+            Self::ui_layer_blend(ui, &layer.id, &mut layer.blend);
+        });
+    }
+    /*
+    fn target_layer(&self) -> Option<LayerID> {
+        let id = self.cur_document?;
+        // Selected layer of the currently focused document, if any
+        self.document_interfaces.get(&id)?.cur_layer
+    }
+    fn ui_layer_iter(
         ui: &mut egui::Ui,
         document_interface: &mut PerDocumentInterface,
         layers: &mut [LayerNode],
@@ -551,7 +196,11 @@ impl DocumentUserInterface {
                         id,
                     } => {
                         ui.horizontal(|ui| {
-                            ui.selectable_value(&mut document_interface.cur_layer, Some(*id), "🗀");
+                            ui.selectable_value(
+                                &mut document_interface.cur_layer,
+                                Some(id.weak()),
+                                "🗀",
+                            );
                             ui.text_edit_singleline(&mut layer.name);
                         })
                         .response
@@ -566,16 +215,14 @@ impl DocumentUserInterface {
                             //Get or insert default is unstable? :V
                             let blend = layer.blend.get_or_insert_with(Default::default);
 
-                            Self::ui_layer_blend(ui, *id, blend);
+                            Self::ui_layer_blend(ui, &id, blend);
                         } else {
                             layer.blend = None;
                         }
 
-                        //Safety - No concurrent access to these nodes.
-                        //TODO: iter api so as to not expose unsafe innards.
-                        let children = unsafe { &mut *children.get() };
+                        let children = children.get_mut();
                         egui::CollapsingHeader::new("Children")
-                            .id_source(*id)
+                            .id_source(&id)
                             .default_open(true)
                             .enabled(!children.is_empty())
                             .show_unindented(ui, |ui| {
@@ -584,7 +231,11 @@ impl DocumentUserInterface {
                     }
                     LayerNode::StrokeLayer { layer, id } => {
                         ui.horizontal(|ui| {
-                            ui.selectable_value(&mut document_interface.cur_layer, Some(*id), "✏");
+                            ui.selectable_value(
+                                &mut document_interface.cur_layer,
+                                Some(id.weak()),
+                                "✏",
+                            );
                             ui.text_edit_singleline(&mut layer.name);
                         })
                         .response
@@ -600,32 +251,15 @@ impl DocumentUserInterface {
             .response
             .context_menu(|ui| {
                 if ui.button("Focus Subtree...").clicked() {
-                    document_interface.focused_subtree = Some(layer.id());
+                    document_interface.focused_subtree = Some(layer.id().weak());
                 }
             });
         }
-    }
-    /*
-    fn do_modal(&mut self, ctx: &egui::Context, add_contents: &Box<dyn FnMut(&mut egui::Ui) -> ()>) {
-        egui::Area::new("Modal")
-            .order(egui::Order::TOP)
-            .movable(true)
-            .show(&ctx, |ui| {
-                egui::Frame::window(ui.style())
-                    .show(ui, *add_contents)
-            });
-    }
-    fn push_modal(&mut self, add_contents: impl FnMut(&mut egui::Ui) -> ()) {
-        self.modal_stack.push(Box::new(add_contents))
     }*/
     pub fn ui(&mut self, ctx: &egui::Context) {
-        /*
-        if !self.modal_stack.is_empty() {
-            for modal in self.modal_stack.iter() {
-                self.do_modal(&ctx, modal);
-            }
-        }*/
-
+        let globals = GLOBALS.get_or_init(Globals::new);
+        let mut selections = globals.selections().blocking_write();
+        let mut documents = globals.documents().blocking_write();
         egui::TopBottomPanel::top("file").show(&ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
@@ -642,8 +276,8 @@ impl DocumentUserInterface {
                         if add_button(ui, "New", Some("Ctrl+N")).clicked() {
                             let document = Document::default();
                             self.document_interfaces
-                                .insert(document.id, Default::default());
-                            self.documents.push(document);
+                                .insert(document.id.weak(), Default::default());
+                            documents.push(document);
                         };
                         let _ = add_button(ui, "Save", Some("Ctrl+S"));
                         let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
@@ -671,7 +305,9 @@ impl DocumentUserInterface {
                 ui.add(egui::Separator::default().vertical());
 
                 // if there is no current document, there is nothing for us to do here
-                let Some(document) = self.cur_document else {return};
+                let Some(document) = selections.cur_document else {
+                    return;
+                };
 
                 // Get (or create) the document interface
                 let interface = self.document_interfaces.entry(document).or_default();
@@ -713,6 +349,10 @@ impl DocumentUserInterface {
                 }
 
                 ui.add(egui::Separator::default().vertical());
+
+                if ui.button("⮪").clicked() {
+                    selections.undos += 1;
+                };
             });
         });
 
@@ -721,42 +361,67 @@ impl DocumentUserInterface {
             ui.separator();
 
             // if there is no current document, there is nothing for us to do here
-            let Some(document_id) = self.cur_document else {return};
+            let Some(document_id) = selections.cur_document else {
+                return;
+            };
 
             // Find the document, otherwise clear selection
-            let Some(document) = self.documents.iter_mut().find(|doc| doc.id == document_id)
-                else {
-                    self.cur_document = None;
-                    return
-                };
+            let Some(document) = documents.iter_mut().find(|doc| &doc.id == document_id) else {
+                selections.cur_document = None;
+                return;
+            };
 
-            let document_interface = self.document_interfaces.entry(document_id).or_default();
+            let document_selections = selections
+                .document_selections
+                .entry(document_id)
+                .or_default();
 
             ui.horizontal(|ui| {
                 if ui.button("➕").clicked() {
                     let layer = StrokeLayer::default();
-                    if let Some(selected) = document_interface.cur_layer {
-                        document.layers.insert_layer_at(selected, layer);
+                    let new_weak_id = layer.id.weak();
+                    if let Some(selected) = document_selections.cur_layer {
+                        let layers = document.layers_mut();
+                        let selected_index = layers
+                            .iter()
+                            .enumerate()
+                            .find(|(_, layer)| layer.id.weak() == selected)
+                            .map(|(idx, _)| idx);
+                        if let Some(index) = selected_index {
+                            // Insert atop selected index
+                            document.layers_mut().insert(index + 1, layer)
+                        } else {
+                            // Selected layer not found! Just insert at top
+                            document.layers_mut().push(layer)
+                        }
                     } else {
-                        document.layers.insert_layer(layer);
+                        document.layers_mut().push(layer)
                     }
+                    // Select the new layer
+                    document_selections.cur_layer = Some(new_weak_id);
                 }
-                if ui.button("🗀").clicked() {
-                    let group = GroupLayer::default();
-                    if let Some(selected) = document_interface.cur_layer {
-                        document.layers.insert_layer_at(selected, group);
-                    } else {
-                        document.layers.insert_layer(group);
-                    }
-                }
+
+                let folder_button = egui::Button::new("🗀");
+                ui.add_enabled(false, folder_button);
+
                 let _ = ui.button("⤵").on_hover_text("Merge down");
                 if ui.button("✖").on_hover_text("Delete layer").clicked() {
-                    if let Some(layer_id) = document_interface.cur_layer.take() {
-                        document.layers.remove(layer_id);
+                    if let Some(selected) = document_selections.cur_layer.take() {
+                        let layers = document.layers_mut();
+                        // Find the index of the selected layer
+                        let selected_index = layers
+                            .iter()
+                            .enumerate()
+                            .find(|(_, layer)| layer.id.weak() == selected)
+                            .map(|(idx, _)| idx);
+                        // Remove, if found
+                        if let Some(idx) = selected_index {
+                            layers.remove(idx);
+                        }
                     }
                 };
             });
-
+            /*
             if let Some(subtree) = document_interface.focused_subtree {
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -765,13 +430,18 @@ impl DocumentUserInterface {
                     }
                     ui.label(format!("Viewing subtree of {subtree}"));
                 });
-            }
+            }*/
 
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
+                let layers = document.layers_mut();
+                for layer in layers.iter_mut().rev() {
+                    Self::layer_edit(ui, &mut document_selections.cur_layer, layer);
+                }
+                /*
                 match document_interface
                     .focused_subtree
-                    .and_then(|tree| document.layers.mut_children_of(tree))
+                    .and_then(|tree| document.layers.find_mut_children_of(tree))
                 {
                     Some(subtree) => {
                         Self::ui_layer_slice(ui, document_interface, subtree);
@@ -784,19 +454,32 @@ impl DocumentUserInterface {
                             &mut document.layers.top_level,
                         );
                     }
-                }
+                }*/
             });
         });
 
         egui::SidePanel::left("Color picker").show(&ctx, |ui| {
-            ui.label("Color");
-            ui.separator();
-
-            egui::color_picker::color_picker_color32(
-                ui,
-                &mut self.color,
-                egui::color_picker::Alpha::OnlyBlend,
-            );
+            {
+                let settings = &mut selections.brush_settings;
+                ui.label("Color");
+                ui.separator();
+                // Why..
+                let mut color = egui::Rgba::from_rgba_premultiplied(
+                    settings.color_modulate[0],
+                    settings.color_modulate[1],
+                    settings.color_modulate[2],
+                    settings.color_modulate[3],
+                );
+                if egui::color_picker::color_edit_button_rgba(
+                    ui,
+                    &mut color,
+                    egui::color_picker::Alpha::OnlyBlend,
+                )
+                .changed()
+                {
+                    settings.color_modulate = color.to_array();
+                };
+            }
 
             ui.separator();
             ui.label("Brushes");
@@ -804,61 +487,77 @@ impl DocumentUserInterface {
 
             ui.horizontal(|ui| {
                 if ui.button("➕").clicked() {
-                    let brush = Brush::default();
+                    let brush = brush::Brush::default();
                     self.brushes.push(brush);
                 }
                 if ui.button("✖").on_hover_text("Delete brush").clicked() {
-                    if let Some(id) = self.cur_brush.take() {
-                        self.brushes.retain(|brush| brush.id != id);
+                    if let Some(id) = selections.cur_brush.take() {
+                        self.brushes.retain(|brush| brush.id() != id);
                     }
                 };
+                ui.toggle_value(&mut selections.brush_settings.is_eraser, "Erase");
             });
             ui.separator();
 
             for brush in self.brushes.iter_mut() {
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.cur_brush, Some(brush.id), "");
-                        ui.text_edit_singleline(&mut brush.name);
+                        ui.radio_value(&mut selections.cur_brush, Some(brush.id().weak()), "");
+                        ui.text_edit_singleline(brush.name_mut());
                     })
                     .response
                     .on_hover_ui(|ui| {
-                        ui.label(format!("{}", brush.id));
+                        ui.label(format!("{}", brush.id()));
 
                         //Smol optimization to avoid formatters
                         let mut buf = uuid::Uuid::encode_buffer();
-                        let uuid = brush.universal_id.as_hyphenated().encode_upper(&mut buf);
+                        let uuid = brush.universal_id().as_hyphenated().encode_upper(&mut buf);
                         ui.label(&uuid[..]);
                     });
                     egui::CollapsingHeader::new("Settings")
-                        .id_source(brush.id)
+                        .id_source(brush.id())
                         .default_open(true)
                         .show(ui, |ui| {
-                            let mut brush_kind = brush.style.brush_kind();
+                            let mut brush_kind = brush.style().brush_kind();
 
-                            egui::ComboBox::new(brush.id, "")
+                            egui::ComboBox::new(brush.id(), "")
                                 .selected_text(brush_kind.as_ref())
                                 .show_ui(ui, |ui| {
-                                    for kind in <BrushKind as strum::IntoEnumIterator>::iter() {
+                                    for kind in
+                                        <brush::BrushKind as strum::IntoEnumIterator>::iter()
+                                    {
                                         ui.selectable_value(&mut brush_kind, kind, kind.as_ref());
                                     }
                                 });
 
                             //Changed by user, switch to defaults for the new kind
-                            if brush_kind != brush.style.brush_kind() {
-                                brush.style = BrushStyle::default_for(brush_kind);
+                            if brush_kind != brush.style().brush_kind() {
+                                *brush.style_mut() = brush::BrushStyle::default_for(brush_kind);
                             }
 
-                            match &mut brush.style {
-                                BrushStyle::Stamped { spacing } => {
-                                    let slider = egui::widgets::Slider::new(spacing, 0.1..=200.0)
-                                        .clamp_to_range(true)
-                                        .logarithmic(true)
-                                        .suffix("px");
+                            match brush.style_mut() {
+                                brush::BrushStyle::Stamped { .. } => {
+                                    let slider = egui::widgets::Slider::new(
+                                        &mut selections.brush_settings.size_mul,
+                                        2.0..=50.0,
+                                    )
+                                    .clamp_to_range(true)
+                                    .logarithmic(true)
+                                    .suffix("px");
 
                                     ui.add(slider);
+
+                                    let slider2 = egui::widgets::Slider::new(
+                                        &mut selections.brush_settings.spacing_px,
+                                        0.1..=10.0,
+                                    )
+                                    .clamp_to_range(true)
+                                    .logarithmic(true)
+                                    .suffix("px");
+
+                                    ui.add(slider2);
                                 }
-                                BrushStyle::Rolled => {}
+                                brush::BrushStyle::Rolled => {}
                             }
                         })
                 });
@@ -890,15 +589,17 @@ impl DocumentUserInterface {
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let mut deleted_ids = smallvec::SmallVec::<[_; 1]>::new();
-                    for document in self.documents.iter() {
+                    for document in documents.iter() {
                         egui::containers::Frame::group(ui.style())
                             .outer_margin(egui::Margin::symmetric(0.0, 0.0))
                             .inner_margin(egui::Margin::symmetric(0.0, 0.0))
-                            .multiply_with_opacity(if self.cur_document == Some(document.id) {
-                                1.0
-                            } else {
-                                0.0
-                            })
+                            .multiply_with_opacity(
+                                if selections.cur_document == Some(document.id.weak()) {
+                                    1.0
+                                } else {
+                                    0.0
+                                },
+                            )
                             .rounding(egui::Rounding {
                                 ne: 2.0,
                                 nw: 2.0,
@@ -906,15 +607,15 @@ impl DocumentUserInterface {
                             })
                             .show(ui, |ui| {
                                 ui.selectable_value(
-                                    &mut self.cur_document,
-                                    Some(document.id),
+                                    &mut selections.cur_document,
+                                    Some(document.id.weak()),
                                     &document.name,
                                 );
                                 if ui.small_button("✖").clicked() {
-                                    deleted_ids.push(document.id);
+                                    deleted_ids.push(document.id.weak());
                                     //Disselect if deleted.
-                                    if self.cur_document == Some(document.id) {
-                                        self.cur_document = None;
+                                    if selections.cur_document == Some(document.id.weak()) {
+                                        selections.cur_document = None;
                                     }
                                 }
                             })
@@ -923,83 +624,409 @@ impl DocumentUserInterface {
                                 ui.label(format!("{}", document.id));
                             });
                     }
-                    self.documents
-                        .retain(|document| !deleted_ids.contains(&document.id));
+                    documents.retain(|document| !deleted_ids.contains(&document.id.weak()));
                     for id in deleted_ids.into_iter() {
                         self.document_interfaces.remove(&id);
                     }
                 });
             });
         });
+
+        self.viewport = ctx.available_rect();
     }
 }
 
+mod stroke_renderer {
+    /// The data managed by the renderer.
+    /// For now, in persuit of actually getting a working product one day,
+    /// this is a very coarse caching sceme. In the future, perhaps a bit more granular
+    /// control can occur, should performance become an issue:
+    ///  * Caching images of incrementally older states, reducing work to get to any given state (performant undo)
+    ///  * Caching tesselation output
+    pub struct RenderData {
+        image: Arc<vk::StorageImage>,
+        pub view: Arc<vk::ImageView<vk::StorageImage>>,
+    }
 
-#[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
+    use crate::vk;
+    use anyhow::Result as AnyResult;
+    use std::sync::Arc;
+    use vulkano::{pipeline::graphics::vertex_input::Vertex, pipeline::Pipeline, sync::GpuFuture};
+    mod vert {
+        vulkano_shaders::shader! {
+            ty: "vertex",
+            path: "src/shaders/stamp.vert",
+        }
+    }
+
+    pub struct StrokeLayerRenderer {
+        context: Arc<crate::render_device::RenderContext>,
+        texture_descriptor: Arc<vk::PersistentDescriptorSet>,
+        gpu_tess: super::gpu_tess::GpuStampTess,
+        pipeline: Arc<vk::GraphicsPipeline>,
+    }
+    impl StrokeLayerRenderer {
+        pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {
+            let image = image::open("brushes/splotch.png")
+                .unwrap()
+                .into_luma_alpha8();
+
+            //Iter over transparencies.
+            let image_grey = image.iter().skip(1).step_by(2).cloned();
+
+            let mut cb = vk::AutoCommandBufferBuilder::primary(
+                context.allocators().command_buffer(),
+                context.queues().transfer().idx(),
+                vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+            )?;
+            let (image, sampler) = {
+                let image = vk::ImmutableImage::from_iter(
+                    context.allocators().memory(),
+                    image_grey,
+                    vk::ImageDimensions::Dim2d {
+                        width: image.width(),
+                        height: image.height(),
+                        array_layers: 1,
+                    },
+                    vulkano::image::MipmapsCount::One,
+                    vk::Format::R8_UNORM,
+                    &mut cb,
+                )?;
+                context
+                    .now()
+                    .then_execute(context.queues().transfer().queue().clone(), cb.build()?)?
+                    .then_signal_fence_and_flush()?
+                    .wait(None)?;
+
+                let view = vk::ImageView::new(
+                    image.clone(),
+                    vk::ImageViewCreateInfo {
+                        component_mapping: vk::ComponentMapping {
+                            //Red is coverage of white, with premul.
+                            a: vk::ComponentSwizzle::Red,
+                            r: vk::ComponentSwizzle::Red,
+                            b: vk::ComponentSwizzle::Red,
+                            g: vk::ComponentSwizzle::Red,
+                        },
+                        ..vk::ImageViewCreateInfo::from_image(&image)
+                    },
+                )?;
+
+                let sampler = vk::Sampler::new(
+                    context.device().clone(),
+                    vk::SamplerCreateInfo {
+                        min_filter: vk::Filter::Linear,
+                        mag_filter: vk::Filter::Linear,
+                        ..Default::default()
+                    },
+                )?;
+
+                (view, sampler)
+            };
+
+            // Safety: dual_src_blend currently broken in vulkano - pull request submitted, for now
+            // no erase U_U
+            let frag = unsafe {
+                vulkano::shader::ShaderModule::from_bytes(
+                    context.device().clone(),
+                    include_bytes!("shaders/stamp.frag.spv"),
+                )
+            }?;
+            let vert = vert::load(context.device().clone())?;
+            // Unwraps ok here, using GLSL where "main" is the only allowed entry point.
+            let frag = frag.entry_point("main").unwrap();
+            let vert = vert.entry_point("main").unwrap();
+
+            // DualSrcBlend (~75% coverage) is used to control whether to erase or draw on a per-fragment basis
+            // [1.0; 4] = draw, [0.0; 4] = erase.
+            let mut premul_dyn_constants = vk::ColorBlendState::new(1);
+            premul_dyn_constants.blend_constants = vk::StateMode::Fixed([1.0; 4]);
+            premul_dyn_constants.attachments[0].blend = Some(vk::AttachmentBlend {
+                alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+                color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+                alpha_destination:
+                    vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+                color_destination:
+                    vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+                alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+                color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+            });
+
+            let pipeline = vk::GraphicsPipeline::start()
+                .fragment_shader(frag, ())
+                .vertex_shader(vert, ())
+                .vertex_input_state(super::gpu_tess::interface::OutputStrokeVertex::per_vertex())
+                .input_assembly_state(vk::InputAssemblyState::new()) //Triangle list, no prim restart
+                .color_blend_state(premul_dyn_constants)
+                .rasterization_state(vk::RasterizationState::new()) // No cull
+                .viewport_state(vk::ViewportState::viewport_fixed_scissor_irrelevant([
+                    vk::Viewport {
+                        depth_range: 0.0..1.0,
+                        dimensions: [super::DOCUMENT_DIMENSION as f32; 2],
+                        origin: [0.0; 2],
+                    },
+                ]))
+                .render_pass(
+                    vulkano::pipeline::graphics::render_pass::PipelineRenderPassType::BeginRendering(
+                        vulkano::pipeline::graphics::render_pass::PipelineRenderingCreateInfo {
+                            view_mask: 0,
+                            color_attachment_formats: vec![Some(super::DOCUMENT_FORMAT)],
+                            depth_attachment_format: None,
+                            stencil_attachment_format: None,
+                            ..Default::default()
+                        }
+                    )
+                )
+                .build(context.device().clone())?;
+
+            let descriptor_set = vk::PersistentDescriptorSet::new(
+                context.allocators().descriptor_set(),
+                pipeline.layout().set_layouts()[0].clone(),
+                [vk::WriteDescriptorSet::image_view_sampler(
+                    0, image, sampler,
+                )],
+            )?;
+
+            let tess = super::gpu_tess::GpuStampTess::new(context.clone())?;
+
+            Ok(Self {
+                context,
+                pipeline,
+                gpu_tess: tess,
+                texture_descriptor: descriptor_set,
+            })
+        }
+        /// Allocate a new RenderData object. Initial contents are undefined!
+        pub fn uninit_render_data(&self) -> anyhow::Result<RenderData> {
+            let image = vk::StorageImage::with_usage(
+                self.context.allocators().memory(),
+                vulkano::image::ImageDimensions::Dim2d {
+                    width: super::DOCUMENT_DIMENSION,
+                    height: super::DOCUMENT_DIMENSION,
+                    array_layers: 1,
+                },
+                super::DOCUMENT_FORMAT,
+                vk::ImageUsage::COLOR_ATTACHMENT | vk::ImageUsage::STORAGE,
+                vk::ImageCreateFlags::empty(),
+                [
+                    // Todo: if these are the same queue, what happen?
+                    self.context.queues().graphics().idx(),
+                    self.context.queues().compute().idx(),
+                ]
+                .into_iter(),
+            )?;
+            let view = vk::ImageView::new_default(image.clone())?;
+
+            use vulkano::VulkanObject;
+            log::info!("Made render data at id{:?}", view.handle());
+
+            Ok(RenderData { image, view })
+        }
+        pub fn draw(
+            &self,
+            strokes: &[super::ImmutableStroke],
+            renderbuf: &RenderData,
+            clear: bool,
+        ) -> AnyResult<vk::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>> {
+            let (future, vertices, indirects) = self.gpu_tess.tess(strokes)?;
+            let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
+                self.context.allocators().command_buffer(),
+                self.context.queues().graphics().idx(),
+                vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+            )?;
+
+            let mut matrix = cgmath::Matrix4::from_scale(2.0 / super::DOCUMENT_DIMENSION as f32);
+            matrix.y *= -1.0;
+            matrix.w.x -= 1.0;
+            matrix.w.y += 1.0;
+
+            command_buffer
+                .begin_rendering(vulkano::command_buffer::RenderingInfo {
+                    color_attachments: vec![Some(
+                        vulkano::command_buffer::RenderingAttachmentInfo {
+                            clear_value: if clear {
+                                Some([0.0, 0.0, 0.0, 0.0].into())
+                            } else {
+                                None
+                            },
+                            load_op: if clear {
+                                vulkano::render_pass::LoadOp::Clear
+                            } else {
+                                vulkano::render_pass::LoadOp::Load
+                            },
+                            store_op: vulkano::render_pass::StoreOp::Store,
+                            ..vulkano::command_buffer::RenderingAttachmentInfo::image_view(
+                                renderbuf.view.clone(),
+                            )
+                        },
+                    )],
+                    contents: vulkano::command_buffer::SubpassContents::Inline,
+                    depth_attachment: None,
+                    ..Default::default()
+                })?
+                .bind_pipeline_graphics(self.pipeline.clone())
+                .push_constants(
+                    self.pipeline.layout().clone(),
+                    0,
+                    Into::<[[f32; 4]; 4]>::into(matrix),
+                )
+                .bind_descriptor_sets(
+                    vulkano::pipeline::PipelineBindPoint::Graphics,
+                    self.pipeline.layout().clone(),
+                    0,
+                    self.texture_descriptor.clone(),
+                )
+                .bind_vertex_buffers(0, vertices)
+                .draw_indirect(indirects)?
+                .end_rendering()?;
+
+            let command_buffer = command_buffer.build()?;
+
+            // After tessellation finishes, render.
+            Ok(future
+                .then_execute(
+                    self.context.queues().graphics().queue().clone(),
+                    command_buffer,
+                )?
+                .then_signal_semaphore_and_flush()?)
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct StrokeBrushSettings {
+    brush: brush::WeakBrushID,
+    /// `a` is flow, NOT opacity, since the stroke is blended continuously not blended as a group.
+    color_modulate: [f32; 4],
+    spacing_px: f32,
+    size_mul: f32,
+    /// If true, the blend constants must be set to generate an erasing effect.
+    is_eraser: bool,
+}
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
-struct TessellatedStrokeVertex {
-    #[format(R32G32_SFLOAT)]
+pub struct StrokePoint {
     pos: [f32; 2],
-    #[format(R32_SFLOAT)]
     pressure: f32,
+    /// Arc length of stroke from beginning to this point
+    dist: f32,
 }
 
-struct LayerRenderData {
-    image: Option<vk::StorageImage>,
-    tessellated_stroke_vertices: Option<vk::Subbuffer<TessellatedStrokeVertex>>,
-    stroke_indirect_commands: Option<vk::Subbuffer<vulkano::command_buffer::DrawIndirectCommand>>,
-}
-pub struct LayerNodeRenderer {
-    layer_data: std::collections::HashMap<LayerNode, LayerRenderData>,
-}
+impl StrokePoint {
+    pub fn lerp(&self, other: &Self, factor: f32) -> Self {
+        let inv_factor = 1.0 - factor;
 
-#[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
-#[repr(C)]
-struct StrokePointUnpacked {
-    #[format(R32G32_SFLOAT)]
-    pos: [f32; 2],
-    #[format(R32_SFLOAT)]
-    pressure: f32,
-}
-
-mod test_renderer_vert {
-    vulkano_shaders::shader! {
-        ty: "vertex",
-        src: r"
-        #version 460
-
-        layout(push_constant) uniform Matrix {
-            mat4 mvp;
-        } push_matrix;
-
-        layout(location = 0) in vec2 pos;
-        layout(location = 1) in float pressure;
-
-        layout(location = 0) flat out vec4 color;
-
-        void main() {
-            vec4 position_2d = push_matrix.mvp * vec4(pos, 0.0, 1.0);
-            color = vec4(0.0, 0.0, 0.0, pressure);
-            gl_Position = vec4(position_2d.xy, 0.0, 1.0);
-        }"
+        let s = std::simd::f32x4::from_array([self.pos[0], self.pos[1], self.pressure, self.dist]);
+        let o =
+            std::simd::f32x4::from_array([other.pos[0], other.pos[1], other.pressure, other.dist]);
+        // FMA is planned but unimplemented ;w;
+        let n = s * std::simd::f32x4::splat(inv_factor) + (o * std::simd::f32x4::splat(factor));
+        Self {
+            pos: [n[0], n[1]],
+            pressure: n[2],
+            dist: n[3],
+        }
     }
 }
-mod test_renderer_frag {
-    vulkano_shaders::shader! {
-        ty: "fragment",
-        src: r"
-        #version 460
-        layout(location = 0) flat in vec4 color;
-
-        layout(location = 0) out vec4 out_color;
-
-        void main() {
-            out_color = color;
-        }"
+pub struct Stroke {
+    /// Unique id during this execution of the program.
+    /// We have 64 bits, this won't get exhausted anytime soon! :P
+    id: FuzzID<Stroke>,
+    brush: StrokeBrushSettings,
+    points: Vec<StrokePoint>,
+}
+/// Decoupled data from header, stored in separate manager. Header managed by UI.
+/// Stores the strokes generated from pen input, with optional render data inserted by renderer.
+pub struct StrokeLayerData {
+    strokes: Vec<ImmutableStroke>,
+    render_data: Option<stroke_renderer::RenderData>,
+}
+/// Collection of layer data (stroke contents and render data) mapped from ID
+pub struct StrokeLayerManager {
+    layers: std::collections::HashMap<WeakID<StrokeLayer>, StrokeLayerData>,
+}
+impl Default for StrokeLayerManager {
+    fn default() -> Self {
+        Self {
+            layers: Default::default(),
+        }
     }
 }
 
-const DOCUMENT_DIMENSION: u32 = 512;
+pub struct ImmutableStroke {
+    id: FuzzID<Stroke>,
+    brush: StrokeBrushSettings,
+    points: Arc<[StrokePoint]>,
+}
+impl From<Stroke> for ImmutableStroke {
+    fn from(value: Stroke) -> Self {
+        Self {
+            id: value.id,
+            brush: value.brush,
+            points: value.points.into(),
+        }
+    }
+}
+
+struct DocumentSelections {
+    pub cur_layer: Option<WeakID<StrokeLayer>>,
+}
+impl Default for DocumentSelections {
+    fn default() -> Self {
+        Self { cur_layer: None }
+    }
+}
+struct Selections {
+    pub cur_document: Option<WeakID<Document>>,
+    pub document_selections: std::collections::HashMap<WeakID<Document>, DocumentSelections>,
+    pub cur_brush: Option<brush::WeakBrushID>,
+    pub brush_settings: StrokeBrushSettings,
+    pub undos: u32,
+}
+impl Default for Selections {
+    fn default() -> Self {
+        Self {
+            cur_document: None,
+            document_selections: Default::default(),
+            cur_brush: None,
+            brush_settings: StrokeBrushSettings {
+                brush: brush::todo_brush().id().weak(),
+                color_modulate: [0.0, 0.0, 0.0, 1.0],
+                size_mul: 15.0,
+                spacing_px: 0.75,
+                is_eraser: false,
+            },
+            undos: 0,
+        }
+    }
+}
+
+// Icky. with a planned client-server architecture, we won't have as many globals -w-;;
+// (well, a server is still a global, but the interface will be much less hacked-)
+struct Globals {
+    stroke_layers: tokio::sync::RwLock<StrokeLayerManager>,
+    documents: tokio::sync::RwLock<Vec<Document>>,
+    selections: tokio::sync::RwLock<Selections>,
+}
+impl Globals {
+    fn new() -> Self {
+        Self {
+            stroke_layers: tokio::sync::RwLock::new(Default::default()),
+            documents: tokio::sync::RwLock::new(Vec::new()),
+            selections: Default::default(),
+        }
+    }
+    fn strokes(&'_ self) -> &'_ tokio::sync::RwLock<StrokeLayerManager> {
+        &self.stroke_layers
+    }
+    fn documents(&'_ self) -> &'_ tokio::sync::RwLock<Vec<Document>> {
+        &self.documents
+    }
+    fn selections(&'_ self) -> &'_ tokio::sync::RwLock<Selections> {
+        &self.selections
+    }
+}
+static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
 
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
 /// behind the Egui content.
@@ -1013,257 +1040,189 @@ pub trait PreviewRenderProxy {
     fn surface_changed(&mut self, render_surface: &render_device::RenderSurface);
 }
 
-struct SillyDocument {
-    verts: Vec<StrokePointUnpacked>,
-    indices: Vec<u32>,
-}
-struct SillyDocumentRenderer {
-    render_context: Arc<render_device::RenderContext>,
-    pipeline: Arc<vk::GraphicsPipeline>,
-    render_pass: Arc<vk::RenderPass>,
-
-    ms_attachment_view: Arc<vk::ImageView<vk::AttachmentImage>>,
-}
-impl SillyDocumentRenderer {
-    fn new(render_context: Arc<render_device::RenderContext>) -> AnyResult<Self> {
-        let document_format = vk::Format::R16G16B16A16_SFLOAT;
-        let document_dimension = DOCUMENT_DIMENSION;
-        let ms_attachment = vk::AttachmentImage::transient_multisampled(
-            render_context.allocators().memory(),
-            [DOCUMENT_DIMENSION; 2],
-            vk::SampleCount::Sample8,
-            document_format,
-        )?;
-        let ms_attachment_view = vk::ImageView::new_default(ms_attachment)?;
-
-        let render_pass = vulkano::single_pass_renderpass!(
-            render_context.device().clone(),
-            attachments: {
-                document: {
-                    load: Clear,
-                    store: DontCare,
-                    format: document_format,
-                    samples: 8,
-                },
-                resolve: {
-                    load: DontCare,
-                    store: Store,
-                    format: document_format,
-                    samples: 1,
-                },
-            },
-            pass: {
-                color: [document],
-                depth_stencil: {},
-                resolve: [resolve],
-            },
-        )?;
-
-        let vert = test_renderer_vert::load(render_context.device().clone())?;
-        let frag = test_renderer_frag::load(render_context.device().clone())?;
-
-        let mut blend_premul = vk::ColorBlendState::new(1);
-        blend_premul.attachments[0].blend = Some(vk::AttachmentBlend {
-            alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-            color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-            alpha_destination:
-                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-            color_destination:
-                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-            alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-            color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-        });
-
-        let pipeline = vk::GraphicsPipeline::start()
-            .render_pass(render_pass.clone().first_subpass())
-            .vertex_shader(
-                vert.entry_point("main").unwrap(),
-                test_renderer_vert::SpecializationConstants::default(),
-            )
-            .fragment_shader(
-                frag.entry_point("main").unwrap(),
-                test_renderer_frag::SpecializationConstants::default(),
-            )
-            .vertex_input_state(StrokePointUnpacked::per_vertex())
-            .input_assembly_state(vk::InputAssemblyState {
-                topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::LineStrip),
-                primitive_restart_enable: vk::StateMode::Fixed(true),
-                ..Default::default()
-            })
-            .color_blend_state(blend_premul)
-            .multisample_state(vk::MultisampleState {
-                alpha_to_coverage_enable: false,
-                alpha_to_one_enable: false,
-                rasterization_samples: vk::SampleCount::Sample8,
-                sample_shading: None,
-                ..Default::default()
-            })
-            .rasterization_state(vk::RasterizationState {
-                line_width: vk::StateMode::Fixed(4.0),
-                line_rasterization_mode:
-                    vulkano::pipeline::graphics::rasterization::LineRasterizationMode::Rectangular,
-                ..vk::RasterizationState::default()
-            })
-            .viewport_state(vk::ViewportState::viewport_fixed_scissor_irrelevant([
-                vk::Viewport {
-                    depth_range: 0.0..1.0,
-                    dimensions: [document_dimension as f32, document_dimension as f32],
-                    origin: [0.0; 2],
-                },
-            ]))
-            .build(render_context.device().clone())?;
-
-        Ok(Self {
-            render_context,
-            pipeline,
-            render_pass,
-
-            ms_attachment_view,
-        })
-    }
-    fn draw(
-        &self,
-        doc: &SillyDocument,
-        buff: Arc<vk::ImageView<vk::StorageImage>>,
-    ) -> AnyResult<vk::sync::future::FenceSignalFuture<impl vk::sync::GpuFuture>> {
-        let matrix = cgmath::ortho(
-            0.0,
-            DOCUMENT_DIMENSION as f32,
-            DOCUMENT_DIMENSION as f32,
-            0.0,
-            -1.0,
-            0.0,
-        );
-
-        let points_buf = vk::Buffer::from_iter(
-            self.render_context.allocators().memory(),
-            vulkano::buffer::BufferCreateInfo {
-                usage: vk::BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            vulkano::memory::allocator::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Upload,
-                ..Default::default()
-            },
-            doc.verts.iter().copied(),
-        )?;
-        let indices = vk::Buffer::from_iter(
-            self.render_context.allocators().memory(),
-            vulkano::buffer::BufferCreateInfo {
-                usage: vk::BufferUsage::INDEX_BUFFER,
-                ..Default::default()
-            },
-            vulkano::memory::allocator::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Upload,
-                ..Default::default()
-            },
-            doc.indices.iter().copied(),
-        )?;
-
-        let document_framebuffer = vk::Framebuffer::new(
-            self.render_pass.clone(),
-            vk::FramebufferCreateInfo {
-                attachments: vec![self.ms_attachment_view.clone(), buff.clone()],
-                ..Default::default()
-            },
-        )?;
-
-        let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
-            self.render_context.allocators().command_buffer(),
-            self.render_context.queues().graphics().idx(),
-            vk::CommandBufferUsage::OneTimeSubmit,
-        )?;
-        command_buffer
-            .begin_render_pass(
-                vk::RenderPassBeginInfo {
-                    clear_values: vec![Some(vk::ClearValue::Float([0.0; 4])), None],
-                    ..vk::RenderPassBeginInfo::framebuffer(document_framebuffer)
-                },
-                vk::SubpassContents::Inline,
-            )?
-            .bind_pipeline_graphics(self.pipeline.clone())
-            .push_constants(
-                self.pipeline.layout().clone(),
-                0,
-                test_renderer_vert::Matrix { mvp: matrix.into() },
-            )
-            .bind_vertex_buffers(0, [points_buf])
-            .bind_index_buffer(indices)
-            .draw_indexed(doc.indices.len() as u32, 1, 0, 0, 0)?
-            .end_render_pass()?;
-        let command_buffer = command_buffer.build()?;
-
-        Ok(self
-            .render_context
-            .now()
-            .then_execute(
-                self.render_context.queues().graphics().queue().clone(),
-                command_buffer,
-            )?
-            .then_signal_fence_and_flush()?)
-    }
-}
-
 fn listener(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     renderer: Arc<render_device::RenderContext>,
     document_preview: Arc<
         parking_lot::RwLock<document_viewport_proxy::DocumentViewportPreviewProxy>,
     >,
-) {
+) -> AnyResult<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
 
-    let mut doc = SillyDocument {
-        indices: vec![],
-        verts: vec![],
-    };
+    let mut manager = StrokeLayerManager::default();
+    let layer_render = stroke_renderer::StrokeLayerRenderer::new(renderer.clone())?;
+    let blend = blend::BlendEngine::new(renderer.device().clone())?;
 
-    let renderer = SillyDocumentRenderer::new(renderer.clone()).unwrap();
+    let globals = GLOBALS.get_or_init(Globals::new);
+    // Create a document and a few layers and select them, to speed up testing iterations :P
+    {
+        let (default_document, default_layer) = {
+            let mut document = Document::default();
+            let document_id = document.id.weak();
 
-    let mut was_pressed = false;
-    loop {
-        match runtime.block_on(event_stream.recv()) {
-            Ok(event_frame) => {
-                let mut changed = false;
+            let layer = StrokeLayer::default();
+            let layer_id = layer.id.weak();
+            document.layer_top_level.push(layer);
 
-                let matrix = document_preview.read().get_matrix().invert().unwrap();
-                for event in event_frame.iter() {
-                    // released, append a primitive restart command
-                    if was_pressed && !event.pressed {
-                        doc.indices.push(u32::MAX);
+            globals.documents.blocking_write().push(document);
+            (document_id, layer_id)
+        };
+
+        let mut selections = globals.selections().blocking_write();
+        selections.cur_document = Some(default_document);
+        let document_selections = selections
+            .document_selections
+            .entry(default_document)
+            .or_default();
+        document_selections.cur_layer = Some(default_layer);
+    }
+
+    let mut current_stroke = None::<Stroke>;
+    runtime.block_on(async {
+        loop {
+            match event_stream.recv().await {
+                Ok(event_frame) => {
+                    let matrix = { document_preview.read().get_matrix() }.invert().unwrap();
+
+                    // Deadlock warning - the interface locks these same two -w-
+                    // Make sure they're locked in the same order in both. Whoopsie.
+                    let mut selections = globals.selections().write().await;
+                    let documents = globals.documents().read().await;
+
+                    let Some(document) = selections.cur_document.and_then(|selection| {
+                        documents
+                            .iter()
+                            .find(|document| document.id.weak() == selection)
+                    }) else {
+                        // No document to work on.
+                        continue;
+                    };
+
+                    let Some(layer) = selections
+                        .cur_document
+                        .and_then(|document| selections.document_selections.get(&document))
+                        .and_then(|document| document.cur_layer)
+                    else {
+                        // No layer to work on
+                        continue;
+                    };
+                    let layer_data =
+                        manager
+                            .layers
+                            .entry(layer)
+                            .or_insert_with(|| StrokeLayerData {
+                                strokes: vec![],
+                                render_data: None,
+                            });
+
+                    let undos = std::mem::take(&mut selections.undos);
+                    let mut layer_needs_redraw = false;
+                    if undos > 0 {
+                        layer_data
+                            .strokes
+                            .drain(layer_data.strokes.len().saturating_sub(undos as usize)..);
+                        layer_needs_redraw = true;
                     }
-                    if event.pressed {
-                        let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
 
-                        doc.verts.push(StrokePointUnpacked {
-                            pos: [
+                    for event in event_frame.iter() {
+                        if event.pressed {
+                            // Get stroke-in-progress or start anew.
+                            let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
+                                brush: selections.brush_settings.clone(),
+                                id: Default::default(),
+                                points: Vec::new(),
+                            });
+                            let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
+                            let pos = [
                                 pos.x * DOCUMENT_DIMENSION as f32,
                                 (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
-                            ],
-                            pressure: event.pressure.unwrap_or(0.0),
-                        });
-                        doc.indices.push((doc.verts.len() - 1) as u32);
-                        changed = true;
+                            ];
+
+                            // Calc cumulative distance from the start, or 0.0 if this is the first point.
+                            let dist = this_stroke
+                                .points
+                                .last()
+                                .map(|last| {
+                                    // I should really be using a linalg library lmao
+                                    let delta = [last.pos[0] - pos[0], last.pos[1] - pos[1]];
+                                    last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
+                                })
+                                .unwrap_or(0.0);
+
+                            this_stroke.points.push(StrokePoint {
+                                pos,
+                                pressure: event.pressure.unwrap_or(1.0),
+                                dist,
+                            })
+                        } else {
+                            if let Some(stroke) = current_stroke.take() {
+                                // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
+                                let immutable: ImmutableStroke = stroke.into();
+                                layer_data.strokes.push(immutable);
+                                layer_needs_redraw = true;
+                            }
+                        }
                     }
 
-                    was_pressed = event.pressed;
-                }
+                    // Unlock before long potentially long compute.
+                    drop(selections);
 
-                if changed {
-                    let buff = runtime.block_on(document_preview.read().get_writeable_buffer());
-                    renderer.draw(&doc, buff).unwrap().wait(None).unwrap();
+                    if layer_needs_redraw {
+                        // Delete render_data if empty.
+                        // Create if render_data absent and layer not empty.
+                        if layer_data.strokes.len() == 0 {
+                            layer_data.render_data = None;
+                            continue;
+                        } else if layer_data.render_data.is_none() {
+                            // Get or try insert with? owo
+                            layer_data.render_data = Some(layer_render.uninit_render_data()?)
+                        }
+                        let buf = layer_data.render_data.as_ref().unwrap();
 
-                    document_preview.read().swap();
+                        let future = layer_render.draw(&layer_data.strokes, buf, true)?;
+
+                        let blend_info: Vec<_> = document
+                            .layer_top_level
+                            .iter()
+                            .filter_map(|layer| {
+                                Some((
+                                    layer.blend.clone(),
+                                    manager
+                                        .layers
+                                        .get(&layer.id.weak())?
+                                        .render_data
+                                        .as_ref()?
+                                        .view
+                                        .clone(),
+                                ))
+                            })
+                            .collect();
+
+                        // Unlock before long potentially long awaits.
+                        drop(documents);
+
+                        let write = document_preview.write();
+                        let buf = write.get_writeable_buffer().await;
+                        let commands =
+                            blend.blend(&renderer, buf, true, &blend_info, [0; 2], [0; 2])?;
+                        future
+                            .then_execute(renderer.queues().compute().queue().clone(), commands)?
+                            .then_signal_fence_and_flush()?
+                            .await?;
+
+                        write.swap();
+                    }
                 }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
+                    log::warn!("Lost {num} stylus frames!");
+                }
+                // Stream closed, no more data to handle - we're done here!
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
-                log::warn!("Lost {num} stylus frames!");
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
         }
-    }
+    })
 }
 
 //If we return, it was due to an error.
@@ -1276,6 +1235,8 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let window_surface = window::WindowSurface::new()?;
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
+
+    GLOBALS.get_or_init(Globals::new);
 
     // Test image generators.
     //let (image, future) = make_test_image(render_context.clone())?;
@@ -1294,7 +1255,9 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let event_stream = window_renderer.stylus_events();
 
     std::thread::spawn(move || {
-        listener(event_stream, render_context.clone(), document_view.clone())
+        if let Err(e) = listener(event_stream, render_context.clone(), document_view.clone()) {
+            log::error!("Helper thread exited with err:\n{e:?}")
+        }
     });
 
     window_renderer.run();

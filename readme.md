@@ -1,4 +1,4 @@
-# fuzzpaint-vk :sheep:
+# <a href="#" onclick="return false;"><img src="https://raw.githubusercontent.com/googlefonts/noto-emoji/main/svg/emoji_u1f411.svg" alt="Baa" title="Baa" style="position:relative;bottom: -0.2em;width:1em;"/></a> fuzzpaint-vk
 
 Graphics accelerated vector-based paint program for people who like compositing software :3
 
@@ -18,20 +18,23 @@ To declare **0.2.0**, I would like to be able to somewhat freely draw a thing an
  - [ ] File I/O
    - [ ] Read/Write custom vector image format
    - [ ] File history (linear)
-   - [ ] Write common image formats (via image-rs/image)
+   - [ ] Export common image formats
+     - via image-rs/image
  - [ ] Brushes
    - [ ] Make and manage textured brushes from inside fuzzpaint
-   - [ ] Save brushes to file (to document or to global repo?)
-   - [ ] Tesselation engine capable of mixed brushes
-   - [ ] Roller brushes
-   - [ ] Stamped brushes
-   - [ ] Efficient erasers
- - [ ] Layers
+   - [ ] Save brushes to file
+     - To document or to global repo? - resolved: both, with UUIDs! That way, files can be freely shared, and brushes can be easily re-used.
+   - [X] Tesselation engine capable of mixed brushes
+   - [ ] ~~Roller brushes~~
+   - [X] Stamped brushes
+   - [X] Efficient erasers
+ - [X] Layers
    - [X] Simple UI to manage layer creation, order, modes, etc.
-   - [ ] Blending Über-compute-shader 
+   - [X] Blending compute shaders
      - In the future, compile a document-specific compute shader to do the blending in a more optimizer-friendly manner.
-     - fall forward on `EXT_blend_operation_advanced`?
-   - Groups + FX + self-populating layers (clone, fill) come later
+     - Also, take advantage of associativity and commutativity of blend modes to reduce number of distinct dispatches
+     - fall forward on `EXT_blend_operation_advanced` or `EXT_fragment_shader_interlock`?
+   - Groups + FX + self-populating layers (clone, fill, gradients) come later
  - [ ] UI
    - [X] Initial layout
    - [ ] A simple hotkey system, for common actions like Ctrl+Z or Ctrl+Space
