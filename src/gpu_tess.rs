@@ -2,7 +2,8 @@ use crate::vk;
 use std::sync::Arc;
 pub mod interface {
     #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone, Debug)]
-    #[repr(C)]
+    // Match align with GLSL std430.
+    #[repr(C, align(16))]
     pub struct OutputStrokeVertex {
         #[format(R32G32_SFLOAT)]
         pub pos: [f32; 2],
@@ -17,7 +18,8 @@ pub mod interface {
 
     }
     #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone)]
-    #[repr(C)]
+    // Match align with GLSL std430.
+    #[repr(C, align(16))]
     pub struct InputStrokeInfo {
         // Indices into inputStrokeVertices buffer
         #[format(R32_UINT)]
@@ -48,7 +50,8 @@ pub mod interface {
         pub modulate: [f32; 4],
     }
     #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone)]
-    #[repr(C)]
+    // Match align with GLSL std430.
+    #[repr(C, align(8))]
     pub struct InputStrokeVertex {
         #[format(R32G32_SFLOAT)]
         pub pos: [f32; 2],
