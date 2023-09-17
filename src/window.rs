@@ -33,7 +33,7 @@ impl WindowSurface {
         self,
         render_surface: render_device::RenderSurface,
         render_context: Arc<render_device::RenderContext>,
-        preview_renderer: Arc<parking_lot::RwLock<dyn crate::PreviewRenderProxy>>,
+        preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
     ) -> GpuResult<WindowRenderer> {
         let egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
         Ok(WindowRenderer {
@@ -64,7 +64,7 @@ pub struct WindowRenderer {
 
     last_frame_fence: Option<vk::sync::future::FenceSignalFuture<Box<dyn GpuFuture>>>,
 
-    preview_renderer: Arc<parking_lot::RwLock<dyn crate::PreviewRenderProxy>>,
+    preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
 }
 impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
@@ -104,7 +104,6 @@ impl WindowRenderer {
         self.swapchain_generation = self.swapchain_generation.wrapping_add(1);
 
         self.preview_renderer
-            .write()
             .surface_changed(self.render_surface.as_ref().unwrap());
 
         Ok(())
@@ -243,10 +242,8 @@ impl WindowRenderer {
         // Free up resources from the last time this frame index was rendered
         // Todo: call much much sooner.
         let preview_commands = {
-            let mut lock = self.preview_renderer.write();
-
-            lock.render_complete(idx);
-            let preview_commands = lock.render(idx)?;
+            self.preview_renderer.render_complete(idx);
+            let preview_commands = self.preview_renderer.render(idx)?;
             preview_commands
         };
         let commands = self.egui_ctx.build_commands(idx);
