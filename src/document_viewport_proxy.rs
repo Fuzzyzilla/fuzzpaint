@@ -53,14 +53,15 @@ mod shaders {
     }
 }
 
-#[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
-#[repr(C)]
-struct DocumentVertex {
-    #[format(R32G32_SFLOAT)]
-    pos: [f32; 2],
+/// An acquired image from the proxy. Will become the current image when dropped,
+/// after a user-provided GPU future.
+struct DocumentViewportPreviewProxyGuard {
+
 }
 
-//type AnyFence = vk::sync::future::FenceSignalFuture<Box<dyn vk::sync::GpuFuture>>;
+/// An double-buffering interface between the asynchronous edit->render pipeline of documents
+/// and the synchronous redrawing of the many swapchain images.
+/// (Because dealing with one image is easier than potentially many, as we don't care about excess framerate)
 pub struct DocumentViewportPreviewProxy {
     render_context: Arc<render_device::RenderContext>,
 

@@ -338,10 +338,12 @@ impl BlendEngine {
             [vk::WriteDescriptorSet::image_view(0, background.clone())],
         )?;
         if clear_background {
-            // Hmmm... The clearing of the whole image kinda breaks the contract, but not
-            // much for me to do :V
+            use vulkano::image::ImageViewAbstract;
             commands.clear_color_image(vk::ClearColorImageInfo {
                 clear_value: [0.0;4].into(),
+                regions: smallvec::smallvec![
+                    background.subresource_range().clone(),
+                ],
                 ..vulkano::command_buffer::ClearColorImageInfo::image(background.image().clone())
             })?;
         }
