@@ -188,6 +188,19 @@ impl Default for ActionsToKeys {
             },
         );
         keys.insert(
+            super::Action::ViewportFlipHorizontal,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
+                    alt: false,
+                    ctrl: false,
+                    shift: false,
+                    key: VirtualKeyCode::M,
+                }])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        keys.insert(
             super::Action::LayerNew,
             HotkeyCollection {
                 keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
@@ -239,7 +252,10 @@ impl Default for ActionsToKeys {
                 pen_hotkeys: None,
             },
         );
-        Self(keys)
+        let new = Self(keys);
+        // Make sure we didn't accidentally bind a single key twice
+        debug_assert!(TryInto::<KeysToActions>::try_into(&new).is_ok());
+        new
     }
 }
 
@@ -273,9 +289,4 @@ impl TryFrom<&ActionsToKeys> for KeysToActions {
 
         Ok(new)
     }
-}
-
-pub struct Hotkeys {
-    actions_to_keys: ActionsToKeys,
-    keys_to_actions: KeysToActions,
 }

@@ -18,6 +18,7 @@ pub enum Action {
 
     ViewportPan,
     ViewportScrub,
+    ViewportFlipHorizontal,
 
     LayerUp,
     LayerDown,
