@@ -24,11 +24,11 @@ To declare **0.2.0**, I would like to be able to somewhat freely draw a thing an
    - [ ] Make and manage textured brushes from inside fuzzpaint
    - [ ] Save brushes to file
      - To document or to global repo? - resolved: both, with UUIDs! That way, files can be freely shared, and brushes can be easily re-used.
-   - [ ] Tesselation engine capable of mixed brushes
-   - [ ] Roller brushes
+   - [X] Tesselation engine capable of mixed brushes
+   - [ ] ~~Roller brushes~~
    - [X] Stamped brushes
    - [X] Efficient erasers
- - [ ] Layers
+ - [X] Layers
    - [X] Simple UI to manage layer creation, order, modes, etc.
    - [X] Blending compute shaders
      - In the future, compile a document-specific compute shader to do the blending in a more optimizer-friendly manner.
