@@ -1,6 +1,6 @@
 use crate::*;
 
-mod document_preview_shaders {
+mod shaders {
     pub mod vertex {
         vulkano_shaders::shader! {
             ty: "vertex",
@@ -11,13 +11,17 @@ mod document_preview_shaders {
                 mat4 mat;
             } matrix;
 
-            layout(location = 0) in vec2 pos;
-
             layout(location = 0) out vec2 out_uv;
 
             void main() {
+                vec4 pos = vec4(
+                    float(gl_VertexIndex & 1),
+                    float(gl_VertexIndex & 2),
+                    0.0,
+                    1.0
+                );
                 out_uv = vec2(pos.x, 1.0 - pos.y);
-                gl_Position = matrix.mat * vec4(pos, 0.0, 1.0);
+                gl_Position = matrix.mat * pos;
             }"
         }
     }
@@ -27,6 +31,10 @@ mod document_preview_shaders {
             src:r"
             #version 460
 
+            const float LIGHT = 0.8;
+            const float DARK = 0.7;
+            const uint SIZE = uint(16);
+
             layout(set = 0, binding = 0) uniform sampler2D image;
 
             layout(location = 0) in vec2 uv;
@@ -34,30 +42,12 @@ mod document_preview_shaders {
             layout(location = 0) out vec4 color;
 
             void main() {
-                vec4 col = texture(image, uv);
-                color = col;
-            }"
-        }
-    }
-    pub mod transparency_grid {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            src:r"
-            #version 460
-
-            const float LIGHT = 0.8;
-            const float DARK = 0.7;
-            const uint SIZE = uint(16);
-
-            layout(location = 0) in vec2 _; ///Dummy input for interface matching
-
-            layout(location = 0) out vec4 color;
-
-            void main() {
                 uvec2 grid_coords = uvec2(gl_FragCoord.xy) / SIZE;
                 bool is_light = (grid_coords.x + grid_coords.y) % 2 == 0;
+                vec3 grid_color = vec3(vec3(is_light ? LIGHT : DARK));
 
-                color = vec4(vec3(is_light ? LIGHT : DARK), 1.0);
+                vec4 col = texture(image, uv);
+                color = vec4(grid_color * (1.0 - col.a) + col.rgb, 1.0);
             }"
         }
     }
@@ -87,12 +77,9 @@ pub struct DocumentViewportPreviewProxy {
     viewport_dimensions: [u32; 2],
 
     pipeline: Arc<vk::GraphicsPipeline>,
-    transparency_pipeline: Arc<vk::GraphicsPipeline>,
 
     document_to_preview_matrix: cgmath::Matrix4<f32>,
     transform_matrix: [[f32; 4]; 4],
-    vertex_buffer: vulkano::buffer::Subbuffer<[DocumentVertex; 4]>,
-    index_buffer: vulkano::buffer::Subbuffer<[u16]>,
 }
 
 impl DocumentViewportPreviewProxy {
@@ -168,98 +155,30 @@ impl DocumentViewportPreviewProxy {
             },
         )?;
 
-        let vertices = [
-            DocumentVertex { pos: [0.0, 0.0] },
-            DocumentVertex { pos: [1.0, 0.0] },
-            DocumentVertex { pos: [0.0, 1.0] },
-            DocumentVertex { pos: [1.0, 1.0] },
-        ];
-        let indices: [u16; 6] = [0, 1, 2, 1, 2, 3];
+        let vertex_shader = shaders::vertex::load(render_surface.context().device().clone())?;
+        let fragment_shader = shaders::fragment::load(render_surface.context().device().clone())?;
 
-        let vertex_staging_buf = vk::Buffer::from_data(
-            render_surface.context().allocators().memory(),
-            vk::BufferCreateInfo {
-                usage: vk::BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            vulkano::memory::allocator::AllocationCreateInfo {
-                usage: vulkano::memory::allocator::MemoryUsage::Upload,
-                ..Default::default()
-            },
-            vertices,
-        )?;
-        let index_staging_buf = vk::Buffer::from_iter(
-            render_surface.context().allocators().memory(),
-            vk::BufferCreateInfo {
-                usage: vk::BufferUsage::INDEX_BUFFER,
-                ..Default::default()
-            },
-            vulkano::memory::allocator::AllocationCreateInfo {
-                usage: vulkano::memory::allocator::MemoryUsage::Upload,
-                ..Default::default()
-            },
-            indices.into_iter(),
-        )?;
-
-        let vertex_shader =
-            document_preview_shaders::vertex::load(render_surface.context().device().clone())?;
-        let fragment_shader =
-            document_preview_shaders::fragment::load(render_surface.context().device().clone())?;
-        let transparency_grid = document_preview_shaders::transparency_grid::load(
-            render_surface.context().device().clone(),
-        )?;
+        // "main" is the only valid GLSL entry point name, ok to unwrap.
         let vertex_shader = vertex_shader.entry_point("main").unwrap();
         let fragment_shader = fragment_shader.entry_point("main").unwrap();
-        let transparency_grid = transparency_grid.entry_point("main").unwrap();
 
-        let mut blend_premul = vk::ColorBlendState::new(1);
-        blend_premul.attachments[0].blend = Some(vk::AttachmentBlend {
-            alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-            color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-            alpha_destination:
-                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-            color_destination:
-                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-            alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-            color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-        });
+        let mut no_blend = vk::ColorBlendState::new(1);
+        no_blend.attachments[0].blend = None;
 
         let size = render_surface.extent();
 
         let pipeline = vk::GraphicsPipeline::start()
-            .vertex_shader(
-                vertex_shader.clone(),
-                document_preview_shaders::vertex::SpecializationConstants::default(),
-            )
-            .fragment_shader(
-                fragment_shader,
-                document_preview_shaders::fragment::SpecializationConstants::default(),
-            )
-            .vertex_input_state(DocumentVertex::per_vertex())
+            .vertex_shader(vertex_shader.clone(), ())
+            .fragment_shader(fragment_shader, ())
+            .vertex_input_state(vulkano::pipeline::graphics::vertex_input::VertexInputState::new())
             .rasterization_state(
                 vk::RasterizationState::default()
                     .cull_mode(vulkano::pipeline::graphics::rasterization::CullMode::None),
             )
-            .color_blend_state(blend_premul.clone())
-            .render_pass(render_pass.clone().first_subpass())
-            .viewport_state(vk::ViewportState::viewport_dynamic_scissor_irrelevant())
-            .build(render_surface.context().device().clone())?;
-
-        let transparency_pipeline = vk::GraphicsPipeline::start()
-            .vertex_shader(
-                vertex_shader,
-                document_preview_shaders::vertex::SpecializationConstants::default(),
+            .input_assembly_state(
+                vk::InputAssemblyState::new().topology(vk::PrimitiveTopology::TriangleStrip),
             )
-            .fragment_shader(
-                transparency_grid,
-                document_preview_shaders::transparency_grid::SpecializationConstants::default(),
-            )
-            .vertex_input_state(DocumentVertex::per_vertex())
-            .rasterization_state(
-                vk::RasterizationState::default()
-                    .cull_mode(vulkano::pipeline::graphics::rasterization::CullMode::None),
-            )
-            .color_blend_state(blend_premul.clone())
+            .color_blend_state(no_blend)
             .render_pass(render_pass.clone().first_subpass())
             .viewport_state(vk::ViewportState::viewport_dynamic_scissor_irrelevant())
             .build(render_surface.context().device().clone())?;
@@ -302,10 +221,7 @@ impl DocumentViewportPreviewProxy {
             render_context: render_surface.context().clone(),
             framebuffers: Vec::new(),
             prerecorded_command_buffers: Vec::new(),
-            index_buffer: index_staging_buf,
-            vertex_buffer: vertex_staging_buf,
             pipeline,
-            transparency_pipeline,
             render_pass,
             transform_matrix: xform.into(),
             document_to_preview_matrix: document_to_preview_matrix,
@@ -372,9 +288,13 @@ impl DocumentViewportPreviewProxy {
                                     },
                                     command_buffer::SubpassContents::Inline,
                                 )?
-                                .bind_pipeline_graphics(self.transparency_pipeline.clone())
-                                .bind_vertex_buffers(0, self.vertex_buffer.clone())
-                                .bind_index_buffer(self.index_buffer.clone())
+                                .bind_pipeline_graphics(self.pipeline.clone())
+                                .bind_descriptor_sets(
+                                    vulkano::pipeline::PipelineBindPoint::Graphics,
+                                    self.pipeline.layout().clone(),
+                                    0,
+                                    vec![self.document_image_bindings[idx].clone()],
+                                )
                                 .set_viewport(
                                     0,
                                     [vk::Viewport {
@@ -387,21 +307,13 @@ impl DocumentViewportPreviewProxy {
                                     }],
                                 )
                                 .push_constants(
-                                    self.transparency_pipeline.layout().clone(),
+                                    self.pipeline.layout().clone(),
                                     0,
-                                    document_preview_shaders::vertex::Matrix {
+                                    shaders::vertex::Matrix {
                                         mat: self.transform_matrix,
                                     },
                                 )
-                                .draw_indexed(6, 1, 0, 0, 0)?
-                                .bind_pipeline_graphics(self.pipeline.clone())
-                                .bind_descriptor_sets(
-                                    vulkano::pipeline::PipelineBindPoint::Graphics,
-                                    self.pipeline.layout().clone(),
-                                    0,
-                                    vec![self.document_image_bindings[idx].clone()],
-                                )
-                                .draw_indexed(6, 1, 0, 0, 0)?
+                                .draw(6, 1, 0, 0)?
                                 .end_render_pass()?;
 
                             Ok(buffer.build()?)
@@ -444,8 +356,7 @@ impl DocumentViewportPreviewProxy {
 }
 impl crate::PreviewRenderProxy for DocumentViewportPreviewProxy {
     fn render<'a>(&'a mut self, idx: u32) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>> {
-        let Some(buffer) = self.prerecorded_command_buffers.get(idx as usize)
-        else {
+        let Some(buffer) = self.prerecorded_command_buffers.get(idx as usize) else {
             anyhow::bail!("No buffer found for swapchain image {idx}!")
         };
 
