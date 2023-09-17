@@ -15,7 +15,7 @@ pub trait HotkeyShadow {
     fn shadows(&self, other: &Self::Other) -> bool;
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq, Clone)]
 pub struct KeyboardHotkey {
     pub ctrl: bool,
     pub alt: bool,
@@ -36,13 +36,13 @@ impl HotkeyShadow for KeyboardHotkey {
     }
 }
 /// Todo: how to identify a pad across program invocations?
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone)]
 pub struct PadID;
 /// Todo: how to identify a pen across program invocations?
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone)]
 pub struct PenID;
 /// Pads are not yet implemented, but looking forward:
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone)]
 pub struct PadHotkey {
     /// Which tablet does this come from? (if multiple)
     pub pad: PadID,
@@ -60,7 +60,7 @@ impl HotkeyShadow for PadHotkey {
 /// Pens are not yet implemented, but looking forward:
 /// Allows many pens, and different functionality per-pen
 /// depending on which pad it is interacting with. (wacom functionality)
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone)]
 pub struct PenHotkey {
     /// Which tablet does this come from? (if multiple)
     pub pad: PadID,
@@ -80,10 +80,29 @@ impl HotkeyShadow for PenHotkey {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct HotkeyCollection {
     pub keyboard_hotkeys: Option<Arc<[KeyboardHotkey]>>,
-    pub pad_hotkeys: Option<Arc<[KeyboardHotkey]>>,
-    pub pen_hotkeys: Option<Arc<[KeyboardHotkey]>>,
+    pub pad_hotkeys: Option<Arc<[PadHotkey]>>,
+    pub pen_hotkeys: Option<Arc<[PenHotkey]>>,
+}
+impl HotkeyCollection {
+    pub fn iter(&self) -> impl Iterator<Item = AnyHotkey> + '_ {
+        let keyboard = self
+            .keyboard_hotkeys
+            .iter()
+            .flat_map(|keys| keys.iter().map(|key| AnyHotkey::Key(key.clone())));
+        let pad = self
+            .pad_hotkeys
+            .iter()
+            .flat_map(|keys| keys.iter().map(|key| AnyHotkey::Pad(key.clone())));
+        let pen = self
+            .pen_hotkeys
+            .iter()
+            .flat_map(|keys| keys.iter().map(|key| AnyHotkey::Pen(key.clone())));
+
+        keyboard.chain(pad).chain(pen)
+    }
 }
 
+#[derive(PartialEq, Eq, Hash, Clone)]
 pub enum AnyHotkey {
     Key(KeyboardHotkey),
     Pad(PadHotkey),
@@ -226,6 +245,36 @@ impl Default for ActionsToKeys {
 
 /// Derived from ActionsToKeys, maps each hotkey onto at most one action.
 pub struct KeysToActions(std::collections::HashMap<AnyHotkey, super::Action>);
+pub enum KeysToActionsError {
+    /// A single key was bound to multiple actions.
+    /// Only the first two encountered (in arbitrary order) are reported.
+    DuplicateBinding {
+        key: AnyHotkey,
+        actions: [super::Action; 2],
+    },
+}
+impl TryFrom<&ActionsToKeys> for KeysToActions {
+    type Error = KeysToActionsError;
+    fn try_from(value: &ActionsToKeys) -> Result<Self, Self::Error> {
+        let mut new = KeysToActions(Default::default());
+
+        for (action, keys) in value.0.iter() {
+            for key in keys.iter() {
+                let old = new.0.insert(key.clone(), *action);
+                // The slot wasn't empty!
+                if let Some(old) = old {
+                    return Err(KeysToActionsError::DuplicateBinding {
+                        key: key.clone(),
+                        actions: [*action, old],
+                    });
+                }
+            }
+        }
+
+        Ok(new)
+    }
+}
+
 pub struct Hotkeys {
     actions_to_keys: ActionsToKeys,
     keys_to_actions: KeysToActions,
