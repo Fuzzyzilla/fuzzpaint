@@ -36,6 +36,9 @@ impl WindowSurface {
         preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
     ) -> GpuResult<WindowRenderer> {
         let egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
+
+        let (send, stream) = crate::actions::create_action_stream();
+
         Ok(WindowRenderer {
             win: self.win,
             render_surface: Some(render_surface),
@@ -45,7 +48,8 @@ impl WindowSurface {
             last_frame_fence: None,
             egui_ctx,
             preview_renderer,
-            action_collector: Default::default(),
+            action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
+            action_stream: stream,
             stylus_events: Default::default(),
         })
     }
@@ -61,6 +65,7 @@ pub struct WindowRenderer {
     egui_ctx: egui_impl::EguiCtx,
 
     action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector,
+    action_stream: crate::actions::ActionStream,
     stylus_events: crate::stylus_events::WinitStylusEventCollector,
     swapchain_generation: u32,
 
@@ -71,6 +76,9 @@ pub struct WindowRenderer {
 impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
+    }
+    pub fn action_listener(&self) -> crate::actions::ActionListener {
+        self.action_stream.listen()
     }
     pub fn stylus_events(
         &self,

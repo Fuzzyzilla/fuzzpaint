@@ -1115,6 +1115,7 @@ static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
 
 fn listener(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
+    mut action_listener: actions::ActionListener,
     renderer: Arc<render_device::RenderContext>,
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
 ) -> AnyResult<()> {
@@ -1190,7 +1191,8 @@ fn listener(
                                 render_data: None,
                             });
 
-                    let undos = std::mem::take(&mut selections.undos);
+                    let key_undos = action_listener.frame().map(|f| f.action_trigger_count(actions::Action::Undo)).unwrap_or(0);
+                    let undos = std::mem::take(&mut selections.undos) + key_undos as u32;
                     let mut layer_needs_redraw = false;
                     if undos > 0 {
                         layer_data
@@ -1334,9 +1336,10 @@ fn main() -> AnyResult<std::convert::Infallible> {
     )?;
 
     let event_stream = window_renderer.stylus_events();
+    let action_listener = window_renderer.action_listener();
 
     std::thread::spawn(move || {
-        if let Err(e) = listener(event_stream, render_context.clone(), document_view.clone()) {
+        if let Err(e) = listener(event_stream, action_listener, render_context.clone(), document_view.clone()) {
             log::error!("Helper thread exited with err:\n{e:?}")
         }
     });

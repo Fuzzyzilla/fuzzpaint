@@ -7,19 +7,21 @@ pub struct WinitKeyboardActionCollector {
     ctrl: bool,
     shift: bool,
     alt: bool,
+
+    sender: super::ActionSender,
 }
-impl Default for WinitKeyboardActionCollector {
-    fn default() -> Self {
+impl WinitKeyboardActionCollector {
+    pub fn new(sender: super::ActionSender) -> Self {
         Self {
             ctrl: false,
             alt: false,
             shift: false,
             current_hotkeys: Default::default(),
             currently_pressed: Default::default(),
+
+            sender,
         }
     }
-}
-impl WinitKeyboardActionCollector {
     pub fn push_event<'a>(&mut self, event: &winit::event::WindowEvent) {
         let hotkeys = crate::GlobalHotkeys::get();
 
@@ -78,7 +80,11 @@ impl WinitKeyboardActionCollector {
                     // Just pressed
                     (false, true) => possible_keys.for_each(|(action, key)| self.push_key(action, key)),
                     // OS key repeat
-                    (true, true) => possible_keys.for_each(|(action, _)| log::trace!("Repeat {action:?}")),
+                    (true, true) => possible_keys.for_each(|(action, _)| {
+                        // No bookkeeping to do, just emit directly
+                        self.sender.repeat(action);
+                        log::trace!("Repeat {action:?}");
+                    }),
                     // Just released
                     (_, false) => possible_keys.for_each(|(action, key)| self.pop_key(action, key)),
                 }
@@ -108,12 +114,18 @@ impl WinitKeyboardActionCollector {
         if self.current_hotkeys.contains_key(&new) {
             return;
         }
+
+        let hotkeys = crate::GlobalHotkeys::get();
+
         let mut shadows_on_new = 0;
         for (old_key, shadows) in self.current_hotkeys.iter_mut() {
             if new.shadows(old_key) {
                 if *shadows == 0 {
-                    // <emit shadow>
-                    log::trace!("Shadowed {old_key:?}");
+                    if let Some(old_action) = hotkeys.keys_to_actions.action_of(old_key.clone()) {
+                        // <emit shadow>
+                        self.sender.shadow(old_action);
+                        log::trace!("Shadowed {old_action:?}");
+                    }
                 }
                 *shadows += 1;
             } else {
@@ -124,9 +136,11 @@ impl WinitKeyboardActionCollector {
             }
         }
         // <emit press>
+        self.sender.press(action);
         log::trace!("Pressed {action:?}");
         if shadows_on_new != 0 {
             // <emit shadow>
+            self.sender.shadow(action);
             log::trace!("Shadowed {action:?}");
         }
 
@@ -141,8 +155,10 @@ impl WinitKeyboardActionCollector {
             return;
         };
         // <emit release>
+        self.sender.release(action);
         log::trace!("Released {action:?}");
 
+        let hotkeys = crate::GlobalHotkeys::get();
         for (old_key, shadows) in self.current_hotkeys.iter_mut() {
             if remove.shadows(old_key) {
                 *shadows = shadows.checked_sub(1).unwrap_or_else(|| {
@@ -155,7 +171,10 @@ impl WinitKeyboardActionCollector {
                 });
                 if *shadows == 0 {
                     // <emit unshadow>
-                    log::trace!("Unshadowed {old_key:?}");
+                    if let Some(old_action) = hotkeys.keys_to_actions.action_of(old_key.clone()) {
+                        log::trace!("Unshadowed {old_action:?}");
+                        self.sender.unshadow(old_action);
+                    }
                 }
             }
         }
