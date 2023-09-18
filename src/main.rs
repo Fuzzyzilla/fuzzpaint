@@ -43,11 +43,11 @@ pub struct GlobalHotkeys {
     keys_to_actions: actions::hotkeys::KeysToActions,
 }
 impl GlobalHotkeys {
-    const FILENAME : &'static str = "hotkeys.ron";
+    const FILENAME: &'static str = "hotkeys.ron";
     /// Shared global hotkeys, saved and loaded from user preferences.
     /// (Or defaulted, if unavailable for some reason)
     pub fn get() -> &'static Self {
-        static GLOBAL_HOTKEYS : std::sync::OnceLock<GlobalHotkeys> = std::sync::OnceLock::new();
+        static GLOBAL_HOTKEYS: std::sync::OnceLock<GlobalHotkeys> = std::sync::OnceLock::new();
 
         GLOBAL_HOTKEYS.get_or_init(|| {
             let mut dir = preferences_dir();
@@ -84,14 +84,12 @@ impl GlobalHotkeys {
         };
 
         match mappings {
-            Ok((actions_to_keys, keys_to_actions)) => {
-                Self {
-                    failed_to_load: false,
-                    actions_to_keys,
-                    keys_to_actions
-                }
+            Ok((actions_to_keys, keys_to_actions)) => Self {
+                failed_to_load: false,
+                actions_to_keys,
+                keys_to_actions,
             },
-            Err(_) => Self::no_path()
+            Err(_) => Self::no_path(),
         }
     }
     /// Return true if loading user's settings failed. This can be useful for
@@ -100,7 +98,8 @@ impl GlobalHotkeys {
         self.failed_to_load
     }
     pub fn save(&self) -> anyhow::Result<()> {
-        let mut preferences = preferences_dir().ok_or_else(|| anyhow::anyhow!("No preferences dir found"))?;
+        let mut preferences =
+            preferences_dir().ok_or_else(|| anyhow::anyhow!("No preferences dir found"))?;
         // Explicity do *not* create recursively. If not found, the user probably has a good reason.
         // Ignore errors (could already exist). Any real errors will be emitted by file access below.
         let _ = std::fs::DirBuilder::new().create(&preferences);
@@ -1024,6 +1023,7 @@ pub struct Stroke {
 /// Stores the strokes generated from pen input, with optional render data inserted by renderer.
 pub struct StrokeLayerData {
     strokes: Vec<ImmutableStroke>,
+    undo_cursor_position: Option<usize>,
     render_data: Option<stroke_renderer::RenderData>,
 }
 /// Collection of layer data (stroke contents and render data) mapped from ID
@@ -1188,16 +1188,42 @@ fn listener(
                             .entry(layer)
                             .or_insert_with(|| StrokeLayerData {
                                 strokes: vec![],
+                                undo_cursor_position: None,
                                 render_data: None,
                             });
 
-                    let key_undos = action_listener.frame().map(|f| f.action_trigger_count(actions::Action::Undo)).unwrap_or(0);
-                    let undos = std::mem::take(&mut selections.undos) + key_undos as u32;
+                    let frame = action_listener.frame().ok();
+                    let (key_undos, key_redos) = match frame {
+                        None => (0, 0),
+                        Some(f) => (
+                            f.action_trigger_count(actions::Action::Undo),
+                            f.action_trigger_count(actions::Action::Redo),
+                        ),
+                    };
+
+                    let ui_undos = std::mem::take(&mut selections.undos) as usize;
+                    let net_undos = (key_undos + ui_undos) as isize - (key_redos as isize);
+
                     let mut layer_needs_redraw = false;
-                    if undos > 0 {
-                        layer_data
-                            .strokes
-                            .drain(layer_data.strokes.len().saturating_sub(undos as usize)..);
+                    if net_undos != 0 {
+                        match layer_data.undo_cursor_position.as_mut() {
+                            Some(count) => {
+                                *count = count.saturating_add_signed(-net_undos);
+                                // cursor exceeded length, delete the cursor
+                                if *count >= layer_data.strokes.len() {
+                                    layer_data.undo_cursor_position = None;
+                                }
+                            }
+                            None => {
+                                if net_undos < 0 {
+                                    // Nothin to do - redone when nothing was undone.
+                                } else {
+                                    layer_data.undo_cursor_position = Some(
+                                        layer_data.strokes.len().saturating_sub(net_undos as usize),
+                                    )
+                                }
+                            }
+                        }
                         layer_needs_redraw = true;
                     }
 
@@ -1235,7 +1261,14 @@ fn listener(
                             if let Some(stroke) = current_stroke.take() {
                                 // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
                                 let immutable: ImmutableStroke = stroke.into();
+
+                                // If there was an undo cursor, truncate everything after
+                                // and replace with new data.
+                                if let Some(cursor) = layer_data.undo_cursor_position.take() {
+                                    layer_data.strokes.drain(cursor..);
+                                }
                                 layer_data.strokes.push(immutable);
+
                                 layer_needs_redraw = true;
                             }
                         }
@@ -1247,7 +1280,9 @@ fn listener(
                     if layer_needs_redraw {
                         // Delete render_data if empty.
                         // Create if render_data absent and layer not empty.
-                        if layer_data.strokes.len() == 0 {
+                        if layer_data.undo_cursor_position == Some(0)
+                            || layer_data.strokes.len() == 0
+                        {
                             layer_data.render_data = None;
                             continue;
                         } else if layer_data.render_data.is_none() {
@@ -1256,7 +1291,12 @@ fn listener(
                         }
                         let buf = layer_data.render_data.as_ref().unwrap();
 
-                        let future = layer_render.draw(&layer_data.strokes, buf, true)?;
+                        // Render up to cursor, if exists. Otherwise, the whole slice.
+                        let strokes_slice = &layer_data.strokes[0..layer_data
+                            .undo_cursor_position
+                            .unwrap_or(layer_data.strokes.len())];
+
+                        let future = layer_render.draw(strokes_slice, buf, true)?;
 
                         let blend_info: Vec<_> = document
                             .layer_top_level
@@ -1339,7 +1379,12 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let action_listener = window_renderer.action_listener();
 
     std::thread::spawn(move || {
-        if let Err(e) = listener(event_stream, action_listener, render_context.clone(), document_view.clone()) {
+        if let Err(e) = listener(
+            event_stream,
+            action_listener,
+            render_context.clone(),
+            document_view.clone(),
+        ) {
             log::error!("Helper thread exited with err:\n{e:?}")
         }
     });
