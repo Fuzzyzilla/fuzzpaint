@@ -72,6 +72,7 @@ impl ActionStream {
 }
 pub enum ListenError {
     Poisoned,
+    Closed,
 }
 pub struct ActionListener {
     /// Listener becomes poisoned if it lags to the point that actions are missed,
@@ -95,6 +96,55 @@ impl ActionListener {
             // and fail if lagged.
             loop {
                 let recv = self.recv.try_recv();
+
+                use tokio::sync::broadcast::error::TryRecvError;
+                match recv {
+                    Ok(action) => actions.push(action),
+                    Err(TryRecvError::Closed | TryRecvError::Empty) => break,
+                    Err(TryRecvError::Lagged(..)) => {
+                        self.poisoned = true;
+                        return Err(ListenError::Poisoned);
+                    }
+                }
+            }
+
+            let action_frame = ActionFrame {
+                base_state: self.current_state.clone(),
+                actions,
+            };
+
+            // Accumulate the actions into the base state for next frame.
+            self.current_state = action_frame.fast_forward();
+
+            Ok(action_frame)
+        }
+    }
+    /// Same as frame, but will wait for data to arrive instead of returning an empty
+    /// frame. Cancel safe.
+    pub async fn wait_frame(&mut self) -> Result<ActionFrame, ListenError> {
+        if self.poisoned {
+            Err(ListenError::Poisoned)
+        } else {
+            let mut actions = Vec::with_capacity(self.recv.len());
+
+            // Recieve as many actions as are available, or poison
+            // and fail if lagged.
+
+            // First, asynchronously read, stalling until data available.
+            use tokio::sync::broadcast::error::RecvError;
+            let recv = self.recv.recv().await;
+            match recv {
+                Ok(action) => actions.push(action),
+                Err(RecvError::Closed) => return Err(ListenError::Closed),
+                Err(RecvError::Lagged(..)) => {
+                    self.poisoned = true;
+                    return Err(ListenError::Poisoned)
+                },
+            }
+
+            // Then, try to recieve as many more as available without waiting.
+            loop {
+                let recv =  self.recv.try_recv();
 
                 use tokio::sync::broadcast::error::TryRecvError;
                 match recv {
@@ -175,6 +225,11 @@ impl ActionFrame {
         }
 
         count
+    }
+    /// Query whether anything happened this frame. ActionListener::frame will return
+    /// a frame with no events if queried before anything new comes in.
+    pub fn changed(&self) -> bool {
+        !self.actions.is_empty()
     }
     /// For actions that rely on the key being held - returns true
     /// if this action is still held by the end of the frame.
