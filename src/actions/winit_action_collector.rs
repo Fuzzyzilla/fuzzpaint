@@ -8,6 +8,17 @@ pub struct WinitKeyboardActionCollector {
     shift: bool,
     alt: bool,
 }
+impl Default for WinitKeyboardActionCollector {
+    fn default() -> Self {
+        Self {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            current_hotkeys: Default::default(),
+            currently_pressed: Default::default(),
+        }
+    }
+}
 impl WinitKeyboardActionCollector {
     pub fn push_event<'a>(&mut self, event: &winit::event::WindowEvent) {
         let hotkeys = crate::GlobalHotkeys::get();
@@ -23,10 +34,10 @@ impl WinitKeyboardActionCollector {
                 let is_pressed = input.state == winit::event::ElementState::Pressed;
 
                 // Update currently_pressed set accordingly:
-                if is_pressed {
-                    self.currently_pressed.remove(&key);
-                } else if !was_pressed {
+                if is_pressed && !was_pressed {
                     self.currently_pressed.insert(key);
+                } else if !is_pressed {
+                    self.currently_pressed.remove(&key);
                 }
 
                 // Depending on the status of ctrl, shift, and alt, this key
@@ -37,8 +48,7 @@ impl WinitKeyboardActionCollector {
                 let ctrl = self.ctrl;
                 let shift = self.shift;
                 let alt = self.alt;
-                let possible_keys = (0u8..(1
-                    << (ctrl as u8 + shift as u8 + alt as u8)))
+                let possible_keys = (0u8..(1 << (ctrl as u8 + shift as u8 + alt as u8)))
                     .into_iter()
                     .map(|mut bits| {
                         // Generates all unique combos of each flag where self.<flag> is set.
@@ -59,31 +69,33 @@ impl WinitKeyboardActionCollector {
                             ctrl: consume(ctrl),
                         }
                     })
-                    .filter(|key| {
-                        // only check keys that correspond to an action
-                        hotkeys.keys_to_actions.contains(key.clone())
+                    .filter_map(|key| {
+                        // find the action of each key, or skip if none.
+                        Some((hotkeys.keys_to_actions.action_of(key.clone())?, key))
                     });
 
                 match (was_pressed, is_pressed) {
                     // Just pressed
-                    (false, true) => possible_keys.for_each(|key| self.push_key(key)),
+                    (false, true) => possible_keys.for_each(|(action, key)| self.push_key(action, key)),
                     // OS key repeat
-                    (true, true) => (),
+                    (true, true) => possible_keys.for_each(|(action, _)| log::trace!("Repeat {action:?}")),
                     // Just released
-                    (_, false) => possible_keys.for_each(|key| self.pop_key(key)),
+                    (_, false) => possible_keys.for_each(|(action, key)| self.pop_key(action, key)),
                 }
             }
             WindowEvent::ModifiersChanged(m) => {
-                let alt_changed = self.alt != m.alt();
-                let ctrl_changed = self.ctrl != m.ctrl();
-                let shift_changed = self.shift != m.shift();
-                self.alt ^= alt_changed;
-                self.ctrl ^= ctrl_changed;
-                self.shift ^= shift_changed;
+                self.alt = m.alt();
+                self.ctrl = m.ctrl();
+                self.shift = m.shift();
+                // Original plan:
                 // For every held key, re-evaluate their meaning w.r.t new
                 // modifiers.
                 // Holy moly that sounds like a lot of work -w-;;
-                todo!()
+
+                // However, upon testing, it feels great with no logic
+                // in here. I'll work on plumbing this logic in with the
+                // rest of the app, and I'll revisit this logic if the need
+                // arises!
             }
             _ => (),
         }
@@ -91,12 +103,17 @@ impl WinitKeyboardActionCollector {
     /// A hotkey was detected, apply it. Will go through and shadow any
     /// hotkeys this one overrides, and potentially shadow this hotkey
     /// immediately if it's shadowed by an existing key.
-    fn push_key(&mut self, new: super::hotkeys::KeyboardHotkey) {
+    fn push_key(&mut self, action: super::Action, new: super::hotkeys::KeyboardHotkey) {
+        // Already pressed, skip to avoid breaking shadow counters
+        if self.current_hotkeys.contains_key(&new) {
+            return;
+        }
         let mut shadows_on_new = 0;
         for (old_key, shadows) in self.current_hotkeys.iter_mut() {
             if new.shadows(old_key) {
                 if *shadows == 0 {
                     // <emit shadow>
+                    log::trace!("Shadowed {old_key:?}");
                 }
                 *shadows += 1;
             } else {
@@ -106,18 +123,25 @@ impl WinitKeyboardActionCollector {
                 }
             }
         }
-        self.current_hotkeys.insert(new, shadows_on_new);
-        
         // <emit press>
+        log::trace!("Pressed {action:?}");
         if shadows_on_new != 0 {
             // <emit shadow>
+            log::trace!("Shadowed {action:?}");
         }
+
+        self.current_hotkeys.insert(new.clone(), shadows_on_new);
     }
     /// A hotkey was ended, discard it. Will go through and unshadow any
     /// hotkeys this one overrode, provided they are not shadowed by another.
-    fn pop_key(&mut self, remove: super::hotkeys::KeyboardHotkey) {
-        self.current_hotkeys.remove(&remove);
+    fn pop_key(&mut self, action: super::Action, remove: super::hotkeys::KeyboardHotkey) {
+        // Early return if the hotkey wasn't previously detected as pressed,
+        // to avoid committing chaos to the shadow counters.
+        if self.current_hotkeys.remove(&remove).is_none() {
+            return;
+        };
         // <emit release>
+        log::trace!("Released {action:?}");
 
         for (old_key, shadows) in self.current_hotkeys.iter_mut() {
             if remove.shadows(old_key) {
@@ -131,6 +155,7 @@ impl WinitKeyboardActionCollector {
                 });
                 if *shadows == 0 {
                     // <emit unshadow>
+                    log::trace!("Unshadowed {old_key:?}");
                 }
             }
         }
