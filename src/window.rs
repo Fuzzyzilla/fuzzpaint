@@ -36,6 +36,9 @@ impl WindowSurface {
         preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
     ) -> GpuResult<WindowRenderer> {
         let egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
+
+        let (send, stream) = crate::actions::create_action_stream();
+
         Ok(WindowRenderer {
             win: self.win,
             render_surface: Some(render_surface),
@@ -45,6 +48,8 @@ impl WindowSurface {
             last_frame_fence: None,
             egui_ctx,
             preview_renderer,
+            action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
+            action_stream: stream,
             stylus_events: Default::default(),
         })
     }
@@ -59,6 +64,8 @@ pub struct WindowRenderer {
     render_context: Arc<render_device::RenderContext>,
     egui_ctx: egui_impl::EguiCtx,
 
+    action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector,
+    action_stream: crate::actions::ActionStream,
     stylus_events: crate::stylus_events::WinitStylusEventCollector,
     swapchain_generation: u32,
 
@@ -69,6 +76,9 @@ pub struct WindowRenderer {
 impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
+    }
+    pub fn action_listener(&self) -> crate::actions::ActionListener {
+        self.action_stream.listen()
     }
     pub fn stylus_events(
         &self,
@@ -139,37 +149,41 @@ impl WindowRenderer {
             };
             self.egui_ctx.push_winit_event(&event);
 
-            match event {
-                Event::WindowEvent { event, .. } => match event {
-                    WindowEvent::CloseRequested => {
-                        *control_flow = winit::event_loop::ControlFlow::Exit;
-                        return;
-                    }
-                    WindowEvent::Resized(..) => {
-                        self.recreate_surface().expect("Failed to rebuild surface");
-                    }
-                    WindowEvent::CursorLeft { .. } => {
-                        self.stylus_events.set_mouse_pressed(false);
-                    }
-                    WindowEvent::CursorMoved { position, .. } => {
-                        // Only take if egui doesn't want it!
-                        if !self.egui_ctx.wants_pointer_input() {
-                            self.stylus_events.push_position(position.into());
-                        }
-                    }
-                    WindowEvent::MouseInput { state, .. } => {
-                        let pressed = winit::event::ElementState::Pressed == state;
 
-                        if pressed {
+            match event {
+                Event::WindowEvent { event, .. } => {
+                    self.action_collector.push_event(&event);
+                    match event {
+                        WindowEvent::CloseRequested => {
+                            *control_flow = winit::event_loop::ControlFlow::Exit;
+                            return;
+                        }
+                        WindowEvent::Resized(..) => {
+                            self.recreate_surface().expect("Failed to rebuild surface");
+                        }
+                        WindowEvent::CursorLeft { .. } => {
+                            self.stylus_events.set_mouse_pressed(false);
+                        }
+                        WindowEvent::CursorMoved { position, .. } => {
                             // Only take if egui doesn't want it!
                             if !self.egui_ctx.wants_pointer_input() {
-                                self.stylus_events.set_mouse_pressed(true)
+                                self.stylus_events.push_position(position.into());
                             }
-                        } else {
-                            self.stylus_events.set_mouse_pressed(false)
                         }
+                        WindowEvent::MouseInput { state, .. } => {
+                            let pressed = winit::event::ElementState::Pressed == state;
+
+                            if pressed {
+                                // Only take if egui doesn't want it!
+                                if !self.egui_ctx.wants_pointer_input() {
+                                    self.stylus_events.set_mouse_pressed(true)
+                                }
+                            } else {
+                                self.stylus_events.set_mouse_pressed(false)
+                            }
+                        }
+                        _ => (),
                     }
-                    _ => (),
                 },
                 Event::DeviceEvent { event, .. } => {
                     match event {

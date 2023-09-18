@@ -8,6 +8,7 @@ use brush::BrushStyle;
 use cgmath::{Matrix4, SquareMatrix};
 use vulkano::command_buffer;
 use vulkano_prelude::*;
+pub mod actions;
 pub mod blend;
 pub mod brush;
 pub mod document_viewport_proxy;
@@ -24,11 +25,94 @@ pub use tess::StrokeTessellator;
 /// Obviously will be user specified on a per-document basis, but for now...
 const DOCUMENT_DIMENSION: u32 = 1024;
 /// Premultiplied RGBA16F for interesting effects (negative + overbright colors and alpha) with
-/// more than 11bit per channel precision in the [0,1] range.
+/// more than 11bit per channel precision in the \[0,1\] range.
 /// Will it be user specified in the future?
 const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 use anyhow::Result as AnyResult;
+
+pub fn preferences_dir() -> Option<std::path::PathBuf> {
+    let mut base_dir = dirs::preference_dir()?;
+    base_dir.push(env!("CARGO_PKG_NAME"));
+    Some(base_dir)
+}
+
+pub struct GlobalHotkeys {
+    failed_to_load: bool,
+    actions_to_keys: actions::hotkeys::ActionsToKeys,
+    keys_to_actions: actions::hotkeys::KeysToActions,
+}
+impl GlobalHotkeys {
+    const FILENAME: &'static str = "hotkeys.ron";
+    /// Shared global hotkeys, saved and loaded from user preferences.
+    /// (Or defaulted, if unavailable for some reason)
+    pub fn get() -> &'static Self {
+        static GLOBAL_HOTKEYS: std::sync::OnceLock<GlobalHotkeys> = std::sync::OnceLock::new();
+
+        GLOBAL_HOTKEYS.get_or_init(|| {
+            let mut dir = preferences_dir();
+            match dir.as_mut() {
+                None => Self::no_path(),
+                Some(dir) => {
+                    dir.push(Self::FILENAME);
+                    Self::load_or_default(&dir)
+                }
+            }
+        })
+    }
+    pub fn no_path() -> Self {
+        log::warn!("Hotkeys weren't available, defaulting.");
+        use actions::hotkeys::*;
+        let default = ActionsToKeys::default();
+        // Default action map is reversable - this is assured by the default impl when debugging.
+        let reverse = (&default).try_into().unwrap();
+
+        Self {
+            failed_to_load: true,
+            keys_to_actions: reverse,
+            actions_to_keys: default,
+        }
+    }
+    fn load_or_default(path: &std::path::Path) -> Self {
+        use actions::hotkeys::*;
+        let mappings: anyhow::Result<(ActionsToKeys, KeysToActions)> = try_block::try_block! {
+            let string = std::fs::read_to_string(path)?;
+            let actions_to_keys : ActionsToKeys = ron::from_str(&string)?;
+            let keys_to_actions : KeysToActions = (&actions_to_keys).try_into()?;
+
+            Ok((actions_to_keys,keys_to_actions))
+        };
+
+        match mappings {
+            Ok((actions_to_keys, keys_to_actions)) => Self {
+                failed_to_load: false,
+                actions_to_keys,
+                keys_to_actions,
+            },
+            Err(_) => Self::no_path(),
+        }
+    }
+    /// Return true if loading user's settings failed. This can be useful for
+    /// displaying a warning.
+    pub fn did_fail_to_load(&self) -> bool {
+        self.failed_to_load
+    }
+    pub fn save(&self) -> anyhow::Result<()> {
+        let mut preferences =
+            preferences_dir().ok_or_else(|| anyhow::anyhow!("No preferences dir found"))?;
+        // Explicity do *not* create recursively. If not found, the user probably has a good reason.
+        // Ignore errors (could already exist). Any real errors will be emitted by file access below.
+        let _ = std::fs::DirBuilder::new().create(&preferences);
+
+        preferences.push(Self::FILENAME);
+        let writer = std::io::BufWriter::new(std::fs::File::create(&preferences)?);
+        Ok(ron::ser::to_writer_pretty(
+            writer,
+            &self.actions_to_keys,
+            Default::default(),
+        )?)
+    }
+}
 
 pub struct StrokeLayer {
     id: FuzzID<Self>,
@@ -939,6 +1023,7 @@ pub struct Stroke {
 /// Stores the strokes generated from pen input, with optional render data inserted by renderer.
 pub struct StrokeLayerData {
     strokes: Vec<ImmutableStroke>,
+    undo_cursor_position: Option<usize>,
     render_data: Option<stroke_renderer::RenderData>,
 }
 /// Collection of layer data (stroke contents and render data) mapped from ID
@@ -1030,6 +1115,7 @@ static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
 
 fn listener(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
+    mut action_listener: actions::ActionListener,
     renderer: Arc<render_device::RenderContext>,
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
 ) -> AnyResult<()> {
@@ -1102,15 +1188,42 @@ fn listener(
                             .entry(layer)
                             .or_insert_with(|| StrokeLayerData {
                                 strokes: vec![],
+                                undo_cursor_position: None,
                                 render_data: None,
                             });
 
-                    let undos = std::mem::take(&mut selections.undos);
+                    let frame = action_listener.frame().ok();
+                    let (key_undos, key_redos) = match frame {
+                        None => (0, 0),
+                        Some(f) => (
+                            f.action_trigger_count(actions::Action::Undo),
+                            f.action_trigger_count(actions::Action::Redo),
+                        ),
+                    };
+
+                    let ui_undos = std::mem::take(&mut selections.undos) as usize;
+                    let net_undos = (key_undos + ui_undos) as isize - (key_redos as isize);
+
                     let mut layer_needs_redraw = false;
-                    if undos > 0 {
-                        layer_data
-                            .strokes
-                            .drain(layer_data.strokes.len().saturating_sub(undos as usize)..);
+                    if net_undos != 0 {
+                        match layer_data.undo_cursor_position.as_mut() {
+                            Some(count) => {
+                                *count = count.saturating_add_signed(-net_undos);
+                                // cursor exceeded length, delete the cursor
+                                if *count >= layer_data.strokes.len() {
+                                    layer_data.undo_cursor_position = None;
+                                }
+                            }
+                            None => {
+                                if net_undos < 0 {
+                                    // Nothin to do - redone when nothing was undone.
+                                } else {
+                                    layer_data.undo_cursor_position = Some(
+                                        layer_data.strokes.len().saturating_sub(net_undos as usize),
+                                    )
+                                }
+                            }
+                        }
                         layer_needs_redraw = true;
                     }
 
@@ -1148,7 +1261,14 @@ fn listener(
                             if let Some(stroke) = current_stroke.take() {
                                 // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
                                 let immutable: ImmutableStroke = stroke.into();
+
+                                // If there was an undo cursor, truncate everything after
+                                // and replace with new data.
+                                if let Some(cursor) = layer_data.undo_cursor_position.take() {
+                                    layer_data.strokes.drain(cursor..);
+                                }
                                 layer_data.strokes.push(immutable);
+
                                 layer_needs_redraw = true;
                             }
                         }
@@ -1160,7 +1280,9 @@ fn listener(
                     if layer_needs_redraw {
                         // Delete render_data if empty.
                         // Create if render_data absent and layer not empty.
-                        if layer_data.strokes.len() == 0 {
+                        if layer_data.undo_cursor_position == Some(0)
+                            || layer_data.strokes.len() == 0
+                        {
                             layer_data.render_data = None;
                             continue;
                         } else if layer_data.render_data.is_none() {
@@ -1169,7 +1291,12 @@ fn listener(
                         }
                         let buf = layer_data.render_data.as_ref().unwrap();
 
-                        let future = layer_render.draw(&layer_data.strokes, buf, true)?;
+                        // Render up to cursor, if exists. Otherwise, the whole slice.
+                        let strokes_slice = &layer_data.strokes[0..layer_data
+                            .undo_cursor_position
+                            .unwrap_or(layer_data.strokes.len())];
+
+                        let future = layer_render.draw(strokes_slice, buf, true)?;
 
                         let blend_info: Vec<_> = document
                             .layer_top_level
@@ -1228,6 +1355,10 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
+    if let Err(e) = GlobalHotkeys::get().save() {
+        log::warn!("Failed to save hotkey config:\n{e:?}");
+    };
+
     GLOBALS.get_or_init(Globals::new);
 
     // Test image generators.
@@ -1245,9 +1376,15 @@ fn main() -> AnyResult<std::convert::Infallible> {
     )?;
 
     let event_stream = window_renderer.stylus_events();
+    let action_listener = window_renderer.action_listener();
 
     std::thread::spawn(move || {
-        if let Err(e) = listener(event_stream, render_context.clone(), document_view.clone()) {
+        if let Err(e) = listener(
+            event_stream,
+            action_listener,
+            render_context.clone(),
+            document_view.clone(),
+        ) {
             log::error!("Helper thread exited with err:\n{e:?}")
         }
     });

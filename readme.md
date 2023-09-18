@@ -8,7 +8,7 @@ Platform support, in order of development priority:
 | **Platform**      | Pen input          | Pad input          |
 |-------------------|--------------------|--------------------|
 | Unix (Wayland)    |:white_large_square:|:white_large_square:|
-| Unix (Xorg)       |Partial             |:x:                 |
+| Unix (Xorg)       |Partial             |None                 |
 | Windows (Ink)     |:white_large_square:|:white_large_square:|
 | Windows (wintab)  |:white_large_square:|:white_large_square:|
 
@@ -37,7 +37,8 @@ To declare **0.2.0**, I would like to be able to somewhat freely draw a thing an
    - Groups + FX + self-populating layers (clone, fill, gradients) come later
  - [ ] UI
    - [X] Initial layout
-   - [ ] A simple hotkey system, for common actions like Ctrl+Z or Ctrl+Space
+   - [X] A ~~simple~~ **✨robust and rebindable✨** hotkey system, with support for
+         pen and pad buttons (although, pen+pad events are not yet reported)
    - [ ] Infinite Undo/Redo
    - [ ] Pan, Zoom, Scroll, Rotate, Mirror viewport
    - [ ] Fit, 100% modes

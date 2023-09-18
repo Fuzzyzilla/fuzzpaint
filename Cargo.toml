@@ -10,6 +10,7 @@ anyhow = "1.0.71"
 bitvec = "1.0.1"
 bytemuck = "1.13.1"
 cgmath = "0.18.0"
+dirs = "5.0.1"
 egui = {version = "0.22.0", features = ["bytemuck"]}
 env_logger = "0.10.0"
 image = "0.24.6"
@@ -17,16 +18,18 @@ log = "0.4.18"
 parking_lot = "0.12.1"
 rayon = "1.7.0"
 rfd = "0.11.4"
-smallvec = "1.10.0"
-strum = {version = "0.25.0", features = ["derive"]}
+ron = "0.8.1"
+serde = { version = "1.0.188", features = ["derive", "rc"] }
+smallvec = { version = "1.10.0", features = ["serde"] }
+strum = { version = "0.25.0", features = ["derive"] }
 thiserror = "1.0.40"
-tokio = { version = "1.28.2", features = ["sync", "rt", "rt-multi-thread"] }
+tokio = { version = "1.28.2", features = ["sync", "rt" ] }
 try-block = "0.1.0"
 uuid = { version = "1.4.0", features = ["v4"] }
 vulkano = "0.33.0"
 vulkano-shaders = "0.33.0"
 vulkano-win = "0.33.0"
-winit = "0.28.6"
+winit = { version = "0.28.6", features = ["serde"] }
 
 [profile.profiling]
 inherits = "release"
