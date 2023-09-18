@@ -128,11 +128,15 @@ impl WindowRenderer {
             }
         }
 
-        if let Some(cursor) = egui_impl::egui_to_winit_cursor(out.cursor_icon) {
-            self.win.set_cursor_icon(cursor);
-            self.win.set_cursor_visible(true);
+        if self.egui_ctx.wants_pointer_input() {
+            if let Some(cursor) = egui_impl::egui_to_winit_cursor(out.cursor_icon) {
+                self.win.set_cursor_icon(cursor);
+                self.win.set_cursor_visible(true);
+            } else {
+                self.win.set_cursor_visible(false);
+            }
         } else {
-            self.win.set_cursor_visible(false);
+            self.win.set_cursor_icon(winit::window::CursorIcon::Crosshair)
         }
     }
     pub fn run(mut self) -> ! {

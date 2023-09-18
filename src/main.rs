@@ -12,6 +12,7 @@ pub mod actions;
 pub mod blend;
 pub mod brush;
 pub mod document_viewport_proxy;
+pub mod gizmos;
 pub mod gpu_tess;
 pub mod id;
 pub mod render_device;
