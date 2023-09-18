@@ -25,7 +25,7 @@ pub use tess::StrokeTessellator;
 /// Obviously will be user specified on a per-document basis, but for now...
 const DOCUMENT_DIMENSION: u32 = 1024;
 /// Premultiplied RGBA16F for interesting effects (negative + overbright colors and alpha) with
-/// more than 11bit per channel precision in the [0,1] range.
+/// more than 11bit per channel precision in the \[0,1\] range.
 /// Will it be user specified in the future?
 const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
@@ -33,7 +33,7 @@ use anyhow::Result as AnyResult;
 
 pub fn preferences_dir() -> Option<std::path::PathBuf> {
     let mut base_dir = dirs::preference_dir()?;
-    base_dir.push("fuzzpaint");
+    base_dir.push(env!("CARGO_PKG_NAME"));
     Some(base_dir)
 }
 

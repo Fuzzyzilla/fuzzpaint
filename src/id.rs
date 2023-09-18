@@ -1,5 +1,5 @@
 //! #IDs
-//! For many purposes, a unique ID is needed. This is implemented in this module via the FuzzID<T> type,
+//! For many purposes, a unique ID is needed. This is implemented in this module via the `FuzzID<T>` type,
 //! which generates unique IDs namespaced by the type T. Order of IDs is not guaranteed.
 //!
 //! As cloning and re-use of an ID is a logic error, a weak, clonable + Copyable version is provided with `FuzzID::weak`.
