@@ -120,6 +120,21 @@ impl HotkeyShadow for AnyHotkey {
         }
     }
 }
+impl From<KeyboardHotkey> for AnyHotkey {
+    fn from(value: KeyboardHotkey) -> Self {
+        Self::Key(value)
+    }
+}
+impl From<PadHotkey> for AnyHotkey {
+    fn from(value: PadHotkey) -> Self {
+        Self::Pad(value)
+    }
+}
+impl From<PenHotkey> for AnyHotkey {
+    fn from(value: PenHotkey) -> Self {
+        Self::Pen(value)
+    }
+}
 /// Maps each action onto potentially many hotkeys.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ActionsToKeys(std::collections::HashMap<super::Action, HotkeyCollection>);
@@ -290,5 +305,13 @@ impl TryFrom<&ActionsToKeys> for KeysToActions {
         }
 
         Ok(new)
+    }
+}
+impl KeysToActions {
+    pub fn contains(&self, key: impl Into<AnyHotkey>) -> bool {
+        self.0.contains_key(&key.into())
+    }
+    pub fn action_of(&self, key: impl Into<AnyHotkey>) -> Option<super::Action> {
+        self.0.get(&key.into()).cloned()
     }
 }

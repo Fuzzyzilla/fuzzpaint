@@ -8,6 +8,7 @@
 //! have been pressed, held, repeated, ect. since the last time it was listened to.
 
 pub mod hotkeys;
+pub mod winit_action_collector;
 
 #[derive(
     serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq, strum::AsRefStr, Clone, Copy, Debug
