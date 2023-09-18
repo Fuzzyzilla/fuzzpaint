@@ -6,7 +6,88 @@
 // (Todo: Should crate::document_viewport_proxy be a kind of gizmo? the parallels are clear...)
 
 /// The structure that manages the rendering of gizmos. Exists on a per-workspace basis, not a per-document basis!
-pub struct GizmoCollection {}
+pub struct GizmoCollection {
+    id_counter: u64,
+    collection: Vec<(
+        GizmoCollectionHandle,
+        Box<dyn Gizmo<DragMetadata = AnyGizmoMeta>>,
+    )>,
+}
+#[derive(PartialEq, Eq)]
+pub struct GizmoCollectionHandle(u64);
+impl GizmoCollection {
+    /// Add a gizmo to the collection, on top of the others. Wild type bounds
+    /// are due to an implementation detail that failed to be contained >w>
+    pub fn add<Meta, G: Gizmo<DragMetadata = Meta> + 'static>(&mut self, gizmo: G)
+    where
+        Meta: std::any::Any + Clone,
+    {
+        self.id_counter = self.id_counter.wrapping_add(1);
+        self.collection.push((
+            GizmoCollectionHandle(self.id_counter),
+            Box::new(AnyGizmo(gizmo)),
+        ))
+    }
+    /// Remove a gizmo from the collection. Currently, the gizmo is lost instead
+    /// of returning due to type erasure...
+    pub fn remove(&mut self, handle: GizmoCollectionHandle) {
+        let Some((idx, _)) = self
+            .collection
+            .iter()
+            .enumerate()
+            .find(|(_, (id, _))| id.0 == handle.0)
+        else {
+            return;
+        };
+        self.collection.remove(idx);
+    }
+}
+
+impl Gizmo for GizmoCollection {
+    // Store the handle to which gizmo was dragged, along with that gizmo's own meta.
+    type DragMetadata = (GizmoCollectionHandle, AnyGizmoMeta);
+
+    fn hover_cursor(&self) -> Option<winit::window::CursorIcon> {
+        // Seems trait design is flawed - not possible to know what cursor to use here :V
+        todo!()
+    }
+    fn grab_cursor(&self) -> Option<winit::window::CursorIcon> {
+        // Seems trait design is flawed - not possible to know what cursor to use here :V
+        todo!()
+    }
+    fn click(&self, point: [f32; 2]) -> Option<Self::DragMetadata> {
+        // Find the topmost gizmo that returns Some, and convert
+        // it's meta to our own. If none found, return None.
+        self.collection
+            .iter()
+            .rev()
+            .find_map(|(id, gizmo)| gizmo.click(point).map(|any_meta| (GizmoCollectionHandle(id.0), any_meta)))
+    }
+    fn drag_to(&self, point: [f32; 2], metadata: &Self::DragMetadata) {
+        // Find the gizmo our metadata's ID points to:
+        let Some(gizmo) = self.collection
+            .iter()
+            .rev()
+            .find(|(id, _)| id == &metadata.0) else {return};
+
+        gizmo.1.drag_to(point, &metadata.1)
+    }
+    fn hit(&self, point: [f32; 2]) -> bool {
+        self.collection
+            .iter()
+            // No need to reverse iterate here, as order doesn't matter.
+            .any(|(_, gizmo)| gizmo.hit(point))
+    }
+    fn release(&self, metadata: Self::DragMetadata) {
+        // Find the gizmo our metadata's ID points to:
+        let Some(gizmo) = self.collection
+            .iter()
+            .rev()
+            .find(|(id, _)| id == &metadata.0) else {return};
+
+        gizmo.1.release(metadata.1)
+    }
+}
 
 /// A gizmo. May simply be a visual, implement mouse hit detection, set a cursor icon, ect.
 pub trait Gizmo {
@@ -41,11 +122,12 @@ pub trait Gizmo {
 ///
 /// Stores a gizmo in a type-erased fasion.
 struct AnyGizmo<G: Gizmo>(G);
+type AnyGizmoMeta = Box<dyn std::any::Any>;
 impl<Meta, G: Gizmo<DragMetadata = Meta>> Gizmo for AnyGizmo<G>
 where
     Meta: std::any::Any + Clone,
 {
-    type DragMetadata = Box<dyn std::any::Any>;
+    type DragMetadata = AnyGizmoMeta;
     fn hover_cursor(&self) -> Option<winit::window::CursorIcon> {
         self.0.hover_cursor()
     }
