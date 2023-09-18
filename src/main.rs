@@ -1272,6 +1272,12 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
+    let hotkey_path = std::path::Path::new("./config/hotkeys.ron");
+    let hotkeys = GlobalHotkeys::load_or_default(&hotkey_path);
+    if let Err(e) = hotkeys.save(&hotkey_path) {
+        log::warn!("Failed to save hotkey config:\n{e:?}");
+    };
+
     GLOBALS.get_or_init(Globals::new);
 
     // Test image generators.
