@@ -31,13 +31,49 @@ const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 use anyhow::Result as AnyResult;
 
+pub fn preferences_dir() -> Option<std::path::PathBuf> {
+    let mut base_dir = dirs::preference_dir()?;
+    base_dir.push("fuzzpaint");
+    Some(base_dir)
+}
+
 pub struct GlobalHotkeys {
     failed_to_load: bool,
     actions_to_keys: actions::hotkeys::ActionsToKeys,
     keys_to_actions: actions::hotkeys::KeysToActions,
 }
 impl GlobalHotkeys {
-    pub fn load_or_default(path: &std::path::Path) -> Self {
+    const FILENAME : &'static str = "hotkeys.ron";
+    /// Shared global hotkeys, saved and loaded from user preferences.
+    /// (Or defaulted, if unavailable for some reason)
+    pub fn get() -> &'static Self {
+        static GLOBAL_HOTKEYS : std::sync::OnceLock<GlobalHotkeys> = std::sync::OnceLock::new();
+
+        GLOBAL_HOTKEYS.get_or_init(|| {
+            let mut dir = preferences_dir();
+            match dir.as_mut() {
+                None => Self::no_path(),
+                Some(dir) => {
+                    dir.push(Self::FILENAME);
+                    Self::load_or_default(&dir)
+                }
+            }
+        })
+    }
+    pub fn no_path() -> Self {
+        log::warn!("Hotkeys weren't available, defaulting.");
+        use actions::hotkeys::*;
+        let default = ActionsToKeys::default();
+        // Default action map is reversable - this is assured by the default impl when debugging.
+        let reverse = (&default).try_into().unwrap();
+
+        Self {
+            failed_to_load: true,
+            keys_to_actions: reverse,
+            actions_to_keys: default,
+        }
+    }
+    fn load_or_default(path: &std::path::Path) -> Self {
         use actions::hotkeys::*;
         let mappings: anyhow::Result<(ActionsToKeys, KeysToActions)> = try_block::try_block! {
             let string = std::fs::read_to_string(path)?;
@@ -47,25 +83,30 @@ impl GlobalHotkeys {
             Ok((actions_to_keys,keys_to_actions))
         };
 
-        let failed_to_load = mappings.is_err();
-
-        let (actions_to_keys, keys_to_actions) = mappings.unwrap_or_else(|e| {
-            log::warn!("Hotkeys weren't available, defaulting:\n{e:?}");
-            let default = ActionsToKeys::default();
-            // Default action map is reversable - this is assured by the default impl when debugging.
-            let reverse = (&default).try_into().unwrap();
-
-            (default, reverse)
-        });
-
-        Self {
-            failed_to_load,
-            keys_to_actions,
-            actions_to_keys,
+        match mappings {
+            Ok((actions_to_keys, keys_to_actions)) => {
+                Self {
+                    failed_to_load: false,
+                    actions_to_keys,
+                    keys_to_actions
+                }
+            },
+            Err(_) => Self::no_path()
         }
     }
-    pub fn save(&self, to_path: &std::path::Path) -> anyhow::Result<()> {
-        let writer = std::io::BufWriter::new(std::fs::File::create(to_path)?);
+    /// Return true if loading user's settings failed. This can be useful for
+    /// displaying a warning.
+    pub fn did_fail_to_load(&self) -> bool {
+        self.failed_to_load
+    }
+    pub fn save(&self) -> anyhow::Result<()> {
+        let mut preferences = preferences_dir().ok_or_else(|| anyhow::anyhow!("No preferences dir found"))?;
+        // Explicity do *not* create recursively. If not found, the user probably has a good reason.
+        // Ignore errors (could already exist). Any real errors will be emitted by file access below.
+        let _ = std::fs::DirBuilder::new().create(&preferences);
+
+        preferences.push(Self::FILENAME);
+        let writer = std::io::BufWriter::new(std::fs::File::create(&preferences)?);
         Ok(ron::ser::to_writer_pretty(
             writer,
             &self.actions_to_keys,
@@ -1272,9 +1313,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
-    let hotkey_path = std::path::Path::new("./config/hotkeys.ron");
-    let hotkeys = GlobalHotkeys::load_or_default(&hotkey_path);
-    if let Err(e) = hotkeys.save(&hotkey_path) {
+    if let Err(e) = GlobalHotkeys::get().save() {
         log::warn!("Failed to save hotkey config:\n{e:?}");
     };
 
