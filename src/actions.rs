@@ -7,6 +7,8 @@
 //! listeners provide `ActionFrame`s that describe, on a per-listener basis, which actions
 //! have been pressed, held, repeated, ect. since the last time it was listened to.
 
+use std::sync::Arc;
+
 pub mod hotkeys;
 pub mod winit_action_collector;
 
@@ -58,16 +60,119 @@ struct ActionStates {
     /// Which action keys have ever been shadowed in their lifetimes?
     was_ever_shadowed: std::collections::HashSet<Action>,
 }
-pub struct ActionStream {
-    current_state: ActionStates,
+impl Default for ActionStates {
+    fn default() -> Self {
+        Self {
+            held: Default::default(),
+            shadowed: Default::default(),
+            was_ever_shadowed: Default::default(),
+        }
+    }
+}
+impl ActionStates {
+    fn push(&mut self, event: ActionEvent, action: Action) {
+        match event {
+            ActionEvent::Press => {
+                self.held.insert(action);
+            }
+            ActionEvent::Release => {
+                // Upon release, shadow and ever_shadowed state get reset.
+                self.held.remove(&action);
+                self.shadowed.remove(&action);
+                self.was_ever_shadowed.remove(&action);
+            }
+            ActionEvent::Repeat => {
+                // Shouldn't be necessary, but just in case!
+                self.held.insert(action);
+            }
+            ActionEvent::Shadowed => {
+                self.shadowed.insert(action);
+                self.was_ever_shadowed.insert(action);
+            }
+            ActionEvent::Unshadowed => {
+                self.shadowed.remove(&action);
+                // Leave `was_ever_shadowed`
+            }
+        }
+    }
+}
+
+/// Create a send/recieve pair. The recieve side can have as many listeners as it wants spawned via
+/// ActionStream::listen, but sending is a unique duty.
+pub fn create_action_stream() -> (ActionSender, ActionStream) {
+    let (send, recv) = tokio::sync::broadcast::channel(32);
+
+    let current_state = (ActionStates::default(), recv);
+    let current_state : std::sync::RwLock<_> = current_state.into();
+    let current_state = Arc::new(current_state);
+
+    (ActionSender{send, current_state: Arc::downgrade(&current_state) }, ActionStream{current_state})
+}
+
+pub struct ActionSender {
+    // Weak, as we can stop carrying/updating this info when it stops being possible to create listeners
+    // (ie, when the holder of the Arc is dropped)
+    current_state: std::sync::Weak<std::sync::RwLock<(ActionStates, tokio::sync::broadcast::Receiver<(ActionEvent, Action)>)>>,
     send: tokio::sync::broadcast::Sender<(ActionEvent, Action)>,
+}
+impl ActionSender {
+    pub fn press(&self, action: Action) {
+        self.push(ActionEvent::Press, action);
+    }
+    pub fn release(&self, action: Action) {
+        self.push(ActionEvent::Release, action);
+    }
+    pub fn repeat(&self, action: Action) {
+        self.push(ActionEvent::Repeat, action);
+    }
+    pub fn shadow(&self, action: Action) {
+        self.push(ActionEvent::Shadowed, action);
+    }
+    pub fn unshadow(&self, action: Action) {
+        self.push(ActionEvent::Unshadowed, action);
+    }
+    fn push(&self, event: ActionEvent, action: Action) {
+        match self.current_state.upgrade() {
+            Some(rw) => {
+                let mut write = rw.write().unwrap();
+                write.0.push(event, action);
+                // Returns err if no listeners.
+                let _ = self.send.send((event, action));
+                // The send must occur while the lock is held.
+                // The compiler doens't know this, but I hope that
+                // this will enforce it: (todo: verify)
+                std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+                // Pretend the lock is still used, and drop it.
+                drop(std::hint::black_box(write));
+            }
+            None => {
+                // Returns err if no listeners.
+                let _ = self.send.send((event, action));
+            }
+        }
+    }
+}
+
+pub struct ActionStream {
+    current_state: Arc<std::sync::RwLock<(ActionStates, tokio::sync::broadcast::Receiver<(ActionEvent, Action)>)>>,
 }
 impl ActionStream {
     pub fn listen(&self) -> ActionListener {
+
+        // All is locked behind RwLock to prevent subtle race condition:
+        // recv and current state are deeply intertwined, and
+        // it's important that recv's "start" aligns with the exact moment
+        // `current_state` is captured from. Thus, we lock the current state,
+        // and make the reciever while it's locked to ensure it hasn't been changed.
+
+        let lock = self.current_state.read().unwrap();
+        let current_state = lock.0.clone();
+        let recv = lock.1.resubscribe();
+
         ActionListener {
             poisoned: false,
-            current_state: self.current_state.clone(),
-            recv: self.send.subscribe(),
+            current_state,
+            recv,
         }
     }
 }
@@ -260,30 +365,8 @@ impl ActionFrame {
     /// Accumulate actions into a new state representing the end of this frame.
     fn fast_forward(&self) -> ActionStates {
         let mut future = self.base_state.clone();
-        for action in self.actions.iter() {
-            match action {
-                (ActionEvent::Press, action) => {
-                    future.held.insert(*action);
-                }
-                (ActionEvent::Release, action) => {
-                    // Upon release, shadow and ever_shadowed state get reset.
-                    future.held.remove(action);
-                    future.shadowed.remove(action);
-                    future.was_ever_shadowed.remove(action);
-                }
-                (ActionEvent::Repeat, action) => {
-                    // Shouldn't be necessary, but just in case!
-                    future.held.insert(*action);
-                }
-                (ActionEvent::Shadowed, action) => {
-                    future.shadowed.insert(*action);
-                    future.was_ever_shadowed.insert(*action);
-                }
-                (ActionEvent::Unshadowed, action) => {
-                    future.shadowed.remove(action);
-                    // Leave `was_ever_shadowed`
-                }
-            }
+        for (event, action) in self.actions.iter() {
+            future.push(*event, *action);
         }
 
         future
