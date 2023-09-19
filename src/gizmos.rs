@@ -13,8 +13,6 @@
 pub enum GizmoOriginPinning {
     /// The origin of the gizmo is pinned to a specific pixel location on the document
     Document,
-    /// The origin of the gizmo follows the mouse.
-    Mouse,
     /// Position is in parent's coordinate space.
     /// Takes the parent's size and position (and pinning thereof) into account.
     /// 
@@ -95,6 +93,8 @@ pub trait GizmoVisitor {
 pub struct Gizmo {
     visual: GizmoVisual,
     interaction: GizmoInteraction,
+    hover_cursor: CursorOrInvisible,
+    drag_cursor: CursorOrInvisible,
     position: ([f32; 2], GizmoOriginPinning),
     scale: ([f32; 2], GizmoTransformPinning),
     rotation: (f32, GizmoTransformPinning)
