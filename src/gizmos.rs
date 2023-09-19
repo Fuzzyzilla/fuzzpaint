@@ -85,7 +85,7 @@ pub enum GizmoInteraction {
     Rotate,
 }
 
-/// A kind of inverse iterator, where the visitor be passed down the whole
+/// A kind of inverse iterator, where the visitor will be passed down the whole
 /// tree to visit every gizmo in order.
 pub trait GizmoVisitor {
     fn visit_gizmo(&mut self, gizmo: &Gizmo);
@@ -107,11 +107,34 @@ pub struct Collection {
     /// Path to the currently open gizmo. (todo!)
     open: Option<()>,
     /// Children of this gizmo, sorted top to bottom. 
-    children: Vec<Gizmo>,
+    children: Vec<AnyGizmo>,
+}
+
+// mem inefficient, implementation detail uwu
+enum AnyGizmo {
+    Gizmo(Gizmo),
+    Collection(Collection),
+}
+enum AnyMeta {
+    Gizmo(GizmoMeta),
+    Collection(CollectionMeta),
+}
+impl From<GizmoMeta> for AnyMeta {
+    fn from(value: GizmoMeta) -> Self {
+        Self::Gizmo(value)
+    }
+}
+impl From<CollectionMeta> for AnyMeta {
+    fn from(value: CollectionMeta) -> Self {
+        Self::Collection(value)
+    }
 }
 
 mod seal {
     pub trait _Sealed {}
+    impl _Sealed for super::AnyGizmo {}
+    impl _Sealed for super::Gizmo {}
+    impl _Sealed for super::Collection {}
 }
 
 use winit::window::CursorIcon as CursorIcon;
@@ -150,19 +173,163 @@ pub trait Gizmooooo : seal::_Sealed {
 }
 
 // Possible types of path emitted by a gizmo.
-struct GizmoMeta {
+pub struct GizmoMeta {
     /// Offset of the mouse at the time of mouse down from this gizmo's origin,
     /// in units determined by GizmoTransformPinning
-    offs: [f32; 2],
+    offset: [f32; 2],
 }
 /// Some number of indicies to drill down into the nested structure,
 /// followed by the terminating gizmo metadata.
-struct CollectionMeta(Vec<usize>, GizmoMeta);
+pub struct CollectionMeta(Vec<usize>, GizmoMeta);
 
-enum AnyMeta {
-    Gizmo(GizmoMeta),
-    Collection(CollectionMeta),
+impl Gizmooooo for Gizmo {
+    type Meta = GizmoMeta;
+
+    fn hit_bounding_box(&self) -> Option<()> {
+        None
+    }
+
+    fn cursor_at(&self, point:[f32;2]) -> CursorOrInvisible {
+        todo!()
+    }
+
+    fn grabbed_cursor(&self, path: &Self::Meta) -> CursorOrInvisible {
+        todo!()
+    }
+
+    fn click_at(&self, point: [f32; 2]) -> Option<Self::Meta> {
+        todo!()
+    }
+
+    fn dragged_delta(&self, path: &Self::Meta, delta: [f32;2]) {
+        todo!()
+    }
+
+    fn drag_release(&self, path: Self::Meta) {
+        todo!()
+    }
+
+    fn click_release(&self, path: Self::Meta) {
+        todo!()
+    }
+
+    fn visit(&self, visitor: &mut impl GizmoVisitor) {
+        visitor.visit_gizmo(self)
+    }
+
 }
-/// Newtype around all these implementation details to allow outside code
-/// to store and work with these paths.
-pub struct Path(AnyMeta);
+
+impl  Gizmooooo for Collection {
+    type Meta = CollectionMeta;
+
+    fn hit_bounding_box(&self) -> Option<()> {
+        None
+    }
+
+    fn cursor_at(&self, point:[f32;2]) -> CursorOrInvisible {
+        todo!()
+    }
+
+    fn grabbed_cursor(&self, path: &Self::Meta) -> CursorOrInvisible {
+        todo!()
+    }
+
+    fn click_at(&self, point: [f32; 2]) -> Option<Self::Meta> {
+        todo!()
+    }
+
+    fn dragged_delta(&self, path: &Self::Meta, delta: [f32;2]) {
+        todo!()
+    }
+
+    fn drag_release(&self, path: Self::Meta) {
+        todo!()
+    }
+
+    fn click_release(&self, path: Self::Meta) {
+        todo!()
+    }
+
+    fn visit(&self, visitor: &mut impl GizmoVisitor) {
+        visitor.visit_collection(self);
+        // In painters order- reverse the children
+        for child in self.children.iter().rev() {
+            child.visit(visitor)
+        }
+    }
+    
+}
+
+impl Gizmooooo for AnyGizmo {
+    type Meta = AnyMeta;
+
+    fn hit_bounding_box(&self) -> Option<()> {
+        match self {
+            AnyGizmo::Collection(g) => g.hit_bounding_box(),
+            AnyGizmo::Gizmo(g) => g.hit_bounding_box(),
+        }
+    }
+
+    fn cursor_at(&self, point:[f32;2]) -> CursorOrInvisible {
+        match self {
+            AnyGizmo::Collection(g) => g.cursor_at(point),
+            AnyGizmo::Gizmo(g) => g.cursor_at(point),
+        }
+    }
+
+    fn grabbed_cursor(&self, path: &Self::Meta) -> CursorOrInvisible {
+        match (self, path) {
+            (AnyGizmo::Collection(g), AnyMeta::Collection(m)) => g.grabbed_cursor(m),
+            (AnyGizmo::Gizmo(g), AnyMeta::Gizmo(m)) => g.grabbed_cursor(m),
+            _ => {
+                log::warn!("Mismatched meta type in AnyGizmo::grabbed_cursor");
+                Some(CursorIcon::Help)
+            }
+        }
+    }
+
+    fn click_at(&self, point: [f32; 2]) -> Option<Self::Meta> {
+        match self {
+            AnyGizmo::Collection(g) => g.click_at(point).map(Into::into),
+            AnyGizmo::Gizmo(g) => g.click_at(point).map(Into::into),
+        }
+    }
+
+    fn dragged_delta(&self, path: &Self::Meta, delta: [f32;2]) {
+        match (self, path) {
+            (AnyGizmo::Collection(g), AnyMeta::Collection(m)) => g.dragged_delta(m, delta),
+            (AnyGizmo::Gizmo(g), AnyMeta::Gizmo(m)) => g.dragged_delta(m, delta),
+            _ => {
+                log::warn!("Mismatched meta type in AnyGizmo::dragged_delta");
+            }
+        }
+    }
+
+    fn drag_release(&self, path: Self::Meta) {
+        match (self, path) {
+            (AnyGizmo::Collection(g), AnyMeta::Collection(m)) => g.drag_release(m),
+            (AnyGizmo::Gizmo(g), AnyMeta::Gizmo(m)) => g.drag_release(m),
+            _ => {
+                log::warn!("Mismatched meta type in AnyGizmo::drag_release");
+            }
+        }
+    }
+
+    fn click_release(&self, path: Self::Meta) {
+        match (self, path) {
+            (AnyGizmo::Collection(g), AnyMeta::Collection(m)) => g.click_release(m),
+            (AnyGizmo::Gizmo(g), AnyMeta::Gizmo(m)) => g.click_release(m),
+            _ => {
+                log::warn!("Mismatched meta type in AnyGizmo::click_release");
+            }
+        }
+    }
+
+    fn visit(&self, visitor: &mut impl GizmoVisitor) {
+        match self {
+            AnyGizmo::Collection(g) => g.visit(visitor),
+            AnyGizmo::Gizmo(g) => g.visit(visitor),
+        }
+    }
+    
+}
