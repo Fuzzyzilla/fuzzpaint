@@ -2,156 +2,85 @@
 //!
 //! Represents an interactive overlay atop the document editing workspace but behind the UI workspace. Useful for interactive
 //! elements, mouse hit detection, rendering immediate previews, ect. without re-rendering the document.
-
+//! 
+//! More complex gizmos are made up of simple composable elements.
+//
 // (Todo: Should crate::document_viewport_proxy be a kind of gizmo? the parallels are clear...)
 
-/// The structure that manages the rendering of gizmos. Exists on a per-workspace basis, not a per-document basis!
-pub struct GizmoCollection {
-    id_counter: u64,
-    collection: Vec<(
-        GizmoCollectionHandle,
-        Box<dyn Gizmo<DragMetadata = AnyGizmoMeta>>,
-    )>,
-}
-#[derive(PartialEq, Eq)]
-pub struct GizmoCollectionHandle(u64);
-impl GizmoCollection {
-    /// Add a gizmo to the collection, on top of the others. Wild type bounds
-    /// are due to an implementation detail that failed to be contained >w>
-    pub fn add<Meta, G: Gizmo<DragMetadata = Meta> + 'static>(&mut self, gizmo: G)
-    where
-        Meta: std::any::Any + Clone,
-    {
-        self.id_counter = self.id_counter.wrapping_add(1);
-        self.collection.push((
-            GizmoCollectionHandle(self.id_counter),
-            Box::new(AnyGizmo(gizmo)),
-        ))
-    }
-    /// Remove a gizmo from the collection. Currently, the gizmo is lost instead
-    /// of returning due to type erasure...
-    pub fn remove(&mut self, handle: GizmoCollectionHandle) {
-        let Some((idx, _)) = self
-            .collection
-            .iter()
-            .enumerate()
-            .find(|(_, (id, _))| id.0 == handle.0)
-        else {
-            return;
-        };
-        self.collection.remove(idx);
-    }
-}
-
-impl Gizmo for GizmoCollection {
-    // Store the handle to which gizmo was dragged, along with that gizmo's own meta.
-    type DragMetadata = (GizmoCollectionHandle, AnyGizmoMeta);
-
-    fn hover_cursor(&self) -> Option<winit::window::CursorIcon> {
-        // Seems trait design is flawed - not possible to know what cursor to use here :V
-        todo!()
-    }
-    fn grab_cursor(&self) -> Option<winit::window::CursorIcon> {
-        // Seems trait design is flawed - not possible to know what cursor to use here :V
-        todo!()
-    }
-    fn click(&self, point: [f32; 2]) -> Option<Self::DragMetadata> {
-        // Find the topmost gizmo that returns Some, and convert
-        // it's meta to our own. If none found, return None.
-        self.collection
-            .iter()
-            .rev()
-            .find_map(|(id, gizmo)| gizmo.click(point).map(|any_meta| (GizmoCollectionHandle(id.0), any_meta)))
-    }
-    fn drag_to(&self, point: [f32; 2], metadata: &Self::DragMetadata) {
-        // Find the gizmo our metadata's ID points to:
-        let Some(gizmo) = self.collection
-            .iter()
-            .rev()
-            .find(|(id, _)| id == &metadata.0) else {return};
-
-        gizmo.1.drag_to(point, &metadata.1)
-    }
-    fn hit(&self, point: [f32; 2]) -> bool {
-        self.collection
-            .iter()
-            // No need to reverse iterate here, as order doesn't matter.
-            .any(|(_, gizmo)| gizmo.hit(point))
-    }
-    fn release(&self, metadata: Self::DragMetadata) {
-        // Find the gizmo our metadata's ID points to:
-        let Some(gizmo) = self.collection
-            .iter()
-            .rev()
-            .find(|(id, _)| id == &metadata.0) else {return};
-
-        gizmo.1.release(metadata.1)
-    }
-}
-
-/// A gizmo. May simply be a visual, implement mouse hit detection, set a cursor icon, ect.
-pub trait Gizmo {
-    type DragMetadata: Sized;
-    /// Cursor to display when the gizmo is hovered. None to hide.
-    fn hover_cursor(&self) -> Option<winit::window::CursorIcon>;
-    /// Cursor to display when the gizmo has been clicked on and held. Defaults to `hover_cursor`.
-    fn grab_cursor(&self) -> Option<winit::window::CursorIcon> {
-        self.hover_cursor()
-    }
-    /// Check for a hit at the given **document coordinate**.
-    fn hit(&self, point: [f32; 2]) -> bool;
-    /// Check for click at the given **document coordinate**.
-    ///
-    /// Returns a metadata object that should be given to drag_to.
-    fn click(&self, point: [f32; 2]) -> Option<Self::DragMetadata>;
-    /// This gizmo was clicked and dragged to this point in **document space**.
-    /// The metadata from click or click_boxed will be passed as an argument, which is useful
-    /// e.g. to track which part of a complex gizmo is being interacted with.
-    /// Will update frequently as a drag is in progress.
-    ///
-    /// To implement snapping or constraints, it's safe to modify the given point or ignore it entirely.
-    fn drag_to(&self, point: [f32; 2], metadata: &Self::DragMetadata);
-    /// Mouse stopped dragging. last point to `drag_to` was the final position. Returns ownership
-    /// of the metadata back to the gizmo.
-    fn release(&self, metadata: Self::DragMetadata);
-}
-
-/// This feels like a C++ style solution, unrusty!!
-/// Although, it is an implementation detail, and only leaks
-/// the trait bond `Gizmo::DragMetadata: Any + Clone` to the outside world.
+/// The origin of the gizmo will be pinned according to it's position and this value.
 ///
-/// Stores a gizmo in a type-erased fasion.
-struct AnyGizmo<G: Gizmo>(G);
-type AnyGizmoMeta = Box<dyn std::any::Any>;
-impl<Meta, G: Gizmo<DragMetadata = Meta>> Gizmo for AnyGizmo<G>
-where
-    Meta: std::any::Any + Clone,
-{
-    type DragMetadata = AnyGizmoMeta;
-    fn hover_cursor(&self) -> Option<winit::window::CursorIcon> {
-        self.0.hover_cursor()
-    }
-    fn grab_cursor(&self) -> Option<winit::window::CursorIcon> {
-        self.0.grab_cursor()
-    }
-    fn hit(&self, point: [f32; 2]) -> bool {
-        self.0.hit(point)
-    }
-    fn click(&self, point: [f32; 2]) -> Option<Self::DragMetadata> {
-        self.0
-            .click(point)
-            .map(|meta| Box::new(meta) as Box<(dyn std::any::Any)>)
-    }
-    fn drag_to(&self, point: [f32; 2], metadata: &Self::DragMetadata) {
-        if let Some(meta) = metadata.downcast_ref::<Meta>() {
-            self.0.drag_to(point, meta)
-        }
-    }
-    fn release(&self, metadata: Self::DragMetadata) {
-        // Here implies the trait bound Meta: Clone
-        // How to relax this?
-        if let Some(meta) = metadata.downcast_ref::<Meta>() {
-            self.0.release(meta.clone())
-        }
-    }
+/// As of right now, no viewport pinning - that's a non-goal of this API. use egui for that ;)
+pub enum GizmoOriginPinning {
+    /// The origin of the gizmo is pinned to a specific pixel location on the document
+    Document,
+    /// The origin of the gizmo follows the mouse.
+    Mouse,
+    /// Position is in parent's coordinate space.
+    /// Takes the parent's size and position (and pinning thereof) into account.
+    /// 
+    /// A top-level gizmo set to `Inherit` will behave as `Document`.
+    Inherit,
+}
+/// The coordinate system of the gizmo will be calculated according to it's size, rotation and this value.
+/// Size and rotation are pinned separately, but use the same logic.
+pub enum GizmoTransformPinning {
+    /// Size is in document pixels. Rotation is relative to the document space.
+    Document,
+    /// Size is in viewport logical pixels, rotation is absolute.
+    Viewport,
+    /// Calculate based on parent's transform.
+    /// 
+    /// A top-level gizmo set to `Inherit` will behave as `Document`.
+    Inherit,
+}
+
+pub enum GizmoMeshStyle {
+    Triangles,
+    LineStrip,
+}
+
+/// How is a gizmo displayed?
+/// For efficiency in rendering, the options are intentionally limited.
+/// For more complex visuals, several gizmos may be combined arbitrarily.
+pub enum GizmoVisual {
+    Mesh{
+        style: GizmoMeshStyle,
+        /// The descriptor of the texture. Should be immutable, as read usage
+        /// lifetime is not currently bounded.
+        /// 
+        /// Set binding 0 should be the combined image sampler, which will be rendered with
+        /// standard alpha blending.
+        texture: Option<crate::vk::PersistentDescriptorSet>,
+        /// Packed floats: \[X,Y,  R,G,B,A,  U,V\]
+        /// 
+        /// Color will be multiplied with the texture sampled at UV, or white if no texture.
+        /// If no texture, UV is ignored and may be invalid.
+        mesh: (),
+        /// Whether the mesh can mutate from frame-to-frame.
+        /// If true, it will be re-uploaded to the GPU every frame,
+        /// otherwise it may be cached and changes may be missed
+        mutable: bool,
+    },
+    None,
+}
+
+/// How can a gizmo be interacted with by the mouse?
+#[repr(u8)]
+pub enum GizmoInteraction {
+    None,
+    /// Can be dragged, and arbitrarily constrained.
+    Move,
+    /// Can be clicked to open
+    Open,
+    /// Both `Move`-able and `Open`-able.
+    MoveOpen,
+    /// Can be rotated around it's origin by dragging, can be arbitrarily constrained.
+    Rotate,
+}
+
+pub struct Gizmo {
+    visual: GizmoVisual,
+    position: ([f32; 2], GizmoOriginPinning),
+    scale: ([f32; 2], GizmoTransformPinning),
+    rotation: (f32, GizmoTransformPinning)
 }
