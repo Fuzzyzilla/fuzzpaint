@@ -155,11 +155,52 @@ pub struct Collection {
     position: ([f32; 2], GizmoOriginPinning),
     scale: ([f32; 2], GizmoTransformPinning),
     rotation: (f32, GizmoTransformPinning),
-
-    /// Path to the currently open gizmo. (todo!)
-    open: Option<()>,
     /// Children of this gizmo, sorted top to bottom.
     children: Vec<AnyGizmo>,
+}
+impl Collection {
+    fn evaluate_path_mut<'a>(&'a mut self, path: &'_ CollectionMeta) -> Option<&'a mut Gizmo> {
+        let mut cur: Option<&'a mut [AnyGizmo]> = Some(&mut self.children);
+        let mut found: Option<&'a mut Gizmo> = None;
+        for idx in path.0.iter() {
+            // Short circuit if we index too deep.
+            let last_cur = cur?;
+            // Short circuit if we index past-the end.
+            let child = last_cur.get_mut(*idx)?;
+            match child {
+                // Index into this collection next
+                AnyGizmo::Collection(c) => cur = Some(&mut c.children),
+                // We found an endpoint -
+                // will short circuit None next iteration if this wasn't the expected endpoint
+                AnyGizmo::Gizmo(g) => {
+                    cur = None;
+                    found = Some(g);
+                }
+            }
+        }
+        found
+    }
+    fn evaluate_path<'a>(&'a self, path: &'_ CollectionMeta) -> Option<&'a Gizmo> {
+        let mut cur: Option<&'a [AnyGizmo]> = Some(&self.children);
+        let mut found: Option<&'a Gizmo> = None;
+        for idx in path.0.iter() {
+            // Short circuit if we index too deep.
+            let last_cur = cur?;
+            // Short circuit if we index past-the end.
+            let child = last_cur.get(*idx)?;
+            match child {
+                // Index into this collection next
+                AnyGizmo::Collection(c) => cur = Some(&c.children),
+                // We found an endpoint -
+                // will short circuit None next iteration if this wasn't the expected endpoint
+                AnyGizmo::Gizmo(g) => {
+                    cur = None;
+                    found = Some(g);
+                }
+            }
+        }
+        found
+    }
 }
 
 // mem inefficient, implementation detail uwu
@@ -360,10 +401,6 @@ impl Gizmooooo for Collection {
         self.visit_hit(&mut visitor)
     }
 
-    fn grabbed_cursor(&self, path: &Self::Meta) -> CursorOrInvisible {
-        todo!()
-    }
-
     fn click_at(&mut self, point: [f32; 2]) -> Option<Self::Meta> {
         // Recursively search the collection structure, populating path and returning Some if
         // a gizmo is found that accepted the click.
@@ -407,7 +444,7 @@ impl Gizmooooo for Collection {
             }
         }
 
-        let mut visitor = ClickVisitor{
+        let mut visitor = ClickVisitor {
             path: smallvec::smallvec![0],
             points_stack: vec![point],
         };
@@ -415,16 +452,30 @@ impl Gizmooooo for Collection {
         self.visit_hit_mut(&mut visitor)
     }
 
+    fn grabbed_cursor(&self, path: &Self::Meta) -> CursorOrInvisible {
+        if let Some(gizmo) = self.evaluate_path(path) {
+            gizmo.grabbed_cursor(&path.1)
+        } else {
+            CursorOrInvisible::Icon(CursorIcon::Help)
+        }
+    }
+
     fn dragged_delta(&mut self, path: &Self::Meta, delta: [f32; 2]) {
-        todo!()
+        if let Some(gizmo) = self.evaluate_path_mut(path) {
+            gizmo.dragged_delta(&path.1, delta)
+        }
     }
 
     fn drag_release(&mut self, path: Self::Meta) {
-        todo!()
+        if let Some(gizmo) = self.evaluate_path_mut(&path) {
+            gizmo.drag_release(path.1)
+        }
     }
 
     fn click_release(&mut self, path: Self::Meta) {
-        todo!()
+        if let Some(gizmo) = self.evaluate_path_mut(&path) {
+            gizmo.click_release(path.1)
+        }
     }
 
     fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> Option<T> {
