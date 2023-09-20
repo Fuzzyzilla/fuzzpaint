@@ -7,30 +7,9 @@
 //
 // (Todo: Should crate::document_viewport_proxy be a kind of gizmo? the parallels are clear...)
 
-/// The origin of the gizmo will be pinned according to it's position and this value.
-///
-/// As of right now, no viewport pinning - that's a non-goal of this API. use egui for that ;)
-pub enum GizmoOriginPinning {
-    /// The origin of the gizmo is pinned to a specific pixel location on the document
-    Document,
-    /// Position is in parent's coordinate space.
-    /// Takes the parent's size and position (and pinning thereof) into account.
-    ///
-    /// A top-level gizmo set to `Inherit` will behave as `Document`.
-    Inherit,
-}
-/// The coordinate system of the gizmo will be calculated according to it's size, rotation and this value.
-/// Size and rotation are pinned separately, but use the same logic.
-pub enum GizmoTransformPinning {
-    /// Size is in document pixels. Rotation is relative to the document space.
-    Document,
-    /// Size is in viewport logical pixels, rotation is absolute.
-    Viewport,
-    /// Calculate based on parent's transform.
-    ///
-    /// A top-level gizmo set to `Inherit` will behave as `Document`.
-    Inherit,
-}
+pub mod transform;
+use transform::*;
+
 
 pub enum GizmoMeshStyle {
     Triangles,
@@ -144,17 +123,13 @@ pub struct Gizmo {
     hover_cursor: CursorOrInvisible,
     grab_cursor: CursorOrInvisible,
 
-    position: ([f32; 2], GizmoOriginPinning),
-    scale: ([f32; 2], GizmoTransformPinning),
-    rotation: (f32, GizmoTransformPinning),
+    transform: GizmoTransform,
 }
 
 /// A collection of many gizmos. It itself is a Gizmo,
 /// meaning Collections-in-Collections is supported.
 pub struct Collection {
-    position: ([f32; 2], GizmoOriginPinning),
-    scale: ([f32; 2], GizmoTransformPinning),
-    rotation: (f32, GizmoTransformPinning),
+    transform: GizmoTransform,
     /// Children of this gizmo, sorted top to bottom.
     children: Vec<AnyGizmo>,
 }
@@ -305,7 +280,7 @@ impl Gizmooooo for Gizmo {
         self.hit_shape.hit(point).then_some(self.hover_cursor)
     }
 
-    fn grabbed_cursor(&self, path: &Self::Meta) -> CursorOrInvisible {
+    fn grabbed_cursor(&self, _path: &Self::Meta) -> CursorOrInvisible {
         self.grab_cursor
     }
 
@@ -319,8 +294,8 @@ impl Gizmooooo for Gizmo {
         match self.interaction {
             GizmoInteraction::Move | GizmoInteraction::MoveOpen => {
                 // todo: transform delta to local delta coords.
-                self.position.0[0] += delta[0];
-                self.position.0[1] += delta[1];
+                self.transform.position[0] += delta[0];
+                self.transform.position[1] += delta[1];
             }
             GizmoInteraction::Rotate => {
                 // no transform needed.
@@ -330,17 +305,17 @@ impl Gizmooooo for Gizmo {
                 // left or down anticlockwise,
                 // instead of working off the absolute position of mouse vs. self.
                 const RAD_PER_PIXEL: f32 = 0.01;
-                self.rotation.0 -= (delta[0] - delta[1]) * RAD_PER_PIXEL;
+                self.transform.rotation -= (delta[0] - delta[1]) * RAD_PER_PIXEL;
             }
             _ => (),
         }
     }
 
-    fn drag_release(&mut self, path: Self::Meta) {
+    fn drag_release(&mut self, _path: Self::Meta) {
         // Hmm.. I don't believe there is any work to do here :V
     }
 
-    fn click_release(&mut self, path: Self::Meta) {
+    fn click_release(&mut self, _path: Self::Meta) {
         // That's a funny syntax :3
         if let GizmoInteraction::Open | GizmoInteraction::MoveOpen = self.interaction {
             // todo: Open self
@@ -435,7 +410,7 @@ impl Gizmooooo for Collection {
                     }
                 }
             }
-            fn end_collection_mut(&mut self, gizmo: &mut Collection) -> Option<CollectionMeta> {
+            fn end_collection_mut(&mut self, _: &mut Collection) -> Option<CollectionMeta> {
                 // Clear last nested path
                 self.path.pop();
                 self.points_stack.pop();
