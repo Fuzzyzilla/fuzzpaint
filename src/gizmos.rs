@@ -7,11 +7,11 @@
 //
 // (Todo: Should crate::document_viewport_proxy be a kind of gizmo? the parallels are clear...)
 
+pub mod renderer;
 pub mod transform;
 use transform::*;
 
-
-pub enum GizmoMeshStyle {
+pub enum GizmoMeshMode {
     Triangles,
     LineStrip,
 }
@@ -23,7 +23,7 @@ pub enum GizmoVisual {
     Mesh {
         /// Interpret mesh as TriangleList or as a wide LineStrip?
         /// Texturing is supported for lines.
-        style: GizmoMeshStyle,
+        style: GizmoMeshMode,
         /// The descriptor of the texture. Should be immutable, as read usage
         /// lifetime is not currently bounded.
         ///
@@ -32,14 +32,12 @@ pub enum GizmoVisual {
         texture: Option<crate::vk::PersistentDescriptorSet>,
         /// Color modulation of this gizmo. Can be changed at will, and will be respected by the renderer.
         color: [f32; 4],
-        /// Packed f32s: \[X,Y,  R,G,B,A,  U,V\]
+        /// A mesh of [renderer::GizmoVertex], forming primitives determined by `mode`.
         ///
-        /// Coordinates are in logical pixels or document pixels, as determined by GizmoTransformPinning.
+        /// Coordinates are in the gizmo's local coordinate system, as determined by GizmoTransformPinning.
         ///
         /// Color will be multiplied with the texture sampled at UV (or white if no texture), and
         /// further multiplied by `Mesh::color`.
-        ///
-        /// If no texture, UV is ignored and may be invalid.
         mesh: (),
         /// Whether the mesh can mutate from frame-to-frame.
         /// If true, it will be re-uploaded to the GPU every frame,
