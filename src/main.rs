@@ -1052,6 +1052,23 @@ impl From<Stroke> for ImmutableStroke {
         }
     }
 }
+pub struct WeakStroke {
+    id: WeakID<Stroke>,
+    brush: StrokeBrushSettings,
+    // Not a weak reference, despite the name. I hadn't thought of this til now x3
+    // to me it makes sense that the existence of this weak reference should keep the
+    // resource alive.
+    points: Arc<[StrokePoint]>,
+}
+impl From<&ImmutableStroke> for WeakStroke {
+    fn from(value: &ImmutableStroke) -> Self {
+        Self {
+            id: value.id.weak(),
+            brush: value.brush.clone(),
+            points: value.points.clone(),
+        }
+    }
+}
 
 struct DocumentSelections {
     pub cur_layer: Option<WeakID<StrokeLayer>>,
@@ -1112,20 +1129,158 @@ impl Globals {
     }
 }
 static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
-
-fn listener(
-    mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
-    mut action_listener: actions::ActionListener,
+enum RenderMessage {
+    SwitchDocument(WeakID<Document>),
+    StrokeLayer{
+        layer: WeakID<StrokeLayer>,
+        kind: StrokeLayerRenderMessageKind,
+    },
+}
+enum StrokeLayerRenderMessageKind {
+    /// The blend settings (opacity, clip, mode) for the layer were modified.
+    BlendChanged(Blend),
+    /// A stroke was appended to the given layer.
+    /// Could be sourced from redos or new data entirely.
+    Append(WeakStroke),
+    /// This number of strokes were trucated (undone or replaced)
+    Truncate(usize),
+}
+async fn render_worker(
     renderer: Arc<render_device::RenderContext>,
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
+    mut render_recv: tokio::sync::mpsc::UnboundedReceiver<RenderMessage>,
 ) -> AnyResult<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-
-    let mut manager = StrokeLayerManager::default();
     let layer_render = stroke_renderer::StrokeLayerRenderer::new(renderer.clone())?;
-    let blend = blend::BlendEngine::new(renderer.device().clone())?;
+    let blend_engine = blend::BlendEngine::new(renderer.device().clone())?;
+
+    let globals = GLOBALS.get_or_init(Globals::new);
+
+    let mut cached_renders = std::collections::HashMap::<WeakID<StrokeLayer>, stroke_renderer::RenderData>::new();
+
+    // An event that was peeked and rejected during aggregation.
+    // Take it the next time around.
+    let mut peeked = None;
+
+    // Take the peeked value, or try to receive new value.
+    while let Some(message) = match peeked.take() {
+        Some(v) => {
+            // We skip awaiting the reciever, and have more work immediately.
+            // yield so that we don't starve the runtime.
+            tokio::task::yield_now().await;
+            Some(v)
+        }
+        None => render_recv.recv().await,
+    } {
+        // Try to aggregate more events, to batch work effectively.
+        let mut events = vec![message];
+        loop{
+            match render_recv.try_recv() {
+                Ok(v) => {
+                    // Accept value, or put into `peeked` and break if it
+                    // is incompatible with aggregated work
+                    
+                    // unwrap ok - vec always has at least one element.
+                    let can_aggregate = match (events.last().unwrap(), &v) {
+                        // Multiple edits to the same layer can be aggregated
+                        (RenderMessage::StrokeLayer { layer: target, .. }, RenderMessage::StrokeLayer { layer: new, .. }) if new == target => {
+                            true
+                        },
+                        // Multiple document switches can be aggregated
+                        // (all are ignored but the last one)
+                        (RenderMessage::SwitchDocument(..), RenderMessage::SwitchDocument(..)) => {
+                            true
+                        }
+                        _ => {
+                            // Incompatible events. Defer event to next pass, and break
+                            false
+                        }
+                    };
+
+                    if can_aggregate {
+                        events.push(v);
+                    } else {
+                        // peeked is always None here, as we took it above. no events lost :3
+                        peeked = Some(v);
+                        break;
+                    }
+                },
+                Err(_) => {
+                    // Empty or closed, we don't care - break and work
+                    // on what events we managed to collect (always at least one)
+                    break;
+                }
+            }
+        }
+        match events.first().unwrap() {
+            // All our commands are layer commands relating to this target:
+            RenderMessage::StrokeLayer { layer: target, .. } => {
+                
+            }
+            // All our commands are document switch commands:
+            // (we only care about the final one)
+            RenderMessage::SwitchDocument(..) => {
+                let new_document = events.last().unwrap();
+                // <rerender viewport>
+            }
+        }
+        /*
+        // Delete render_data if empty.
+        // Create if render_data absent and layer not empty.
+        if layer_data.undo_cursor_position == Some(0) || layer_data.strokes.len() == 0 {
+            layer_data.render_data = None;
+            continue;
+        } else if layer_data.render_data.is_none() {
+            // Get or try insert with? owo
+            layer_data.render_data = Some(layer_render.uninit_render_data()?)
+        }
+        let buf = layer_data.render_data.as_ref().unwrap();
+
+        // Render up to cursor, if exists. Otherwise, the whole slice.
+        let strokes_slice = &layer_data.strokes[0..layer_data
+            .undo_cursor_position
+            .unwrap_or(layer_data.strokes.len())];
+
+        let future = layer_render.draw(strokes_slice, buf, true)?;
+
+        let blend_info: Vec<_> = document
+            .layer_top_level
+            .iter()
+            .filter_map(|layer| {
+                Some((
+                    layer.blend.clone(),
+                    manager
+                        .layers
+                        .get(&layer.id.weak())?
+                        .render_data
+                        .as_ref()?
+                        .view
+                        .clone(),
+                ))
+            })
+            .collect();
+
+        // Unlock before long potentially long awaits.
+        drop(documents);
+
+        let proxy = document_preview.write().await;
+        let commands = blend.blend(&renderer, proxy.clone(), true, &blend_info, [0; 2], [0; 2])?;
+        let fence = future
+            .then_execute(renderer.queues().compute().queue().clone(), commands)?
+            .boxed_send()
+            .then_signal_fence_and_flush()?;
+        proxy.submit_with_fence(fence);*/
+    }
+
+    // Recv returned none - no more messages can be recieved, end worker with success.
+    Ok(())
+}
+async fn stylus_event_collector(
+    mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
+    mut action_listener: actions::ActionListener,
+    document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
+    render_send: tokio::sync::mpsc::UnboundedSender<RenderMessage>,
+) -> AnyResult<()> {
+    let mut manager = StrokeLayerManager::default();
 
     let globals = GLOBALS.get_or_init(Globals::new);
     // Create a document and a few layers and select them, to speed up testing iterations :P
@@ -1149,199 +1304,138 @@ fn listener(
             .entry(default_document)
             .or_default();
         document_selections.cur_layer = Some(default_layer);
+
+        // Notify the renderer of the new document
+        render_send.send(RenderMessage::SwitchDocument(default_document))?;
     }
 
     let mut current_stroke = None::<Stroke>;
-    runtime.block_on(async {
-        loop {
-            match event_stream.recv().await {
-                Ok(event_frame) => {
-                    // Silly silly block_in_place. This will wait at most the time taken to write one pointer. >:V
-                    // Tokio will panic though in order to force good form.
-                    let matrix = document_preview.get_matrix().await.invert().unwrap();
 
-                    // Deadlock warning - the interface locks these same two -w-
-                    // Make sure they're locked in the same order in both. Whoopsie.
-                    let mut selections = globals.selections().write().await;
-                    let documents = globals.documents().read().await;
+    loop {
+        match event_stream.recv().await {
+            Ok(event_frame) => {
+                let matrix = document_preview.get_matrix().await.invert().unwrap();
 
-                    let Some(document) = selections.cur_document.and_then(|selection| {
-                        documents
-                            .iter()
-                            .find(|document| document.id.weak() == selection)
-                    }) else {
-                        // No document to work on.
-                        continue;
-                    };
+                // Deadlock warning - the interface locks these same two -w-
+                // Make sure they're locked in the same order in both. Whoopsie.
+                let mut selections = globals.selections().write().await;
+                let documents = globals.documents().read().await;
 
-                    let Some(layer) = selections
-                        .cur_document
-                        .and_then(|document| selections.document_selections.get(&document))
-                        .and_then(|document| document.cur_layer)
-                    else {
-                        // No layer to work on
-                        continue;
-                    };
-                    let layer_data =
-                        manager
-                            .layers
-                            .entry(layer)
-                            .or_insert_with(|| StrokeLayerData {
-                                strokes: vec![],
-                                undo_cursor_position: None,
-                                render_data: None,
-                            });
+                let Some(document) = selections.cur_document.and_then(|selection| {
+                    documents
+                        .iter()
+                        .find(|document| document.id.weak() == selection)
+                }) else {
+                    // No document to work on.
+                    continue;
+                };
 
-                    let frame = action_listener.frame().ok();
-                    let (key_undos, key_redos) = match frame {
-                        None => (0, 0),
-                        Some(f) => (
-                            f.action_trigger_count(actions::Action::Undo),
-                            f.action_trigger_count(actions::Action::Redo),
-                        ),
-                    };
+                let Some(layer) = selections
+                    .cur_document
+                    .and_then(|document| selections.document_selections.get(&document))
+                    .and_then(|document| document.cur_layer)
+                else {
+                    // No layer to work on
+                    continue;
+                };
+                let layer_data = manager
+                    .layers
+                    .entry(layer)
+                    .or_insert_with(|| StrokeLayerData {
+                        strokes: vec![],
+                        undo_cursor_position: None,
+                        render_data: None,
+                    });
 
-                    let ui_undos = std::mem::take(&mut selections.undos) as usize;
-                    let net_undos = (key_undos + ui_undos) as isize - (key_redos as isize);
+                let frame = action_listener.frame().ok();
+                let (key_undos, key_redos) = match frame {
+                    None => (0, 0),
+                    Some(f) => (
+                        f.action_trigger_count(actions::Action::Undo),
+                        f.action_trigger_count(actions::Action::Redo),
+                    ),
+                };
 
-                    let mut layer_needs_redraw = false;
-                    if net_undos != 0 {
-                        match layer_data.undo_cursor_position.as_mut() {
-                            Some(count) => {
-                                *count = count.saturating_add_signed(-net_undos);
-                                // cursor exceeded length, delete the cursor
-                                if *count >= layer_data.strokes.len() {
-                                    layer_data.undo_cursor_position = None;
-                                }
-                            }
-                            None => {
-                                if net_undos < 0 {
-                                    // Nothin to do - redone when nothing was undone.
-                                } else {
-                                    layer_data.undo_cursor_position = Some(
-                                        layer_data.strokes.len().saturating_sub(net_undos as usize),
-                                    )
-                                }
+                let ui_undos = std::mem::take(&mut selections.undos) as usize;
+                let net_undos = (key_undos + ui_undos) as isize - (key_redos as isize);
+
+                if net_undos != 0 {
+                    match layer_data.undo_cursor_position.as_mut() {
+                        Some(count) => {
+                            *count = count.saturating_add_signed(-net_undos);
+                            // cursor exceeded length, delete the cursor
+                            if *count >= layer_data.strokes.len() {
+                                layer_data.undo_cursor_position = None;
                             }
                         }
-                        layer_needs_redraw = true;
-                    }
-
-                    for event in event_frame.iter() {
-                        if event.pressed {
-                            // Get stroke-in-progress or start anew.
-                            let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
-                                brush: selections.brush_settings.clone(),
-                                id: Default::default(),
-                                points: Vec::new(),
-                            });
-                            let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
-                            let pos = [
-                                pos.x * DOCUMENT_DIMENSION as f32,
-                                (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
-                            ];
-
-                            // Calc cumulative distance from the start, or 0.0 if this is the first point.
-                            let dist = this_stroke
-                                .points
-                                .last()
-                                .map(|last| {
-                                    // I should really be using a linalg library lmao
-                                    let delta = [last.pos[0] - pos[0], last.pos[1] - pos[1]];
-                                    last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
-                                })
-                                .unwrap_or(0.0);
-
-                            this_stroke.points.push(StrokePoint {
-                                pos,
-                                pressure: event.pressure.unwrap_or(1.0),
-                                dist,
-                            })
-                        } else {
-                            if let Some(stroke) = current_stroke.take() {
-                                // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
-                                let immutable: ImmutableStroke = stroke.into();
-
-                                // If there was an undo cursor, truncate everything after
-                                // and replace with new data.
-                                if let Some(cursor) = layer_data.undo_cursor_position.take() {
-                                    layer_data.strokes.drain(cursor..);
-                                }
-                                layer_data.strokes.push(immutable);
-
-                                layer_needs_redraw = true;
+                        None => {
+                            if net_undos < 0 {
+                                // Nothin to do - redone when nothing was undone.
+                            } else {
+                                layer_data.undo_cursor_position = Some(
+                                    layer_data.strokes.len().saturating_sub(net_undos as usize),
+                                )
                             }
                         }
-                    }
-
-                    // Unlock before long potentially long compute.
-                    drop(selections);
-
-                    if layer_needs_redraw {
-                        // Delete render_data if empty.
-                        // Create if render_data absent and layer not empty.
-                        if layer_data.undo_cursor_position == Some(0)
-                            || layer_data.strokes.len() == 0
-                        {
-                            layer_data.render_data = None;
-                            continue;
-                        } else if layer_data.render_data.is_none() {
-                            // Get or try insert with? owo
-                            layer_data.render_data = Some(layer_render.uninit_render_data()?)
-                        }
-                        let buf = layer_data.render_data.as_ref().unwrap();
-
-                        // Render up to cursor, if exists. Otherwise, the whole slice.
-                        let strokes_slice = &layer_data.strokes[0..layer_data
-                            .undo_cursor_position
-                            .unwrap_or(layer_data.strokes.len())];
-
-                        let future = layer_render.draw(strokes_slice, buf, true)?;
-
-                        let blend_info: Vec<_> = document
-                            .layer_top_level
-                            .iter()
-                            .filter_map(|layer| {
-                                Some((
-                                    layer.blend.clone(),
-                                    manager
-                                        .layers
-                                        .get(&layer.id.weak())?
-                                        .render_data
-                                        .as_ref()?
-                                        .view
-                                        .clone(),
-                                ))
-                            })
-                            .collect();
-
-                        // Unlock before long potentially long awaits.
-                        drop(documents);
-
-                        let proxy = document_preview.write().await;
-                        let commands = blend.blend(
-                            &renderer,
-                            proxy.clone(),
-                            true,
-                            &blend_info,
-                            [0; 2],
-                            [0; 2],
-                        )?;
-                        let fence = future
-                            .then_execute(renderer.queues().compute().queue().clone(), commands)?
-                            .boxed_send()
-                            .then_signal_fence_and_flush()?;
-                        proxy.submit_with_fence(fence);
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
-                    log::warn!("Lost {num} stylus frames!");
+
+                for event in event_frame.iter() {
+                    if event.pressed {
+                        // Get stroke-in-progress or start anew.
+                        let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
+                            brush: selections.brush_settings.clone(),
+                            id: Default::default(),
+                            points: Vec::new(),
+                        });
+                        let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
+                        let pos = [
+                            pos.x * DOCUMENT_DIMENSION as f32,
+                            (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
+                        ];
+
+                        // Calc cumulative distance from the start, or 0.0 if this is the first point.
+                        let dist = this_stroke
+                            .points
+                            .last()
+                            .map(|last| {
+                                // I should really be using a linalg library lmao
+                                let delta = [last.pos[0] - pos[0], last.pos[1] - pos[1]];
+                                last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
+                            })
+                            .unwrap_or(0.0);
+
+                        this_stroke.points.push(StrokePoint {
+                            pos,
+                            pressure: event.pressure.unwrap_or(1.0),
+                            dist,
+                        })
+                    } else {
+                        if let Some(stroke) = current_stroke.take() {
+                            // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
+                            let immutable: ImmutableStroke = stroke.into();
+
+                            // If there was an undo cursor, truncate everything after
+                            // and replace with new data.
+                            if let Some(cursor) = layer_data.undo_cursor_position.take() {
+                                layer_data.strokes.drain(cursor..);
+                            }
+
+                            let weak_ref = (&immutable).into();
+                            layer_data.strokes.push(immutable);
+
+                            render_send.send(RenderMessage::StrokeLayer { layer, kind: StrokeLayerRenderMessageKind::Append(weak_ref) })?;
+                        }
+                    }
                 }
-                // Stream closed, no more data to handle - we're done here!
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
             }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
+                log::warn!("Lost {num} stylus frames!");
+            }
+            // Stream closed, no more data to handle - we're done here!
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
         }
-    })
+    }
 }
 
 //If we return, it was due to an error.
@@ -1379,13 +1473,33 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let action_listener = window_renderer.action_listener();
 
     std::thread::spawn(move || {
-        if let Err(e) = listener(
-            event_stream,
-            action_listener,
-            render_context.clone(),
-            document_view.clone(),
-        ) {
-            log::error!("Helper thread exited with err:\n{e:?}")
+        let result = {
+            // We don't expect this channel to get very large, but it's important
+            // that messages don't get lost under any circumstance, lest an expensive
+            // document rebuild be needed :P
+            let (render_sender, render_reciever) =
+                tokio::sync::mpsc::unbounded_channel::<RenderMessage>();
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            // between current_thread runtime and try_join, these tasks are
+            // not actually run in parallel, just interleaved. This is preferable
+            // for now, just a note for future self UwU
+            runtime.block_on(async {
+                tokio::try_join!(
+                    stylus_event_collector(
+                        event_stream,
+                        action_listener,
+                        document_view.clone(),
+                        render_sender,
+                    ),
+                    render_worker(render_context, document_view, render_reciever,),
+                )
+            })
+        };
+        if let Err(e) = result {
+            log::error!("Helper task exited with err, runtime terminated:\n{e:?}")
         }
     });
 
