@@ -15,6 +15,7 @@ pub trait PreviewRenderProxy {
         swapchain_image_idx: u32,
     ) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>>;
     fn surface_changed(&self, render_surface: &render_device::RenderSurface);
+    fn has_update(&self) -> bool;
 }
 
 mod shaders {
@@ -479,6 +480,15 @@ impl DocumentViewportPreviewProxy {
             }
         }
     }
+    /// Returns true if a new image was submitted that hasn't been
+    /// acquired yet
+    pub fn has_new_read(&self) -> bool {
+        match &*self.swap_after.read().unwrap() {
+            SwapAfter::Empty => false,
+            SwapAfter::Now => true,
+            SwapAfter::Fence(fence) => fence.is_signaled().unwrap(),
+        }
+    }
     pub async fn write(&self) -> DocumentViewportPreviewProxyImageGuard<'_> {
         self.write_ready_notify.notified().await;
         assert!(self.swap_after.read().unwrap().is_empty());
@@ -523,5 +533,8 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
             &self.document_image_bindings,
         ));
         *self.surface_data.blocking_write() = new;
+    }
+    fn has_update(&self) -> bool {
+        self.has_new_read()
     }
 }
