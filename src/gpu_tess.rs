@@ -15,7 +15,6 @@ pub mod interface {
         pub erase: f32,
         #[format(R32G32B32_SFLOAT)]
         pub pad: [f32; 3],
-
     }
     #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone)]
     // Match align with GLSL std430.
@@ -288,26 +287,24 @@ impl GpuStampTess {
             group_index_counter as u64,
         )?;
         let mut current_idx = 0u32;
-        input_map.write()?
+        input_map
+            .write()?
             .iter_mut()
-            .zip(
-                num_groups_per_info
-                    .into_iter()
-                    .flat_map(|num| {
-                        // For this stroke, a `num` groups are created.
-                        // Repeat `num` identical "pointers" to the info.
-                        current_idx += 1;
-                        std::iter::repeat(current_idx-1)
-                            .take(num as usize)
-                    })
-            )
+            .zip(num_groups_per_info.into_iter().flat_map(|num| {
+                // For this stroke, a `num` groups are created.
+                // Repeat `num` identical "pointers" to the info.
+                current_idx += 1;
+                std::iter::repeat(current_idx - 1).take(num as usize)
+            }))
             .for_each(|(map, info_idx)| *map = info_idx);
 
         let output_infos = vk::Buffer::new_slice::<interface::OutputStrokeInfo>(
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
                 // Transfer dest for clearing
-                usage: vk::BufferUsage::STORAGE_BUFFER | vk::BufferUsage::INDIRECT_BUFFER | vk::BufferUsage::TRANSFER_DST,
+                usage: vk::BufferUsage::STORAGE_BUFFER
+                    | vk::BufferUsage::INDIRECT_BUFFER
+                    | vk::BufferUsage::TRANSFER_DST,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
@@ -366,7 +363,11 @@ impl GpuStampTess {
             .dispatch([group_index_counter, 1, 1])?;
         let command_buffer = command_buffer.build()?;
 
-        log::trace!("Dispatched {} tessellation workgroups for {} strokes", group_index_counter, strokes.len());
+        log::trace!(
+            "Dispatched {} tessellation workgroups for {} strokes",
+            group_index_counter,
+            strokes.len()
+        );
 
         use vk::sync::GpuFuture;
         let future = vk::sync::now(self.context.device().clone())

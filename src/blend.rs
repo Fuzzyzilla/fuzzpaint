@@ -68,15 +68,15 @@ mod shaders {
     #[derive(bytemuck::Zeroable, vulkano::buffer::BufferContents, Clone, Copy, PartialEq)]
     #[repr(C)]
     pub struct BlendConstants {
-        pub opacity : f32,
+        pub opacity: f32,
         /// Bool32: only 1 and 0 are valid!!
-        clip : u32,
+        clip: u32,
     }
     impl BlendConstants {
         pub fn new(opacity: f32, clip: bool) -> Self {
             Self {
                 opacity,
-                clip: if clip {1} else {0}
+                clip: if clip { 1 } else { 0 },
             }
         }
     }
@@ -159,13 +159,11 @@ impl BlendEngine {
             let mut push = entry_point.push_constant_requirements().map(|&v| v);
             debug_assert_eq!(
                 push,
-                Some(
-                    vulkano::pipeline::layout::PushConstantRange {
-                        stages: vulkano::shader::ShaderStages::COMPUTE,
-                        offset: 0,
-                        size: 24, // Blend: (f32 + bool32), Rect:(u32 * 4)
-                    }
-                )
+                Some(vulkano::pipeline::layout::PushConstantRange {
+                    stages: vulkano::shader::ShaderStages::COMPUTE,
+                    offset: 0,
+                    size: 24, // Blend: (f32 + bool32), Rect:(u32 * 4)
+                })
             );
         };
 
@@ -241,13 +239,11 @@ impl BlendEngine {
             device.clone(),
             vulkano::pipeline::layout::PipelineLayoutCreateInfo {
                 set_layouts: vec![input_image_layout, output_image_layout],
-                push_constant_ranges: vec![
-                    vulkano::pipeline::layout::PushConstantRange{
-                        offset: 0,
-                        size: 24, // f32 + bool32 + Rect:(u32 * 4)
-                        stages: vulkano::shader::ShaderStages::COMPUTE,
-                    }
-                ],
+                push_constant_ranges: vec![vulkano::pipeline::layout::PushConstantRange {
+                    offset: 0,
+                    size: 24, // f32 + bool32 + Rect:(u32 * 4)
+                    stages: vulkano::shader::ShaderStages::COMPUTE,
+                }],
                 ..vulkano::pipeline::layout::PipelineLayoutCreateInfo::default()
             },
         )?;
@@ -260,7 +256,7 @@ impl BlendEngine {
         /// Very smol inflexible macro to compile and insert one blend mode program from the `shaders` module into the `modes` map.
         macro_rules! build_mode {
             ($mode:expr, $namespace:ident) => {
-                let mode : BlendMode = $mode;
+                let mode: BlendMode = $mode;
                 let prev = modes.insert(
                     mode,
                     Self::build_pipeline(
@@ -274,7 +270,10 @@ impl BlendEngine {
                             .unwrap(),
                     )?,
                 );
-                assert!(prev.is_none(), "Overwrote blend program {mode:?}. Did you typo the name?");
+                assert!(
+                    prev.is_none(),
+                    "Overwrote blend program {mode:?}. Did you typo the name?"
+                );
             };
         }
 
@@ -302,8 +301,8 @@ impl BlendEngine {
         background: Arc<vk::ImageView<vk::StorageImage>>,
         clear_background: bool,
         layers: &[(Blend, Arc<vk::ImageView<vk::StorageImage>>)],
-        origin: [u32;2],
-        extent: [u32;2],
+        origin: [u32; 2],
+        extent: [u32; 2],
     ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
         let mut commands = vk::AutoCommandBufferBuilder::primary(
             context.allocators().command_buffer(),
@@ -314,10 +313,8 @@ impl BlendEngine {
         if clear_background {
             use vulkano::image::ImageViewAbstract;
             commands.clear_color_image(vk::ClearColorImageInfo {
-                clear_value: [0.0;4].into(),
-                regions: smallvec::smallvec![
-                    background.subresource_range().clone(),
-                ],
+                clear_value: [0.0; 4].into(),
+                regions: smallvec::smallvec![background.subresource_range().clone(),],
                 ..vulkano::command_buffer::ClearColorImageInfo::image(background.image().clone())
             })?;
         }
@@ -325,11 +322,9 @@ impl BlendEngine {
         // Still honor the request to clear the image if no layers are provided.
         if layers.is_empty() {
             log::warn!("Blend invoked on no layers.");
-            return Ok(
-                commands.build()?
-            )
+            return Ok(commands.build()?);
         }
-        
+
         // Compute the number of workgroups to dispatch for a given image
         // Or, None if the number of workgroups exceeds the maximum the device supports.
         let output_size = background.image().dimensions();
@@ -361,7 +356,15 @@ impl BlendEngine {
 
         let mut last_mode = None;
         let mut last_blend_settings = None;
-        for (Blend{mode, alpha_clip, opacity}, image) in layers {
+        for (
+            Blend {
+                mode,
+                alpha_clip,
+                opacity,
+            },
+            image,
+        ) in layers
+        {
             // bind a new pipeline if changed from last iter
             if last_mode != Some(*mode) {
                 let Some(program) = self.mode_pipelines.get(mode).map(Arc::clone) else {

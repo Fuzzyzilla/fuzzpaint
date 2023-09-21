@@ -435,7 +435,9 @@ impl DocumentUserInterface {
                 ui.add(egui::Separator::default().vertical());
 
                 if ui.button("⮪").clicked() {
-                    selections.undos.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    selections
+                        .undos
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 };
             });
         });
@@ -1132,7 +1134,7 @@ impl Globals {
 static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
 enum RenderMessage {
     SwitchDocument(WeakID<Document>),
-    StrokeLayer{
+    StrokeLayer {
         layer: WeakID<StrokeLayer>,
         kind: StrokeLayerRenderMessageKind,
     },
@@ -1156,11 +1158,13 @@ async fn render_worker(
 
     let globals = GLOBALS.get_or_init(Globals::new);
 
-    let mut cached_renders = std::collections::HashMap::<WeakID<StrokeLayer>, stroke_renderer::RenderData>::new();
+    let mut cached_renders =
+        std::collections::HashMap::<WeakID<StrokeLayer>, stroke_renderer::RenderData>::new();
     // Cursors into global stroke collection for each layer.
     // As global state can drift from local state if render_worker is starved,
     // this helps make sense of it.
-    let mut weak_layer_strokes = std::collections::HashMap::<WeakID<StrokeLayer>, Vec<WeakStroke>>::new();
+    let mut weak_layer_strokes =
+        std::collections::HashMap::<WeakID<StrokeLayer>, Vec<WeakStroke>>::new();
     let mut layer_blends = std::collections::HashMap::<WeakID<StrokeLayer>, Blend>::new();
 
     // An event that was peeked and rejected during aggregation.
@@ -1182,18 +1186,19 @@ async fn render_worker(
         // Try to aggregate more events, to batch work effectively.
         let mut events = vec![message];
         let mut skip_blend = false;
-        loop{
+        loop {
             match render_recv.try_recv() {
                 Ok(v) => {
                     // Accept value, or put into `peeked` and break if it
                     // is incompatible with aggregated work
-                    
+
                     // unwrap ok - vec always has at least one element.
                     let can_aggregate = match (events.last().unwrap(), &v) {
                         // Multiple edits to the same layer can be aggregated
-                        (RenderMessage::StrokeLayer { layer: target, .. }, RenderMessage::StrokeLayer { layer: new, .. }) if new == target => {
-                            true
-                        },
+                        (
+                            RenderMessage::StrokeLayer { layer: target, .. },
+                            RenderMessage::StrokeLayer { layer: new, .. },
+                        ) if new == target => true,
                         // Multiple document switches can be aggregated
                         // (all are ignored but the last one)
                         (RenderMessage::SwitchDocument(..), RenderMessage::SwitchDocument(..)) => {
@@ -1204,7 +1209,7 @@ async fn render_worker(
                         (RenderMessage::StrokeLayer { .. }, RenderMessage::SwitchDocument(..)) => {
                             skip_blend = true;
                             false
-                        } 
+                        }
                         _ => {
                             // Incompatible events. Defer event to next pass, and break
                             false
@@ -1218,7 +1223,7 @@ async fn render_worker(
                         peeked = Some(v);
                         break;
                     }
-                },
+                }
                 Err(_) => {
                     // Empty or closed, we don't care - break and work
                     // on what events we managed to collect (always at least one)
@@ -1256,7 +1261,10 @@ async fn render_worker(
                                     // Remove strokes from render queue
                                     strokes_to_render.drain(num_to_render.saturating_sub(*num)..);
 
-                                    let global_strokes_truncate = layer_strokes.len().checked_sub(*num).expect("Cant truncate past empty");
+                                    let global_strokes_truncate = layer_strokes
+                                        .len()
+                                        .checked_sub(*num)
+                                        .expect("Cant truncate past empty");
 
                                     layer_strokes.drain(global_strokes_truncate..);
 
@@ -1274,7 +1282,7 @@ async fn render_worker(
                                     new_blend = Some(blend);
                                 }
                             }
-                        },
+                        }
                         _ => panic!("Incorrect render command aggregation!"),
                     }
                 }
@@ -1317,11 +1325,11 @@ async fn render_worker(
                         // let blend = new_blend.unwrap();
                         // collect blend info from realtime document.
                         // need to track this locally, this info could be from wayyy in the future.
-                        let blend_info : Vec<_> = {
+                        let blend_info: Vec<_> = {
                             let read = globals.documents.read().await;
-                            let Some(doc) = read
-                                .iter()
-                                .find(|doc| doc.id.weak() == document_to_draw) else {
+                            let Some(doc) =
+                                read.iter().find(|doc| doc.id.weak() == document_to_draw)
+                            else {
                                 // Document not found, nothin to draw.
                                 continue;
                             };
@@ -1331,31 +1339,38 @@ async fn render_worker(
                                 .filter_map(|layer| {
                                     Some((
                                         layer.blend.clone(),
-                                        cached_renders
-                                            .get(&layer.id.weak())?
-                                            .view
-                                            .clone(),
+                                        cached_renders.get(&layer.id.weak())?.view.clone(),
                                     ))
                                 })
                                 .collect()
                         };
-        
-                
+
                         let proxy = document_preview.write().await;
-                        let commands = blend_engine.blend(&renderer, proxy.clone(), true, &blend_info, [0; 2], [0; 2])?;
+                        let commands = blend_engine.blend(
+                            &renderer,
+                            proxy.clone(),
+                            true,
+                            &blend_info,
+                            [0; 2],
+                            [0; 2],
+                        )?;
 
                         let fence = match draw_semaphore_future {
-                            Some(semaphore) => {
-                                semaphore
-                                .then_execute(renderer.queues().compute().queue().clone(), commands)?
-                                .boxed_send()
-                            }
-                            None => {
-                                renderer.now()
-                                .then_execute(renderer.queues().compute().queue().clone(), commands)?
-                                .boxed_send()
-                            }
-                        }.then_signal_fence_and_flush()?;
+                            Some(semaphore) => semaphore
+                                .then_execute(
+                                    renderer.queues().compute().queue().clone(),
+                                    commands,
+                                )?
+                                .boxed_send(),
+                            None => renderer
+                                .now()
+                                .then_execute(
+                                    renderer.queues().compute().queue().clone(),
+                                    commands,
+                                )?
+                                .boxed_send(),
+                        }
+                        .then_signal_fence_and_flush()?;
                         proxy.submit_with_fence(fence);
                     }
                 }
@@ -1467,7 +1482,11 @@ async fn stylus_event_collector(
                     let Some(cur_document) = read.cur_document else {
                         continue;
                     };
-                    let Some(cur_layer) = read.document_selections.get(&cur_document).and_then(|selections| selections.cur_layer) else {
+                    let Some(cur_layer) = read
+                        .document_selections
+                        .get(&cur_document)
+                        .and_then(|selections| selections.cur_layer)
+                    else {
                         continue;
                     };
                     let brush = read.brush_settings.clone();
@@ -1486,58 +1505,79 @@ async fn stylus_event_collector(
                     ),
                 };
 
+                // Assume redos cancel out undos
                 let net_undos = (key_undos + ui_undos) as isize - (key_redos as isize);
-                
-
 
                 if net_undos != 0 {
                     let mut stroke_manager = globals.strokes().write().await;
-    
-                    let layer_data = stroke_manager
-                        .layers
-                        .entry(cur_layer)
-                        .or_insert_with(|| StrokeLayerData {
-                            strokes: vec![],
-                            undo_cursor_position: None,
-                        });
-                    
-                    match layer_data.undo_cursor_position.as_mut() {
-                        Some(count) => {
-                            if net_undos > 0 {
-                                let _ = render_send.send(
-                                    RenderMessage::StrokeLayer {
-                                        layer: cur_layer,
-                                        // as cast ok - we checked that net_undos is positive.
-                                        kind: StrokeLayerRenderMessageKind::Truncate((*count).min(net_undos as usize))
-                                    }
-                                );
-                            } else {
-                                //redoooo
-                                todo!()
-                            }
-                            *count = count.saturating_add_signed(-net_undos);
-                            // cursor exceeded length, delete the cursor
-                            if *count >= layer_data.strokes.len() {
-                                layer_data.undo_cursor_position = None;
-                            }
-                        }
-                        None => {
-                            if net_undos < 0 {
-                                // Nothin to do - redone when nothing was undone.
-                            } else {
-                                let _ = render_send.send(
-                                    RenderMessage::StrokeLayer {
-                                        layer: cur_layer,
-                                        // as cast ok - we checked that net_undos is positive.
-                                        kind: StrokeLayerRenderMessageKind::Truncate(layer_data.strokes.len().min(net_undos as usize))
-                                    }
-                                );
 
-                                layer_data.undo_cursor_position = Some(
-                                    layer_data.strokes.len().saturating_sub(net_undos as usize),
-                                )
+                    let layer_data =
+                        stroke_manager
+                            .layers
+                            .entry(cur_layer)
+                            .or_insert_with(|| StrokeLayerData {
+                                strokes: vec![],
+                                undo_cursor_position: None,
+                            });
+
+                    match (layer_data.undo_cursor_position, net_undos) {
+                        // Redone when nothing undone - do nothin!
+                        (None, ..=0) => (),
+                        // New undos!
+                        (None, undos @ 1..) => {
+                            // `as` cast ok - we checked that it's positive.
+                            // clamp undos to the size of the data.
+                            let undos = layer_data.strokes.len().min(undos as usize);
+                            // Subtract won't overflow
+                            layer_data.undo_cursor_position =
+                                Some(layer_data.strokes.len() - undos);
+                            // broadcast the truncation request
+                            render_send.send(RenderMessage::StrokeLayer {
+                                layer: cur_layer,
+                                kind: StrokeLayerRenderMessageKind::Truncate(undos),
+                            })?;
+                        }
+                        // Redos when there were outstanding undos
+                        (Some(old_cursor), negative_redos @ ..=0) => {
+                            // weird conventions I invented here :V
+                            let redos = -negative_redos as usize;
+                            let new_cursor = old_cursor.saturating_add(redos);
+
+                            // This many redos will move cursor past the end
+                            let bounds = if new_cursor >= layer_data.strokes.len() {
+                                layer_data.undo_cursor_position = None;
+                                // append all strokes from the cursor onward
+                                old_cursor..layer_data.strokes.len()
+                            } else {
+                                layer_data.undo_cursor_position = Some(new_cursor);
+
+                                // append all strokes from the old cursor until the new
+                                old_cursor..new_cursor
+                            };
+
+                            // Tell the renderer to append these strokes once more
+                            for stroke in &layer_data.strokes[bounds] {
+                                render_send.send(RenderMessage::StrokeLayer {
+                                    layer: cur_layer,
+                                    kind: StrokeLayerRenderMessageKind::Append(stroke.into()),
+                                })?;
                             }
                         }
+                        // There were outstanding undos, and we're adding to them.
+                        (Some(old_cursor), undos @ 1..) => {
+                            // Prevent undos from taking index below 0
+                            let undos = old_cursor.min(undos as usize);
+
+                            // Won't overflow
+                            layer_data.undo_cursor_position = Some(old_cursor - undos);
+
+                            render_send.send(RenderMessage::StrokeLayer {
+                                layer: cur_layer,
+                                kind: StrokeLayerRenderMessageKind::Truncate(undos),
+                            })?;
+                        }
+                        // All cases are handled.
+                        _ => unreachable!(),
                     }
                 }
 
@@ -1577,15 +1617,15 @@ async fn stylus_event_collector(
                             let immutable: ImmutableStroke = stroke.into();
 
                             let mut stroke_manager = globals.strokes().write().await;
-    
-                            let layer_data = stroke_manager
-                                .layers
-                                .entry(cur_layer)
-                                .or_insert_with(|| StrokeLayerData {
-                                    strokes: vec![],
-                                    undo_cursor_position: None,
+
+                            let layer_data =
+                                stroke_manager.layers.entry(cur_layer).or_insert_with(|| {
+                                    StrokeLayerData {
+                                        strokes: vec![],
+                                        undo_cursor_position: None,
+                                    }
                                 });
-                            
+
                             // If there was an undo cursor, truncate everything after
                             // and replace with new data.
                             if let Some(cursor) = layer_data.undo_cursor_position.take() {
@@ -1595,7 +1635,10 @@ async fn stylus_event_collector(
                             let weak_ref = (&immutable).into();
                             layer_data.strokes.push(immutable);
 
-                            render_send.send(RenderMessage::StrokeLayer { layer: cur_layer, kind: StrokeLayerRenderMessageKind::Append(weak_ref) })?;
+                            render_send.send(RenderMessage::StrokeLayer {
+                                layer: cur_layer,
+                                kind: StrokeLayerRenderMessageKind::Append(weak_ref),
+                            })?;
                         }
                     }
                 }
