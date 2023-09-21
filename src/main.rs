@@ -1166,6 +1166,8 @@ async fn render_worker(
     // Take it the next time around.
     let mut peeked = None;
 
+    let mut document_to_draw = None;
+
     // Take the peeked value, or try to receive new value.
     while let Some(message) = match peeked.take() {
         Some(v) => {
@@ -1319,16 +1321,66 @@ async fn render_worker(
                     draw_semaphore_future = Some(layer_render.draw(&strokes_to_render, cache_entry, clear)?);
                 }
 
+                // implicit sync: if skip_blend or document_to_draw.is_none the draw_semaphore_future will not be awaited.
+                // next draw to this layer may need to be synchronized. Vulkano handles this in the background, but
+                // it's an important subtlety so... note for future self!
+
                 if !skip_blend {
-                    // Or fetch from globals, todo
-                    let blend = new_blend.unwrap();
-                    //blend_engine.blend(context, background, clear_background, layers, origin, extent)
+                    if let Some(document_to_draw) = document_to_draw {
+                        // wawawawawaaaw
+                        // let blend = new_blend.unwrap();
+                        // collect blend info from realtime document.
+                        // need to track this locally, this info could be from wayyy in the future.
+                        let blend_info : Vec<_> = {
+                            let read = globals.documents.read().await;
+                            let Some(doc) = read
+                                .iter()
+                                .find(|doc| doc.id.weak() == document_to_draw) else {
+                                // Document not found, nothin to draw.
+                                continue;
+                            };
+
+                            doc.layer_top_level
+                                .iter()
+                                .filter_map(|layer| {
+                                    Some((
+                                        layer.blend.clone(),
+                                        cached_renders
+                                            .get(&layer.id.weak())?
+                                            .view
+                                            .clone(),
+                                    ))
+                                })
+                                .collect()
+                        };
+        
+                
+                        let proxy = document_preview.write().await;
+                        let commands = blend_engine.blend(&renderer, proxy.clone(), true, &blend_info, [0; 2], [0; 2])?;
+
+                        let fence = match draw_semaphore_future {
+                            Some(semaphore) => {
+                                semaphore
+                                .then_execute(renderer.queues().compute().queue().clone(), commands)?
+                                .boxed_send()
+                            }
+                            None => {
+                                renderer.now()
+                                .then_execute(renderer.queues().compute().queue().clone(), commands)?
+                                .boxed_send()
+                            }
+                        }.then_signal_fence_and_flush()?;
+                        proxy.submit_with_fence(fence);
+                    }
                 }
             }
             // All our commands are document switch commands:
             // (we only care about the final one)
             RenderMessage::SwitchDocument(..) => {
-                let new_document = events.last().unwrap();
+                let RenderMessage::SwitchDocument(new_document) = events.last().unwrap() else {
+                    panic!("Incorrect render command aggregation!")
+                };
+                document_to_draw = Some(new_document.clone());
                 // <rerender viewport>
             }
         }
@@ -1465,6 +1517,18 @@ async fn stylus_event_collector(
                     
                     match layer_data.undo_cursor_position.as_mut() {
                         Some(count) => {
+                            if net_undos > 0 {
+                                let _ = render_send.send(
+                                    RenderMessage::StrokeLayer {
+                                        layer: cur_layer,
+                                        // as cast ok - we checked that net_undos is positive.
+                                        kind: StrokeLayerRenderMessageKind::Truncate((*count).min(net_undos as usize))
+                                    }
+                                );
+                            } else {
+                                //redoooo
+                                todo!()
+                            }
                             *count = count.saturating_add_signed(-net_undos);
                             // cursor exceeded length, delete the cursor
                             if *count >= layer_data.strokes.len() {
