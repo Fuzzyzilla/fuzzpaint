@@ -1382,58 +1382,50 @@ async fn render_worker(
                     panic!("Incorrect render command aggregation!")
                 };
                 document_to_draw = Some(new_document.clone());
+
                 // <rerender viewport>
+                let blend_info: Vec<_> = {
+                    let read = globals.documents.read().await;
+                    let Some(doc) =
+                        read.iter().find(|doc| doc.id.weak() == *new_document)
+                    else {
+                        // Document not found, nothin to draw.
+                        continue;
+                    };
+
+                    doc.layer_top_level
+                        .iter()
+                        .filter_map(|layer| {
+                            Some((
+                                layer.blend.clone(),
+                                cached_renders.get(&layer.id.weak())?.view.clone(),
+                            ))
+                        })
+                        .collect()
+                };
+
+                let proxy = document_preview.write().await;
+                let commands = blend_engine.blend(
+                    &renderer,
+                    proxy.clone(),
+                    true,
+                    &blend_info,
+                    [0; 2],
+                    [0; 2],
+                )?;
+
+                let fence = renderer
+                    .now()
+                    .then_execute(
+                        renderer.queues().compute().queue().clone(),
+                        commands,
+                    )?
+                    .boxed_send()
+                .then_signal_fence_and_flush()?;
+                proxy.submit_with_fence(fence);
             }
         }
-        /*
-        // Delete render_data if empty.
-        // Create if render_data absent and layer not empty.
-        if layer_data.undo_cursor_position == Some(0) || layer_data.strokes.len() == 0 {
-            layer_data.render_data = None;
-            continue;
-        } else if layer_data.render_data.is_none() {
-            // Get or try insert with? owo
-            layer_data.render_data = Some(layer_render.uninit_render_data()?)
-        }
-        let buf = layer_data.render_data.as_ref().unwrap();
-
-        // Render up to cursor, if exists. Otherwise, the whole slice.
-        let strokes_slice = &layer_data.strokes[0..layer_data
-            .undo_cursor_position
-            .unwrap_or(layer_data.strokes.len())];
-
-        let future = layer_render.draw(strokes_slice, buf, true)?;
-
-        let blend_info: Vec<_> = document
-            .layer_top_level
-            .iter()
-            .filter_map(|layer| {
-                Some((
-                    layer.blend.clone(),
-                    manager
-                        .layers
-                        .get(&layer.id.weak())?
-                        .render_data
-                        .as_ref()?
-                        .view
-                        .clone(),
-                ))
-            })
-            .collect();
-
-        // Unlock before long potentially long awaits.
-        drop(documents);
-
-        let proxy = document_preview.write().await;
-        let commands = blend.blend(&renderer, proxy.clone(), true, &blend_info, [0; 2], [0; 2])?;
-        let fence = future
-            .then_execute(renderer.queues().compute().queue().clone(), commands)?
-            .boxed_send()
-            .then_signal_fence_and_flush()?;
-        proxy.submit_with_fence(fence);*/
     }
-
-    // Recv returned none - no more messages can be recieved, end worker with success.
     Ok(())
 }
 async fn stylus_event_collector(
@@ -1464,10 +1456,9 @@ async fn stylus_event_collector(
             .entry(default_document)
             .or_default();
         document_selections.cur_layer = Some(default_layer);
-
-        // Notify the renderer of the new document
-        render_send.send(RenderMessage::SwitchDocument(default_document))?;
     }
+
+    let mut last_document = None;
 
     let mut current_stroke = None::<Stroke>;
 
@@ -1495,6 +1486,12 @@ async fn stylus_event_collector(
 
                     (cur_document, cur_layer, brush, undos)
                 };
+
+                if Some(cur_document) != last_document {
+                    last_document = Some(cur_document.clone());
+                    // Notify renderer of the change
+                    render_send.send(RenderMessage::SwitchDocument(cur_document.clone()))?;
+                }
 
                 let frame = action_listener.frame().ok();
                 let (key_undos, key_redos) = match frame {
@@ -1540,7 +1537,8 @@ async fn stylus_event_collector(
                         // Redos when there were outstanding undos
                         (Some(old_cursor), negative_redos @ ..=0) => {
                             // weird conventions I invented here :V
-                            let redos = -negative_redos as usize;
+                            // `as` cast ok - we checked that it's negative, and inverted it.
+                            let redos = (-negative_redos) as usize;
                             let new_cursor = old_cursor.saturating_add(redos);
 
                             // This many redos will move cursor past the end
@@ -1566,6 +1564,7 @@ async fn stylus_event_collector(
                         // There were outstanding undos, and we're adding to them.
                         (Some(old_cursor), undos @ 1..) => {
                             // Prevent undos from taking index below 0
+                            // `as` cast ok - we checked that it's positive
                             let undos = old_cursor.min(undos as usize);
 
                             // Won't overflow
