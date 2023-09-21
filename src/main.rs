@@ -1160,12 +1160,10 @@ async fn render_worker(
 
     let mut cached_renders =
         std::collections::HashMap::<WeakID<StrokeLayer>, stroke_renderer::RenderData>::new();
-    // Cursors into global stroke collection for each layer.
-    // As global state can drift from local state if render_worker is starved,
-    // this helps make sense of it.
+    // Keep track of layer states locally, as globals can be mutated out-of-step with render commands
+    // We expect eventual consistency though!
     let mut weak_layer_strokes =
         std::collections::HashMap::<WeakID<StrokeLayer>, Vec<WeakStroke>>::new();
-    let mut layer_blends = std::collections::HashMap::<WeakID<StrokeLayer>, Blend>::new();
 
     // An event that was peeked and rejected during aggregation.
     // Take it the next time around.
@@ -1696,13 +1694,13 @@ fn main() -> AnyResult<std::convert::Infallible> {
             // for now, just a note for future self UwU
             runtime.block_on(async {
                 tokio::try_join!(
+                    render_worker(render_context, document_view.clone(), render_reciever,),
                     stylus_event_collector(
                         event_stream,
                         action_listener,
-                        document_view.clone(),
+                        document_view,
                         render_sender,
                     ),
-                    render_worker(render_context, document_view, render_reciever,),
                 )
             })
         };
