@@ -1250,7 +1250,16 @@ async fn render_worker(
                                     let num = num.saturating_sub(num_to_render);
                                     if num > 0 {
                                         clear = true;
-                                        todo!()
+                                        let read = globals.stroke_layers.read().await;
+                                        if let Some(strokes) = read.layers.get(target) {
+                                            // Gets complicated - the truncate command could be very old,
+                                            // so the layer's data may no longer reflect the proper strokes.
+                                            // big problem!
+                                            todo!()
+                                        } else {
+                                            // strokes not found, no data to work from. problematic!
+                                            log::warn!("Stroke layer truncate: No layer data found to draw from!");
+                                        }
                                     }
                                 }
                                 StrokeLayerRenderMessageKind::BlendChanged(blend) => {
@@ -1405,16 +1414,6 @@ async fn stylus_event_collector(
                     (cur_document, cur_layer, brush, undos)
                 };
 
-                let mut stroke_manager = globals.strokes().write().await;
-
-                let layer_data = stroke_manager
-                    .layers
-                    .entry(cur_layer)
-                    .or_insert_with(|| StrokeLayerData {
-                        strokes: vec![],
-                        undo_cursor_position: None,
-                    });
-
                 let frame = action_listener.frame().ok();
                 let (key_undos, key_redos) = match frame {
                     None => (0, 0),
@@ -1425,8 +1424,20 @@ async fn stylus_event_collector(
                 };
 
                 let net_undos = (key_undos + ui_undos) as isize - (key_redos as isize);
+                
+
 
                 if net_undos != 0 {
+                    let mut stroke_manager = globals.strokes().write().await;
+    
+                    let layer_data = stroke_manager
+                        .layers
+                        .entry(cur_layer)
+                        .or_insert_with(|| StrokeLayerData {
+                            strokes: vec![],
+                            undo_cursor_position: None,
+                        });
+                    
                     match layer_data.undo_cursor_position.as_mut() {
                         Some(count) => {
                             *count = count.saturating_add_signed(-net_undos);
@@ -1482,6 +1493,16 @@ async fn stylus_event_collector(
                             // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
                             let immutable: ImmutableStroke = stroke.into();
 
+                            let mut stroke_manager = globals.strokes().write().await;
+    
+                            let layer_data = stroke_manager
+                                .layers
+                                .entry(cur_layer)
+                                .or_insert_with(|| StrokeLayerData {
+                                    strokes: vec![],
+                                    undo_cursor_position: None,
+                                });
+                            
                             // If there was an undo cursor, truncate everything after
                             // and replace with new data.
                             if let Some(cursor) = layer_data.undo_cursor_position.take() {
