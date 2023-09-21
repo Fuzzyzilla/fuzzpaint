@@ -169,7 +169,7 @@ impl GpuStampTess {
     /// Will automatically load stroke points into a buffer.
     pub fn tess(
         &self,
-        strokes: &[crate::ImmutableStroke],
+        strokes: &[crate::WeakStroke],
     ) -> anyhow::Result<(
         vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
@@ -209,7 +209,7 @@ impl GpuStampTess {
     /// Returns a semaphore for when the compute completes, the vertex buffer, and the draw indirection buffer.
     pub fn tess_buffer(
         &self,
-        strokes: &[crate::ImmutableStroke],
+        strokes: &[crate::WeakStroke],
         packed_points: vulkano::buffer::subbuffer::Subbuffer<[interface::InputStrokeVertex]>,
     ) -> anyhow::Result<(
         vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,

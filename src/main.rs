@@ -908,7 +908,7 @@ mod stroke_renderer {
         }
         pub fn draw(
             &self,
-            strokes: &[super::ImmutableStroke],
+            strokes: &[super::WeakStroke],
             renderbuf: &RenderData,
             clear: bool,
         ) -> AnyResult<vk::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>> {
@@ -1052,6 +1052,8 @@ impl From<Stroke> for ImmutableStroke {
         }
     }
 }
+
+#[derive(Clone)]
 pub struct WeakStroke {
     id: WeakID<Stroke>,
     brush: StrokeBrushSettings,
@@ -1173,6 +1175,7 @@ async fn render_worker(
     } {
         // Try to aggregate more events, to batch work effectively.
         let mut events = vec![message];
+        let mut skip_blend = false;
         loop{
             match render_recv.try_recv() {
                 Ok(v) => {
@@ -1190,6 +1193,12 @@ async fn render_worker(
                         (RenderMessage::SwitchDocument(..), RenderMessage::SwitchDocument(..)) => {
                             true
                         }
+                        // Defer switch to next pass, but the switching document means we can skip
+                        // re-rendering the document after the stroke layer commands.
+                        (RenderMessage::StrokeLayer { .. }, RenderMessage::SwitchDocument(..)) => {
+                            skip_blend = true;
+                            false
+                        } 
                         _ => {
                             // Incompatible events. Defer event to next pass, and break
                             false
@@ -1214,7 +1223,74 @@ async fn render_worker(
         match events.first().unwrap() {
             // All our commands are layer commands relating to this target:
             RenderMessage::StrokeLayer { layer: target, .. } => {
-                
+                // clear the layer image before rendering? true if undone past the cached version.
+                let mut clear = false;
+                // keep track of rendering work to do. May include old strokes too,
+                // if the truncate commands put us back in time before the cached image.
+                let mut strokes_to_render = Vec::<WeakStroke>::new();
+
+                // Keep track of the blend changes. Only the last will apply.
+                // None at the end of iteration means it hasn't changed - read from
+                // document data directly.
+                let mut new_blend = None;
+                for event in events.iter() {
+                    match event {
+                        RenderMessage::StrokeLayer { layer, kind } => {
+                            assert!(layer == target);
+
+                            match kind {
+                                StrokeLayerRenderMessageKind::Append(s) => strokes_to_render.push(s.clone()),
+                                StrokeLayerRenderMessageKind::Truncate(num) => {
+                                    let num_to_render = strokes_to_render.len();
+
+                                    // Remove strokes from render queue
+                                    strokes_to_render.drain(num_to_render.saturating_sub(*num)..);
+
+                                    // we took as many as possible from new commands - how many left over to remove?
+                                    // if more than zero, we have to fetch strokes from globals.
+                                    let num = num.saturating_sub(num_to_render);
+                                    if num > 0 {
+                                        clear = true;
+                                        todo!()
+                                    }
+                                }
+                                StrokeLayerRenderMessageKind::BlendChanged(blend) => {
+                                    new_blend = Some(blend);
+                                }
+                            }
+                        },
+                        _ => panic!("Incorrect render command aggregation!"),
+                    }
+                }
+
+                if !clear && strokes_to_render.is_empty() && new_blend.is_none() {
+                    // No work to do. Go listen for new events.
+                    continue;
+                }
+
+                let mut draw_semaphore_future = None;
+
+                if clear && strokes_to_render.len() == 0 {
+                    // Clear without remaking - just delete the data.
+                    cached_renders.remove(&target);
+                } else {
+                    // get or try insert with - create buffer if it doesn't exist, and get a ref to it.
+                    let cache_entry = match cached_renders.entry(target.clone()) {
+                        std::collections::hash_map::Entry::Occupied(occupied) => {
+                            &*occupied.into_mut()
+                        }
+                        std::collections::hash_map::Entry::Vacant(vacant) => {
+                            &*vacant.insert(layer_render.uninit_render_data()?)
+                        }
+                    };
+                    draw_semaphore_future = Some(layer_render.draw(&strokes_to_render, cache_entry, clear)?);
+                }
+
+                if !skip_blend {
+                    // Or fetch from globals, todo
+                    let blend = new_blend.unwrap();
+                    //blend_engine.blend(context, background, clear_background, layers, origin, extent)
+                }
             }
             // All our commands are document switch commands:
             // (we only care about the final one)
@@ -1293,11 +1369,11 @@ async fn stylus_event_collector(
             let layer_id = layer.id.weak();
             document.layer_top_level.push(layer);
 
-            globals.documents.blocking_write().push(document);
+            globals.documents.write().await.push(document);
             (document_id, layer_id)
         };
 
-        let mut selections = globals.selections().blocking_write();
+        let mut selections = globals.selections().write().await;
         selections.cur_document = Some(default_document);
         let document_selections = selections
             .document_selections
