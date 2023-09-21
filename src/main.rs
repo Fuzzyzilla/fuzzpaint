@@ -22,6 +22,10 @@ use blend::{Blend, BlendMode};
 pub use id::{FuzzID, WeakID};
 pub use tess::StrokeTessellator;
 
+#[cfg(feature = "dhat_heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 /// Obviously will be user specified on a per-document basis, but for now...
 const DOCUMENT_DIMENSION: u32 = 1024;
 /// Premultiplied RGBA16F for interesting effects (negative + overbright colors and alpha) with
@@ -1647,6 +1651,11 @@ async fn stylus_event_collector(
 //If we return, it was due to an error.
 //convert::Infallible is a quite ironic name for this useage, isn't it? :P
 fn main() -> AnyResult<std::convert::Infallible> {
+    #[cfg(feature = "dhat_heap")]
+    let _profiler = {
+        log::trace!("Installed dhat");
+        dhat::Profiler::new_heap()
+    };
     env_logger::builder()
         .filter_level(log::LevelFilter::max())
         .init();
@@ -1679,6 +1688,11 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let action_listener = window_renderer.action_listener();
 
     std::thread::spawn(move || {
+        #[cfg(feature = "dhat_heap")]
+        // Keep alive. Winit takes ownership of main, and will never
+        // drop this unless we steal it.
+        let _profiler = _profiler;
+
         let result = {
             // We don't expect this channel to get very large, but it's important
             // that messages don't get lost under any circumstance, lest an expensive
