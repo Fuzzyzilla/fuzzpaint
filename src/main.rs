@@ -1157,6 +1157,10 @@ async fn render_worker(
     let globals = GLOBALS.get_or_init(Globals::new);
 
     let mut cached_renders = std::collections::HashMap::<WeakID<StrokeLayer>, stroke_renderer::RenderData>::new();
+    // Cursors into global stroke collection for each layer.
+    // As global state can drift from local state if render_worker is starved,
+    // this helps make sense of it.
+    let mut render_indices = std::collections::HashMap::<WeakID<StrokeLayer>, usize>::new();
 
     // An event that was peeked and rejected during aggregation.
     // Take it the next time around.
@@ -1227,6 +1231,7 @@ async fn render_worker(
                 // keep track of rendering work to do. May include old strokes too,
                 // if the truncate commands put us back in time before the cached image.
                 let mut strokes_to_render = Vec::<WeakStroke>::new();
+                let cursor = render_indices.entry(target.clone()).or_insert(0);
 
                 // Keep track of the blend changes. Only the last will apply.
                 // None at the end of iteration means it hasn't changed - read from
@@ -1238,27 +1243,47 @@ async fn render_worker(
                             assert!(layer == target);
 
                             match kind {
-                                StrokeLayerRenderMessageKind::Append(s) => strokes_to_render.push(s.clone()),
+                                StrokeLayerRenderMessageKind::Append(s) => {
+                                    strokes_to_render.push(s.clone());
+                                    *cursor += 1;
+                                }
                                 StrokeLayerRenderMessageKind::Truncate(num) => {
                                     let num_to_render = strokes_to_render.len();
 
                                     // Remove strokes from render queue
                                     strokes_to_render.drain(num_to_render.saturating_sub(*num)..);
 
+                                    // catch attempt to truncate past index 0
+                                    *cursor = cursor.checked_sub(*num)
+                                        .ok_or_else(|| anyhow::anyhow!("Cannot truncate past the beginning of layer history!"))?;
+
                                     // we took as many as possible from new commands - how many left over to remove?
                                     // if more than zero, we have to fetch strokes from globals.
                                     let num = num.saturating_sub(num_to_render);
                                     if num > 0 {
+                                        // We're no longer strictly adding new content, we're removing what's
+                                        // already been drawn. Clear the image.
                                         clear = true;
+
                                         let read = globals.stroke_layers.read().await;
                                         if let Some(strokes) = read.layers.get(target) {
                                             // Gets complicated - the truncate command could be very old,
                                             // so the layer's data may no longer reflect the proper strokes.
-                                            // big problem!
-                                            todo!()
+                                            
+                                            let strokes = strokes.strokes.as_slice();
+                                            // Realtime strokes is *shorter* than what we have been asked to
+                                            // rewind into. This isn't an error (more truncates could follow) but
+                                            // i dunno how to handle this yet :V
+                                            if strokes.len() < *cursor {
+                                                todo!("Realtime strokes is shorter than local strokes")
+                                            }
+                                            // `strokes_to_render` is empty here from drain above.
+                                            // add strokes from start of history up to the new cursor to the list
+                                            // (cursor is a past-the-end index)
+                                            strokes_to_render.extend(strokes[..*cursor].iter().map(Into::into));
                                         } else {
                                             // strokes not found, no data to work from. problematic!
-                                            log::warn!("Stroke layer truncate: No layer data found to draw from!");
+                                            todo!("Stroke layer truncate: No layer data found to draw from!");
                                         }
                                     }
                                 }
