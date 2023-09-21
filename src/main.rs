@@ -1160,7 +1160,8 @@ async fn render_worker(
     // Cursors into global stroke collection for each layer.
     // As global state can drift from local state if render_worker is starved,
     // this helps make sense of it.
-    let mut render_indices = std::collections::HashMap::<WeakID<StrokeLayer>, usize>::new();
+    let mut weak_layer_strokes = std::collections::HashMap::<WeakID<StrokeLayer>, Vec<WeakStroke>>::new();
+    let mut layer_blends = std::collections::HashMap::<WeakID<StrokeLayer>, Blend>::new();
 
     // An event that was peeked and rejected during aggregation.
     // Take it the next time around.
@@ -1233,7 +1234,7 @@ async fn render_worker(
                 // keep track of rendering work to do. May include old strokes too,
                 // if the truncate commands put us back in time before the cached image.
                 let mut strokes_to_render = Vec::<WeakStroke>::new();
-                let cursor = render_indices.entry(target.clone()).or_insert(0);
+                let layer_strokes = weak_layer_strokes.entry(target.clone()).or_default();
 
                 // Keep track of the blend changes. Only the last will apply.
                 // None at the end of iteration means it hasn't changed - read from
@@ -1247,7 +1248,7 @@ async fn render_worker(
                             match kind {
                                 StrokeLayerRenderMessageKind::Append(s) => {
                                     strokes_to_render.push(s.clone());
-                                    *cursor += 1;
+                                    layer_strokes.push(s.clone());
                                 }
                                 StrokeLayerRenderMessageKind::Truncate(num) => {
                                     let num_to_render = strokes_to_render.len();
@@ -1255,9 +1256,9 @@ async fn render_worker(
                                     // Remove strokes from render queue
                                     strokes_to_render.drain(num_to_render.saturating_sub(*num)..);
 
-                                    // catch attempt to truncate past index 0
-                                    *cursor = cursor.checked_sub(*num)
-                                        .ok_or_else(|| anyhow::anyhow!("Cannot truncate past the beginning of layer history!"))?;
+                                    let global_strokes_truncate = layer_strokes.len().checked_sub(*num).expect("Cant truncate past empty");
+
+                                    layer_strokes.drain(global_strokes_truncate..);
 
                                     // we took as many as possible from new commands - how many left over to remove?
                                     // if more than zero, we have to fetch strokes from globals.
@@ -1266,27 +1267,7 @@ async fn render_worker(
                                         // We're no longer strictly adding new content, we're removing what's
                                         // already been drawn. Clear the image.
                                         clear = true;
-
-                                        let read = globals.stroke_layers.read().await;
-                                        if let Some(strokes) = read.layers.get(target) {
-                                            // Gets complicated - the truncate command could be very old,
-                                            // so the layer's data may no longer reflect the proper strokes.
-                                            
-                                            let strokes = strokes.strokes.as_slice();
-                                            // Realtime strokes is *shorter* than what we have been asked to
-                                            // rewind into. This isn't an error (more truncates could follow) but
-                                            // i dunno how to handle this yet :V
-                                            if strokes.len() < *cursor {
-                                                todo!("Realtime strokes is shorter than local strokes")
-                                            }
-                                            // `strokes_to_render` is empty here from drain above.
-                                            // add strokes from start of history up to the new cursor to the list
-                                            // (cursor is a past-the-end index)
-                                            strokes_to_render.extend(strokes[..*cursor].iter().map(Into::into));
-                                        } else {
-                                            // strokes not found, no data to work from. problematic!
-                                            todo!("Stroke layer truncate: No layer data found to draw from!");
-                                        }
+                                        strokes_to_render.extend(layer_strokes.iter().cloned());
                                     }
                                 }
                                 StrokeLayerRenderMessageKind::BlendChanged(blend) => {
@@ -1318,7 +1299,12 @@ async fn render_worker(
                             &*vacant.insert(layer_render.uninit_render_data()?)
                         }
                     };
-                    draw_semaphore_future = Some(layer_render.draw(&strokes_to_render, cache_entry, clear)?);
+                    match layer_render.draw(&strokes_to_render, cache_entry, clear) {
+                        Ok(semaphore) => draw_semaphore_future = Some(semaphore),
+                        Err(e) => {
+                            log::warn!("{e:?}");
+                        }
+                    };
                 }
 
                 // implicit sync: if skip_blend or document_to_draw.is_none the draw_semaphore_future will not be awaited.
@@ -1539,6 +1525,14 @@ async fn stylus_event_collector(
                             if net_undos < 0 {
                                 // Nothin to do - redone when nothing was undone.
                             } else {
+                                let _ = render_send.send(
+                                    RenderMessage::StrokeLayer {
+                                        layer: cur_layer,
+                                        // as cast ok - we checked that net_undos is positive.
+                                        kind: StrokeLayerRenderMessageKind::Truncate(layer_data.strokes.len().min(net_undos as usize))
+                                    }
+                                );
+
                                 layer_data.undo_cursor_position = Some(
                                     layer_data.strokes.len().saturating_sub(net_undos as usize),
                                 )

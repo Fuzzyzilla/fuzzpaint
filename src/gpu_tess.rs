@@ -181,6 +181,9 @@ impl GpuStampTess {
             .try_fold(0, u64::checked_add);
         let count = count.ok_or_else(|| anyhow::anyhow!("Packed point buffer too long!"))?;
 
+        if count == 0 {
+            anyhow::bail!("Tess invoked on zero points!")
+        }
         let packed_points = vk::Buffer::new_slice::<interface::InputStrokeVertex>(
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
@@ -216,6 +219,9 @@ impl GpuStampTess {
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
+        if strokes.is_empty() {
+            anyhow::bail!("Tess invoked on empty zero strokes!")
+        }
         let mut point_index_counter = 0;
         let mut group_index_counter = 0;
         let mut vertex_output_index_counter = 0;
@@ -263,6 +269,10 @@ impl GpuStampTess {
                 info
             }),
         )?;
+
+        if group_index_counter == 0 {
+            anyhow::bail!("Stroke too short to tessellate.")
+        }
         // One element per workgroup, telling it which info to work on.
         let input_map = vk::Buffer::new_slice::<u32>(
             self.context.allocators().memory(),

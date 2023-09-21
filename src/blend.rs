@@ -305,10 +305,31 @@ impl BlendEngine {
         origin: [u32;2],
         extent: [u32;2],
     ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
-        if layers.is_empty() {
-            anyhow::bail!("No layers to blend.")
+        let mut commands = vk::AutoCommandBufferBuilder::primary(
+            context.allocators().command_buffer(),
+            context.queues().compute().idx(),
+            vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        if clear_background {
+            use vulkano::image::ImageViewAbstract;
+            commands.clear_color_image(vk::ClearColorImageInfo {
+                clear_value: [0.0;4].into(),
+                regions: smallvec::smallvec![
+                    background.subresource_range().clone(),
+                ],
+                ..vulkano::command_buffer::ClearColorImageInfo::image(background.image().clone())
+            })?;
         }
 
+        // Still honor the request to clear the image if no layers are provided.
+        if layers.is_empty() {
+            log::warn!("Blend invoked on no layers.");
+            return Ok(
+                commands.build()?
+            )
+        }
+        
         // Compute the number of workgroups to dispatch for a given image
         // Or, None if the number of workgroups exceeds the maximum the device supports.
         let output_size = background.image().dimensions();
@@ -326,27 +347,11 @@ impl BlendEngine {
             }
         };
 
-        let mut commands = vk::AutoCommandBufferBuilder::primary(
-            context.allocators().command_buffer(),
-            context.queues().compute().idx(),
-            vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
-        )?;
-
         let output_set = vk::PersistentDescriptorSet::new(
             context.allocators().descriptor_set(),
             self.shader_layout.set_layouts()[shaders::OUTPUT_IMAGE_SET as usize].clone(),
             [vk::WriteDescriptorSet::image_view(0, background.clone())],
         )?;
-        if clear_background {
-            use vulkano::image::ImageViewAbstract;
-            commands.clear_color_image(vk::ClearColorImageInfo {
-                clear_value: [0.0;4].into(),
-                regions: smallvec::smallvec![
-                    background.subresource_range().clone(),
-                ],
-                ..vulkano::command_buffer::ClearColorImageInfo::image(background.image().clone())
-            })?;
-        }
         commands.bind_descriptor_sets(
             vulkano::pipeline::PipelineBindPoint::Compute,
             self.shader_layout.clone(),
