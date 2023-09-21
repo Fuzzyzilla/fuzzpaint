@@ -435,7 +435,7 @@ impl DocumentUserInterface {
                 ui.add(egui::Separator::default().vertical());
 
                 if ui.button("⮪").clicked() {
-                    selections.undos += 1;
+                    selections.undos.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 };
             });
         });
@@ -1024,7 +1024,6 @@ pub struct Stroke {
 pub struct StrokeLayerData {
     strokes: Vec<ImmutableStroke>,
     undo_cursor_position: Option<usize>,
-    render_data: Option<stroke_renderer::RenderData>,
 }
 /// Collection of layer data (stroke contents and render data) mapped from ID
 pub struct StrokeLayerManager {
@@ -1085,7 +1084,7 @@ struct Selections {
     pub document_selections: std::collections::HashMap<WeakID<Document>, DocumentSelections>,
     pub cur_brush: Option<brush::WeakBrushID>,
     pub brush_settings: StrokeBrushSettings,
-    pub undos: u32,
+    pub undos: std::sync::atomic::AtomicU32,
 }
 impl Default for Selections {
     fn default() -> Self {
@@ -1100,7 +1099,7 @@ impl Default for Selections {
                 spacing_px: 0.75,
                 is_eraser: false,
             },
-            undos: 0,
+            undos: 0.into(),
         }
     }
 }
@@ -1356,8 +1355,6 @@ async fn stylus_event_collector(
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
     render_send: tokio::sync::mpsc::UnboundedSender<RenderMessage>,
 ) -> AnyResult<()> {
-    let mut manager = StrokeLayerManager::default();
-
     let globals = GLOBALS.get_or_init(Globals::new);
     // Create a document and a few layers and select them, to speed up testing iterations :P
     {
@@ -1392,35 +1389,30 @@ async fn stylus_event_collector(
             Ok(event_frame) => {
                 let matrix = document_preview.get_matrix().await.invert().unwrap();
 
-                // Deadlock warning - the interface locks these same two -w-
-                // Make sure they're locked in the same order in both. Whoopsie.
-                let mut selections = globals.selections().write().await;
-                let documents = globals.documents().read().await;
+                // Collect all the data we need from selections global immediately:
+                let (cur_document, cur_layer, cur_brush, ui_undos) = {
+                    let read = globals.selections().read().await;
+                    let Some(cur_document) = read.cur_document else {
+                        continue;
+                    };
+                    let Some(cur_layer) = read.document_selections.get(&cur_document).and_then(|selections| selections.cur_layer) else {
+                        continue;
+                    };
+                    let brush = read.brush_settings.clone();
 
-                let Some(document) = selections.cur_document.and_then(|selection| {
-                    documents
-                        .iter()
-                        .find(|document| document.id.weak() == selection)
-                }) else {
-                    // No document to work on.
-                    continue;
+                    let undos = read.undos.swap(0, std::sync::atomic::Ordering::Relaxed) as usize;
+
+                    (cur_document, cur_layer, brush, undos)
                 };
 
-                let Some(layer) = selections
-                    .cur_document
-                    .and_then(|document| selections.document_selections.get(&document))
-                    .and_then(|document| document.cur_layer)
-                else {
-                    // No layer to work on
-                    continue;
-                };
-                let layer_data = manager
+                let mut stroke_manager = globals.strokes().write().await;
+
+                let layer_data = stroke_manager
                     .layers
-                    .entry(layer)
+                    .entry(cur_layer)
                     .or_insert_with(|| StrokeLayerData {
                         strokes: vec![],
                         undo_cursor_position: None,
-                        render_data: None,
                     });
 
                 let frame = action_listener.frame().ok();
@@ -1432,7 +1424,6 @@ async fn stylus_event_collector(
                     ),
                 };
 
-                let ui_undos = std::mem::take(&mut selections.undos) as usize;
                 let net_undos = (key_undos + ui_undos) as isize - (key_redos as isize);
 
                 if net_undos != 0 {
@@ -1460,7 +1451,7 @@ async fn stylus_event_collector(
                     if event.pressed {
                         // Get stroke-in-progress or start anew.
                         let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
-                            brush: selections.brush_settings.clone(),
+                            brush: cur_brush.clone(),
                             id: Default::default(),
                             points: Vec::new(),
                         });
@@ -1500,7 +1491,7 @@ async fn stylus_event_collector(
                             let weak_ref = (&immutable).into();
                             layer_data.strokes.push(immutable);
 
-                            render_send.send(RenderMessage::StrokeLayer { layer, kind: StrokeLayerRenderMessageKind::Append(weak_ref) })?;
+                            render_send.send(RenderMessage::StrokeLayer { layer: cur_layer, kind: StrokeLayerRenderMessageKind::Append(weak_ref) })?;
                         }
                     }
                 }
