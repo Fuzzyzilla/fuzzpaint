@@ -1386,9 +1386,7 @@ async fn render_worker(
                 // <rerender viewport>
                 let blend_info: Vec<_> = {
                     let read = globals.documents.read().await;
-                    let Some(doc) =
-                        read.iter().find(|doc| doc.id.weak() == *new_document)
-                    else {
+                    let Some(doc) = read.iter().find(|doc| doc.id.weak() == *new_document) else {
                         // Document not found, nothin to draw.
                         continue;
                     };
@@ -1416,12 +1414,9 @@ async fn render_worker(
 
                 let fence = renderer
                     .now()
-                    .then_execute(
-                        renderer.queues().compute().queue().clone(),
-                        commands,
-                    )?
+                    .then_execute(renderer.queues().compute().queue().clone(), commands)?
                     .boxed_send()
-                .then_signal_fence_and_flush()?;
+                    .then_signal_fence_and_flush()?;
                 proxy.submit_with_fence(fence);
             }
         }
