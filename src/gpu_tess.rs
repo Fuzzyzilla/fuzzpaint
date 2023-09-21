@@ -15,7 +15,6 @@ pub mod interface {
         pub erase: f32,
         #[format(R32G32B32_SFLOAT)]
         pub pad: [f32; 3],
-
     }
     #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone)]
     // Match align with GLSL std430.
@@ -169,7 +168,7 @@ impl GpuStampTess {
     /// Will automatically load stroke points into a buffer.
     pub fn tess(
         &self,
-        strokes: &[crate::ImmutableStroke],
+        strokes: &[crate::WeakStroke],
     ) -> anyhow::Result<(
         vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
@@ -181,6 +180,9 @@ impl GpuStampTess {
             .try_fold(0, u64::checked_add);
         let count = count.ok_or_else(|| anyhow::anyhow!("Packed point buffer too long!"))?;
 
+        if count == 0 {
+            anyhow::bail!("Tess invoked on zero points!")
+        }
         let packed_points = vk::Buffer::new_slice::<interface::InputStrokeVertex>(
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
@@ -209,13 +211,16 @@ impl GpuStampTess {
     /// Returns a semaphore for when the compute completes, the vertex buffer, and the draw indirection buffer.
     pub fn tess_buffer(
         &self,
-        strokes: &[crate::ImmutableStroke],
+        strokes: &[crate::WeakStroke],
         packed_points: vulkano::buffer::subbuffer::Subbuffer<[interface::InputStrokeVertex]>,
     ) -> anyhow::Result<(
         vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
+        if strokes.is_empty() {
+            anyhow::bail!("Tess invoked on empty zero strokes!")
+        }
         let mut point_index_counter = 0;
         let mut group_index_counter = 0;
         let mut vertex_output_index_counter = 0;
@@ -263,6 +268,10 @@ impl GpuStampTess {
                 info
             }),
         )?;
+
+        if group_index_counter == 0 {
+            anyhow::bail!("Stroke too short to tessellate.")
+        }
         // One element per workgroup, telling it which info to work on.
         let input_map = vk::Buffer::new_slice::<u32>(
             self.context.allocators().memory(),
@@ -278,26 +287,24 @@ impl GpuStampTess {
             group_index_counter as u64,
         )?;
         let mut current_idx = 0u32;
-        input_map.write()?
+        input_map
+            .write()?
             .iter_mut()
-            .zip(
-                num_groups_per_info
-                    .into_iter()
-                    .flat_map(|num| {
-                        // For this stroke, a `num` groups are created.
-                        // Repeat `num` identical "pointers" to the info.
-                        current_idx += 1;
-                        std::iter::repeat(current_idx-1)
-                            .take(num as usize)
-                    })
-            )
+            .zip(num_groups_per_info.into_iter().flat_map(|num| {
+                // For this stroke, a `num` groups are created.
+                // Repeat `num` identical "pointers" to the info.
+                current_idx += 1;
+                std::iter::repeat(current_idx - 1).take(num as usize)
+            }))
             .for_each(|(map, info_idx)| *map = info_idx);
 
         let output_infos = vk::Buffer::new_slice::<interface::OutputStrokeInfo>(
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
                 // Transfer dest for clearing
-                usage: vk::BufferUsage::STORAGE_BUFFER | vk::BufferUsage::INDIRECT_BUFFER | vk::BufferUsage::TRANSFER_DST,
+                usage: vk::BufferUsage::STORAGE_BUFFER
+                    | vk::BufferUsage::INDIRECT_BUFFER
+                    | vk::BufferUsage::TRANSFER_DST,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
@@ -356,7 +363,11 @@ impl GpuStampTess {
             .dispatch([group_index_counter, 1, 1])?;
         let command_buffer = command_buffer.build()?;
 
-        log::trace!("Dispatched {} tessellation workgroups for {} strokes", group_index_counter, strokes.len());
+        log::trace!(
+            "Dispatched {} tessellation workgroups for {} strokes",
+            group_index_counter,
+            strokes.len()
+        );
 
         use vk::sync::GpuFuture;
         let future = vk::sync::now(self.context.device().clone())

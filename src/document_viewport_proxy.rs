@@ -15,6 +15,7 @@ pub trait PreviewRenderProxy {
         swapchain_image_idx: u32,
     ) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>>;
     fn surface_changed(&self, render_surface: &render_device::RenderSurface);
+    fn has_update(&self) -> bool;
 }
 
 mod shaders {
@@ -299,22 +300,6 @@ pub struct DocumentViewportPreviewProxy {
 
 impl DocumentViewportPreviewProxy {
     pub fn new(render_surface: &render_device::RenderSurface) -> AnyResult<Self> {
-        let render_pass = vulkano::single_pass_renderpass!(
-            render_surface.context().device().clone(),
-            attachments: {
-                document: {
-                    load: Clear,
-                    store: Store,
-                    format: render_surface.format(),
-                    samples: 1,
-                },
-            },
-            pass: {
-                color: [document],
-                depth_stencil: {},
-            },
-        )?;
-
         // Only one frame-in-flight - Keep an additional buffer for writing to.
         let num_document_buffers = 2u32;
 
@@ -333,6 +318,36 @@ impl DocumentViewportPreviewProxy {
             vk::ImageCreateFlags::empty(),
             [render_surface.context().queues().graphics().idx()],
         )?;
+
+        // synchronously clear the read buffer, to move it into a well-defined format.
+        // Not sure how to do this cleaner :V
+        let initialize_future = {
+            let context = render_surface.context();
+
+            let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
+                context.allocators().command_buffer(),
+                context.queues().compute().idx(),
+                command_buffer::CommandBufferUsage::OneTimeSubmit,
+            )?;
+
+            command_buffer.clear_color_image(command_buffer::ClearColorImageInfo {
+                image_layout: vulkano::image::ImageLayout::General,
+                clear_value: [0.0; 4].into(),
+                regions: smallvec::smallvec![vk::ImageSubresourceRange {
+                    array_layers: 0..1,
+                    aspects: vk::ImageAspects::COLOR,
+                    mip_levels: 0..1,
+                },],
+                ..command_buffer::ClearColorImageInfo::image(document_image_array.clone())
+            })?;
+
+            let command_buffer = command_buffer.build()?;
+
+            context
+                .now()
+                .then_execute(context.queues().compute().queue().clone(), command_buffer)?
+                .then_signal_fence_and_flush()?
+        };
 
         let document_image_views = [
             vk::ImageView::new(
@@ -360,6 +375,22 @@ impl DocumentViewportPreviewProxy {
                 },
             )?,
         ];
+
+        let render_pass = vulkano::single_pass_renderpass!(
+            render_surface.context().device().clone(),
+            attachments: {
+                document: {
+                    load: Clear,
+                    store: Store,
+                    format: render_surface.format(),
+                    samples: 1,
+                },
+            },
+            pass: {
+                color: [document],
+                depth_stencil: {},
+            },
+        )?;
 
         let sampler = vk::Sampler::new(
             render_surface.context().device().clone(),
@@ -429,6 +460,9 @@ impl DocumentViewportPreviewProxy {
         // Start as notified - write buffer is available immediately.
         notify.notify_one();
 
+        // Wait for initialization to finish.
+        initialize_future.wait(None)?;
+
         Ok(Self {
             render_context: render_surface.context().clone(),
             pipeline,
@@ -479,6 +513,15 @@ impl DocumentViewportPreviewProxy {
             }
         }
     }
+    /// Returns true if a new image was submitted that hasn't been
+    /// acquired yet
+    pub fn has_new_read(&self) -> bool {
+        match &*self.swap_after.read().unwrap() {
+            SwapAfter::Empty => false,
+            SwapAfter::Now => true,
+            SwapAfter::Fence(fence) => fence.is_signaled().unwrap(),
+        }
+    }
     pub async fn write(&self) -> DocumentViewportPreviewProxyImageGuard<'_> {
         self.write_ready_notify.notified().await;
         assert!(self.swap_after.read().unwrap().is_empty());
@@ -523,5 +566,8 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
             &self.document_image_bindings,
         ));
         *self.surface_data.blocking_write() = new;
+    }
+    fn has_update(&self) -> bool {
+        self.has_new_read()
     }
 }

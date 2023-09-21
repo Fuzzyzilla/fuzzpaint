@@ -48,7 +48,8 @@ impl WindowSurface {
             last_frame_fence: None,
             egui_ctx,
             preview_renderer,
-            action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
+            action_collector:
+                crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
             action_stream: stream,
             stylus_events: Default::default(),
         })
@@ -149,7 +150,6 @@ impl WindowRenderer {
             };
             self.egui_ctx.push_winit_event(&event);
 
-
             match event {
                 Event::WindowEvent { event, .. } => {
                     self.action_collector.push_event(&event);
@@ -184,7 +184,7 @@ impl WindowRenderer {
                         }
                         _ => (),
                     }
-                },
+                }
                 Event::DeviceEvent { event, .. } => {
                     match event {
                         //Pressure out of 65535
@@ -206,7 +206,7 @@ impl WindowRenderer {
                         self.apply_platform_output(output);
                     };
 
-                    if self.egui_ctx.needs_redraw() {
+                    if self.egui_ctx.needs_redraw() || self.preview_renderer.has_update() {
                         self.window().request_redraw()
                     }
 
@@ -218,7 +218,9 @@ impl WindowRenderer {
                     };
                 }
                 Event::RedrawEventsCleared => {
-                    *control_flow = winit::event_loop::ControlFlow::Wait;
+                    *control_flow = winit::event_loop::ControlFlow::WaitUntil(
+                        std::time::Instant::now() + std::time::Duration::from_millis(100),
+                    );
                 }
                 _ => (),
             }
