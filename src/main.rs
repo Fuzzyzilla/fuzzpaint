@@ -17,6 +17,7 @@ pub mod id;
 pub mod render_device;
 pub mod stylus_events;
 pub mod tess;
+pub mod view_transform;
 use blend::{Blend, BlendMode};
 
 pub use id::{FuzzID, WeakID};
@@ -1491,11 +1492,16 @@ async fn stylus_event_collector(
                 }
 
                 let frame = action_listener.frame().ok();
-                let (key_undos, key_redos) = match frame {
-                    None => (0, 0),
+                let (key_undos, key_redos, is_pan, is_scrub, is_mirror) = match frame {
+                    None => (0, 0, false, false, false,),
                     Some(f) => (
                         f.action_trigger_count(actions::Action::Undo),
                         f.action_trigger_count(actions::Action::Redo),
+
+                        f.is_action_held(actions::Action::ViewportPan),
+                        f.is_action_held(actions::Action::ViewportScrub),
+                        // An odd number of mirror requests, we assume two mirror requests cancel out
+                        f.action_trigger_count(actions::Action::ViewportFlipHorizontal) % 2 == 1,
                     ),
                 };
 
