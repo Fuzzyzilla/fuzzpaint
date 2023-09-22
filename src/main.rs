@@ -1,4 +1,5 @@
 #![feature(portable_simd)]
+#![feature(once_cell_try)]
 use std::sync::Arc;
 mod egui_impl;
 pub mod gpu_err;
@@ -28,7 +29,7 @@ pub use tess::StrokeTessellator;
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 /// Obviously will be user specified on a per-document basis, but for now...
-const DOCUMENT_DIMENSION: u32 = 1024;
+const DOCUMENT_DIMENSION: u32 = 512;
 /// Premultiplied RGBA16F for interesting effects (negative + overbright colors and alpha) with
 /// more than 11bit per channel precision in the \[0,1\] range.
 /// Will it be user specified in the future?
@@ -1463,7 +1464,10 @@ async fn stylus_event_collector(
     loop {
         match event_stream.recv().await {
             Ok(event_frame) => {
-                let matrix = document_preview.get_matrix().await.invert().unwrap();
+                // We need a transform in order to do any of our work!
+                let Some(transform) = document_preview.get_view_transform().await else {
+                    continue;
+                };
 
                 // Collect all the data we need from selections global immediately:
                 let (cur_document, cur_layer, cur_brush, ui_undos) = {
@@ -1493,11 +1497,10 @@ async fn stylus_event_collector(
 
                 let frame = action_listener.frame().ok();
                 let (key_undos, key_redos, is_pan, is_scrub, is_mirror) = match frame {
-                    None => (0, 0, false, false, false,),
+                    None => (0, 0, false, false, false),
                     Some(f) => (
                         f.action_trigger_count(actions::Action::Undo),
                         f.action_trigger_count(actions::Action::Redo),
-
                         f.is_action_held(actions::Action::ViewportPan),
                         f.is_action_held(actions::Action::ViewportScrub),
                         // An odd number of mirror requests, we assume two mirror requests cancel out
@@ -1596,25 +1599,25 @@ async fn stylus_event_collector(
                                 id: Default::default(),
                                 points: Vec::new(),
                             });
-                            let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
-                            let pos = [
-                                pos.x * DOCUMENT_DIMENSION as f32,
-                                (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
-                            ];
-    
+                            let Ok(pos) =
+                                transform.unproject(cgmath::point2(event.pos.0, event.pos.1))
+                            else {
+                                // If transform is ill-formed, we can't do work.
+                                continue;
+                            };
+
                             // Calc cumulative distance from the start, or 0.0 if this is the first point.
                             let dist = this_stroke
                                 .points
                                 .last()
                                 .map(|last| {
-                                    // I should really be using a linalg library lmao
-                                    let delta = [last.pos[0] - pos[0], last.pos[1] - pos[1]];
+                                    let delta = [last.pos[0] - pos.x, last.pos[1] - pos.y];
                                     last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
                                 })
                                 .unwrap_or(0.0);
-    
+
                             this_stroke.points.push(StrokePoint {
-                                pos,
+                                pos: [pos.x, pos.y],
                                 pressure: event.pressure.unwrap_or(1.0),
                                 dist,
                             })
@@ -1622,26 +1625,26 @@ async fn stylus_event_collector(
                             if let Some(stroke) = current_stroke.take() {
                                 // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
                                 let immutable: ImmutableStroke = stroke.into();
-    
+
                                 let mut stroke_manager = globals.strokes().write().await;
-    
-                                let layer_data =
-                                    stroke_manager.layers.entry(cur_layer).or_insert_with(|| {
-                                        StrokeLayerData {
-                                            strokes: vec![],
-                                            undo_cursor_position: None,
-                                        }
+
+                                let layer_data = stroke_manager
+                                    .layers
+                                    .entry(cur_layer)
+                                    .or_insert_with(|| StrokeLayerData {
+                                        strokes: vec![],
+                                        undo_cursor_position: None,
                                     });
-    
+
                                 // If there was an undo cursor, truncate everything after
                                 // and replace with new data.
                                 if let Some(cursor) = layer_data.undo_cursor_position.take() {
                                     layer_data.strokes.drain(cursor..);
                                 }
-    
+
                                 let weak_ref = (&immutable).into();
                                 layer_data.strokes.push(immutable);
-    
+
                                 render_send.send(RenderMessage::StrokeLayer {
                                     layer: cur_layer,
                                     kind: StrokeLayerRenderMessageKind::Append(weak_ref),

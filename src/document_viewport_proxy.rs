@@ -140,7 +140,7 @@ impl<Future: GpuFuture> SwapAfter<Future> {
 /// Collection of all the data that is derived from the surface.
 /// Everything else is """immutable""", whereas this all needs to be mutable.
 /// When the surface changes, a new one is made and a quick Arc pointer swap is all that is needed.
-/// 
+///
 /// The dynamic transforms very much spoiled the purpose of this struct, evaluate if it can be re-merged into
 /// the main struct.
 struct ProxySurfaceData {
@@ -228,7 +228,44 @@ impl ProxySurfaceData {
             command_buffer::CommandBufferUsage::OneTimeSubmit,
         )?;
 
-        let matrix = self.cached_matrix.get_or_init(|| todo!());
+        let matrix = self
+            .cached_matrix
+            .get_or_try_init(|| -> anyhow::Result<_> {
+                let transform = match &self.transform {
+                    view_transform::DocumentTransform::Fit(f) => f
+                        .make_transform(
+                            cgmath::vec2(
+                                crate::DOCUMENT_DIMENSION as f32,
+                                crate::DOCUMENT_DIMENSION as f32,
+                            ),
+                            self.view_pos,
+                            self.view_size,
+                        )
+                        .ok_or_else(|| anyhow::anyhow!("Malformed document transform"))?,
+                    view_transform::DocumentTransform::Transform(t) => t.clone(),
+                };
+                log::trace!("Scale: {:?}", transform);
+                // Scale up 1x1 vertex buffer to document size
+                let base_xform = cgmath::Matrix3::from_nonuniform_scale(
+                    crate::DOCUMENT_DIMENSION as f32,
+                    crate::DOCUMENT_DIMENSION as f32,
+                );
+                // Then view transform
+                let mat3: cgmath::Matrix3<f32> = transform.into();
+                let mat3 = base_xform * mat3;
+                let mat4: cgmath::Matrix4<f32> = mat3.into();
+                // Then to NDC
+                let ndc = cgmath::ortho(
+                    0.0,
+                    self.surface_dimensions[0] as f32,
+                    self.surface_dimensions[1] as f32,
+                    0.0,
+                    -1.0,
+                    1.0,
+                );
+                let mat4 = ndc * mat4;
+                Ok(mat4.into())
+            })?;
 
         command_buffer
             .begin_render_pass(
@@ -249,7 +286,10 @@ impl ProxySurfaceData {
                 0,
                 [vk::Viewport {
                     depth_range: 0.0..1.0,
-                    dimensions: [self.surface_dimensions[0] as f32, self.surface_dimensions[1] as f32],
+                    dimensions: [
+                        self.surface_dimensions[0] as f32,
+                        self.surface_dimensions[1] as f32,
+                    ],
                     origin: [0.0; 2],
                 }],
             )
@@ -262,9 +302,7 @@ impl ProxySurfaceData {
             )
             .draw(6, 1, 0, 0)?
             .end_render_pass()?;
-        Ok(
-            command_buffer.build()?
-        )
+        Ok(command_buffer.build()?)
     }
     fn clear_cache(&mut self) {
         self.cached_matrix.take();
@@ -312,7 +350,7 @@ pub struct DocumentViewportPreviewProxy {
     pipeline: Arc<vk::GraphicsPipeline>,
 
     // Surface-derived render data ===============
-    surface_data: tokio::sync::RwLock<Arc<ProxySurfaceData>>,
+    surface_data: tokio::sync::RwLock<ProxySurfaceData>,
 }
 
 impl DocumentViewportPreviewProxy {
@@ -469,19 +507,20 @@ impl DocumentViewportPreviewProxy {
         let viewport_size = [
             render_surface.extent()[0] as f32,
             render_surface.extent()[1] as f32,
-        ].into();
+        ]
+        .into();
         let document_transform = crate::view_transform::DocumentTransform::default();
 
-        let surface_data = Arc::new(ProxySurfaceData::new(
+        let surface_data = ProxySurfaceData::new(
             render_surface.context().clone(),
-            render_surface.clone(),
+            render_surface,
             render_pass.clone(),
             pipeline.clone(),
             &document_image_bindings,
             viewport_pos,
             viewport_size,
-            document_transform,
-        ));
+            document_transform.clone(),
+        );
 
         let notify = tokio::sync::Notify::new();
         // Start as notified - write buffer is available immediately.
@@ -495,7 +534,6 @@ impl DocumentViewportPreviewProxy {
 
             document_transform: document_transform.into(),
             viewport: (viewport_pos, viewport_size).into(),
-
 
             pipeline,
             render_pass,
@@ -567,20 +605,31 @@ impl DocumentViewportPreviewProxy {
             proxy: &self,
         }
     }
+    /// The area of the screen where the document is visible has changed
+    pub fn viewport_changed(&self, position: cgmath::Point2<f32>, size: cgmath::Vector2<f32>) {
+        *self.viewport.write() = (position, size);
+        self.surface_data
+            .blocking_write()
+            .set_viewport_size(position, size);
+    }
     pub async fn insert_document_transform(&self, new: crate::view_transform::DocumentTransform) {
-        *self.document_transform.write().await = new;
+        *self.document_transform.write().await = new.clone();
+        self.surface_data.write().await.set_transform(new);
     }
     pub async fn get_view_transform(&self) -> Option<crate::view_transform::ViewTransform> {
         // lock, clone, release asap
         match { self.document_transform.read().await.clone() } {
-            crate::view_transform::DocumentTransform::Fit(f) => f.make_transform(
-                cgmath::Vector2 {
-                    x: crate::DOCUMENT_DIMENSION as f32,
-                    y: crate::DOCUMENT_DIMENSION as f32,
-                },
-                todo!(),
-                todo!(),
-            ),
+            crate::view_transform::DocumentTransform::Fit(f) => {
+                let (pos, size) = *self.viewport.read();
+                f.make_transform(
+                    cgmath::Vector2 {
+                        x: crate::DOCUMENT_DIMENSION as f32,
+                        y: crate::DOCUMENT_DIMENSION as f32,
+                    },
+                    pos,
+                    size,
+                )
+            }
             crate::view_transform::DocumentTransform::Transform(t) => Some(t),
         }
     }
@@ -590,24 +639,26 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
     unsafe fn render(&self, swapchain_idx: u32) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>> {
         // Safety: contract forwarded to the contract of this fn.
         let image_idx = unsafe { self.read() };
-        Ok(self.surface_data.blocking_read().get_commands(swapchain_idx, image_idx)
-                    .map(Into::into)?)
+        Ok(self
+            .surface_data
+            .blocking_read()
+            .get_commands(swapchain_idx, image_idx)
+            .map(Into::into)?)
     }
     fn surface_changed(&self, render_surface: &render_device::RenderSurface) {
         let viewport = self.viewport.read().clone();
         let transform = self.document_transform.blocking_read().clone();
 
-        let new = Arc::new(ProxySurfaceData::new(
+        let new = ProxySurfaceData::new(
             self.render_context.clone(),
             render_surface,
             self.render_pass.clone(),
             self.pipeline.clone(),
             &self.document_image_bindings,
-            
             viewport.0,
             viewport.1,
             transform,
-        ));
+        );
         *self.surface_data.blocking_write() = new;
     }
     fn has_update(&self) -> bool {

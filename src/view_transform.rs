@@ -4,7 +4,7 @@ type Decomposed2 = cgmath::Decomposed<cgmath::Vector2<f32>, cgmath::Basis2<f32>>
 
 /// An affine transform for views. Includes offset, rotation, uniform scale, and horizontal flip.
 /// (vertical flipping can be achieved by horizontal flip and rotate 180*)
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ViewTransform {
     // Marker flag for flipping on the x axis. cgmath::Decomposed cannot represent this.
     // todo: keeping it simple by not implementing this yet.
@@ -19,6 +19,7 @@ pub enum TransformError {
     /// Occurs if scale gets too close to zero.
     Uninvertable,
 }
+
 impl ViewTransform {
     /// Is the view flipped (determinate negative)?
     /// Doesn't differentiate between horizontal and vertical flipping.
@@ -122,8 +123,8 @@ impl ViewTransform {
         Self {
             decomposed: Decomposed2 {
                 rot: Rotation2::from_angle(rotation),
-                scale: scale,
-                disp: todo!(),
+                scale,
+                disp: Zero::zero(), // todo
             },
         }
     }
@@ -132,6 +133,39 @@ impl ViewTransform {
 impl From<ViewTransform> for cgmath::Matrix3<f32> {
     fn from(value: ViewTransform) -> Self {
         value.decomposed.into()
+    }
+}
+impl From<ViewTransform> for cgmath::Matrix4<f32> {
+    fn from(value: ViewTransform) -> Self {
+        let mat3: cgmath::Matrix3<f32> = value.decomposed.into();
+        mat3.into()
+        // Is this the same op as into()?
+        /*Self {
+            x: cgmath::Vector4 {
+                x: mat3.x.x,
+                y: mat3.x.y,
+                z: 0.0,
+                w: mat3.x.z,
+            },
+            y: cgmath::Vector4 {
+                x: mat3.y.x,
+                y: mat3.y.y,
+                z: 0.0,
+                w: mat3.y.z,
+            },
+            z: cgmath::Vector4 {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+                w: 0.0,
+            },
+            w: cgmath::Vector4 {
+                x: mat3.z.x,
+                y: mat3.z.y,
+                z: 0.0,
+                w: mat3.z.z,
+            },
+        }*/
     }
 }
 
@@ -179,7 +213,8 @@ impl DocumentFit {
         let document_size = half_max_range * 2.0 + cgmath::vec2(MARGIN, MARGIN);
 
         // Calculate x,y fitting scales. Choose the smaller scale.
-        let document_scales = cgmath::vec2(view_size.x / document_size.x, view_size.y / document_size.y);
+        let document_scales =
+            cgmath::vec2(view_size.x / document_size.x, view_size.y / document_size.y);
         let document_scale = document_scales.x.min(document_scales.y);
 
         if document_scale < 0.001 {
