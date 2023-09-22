@@ -34,7 +34,7 @@ mod shaders {
             void main() {
                 vec4 pos = vec4(
                     float(gl_VertexIndex & 1),
-                    float(gl_VertexIndex & 2),
+                    float((gl_VertexIndex & 2) / 2),
                     0.0,
                     1.0
                 );
@@ -245,34 +245,19 @@ impl ProxySurfaceData {
                     view_transform::DocumentTransform::Transform(t) => t.clone(),
                 };
 
-                // Something horrendous is happening here, and I don't know what.
-                // Even the most trivial of transforms result in nonsensical vs output...
-                // I have no clue what is happening. :,,,,((((
+                log::trace!("Xform: {transform:?}");
 
-                let viewport_dimensions = self.surface_dimensions;
-                let margin = 25.0;
-                //Total size, to "fit" image. Use the smallest of both dimensions.
-                let image_size_px = 50.0 as f32;
-                //viewport_dimensions[0].min(viewport_dimensions[1]) as f32 - (2.0 * margin);
-                let x = (viewport_dimensions[0] as f32 - image_size_px) / 2.0;
-                let y = (viewport_dimensions[1] as f32 - image_size_px) / 2.0;
-                let document_to_preview_matrix =
-                    Matrix4::from_translation(cgmath::Vector3 { x, y, z: 0.0 })
-                        * Matrix4::from_scale(image_size_px as f32);
+                let base_xform = ultraviolet::Mat4::from_nonuniform_scale(ultraviolet::Vec3 { x: crate::DOCUMENT_DIMENSION as f32, y: crate::DOCUMENT_DIMENSION as f32, z: 1.0 });
+                // convert cgmath to ultraviolet (todo, switch all to ultraviolet)
+                let mat4 : cgmath::Matrix4<f32> = transform.into();
+                let mat4 : [[f32;4];4]= mat4.into();
+                let mat4 : ultraviolet::Mat4 = mat4.into();
 
-                let transform_matrix = cgmath::ortho(
-                    0.0,
-                    viewport_dimensions[0] as f32,
-                    viewport_dimensions[1] as f32,
-                    0.0,
-                    -1.0,
-                    1.0,
-                ) * document_to_preview_matrix;
-
-                let transform_matrix: [[f32; 4]; 4] = transform_matrix.into();
+                let proj = crate::vk::projection::orthographic_vk(0.0, self.surface_dimensions[0] as f32, 0.0, self.surface_dimensions[1] as f32, -1.0, 1.0);
+                let proj = proj * mat4 * base_xform;
+                let transform_matrix: [[f32; 4]; 4] = proj.into();
                 Ok(transform_matrix)
             })?;
-
         command_buffer
             .begin_render_pass(
                 vk::RenderPassBeginInfo {
@@ -304,7 +289,7 @@ impl ProxySurfaceData {
                 0,
                 shaders::vertex::Matrix { mat: *matrix },
             )
-            .draw(6, 1, 0, 0)?
+            .draw(4, 1, 0, 0)?
             .end_render_pass()?;
         Ok(command_buffer.build()?)
     }
