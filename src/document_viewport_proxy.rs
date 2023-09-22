@@ -250,8 +250,6 @@ impl ProxySurfaceData {
                     view_transform::DocumentTransform::Transform(t) => t.clone(),
                 };
 
-                log::trace!("Xform: {transform:?}");
-
                 let base_xform = ultraviolet::Mat4::from_nonuniform_scale(ultraviolet::Vec3 {
                     x: crate::DOCUMENT_DIMENSION as f32,
                     y: crate::DOCUMENT_DIMENSION as f32,

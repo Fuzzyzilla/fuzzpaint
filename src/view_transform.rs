@@ -1,6 +1,8 @@
 use cgmath::prelude::*;
 
 type Decomposed2 = cgmath::Decomposed<cgmath::Vector2<f32>, cgmath::Basis2<f32>>;
+/// Margin around a fit document. Todo: make this user configurable?
+pub const MARGIN: f32 = 8.0;
 
 /// An affine transform for views. Includes offset, rotation, uniform scale, and horizontal flip.
 /// (vertical flipping can be achieved by horizontal flip and rotate 180*)
@@ -117,14 +119,17 @@ impl ViewTransform {
     /// Create a transform where the document's center is located at view_center
     pub fn center_on(
         view_center: cgmath::Point2<f32>,
+        document_size: cgmath::Vector2<f32>,
         rotation: cgmath::Rad<f32>,
         scale: f32,
     ) -> Self {
+        let disp = view_center.to_vec() - (scale * document_size / 2.0);
+
         Self {
             decomposed: Decomposed2 {
                 rot: Rotation2::from_angle(rotation),
                 scale,
-                disp: Zero::zero(), // todo
+                disp, // todo
             },
         }
     }
@@ -138,9 +143,9 @@ impl From<ViewTransform> for cgmath::Matrix3<f32> {
 impl From<ViewTransform> for cgmath::Matrix4<f32> {
     fn from(value: ViewTransform) -> Self {
         let mat3: cgmath::Matrix3<f32> = value.decomposed.into();
-        mat3.into()
-        // Is this the same op as into()?
-        /*Self {
+        // Is this the same op as mat3.into()?
+        // found out - it's NOT! keep doin this :>
+        Self {
             x: cgmath::Vector4 {
                 x: mat3.x.x,
                 y: mat3.x.y,
@@ -165,7 +170,7 @@ impl From<ViewTransform> for cgmath::Matrix4<f32> {
                 z: 0.0,
                 w: mat3.z.z,
             },
-        }*/
+        }
     }
 }
 
@@ -206,22 +211,26 @@ impl DocumentFit {
                 .abs()
                 .max(bottom_right_corner_ray.y.abs()),
         );
+        // Adjust viewport for margin.
+        let view_pos_margin = view_pos + cgmath::vec2(MARGIN, MARGIN);
+        let view_size_margin = view_size - 2.0 * cgmath::vec2(MARGIN, MARGIN);
 
-        // Margin around document
-        const MARGIN: f32 = 0.0;
-        // new fitting rectangle for document after rotation.
-        let document_size = half_max_range * 2.0 + cgmath::vec2(MARGIN, MARGIN);
+        // pretend the document is the bounding rect of the rotated document
+        let document_size = half_max_range * 2.0;
 
         // Calculate x,y fitting scales. Choose the smaller scale.
-        let document_scales =
-            cgmath::vec2(view_size.x / document_size.x, view_size.y / document_size.y);
+        let document_scales = cgmath::vec2(
+            view_size_margin.x / document_size.x,
+            view_size_margin.y / document_size.y,
+        );
         let document_scale = document_scales.x.min(document_scales.y);
 
         if document_scale < 0.001 {
             None
         } else {
             Some(ViewTransform::center_on(
-                view_pos + view_size / 2.0,
+                view_pos_margin + view_size_margin / 2.0,
+                document_size,
                 self.rotation,
                 document_scale,
             ))
