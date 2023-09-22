@@ -72,19 +72,17 @@ impl ViewTransform {
         view_center: cgmath::Point2<f32>,
         scale_by: f32,
     ) -> Result<(), TransformError> {
-        //let local_center = self.unproject(view_center)?.to_vec();
-        let local_center = view_center.to_vec();
-        // Translate so that local center is at origin
-        self.decomposed.concat_self(&Decomposed2 {
-            disp: -1.0 * local_center,
-            rot: One::one(),
-            scale: 1.0,
-        });
+        let local_center = self.unproject(view_center)?.to_vec();
+
         // then scale. May result in an un-invertible matrix, but this will only be reported later.
-        self.decomposed.scale *= scale_by;
+        self.decomposed.concat_self(&Decomposed2 {
+            scale: scale_by,
+            disp: Zero::zero(),
+            rot: One::one(),
+        });
         // then translate back.
         self.decomposed.concat_self(&Decomposed2 {
-            disp: local_center,
+            disp: -(scale_by - 1.0) * local_center,
             rot: One::one(),
             scale: 1.0,
         });

@@ -78,16 +78,20 @@ impl WinitKeyboardActionCollector {
 
                 match (was_pressed, is_pressed) {
                     // Just pressed
-                    (false, true) => possible_keys.for_each(|(action, key)| self.push_key(action, key)),
+                    (false, true) => {
+                        possible_keys.for_each(|(action, key)| self.push_key(action, key))
+                    }
                     // OS key repeat
                     (true, true) => possible_keys.for_each(|(action, _)| {
                         // No bookkeeping to do, just emit directly
                         self.sender.repeat(action);
-                        log::trace!("Repeat {action:?}");
                     }),
                     // Just released
                     (_, false) => possible_keys.for_each(|(action, key)| self.pop_key(action, key)),
                 }
+
+                // Shouldn't need to happen but it's not working and i'm getting tired of debugging TwT
+                self.cull();
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.alt = m.alt();
@@ -102,8 +106,33 @@ impl WinitKeyboardActionCollector {
                 // in here. I'll work on plumbing this logic in with the
                 // rest of the app, and I'll revisit this logic if the need
                 // arises!
+
+                // Clear any hotkeys that stopped due to any modifiers releasing.
+                self.cull();
             }
             _ => (),
+        }
+    }
+    /// Release any events that have stopped being relavent.
+    fn cull(&mut self) {
+        let mut to_remove = Vec::<super::hotkeys::KeyboardHotkey>::new();
+
+        for (hotkey, _) in self.current_hotkeys.iter() {
+            let no_longer_applies = (hotkey.alt && !self.alt)
+                || (hotkey.shift && !self.shift)
+                || (hotkey.ctrl && !self.ctrl)
+                || !self.currently_pressed.contains(&hotkey.key);
+
+            if no_longer_applies {
+                to_remove.push(hotkey.clone())
+            }
+        }
+
+        let hotkeys = crate::GlobalHotkeys::get();
+        for hotkey in to_remove.into_iter() {
+            if let Some(action) = hotkeys.keys_to_actions.action_of(hotkey.clone()) {
+                self.pop_key(action, hotkey);
+            }
         }
     }
     /// A hotkey was detected, apply it. Will go through and shadow any
@@ -122,9 +151,7 @@ impl WinitKeyboardActionCollector {
             if new.shadows(old_key) {
                 if *shadows == 0 {
                     if let Some(old_action) = hotkeys.keys_to_actions.action_of(old_key.clone()) {
-                        // <emit shadow>
                         self.sender.shadow(old_action);
-                        log::trace!("Shadowed {old_action:?}");
                     }
                 }
                 *shadows += 1;
@@ -135,13 +162,9 @@ impl WinitKeyboardActionCollector {
                 }
             }
         }
-        // <emit press>
         self.sender.press(action);
-        log::trace!("Pressed {action:?}");
         if shadows_on_new != 0 {
-            // <emit shadow>
             self.sender.shadow(action);
-            log::trace!("Shadowed {action:?}");
         }
 
         self.current_hotkeys.insert(new.clone(), shadows_on_new);
@@ -154,9 +177,7 @@ impl WinitKeyboardActionCollector {
         if self.current_hotkeys.remove(&remove).is_none() {
             return;
         };
-        // <emit release>
         self.sender.release(action);
-        log::trace!("Released {action:?}");
 
         let hotkeys = crate::GlobalHotkeys::get();
         for (old_key, shadows) in self.current_hotkeys.iter_mut() {
@@ -172,7 +193,6 @@ impl WinitKeyboardActionCollector {
                 if *shadows == 0 {
                     // <emit unshadow>
                     if let Some(old_action) = hotkeys.keys_to_actions.action_of(old_key.clone()) {
-                        log::trace!("Unshadowed {old_action:?}");
                         self.sender.unshadow(old_action);
                     }
                 }

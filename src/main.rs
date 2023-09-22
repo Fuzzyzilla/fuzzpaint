@@ -1599,7 +1599,7 @@ async fn stylus_event_collector(
                                 last_pos.map(|pos| (event.pos.0 - pos.0, event.pos.1 - pos.1))
                             {
                                 if is_scrub {
-                                    let scale = 1.0 + (delta.0 + delta.1) / 10.0;
+                                    let scale = 1.0 + (delta.0 + delta.1) / 100.0;
                                     let _ = transform.scale_about(
                                         cgmath::Point2 {
                                             x: start_pos.0,

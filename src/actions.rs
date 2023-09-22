@@ -28,7 +28,7 @@ pub enum Action {
     LayerNew,
     LayerDelete,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ActionEvent {
     Press,
     /// The action was held long enough that the key is being strobed by the OS.
@@ -381,6 +381,9 @@ impl ActionFrame {
     fn fast_forward(&self) -> ActionStates {
         let mut future = self.base_state.clone();
         for (event, action) in self.actions.iter() {
+            if *event != ActionEvent::Repeat {
+                log::trace!("Action {action:?} {event:?}")
+            };
             future.push(*event, *action);
         }
 
