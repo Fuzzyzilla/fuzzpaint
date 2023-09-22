@@ -244,30 +244,33 @@ impl ProxySurfaceData {
                         .ok_or_else(|| anyhow::anyhow!("Malformed document transform"))?,
                     view_transform::DocumentTransform::Transform(t) => t.clone(),
                 };
-                log::trace!("Viewport size: {:?}", self.surface_dimensions);
 
                 // Something horrendous is happening here, and I don't know what.
                 // Even the most trivial of transforms result in nonsensical vs output...
                 // I have no clue what is happening. :,,,,((((
-                let mat4 = cgmath::Matrix4::from_nonuniform_scale(
-                    crate::DOCUMENT_DIMENSION as f32,
-                    crate::DOCUMENT_DIMENSION as f32,
-                    1.0,
-                );
 
-                let ndc: Matrix4<f32> = cgmath::ortho(
+                let viewport_dimensions = self.surface_dimensions;
+                let margin = 25.0;
+                //Total size, to "fit" image. Use the smallest of both dimensions.
+                let image_size_px = 50.0 as f32;
+                //viewport_dimensions[0].min(viewport_dimensions[1]) as f32 - (2.0 * margin);
+                let x = (viewport_dimensions[0] as f32 - image_size_px) / 2.0;
+                let y = (viewport_dimensions[1] as f32 - image_size_px) / 2.0;
+                let document_to_preview_matrix =
+                    Matrix4::from_translation(cgmath::Vector3 { x, y, z: 0.0 })
+                        * Matrix4::from_scale(image_size_px as f32);
+
+                let transform_matrix = cgmath::ortho(
                     0.0,
-                    self.surface_dimensions[0] as f32,
-                    self.surface_dimensions[1] as f32,
+                    viewport_dimensions[0] as f32,
+                    viewport_dimensions[1] as f32,
                     0.0,
                     -1.0,
                     1.0,
-                )
-                .into();
-                let mat4 = ndc * mat4;
+                ) * document_to_preview_matrix;
 
-                log::trace!("{mat4:#?}");
-                Ok(mat4.into())
+                let transform_matrix: [[f32; 4]; 4] = transform_matrix.into();
+                Ok(transform_matrix)
             })?;
 
         command_buffer
