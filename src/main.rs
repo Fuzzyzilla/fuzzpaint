@@ -29,7 +29,7 @@ pub use tess::StrokeTessellator;
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 /// Obviously will be user specified on a per-document basis, but for now...
-const DOCUMENT_DIMENSION: u32 = 512;
+const DOCUMENT_DIMENSION: u32 = 32;
 /// Premultiplied RGBA16F for interesting effects (negative + overbright colors and alpha) with
 /// more than 11bit per channel precision in the \[0,1\] range.
 /// Will it be user specified in the future?

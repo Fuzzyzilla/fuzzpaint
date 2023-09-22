@@ -244,26 +244,29 @@ impl ProxySurfaceData {
                         .ok_or_else(|| anyhow::anyhow!("Malformed document transform"))?,
                     view_transform::DocumentTransform::Transform(t) => t.clone(),
                 };
-                log::trace!("Scale: {:?}", transform);
-                // Scale up 1x1 vertex buffer to document size
-                let base_xform = cgmath::Matrix3::from_nonuniform_scale(
+                log::trace!("Viewport size: {:?}", self.surface_dimensions);
+
+                // Something horrendous is happening here, and I don't know what.
+                // Even the most trivial of transforms result in nonsensical vs output...
+                // I have no clue what is happening. :,,,,((((
+                let mat4 = cgmath::Matrix4::from_nonuniform_scale(
                     crate::DOCUMENT_DIMENSION as f32,
                     crate::DOCUMENT_DIMENSION as f32,
+                    1.0,
                 );
-                // Then view transform
-                let mat3: cgmath::Matrix3<f32> = transform.into();
-                let mat3 = base_xform * mat3;
-                let mat4: cgmath::Matrix4<f32> = mat3.into();
-                // Then to NDC
-                let ndc = cgmath::ortho(
+
+                let ndc: Matrix4<f32> = cgmath::ortho(
                     0.0,
                     self.surface_dimensions[0] as f32,
                     self.surface_dimensions[1] as f32,
                     0.0,
                     -1.0,
                     1.0,
-                );
+                )
+                .into();
                 let mat4 = ndc * mat4;
+
+                log::trace!("{mat4:#?}");
                 Ok(mat4.into())
             })?;
 
@@ -296,9 +299,7 @@ impl ProxySurfaceData {
             .push_constants(
                 self.pipeline.layout().clone(),
                 0,
-                shaders::vertex::Matrix {
-                    mat: matrix.clone(),
-                },
+                shaders::vertex::Matrix { mat: *matrix },
             )
             .draw(6, 1, 0, 0)?
             .end_render_pass()?;
