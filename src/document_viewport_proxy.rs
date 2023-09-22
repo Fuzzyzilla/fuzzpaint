@@ -14,8 +14,13 @@ pub trait PreviewRenderProxy {
         &self,
         swapchain_image_idx: u32,
     ) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>>;
+    /// The window surface has been invalidated and remade.
     fn surface_changed(&self, render_surface: &render_device::RenderSurface);
+    /// Is this proxy requesting a redraw?
     fn has_update(&self) -> bool;
+    /// The area used for this viewport has changed. Not the same as the surface - rather, the central area
+    /// between UI elements where this proxy is visible. Proxies should still initialize the whole screen, however.
+    fn viewport_changed(&self, position: ultraviolet::Vec2, size: ultraviolet::Vec2);
 }
 
 mod shaders {
@@ -247,13 +252,24 @@ impl ProxySurfaceData {
 
                 log::trace!("Xform: {transform:?}");
 
-                let base_xform = ultraviolet::Mat4::from_nonuniform_scale(ultraviolet::Vec3 { x: crate::DOCUMENT_DIMENSION as f32, y: crate::DOCUMENT_DIMENSION as f32, z: 1.0 });
+                let base_xform = ultraviolet::Mat4::from_nonuniform_scale(ultraviolet::Vec3 {
+                    x: crate::DOCUMENT_DIMENSION as f32,
+                    y: crate::DOCUMENT_DIMENSION as f32,
+                    z: 1.0,
+                });
                 // convert cgmath to ultraviolet (todo, switch all to ultraviolet)
-                let mat4 : cgmath::Matrix4<f32> = transform.into();
-                let mat4 : [[f32;4];4]= mat4.into();
-                let mat4 : ultraviolet::Mat4 = mat4.into();
+                let mat4: cgmath::Matrix4<f32> = transform.into();
+                let mat4: [[f32; 4]; 4] = mat4.into();
+                let mat4: ultraviolet::Mat4 = mat4.into();
 
-                let proj = crate::vk::projection::orthographic_vk(0.0, self.surface_dimensions[0] as f32, 0.0, self.surface_dimensions[1] as f32, -1.0, 1.0);
+                let proj = crate::vk::projection::orthographic_vk(
+                    0.0,
+                    self.surface_dimensions[0] as f32,
+                    0.0,
+                    self.surface_dimensions[1] as f32,
+                    -1.0,
+                    1.0,
+                );
                 let proj = proj * mat4 * base_xform;
                 let transform_matrix: [[f32; 4]; 4] = proj.into();
                 Ok(transform_matrix)
@@ -649,6 +665,23 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
             transform,
         );
         *self.surface_data.blocking_write() = new;
+    }
+    fn viewport_changed(&self, position: ultraviolet::Vec2, size: ultraviolet::Vec2) {
+        let cg = (
+            cgmath::Point2 {
+                x: position.x,
+                y: position.y,
+            },
+            cgmath::Vector2 {
+                x: size.x,
+                y: size.y,
+            },
+        );
+
+        self.surface_data
+            .blocking_write()
+            .set_viewport_size(cg.0, cg.1);
+        *self.viewport.write() = cg;
     }
     fn has_update(&self) -> bool {
         self.redraw_requested()

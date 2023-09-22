@@ -229,14 +229,30 @@ impl WindowRenderer {
     fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
         static mut DOCUMENT_INTERFACE: std::sync::OnceLock<crate::DocumentUserInterface> =
             std::sync::OnceLock::new();
-        self.egui_ctx.update(|ctx| {
-            //Safety - Not running the ui concurrently, this cannot be accessed similtaneously.
-            unsafe {
-                //Hacky but impermanent
-                DOCUMENT_INTERFACE.get_or_init(Default::default);
-                DOCUMENT_INTERFACE.get_mut().unwrap().ui(&ctx);
-            }
-        })
+
+        //Safety - Not running the ui concurrently, this cannot be accessed similtaneously.
+        // very yucky. fixme soon.
+        let document_interface = unsafe {
+            DOCUMENT_INTERFACE.get_or_init(Default::default);
+            DOCUMENT_INTERFACE.get_mut().unwrap()
+        };
+        let output = self.egui_ctx.update(|ctx| {
+            document_interface.ui(&ctx);
+        });
+
+        if let Some(view) = document_interface.get_document_viewport() {
+            let pos = view.left_top();
+            let size = view.size();
+            self.preview_renderer.viewport_changed(
+                ultraviolet::Vec2 { x: pos.x, y: pos.y },
+                ultraviolet::Vec2 {
+                    x: size.x,
+                    y: size.y,
+                },
+            );
+        };
+
+        output
     }
     fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =
