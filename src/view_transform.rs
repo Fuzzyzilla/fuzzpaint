@@ -9,6 +9,9 @@ pub struct ViewTransform {
     // Marker flag for flipping on the x axis. cgmath::Decomposed cannot represent this.
     // todo: keeping it simple by not implementing this yet.
     // flip_x: bool,
+
+    // current convention is to position based on top-left corner. This is an
+    // implementation detail however!
     decomposed: Decomposed2,
 }
 pub enum TransformError {
@@ -110,6 +113,20 @@ impl ViewTransform {
     pub fn project(&self, local_point: cgmath::Point2<f32>) -> cgmath::Point2<f32> {
         self.decomposed.transform_point(local_point)
     }
+    /// Create a transform where the document's center is located at view_center
+    pub fn center_on(
+        view_center: cgmath::Point2<f32>,
+        rotation: cgmath::Rad<f32>,
+        scale: f32,
+    ) -> Self {
+        Self {
+            decomposed: Decomposed2 {
+                rot: Rotation2::from_angle(rotation),
+                scale: scale,
+                disp: todo!(),
+            },
+        }
+    }
 }
 
 impl From<ViewTransform> for cgmath::Matrix3<f32> {
@@ -118,6 +135,7 @@ impl From<ViewTransform> for cgmath::Matrix3<f32> {
     }
 }
 
+#[derive(Clone)]
 pub struct DocumentFit {
     pub flip_x: bool,
     pub rotation: cgmath::Rad<f32>,
@@ -128,10 +146,9 @@ impl DocumentFit {
     pub fn make_transform(
         &self,
         document_size: cgmath::Vector2<f32>,
-        (view_pos, view_size): (cgmath::Point2<f32>, cgmath::Vector2<f32>),
+        view_pos: cgmath::Point2<f32>,
+        view_size: cgmath::Vector2<f32>,
     ) -> Option<ViewTransform> {
-        let widest_viewport_dimension = view_size.x.max(view_size.y);
-
         // rotate two rays. These will give us the max bounds of the rotated document.
         // probably a easier and less literal way to do this x3
         let bottom_right_corner_ray = document_size / 2.0;
@@ -156,29 +173,37 @@ impl DocumentFit {
                 .max(bottom_right_corner_ray.y.abs()),
         );
 
-        // new fitting rectangle for document after rotation.
-        let document_size = half_max_range * 2.0;
-
         // Margin around document
         const MARGIN: f32 = 0.0;
-        let document_max_dimension = document_size.x.max(document_size.y) + MARGIN;
-        let document_scale = widest_viewport_dimension / document_max_dimension;
+        // new fitting rectangle for document after rotation.
+        let document_size = half_max_range * 2.0 + cgmath::vec2(MARGIN, MARGIN);
+
+        // Calculate x,y fitting scales. Choose the smaller scale.
+        let document_scales = cgmath::vec2(view_size.x / document_size.x, view_size.y / document_size.y);
+        let document_scale = document_scales.x.min(document_scales.y);
 
         if document_scale < 0.001 {
             None
         } else {
-            Some(ViewTransform {
-                decomposed: cgmath::Decomposed {
-                    scale: document_scale,
-                    rot: rot_basis,
-                    // Wrong vector, todo.
-                    disp: view_pos.to_vec(),
-                },
-            })
+            Some(ViewTransform::center_on(
+                view_pos + view_size / 2.0,
+                self.rotation,
+                document_scale,
+            ))
         }
     }
 }
 
+impl Default for DocumentFit {
+    fn default() -> Self {
+        Self {
+            flip_x: false,
+            rotation: Zero::zero(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub enum DocumentTransform {
     /// Auto positioned and sized, with given flip and rotation, to fit into the viewport.
     ///
@@ -189,4 +214,9 @@ pub enum DocumentTransform {
     // That's wildly niche, just use custom transform instead UwU
     /// User-defined transform, after a scrub or drag.
     Transform(ViewTransform),
+}
+impl Default for DocumentTransform {
+    fn default() -> Self {
+        Self::Fit(Default::default())
+    }
 }

@@ -1583,64 +1583,70 @@ async fn stylus_event_collector(
                     }
                 }
 
-                for event in event_frame.iter() {
-                    if event.pressed {
-                        // Get stroke-in-progress or start anew.
-                        let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
-                            brush: cur_brush.clone(),
-                            id: Default::default(),
-                            points: Vec::new(),
-                        });
-                        let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
-                        let pos = [
-                            pos.x * DOCUMENT_DIMENSION as f32,
-                            (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
-                        ];
-
-                        // Calc cumulative distance from the start, or 0.0 if this is the first point.
-                        let dist = this_stroke
-                            .points
-                            .last()
-                            .map(|last| {
-                                // I should really be using a linalg library lmao
-                                let delta = [last.pos[0] - pos[0], last.pos[1] - pos[1]];
-                                last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
+                if is_pan || is_scrub {
+                    // treat stylus events as viewport movement
+                    todo!()
+                } else {
+                    // treat stylus as new strokes
+                    for event in event_frame.iter() {
+                        if event.pressed {
+                            // Get stroke-in-progress or start anew.
+                            let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
+                                brush: cur_brush.clone(),
+                                id: Default::default(),
+                                points: Vec::new(),
+                            });
+                            let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
+                            let pos = [
+                                pos.x * DOCUMENT_DIMENSION as f32,
+                                (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
+                            ];
+    
+                            // Calc cumulative distance from the start, or 0.0 if this is the first point.
+                            let dist = this_stroke
+                                .points
+                                .last()
+                                .map(|last| {
+                                    // I should really be using a linalg library lmao
+                                    let delta = [last.pos[0] - pos[0], last.pos[1] - pos[1]];
+                                    last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
+                                })
+                                .unwrap_or(0.0);
+    
+                            this_stroke.points.push(StrokePoint {
+                                pos,
+                                pressure: event.pressure.unwrap_or(1.0),
+                                dist,
                             })
-                            .unwrap_or(0.0);
-
-                        this_stroke.points.push(StrokePoint {
-                            pos,
-                            pressure: event.pressure.unwrap_or(1.0),
-                            dist,
-                        })
-                    } else {
-                        if let Some(stroke) = current_stroke.take() {
-                            // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
-                            let immutable: ImmutableStroke = stroke.into();
-
-                            let mut stroke_manager = globals.strokes().write().await;
-
-                            let layer_data =
-                                stroke_manager.layers.entry(cur_layer).or_insert_with(|| {
-                                    StrokeLayerData {
-                                        strokes: vec![],
-                                        undo_cursor_position: None,
-                                    }
-                                });
-
-                            // If there was an undo cursor, truncate everything after
-                            // and replace with new data.
-                            if let Some(cursor) = layer_data.undo_cursor_position.take() {
-                                layer_data.strokes.drain(cursor..);
+                        } else {
+                            if let Some(stroke) = current_stroke.take() {
+                                // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
+                                let immutable: ImmutableStroke = stroke.into();
+    
+                                let mut stroke_manager = globals.strokes().write().await;
+    
+                                let layer_data =
+                                    stroke_manager.layers.entry(cur_layer).or_insert_with(|| {
+                                        StrokeLayerData {
+                                            strokes: vec![],
+                                            undo_cursor_position: None,
+                                        }
+                                    });
+    
+                                // If there was an undo cursor, truncate everything after
+                                // and replace with new data.
+                                if let Some(cursor) = layer_data.undo_cursor_position.take() {
+                                    layer_data.strokes.drain(cursor..);
+                                }
+    
+                                let weak_ref = (&immutable).into();
+                                layer_data.strokes.push(immutable);
+    
+                                render_send.send(RenderMessage::StrokeLayer {
+                                    layer: cur_layer,
+                                    kind: StrokeLayerRenderMessageKind::Append(weak_ref),
+                                })?;
                             }
-
-                            let weak_ref = (&immutable).into();
-                            layer_data.strokes.push(immutable);
-
-                            render_send.send(RenderMessage::StrokeLayer {
-                                layer: cur_layer,
-                                kind: StrokeLayerRenderMessageKind::Append(weak_ref),
-                            })?;
                         }
                     }
                 }
