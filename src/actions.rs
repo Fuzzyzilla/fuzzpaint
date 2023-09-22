@@ -13,7 +13,7 @@ pub mod hotkeys;
 pub mod winit_action_collector;
 
 #[derive(
-    serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq, strum::AsRefStr, Clone, Copy, Debug
+    serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq, strum::AsRefStr, Clone, Copy, Debug,
 )]
 pub enum Action {
     Undo,
@@ -103,16 +103,27 @@ pub fn create_action_stream() -> (ActionSender, ActionStream) {
     let (send, recv) = tokio::sync::broadcast::channel(32);
 
     let current_state = (ActionStates::default(), recv);
-    let current_state : std::sync::RwLock<_> = current_state.into();
+    let current_state: std::sync::RwLock<_> = current_state.into();
     let current_state = Arc::new(current_state);
 
-    (ActionSender{send, current_state: Arc::downgrade(&current_state) }, ActionStream{current_state})
+    (
+        ActionSender {
+            send,
+            current_state: Arc::downgrade(&current_state),
+        },
+        ActionStream { current_state },
+    )
 }
 
 pub struct ActionSender {
     // Weak, as we can stop carrying/updating this info when it stops being possible to create listeners
     // (ie, when the holder of the Arc is dropped)
-    current_state: std::sync::Weak<std::sync::RwLock<(ActionStates, tokio::sync::broadcast::Receiver<(ActionEvent, Action)>)>>,
+    current_state: std::sync::Weak<
+        std::sync::RwLock<(
+            ActionStates,
+            tokio::sync::broadcast::Receiver<(ActionEvent, Action)>,
+        )>,
+    >,
     send: tokio::sync::broadcast::Sender<(ActionEvent, Action)>,
 }
 impl ActionSender {
@@ -154,11 +165,15 @@ impl ActionSender {
 }
 
 pub struct ActionStream {
-    current_state: Arc<std::sync::RwLock<(ActionStates, tokio::sync::broadcast::Receiver<(ActionEvent, Action)>)>>,
+    current_state: Arc<
+        std::sync::RwLock<(
+            ActionStates,
+            tokio::sync::broadcast::Receiver<(ActionEvent, Action)>,
+        )>,
+    >,
 }
 impl ActionStream {
     pub fn listen(&self) -> ActionListener {
-
         // All is locked behind RwLock to prevent subtle race condition:
         // recv and current state are deeply intertwined, and
         // it's important that recv's "start" aligns with the exact moment
@@ -244,13 +259,13 @@ impl ActionListener {
                 Err(RecvError::Closed) => return Err(ListenError::Closed),
                 Err(RecvError::Lagged(..)) => {
                     self.poisoned = true;
-                    return Err(ListenError::Poisoned)
-                },
+                    return Err(ListenError::Poisoned);
+                }
             }
 
             // Then, try to recieve as many more as available without waiting.
             loop {
-                let recv =  self.recv.try_recv();
+                let recv = self.recv.try_recv();
 
                 use tokio::sync::broadcast::error::TryRecvError;
                 match recv {
@@ -354,7 +369,7 @@ impl ActionFrame {
             match event.0 {
                 ActionEvent::Press => is_held = true,
                 ActionEvent::Release => is_held = false,
-                ActionEvent::Repeat => (),
+                ActionEvent::Repeat => is_held = true,
                 ActionEvent::Shadowed => is_shadowed = true,
                 ActionEvent::Unshadowed => is_shadowed = false,
             }

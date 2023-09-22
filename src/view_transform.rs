@@ -72,7 +72,8 @@ impl ViewTransform {
         view_center: cgmath::Point2<f32>,
         scale_by: f32,
     ) -> Result<(), TransformError> {
-        let local_center = self.unproject(view_center)?.to_vec();
+        //let local_center = self.unproject(view_center)?.to_vec();
+        let local_center = view_center.to_vec();
         // Translate so that local center is at origin
         self.decomposed.concat_self(&Decomposed2 {
             disp: -1.0 * local_center,
@@ -91,15 +92,8 @@ impl ViewTransform {
         Ok(())
     }
     /// Pan by this displacement in viewspace.
-    pub fn pan(&mut self, delta: cgmath::Vector2<f32>) -> Result<(), TransformError> {
-        let local_delta = self
-            .decomposed
-            .inverse_transform_vector(delta)
-            .ok_or(TransformError::Uninvertable)?;
-
-        self.decomposed.disp += local_delta;
-
-        Ok(())
+    pub fn pan(&mut self, delta: cgmath::Vector2<f32>) {
+        self.decomposed.disp += delta;
     }
     /// Convert this point in view space to local space
     pub fn unproject(
