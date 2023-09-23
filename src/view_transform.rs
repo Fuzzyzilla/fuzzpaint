@@ -84,14 +84,11 @@ impl ViewTransform {
         rotation: cgmath::Rad<f32>,
         scale: f32,
     ) -> Self {
-        let disp = view_center.to_vec() - (scale * document_size / 2.0);
+        let rot = cgmath::Basis2::from_angle(rotation);
+        let disp = view_center.to_vec() - scale * rot.rotate_vector(document_size / 2.0);
 
         Self {
-            decomposed: Decomposed2 {
-                rot: Rotation2::from_angle(rotation),
-                scale,
-                disp,
-            },
+            decomposed: Decomposed2 { rot, scale, disp },
         }
     }
 }
@@ -203,7 +200,7 @@ impl Default for DocumentFit {
     fn default() -> Self {
         Self {
             flip_x: false,
-            rotation: Zero::zero(),
+            rotation: cgmath::Rad(1.0),
         }
     }
 }
