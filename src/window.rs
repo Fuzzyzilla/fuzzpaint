@@ -229,14 +229,35 @@ impl WindowRenderer {
     fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
         static mut DOCUMENT_INTERFACE: std::sync::OnceLock<crate::DocumentUserInterface> =
             std::sync::OnceLock::new();
-        self.egui_ctx.update(|ctx| {
-            //Safety - Not running the ui concurrently, this cannot be accessed similtaneously.
-            unsafe {
-                //Hacky but impermanent
-                DOCUMENT_INTERFACE.get_or_init(Default::default);
-                DOCUMENT_INTERFACE.get_mut().unwrap().ui(&ctx);
+        static mut LAST_VIEWPORT: Option<egui::Rect> = None;
+
+        //Safety - Not running the ui concurrently, this cannot be accessed similtaneously.
+        // very yucky. fixme soon.
+        let document_interface = unsafe {
+            DOCUMENT_INTERFACE.get_or_init(Default::default);
+            DOCUMENT_INTERFACE.get_mut().unwrap()
+        };
+        let output = self.egui_ctx.update(|ctx| {
+            document_interface.ui(&ctx);
+        });
+        let last_viewport = unsafe { &mut LAST_VIEWPORT };
+        let new_viewport = document_interface.get_document_viewport();
+        if *last_viewport != new_viewport {
+            *last_viewport = new_viewport;
+            if let Some(new_viewport) = new_viewport {
+                let pos = new_viewport.left_top();
+                let size = new_viewport.size();
+                self.preview_renderer.viewport_changed(
+                    ultraviolet::Vec2 { x: pos.x, y: pos.y },
+                    ultraviolet::Vec2 {
+                        x: size.x,
+                        y: size.y,
+                    },
+                );
             }
-        })
+        };
+
+        output
     }
     fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =
@@ -261,14 +282,13 @@ impl WindowRenderer {
         //Wait for previous frame to end. (required for safety of preview render proxy)
         self.last_frame_fence.take().map(|fence| fence.wait(None));
 
-        // Lmao
-        // Free up resources from the last time this frame index was rendered
-        // Todo: call much much sooner.
-        let preview_commands = {
-            // Safety - we synchronize on the previous frame above.
-            // The commands from last render will be done now :3
-            let preview_commands = unsafe { self.preview_renderer.render(idx)? };
-            preview_commands
+        let preview_commands = unsafe { self.preview_renderer.render(idx) };
+        let preview_commands = match preview_commands {
+            Ok(commands) => Some(commands),
+            Err(e) => {
+                log::warn!("Failed to build preview commands {e:?}");
+                None
+            }
         };
 
         let render_complete = match commands {
@@ -289,30 +309,45 @@ impl WindowRenderer {
                 // wait for the semaphore. For now, I just stall the thread.
                 transfer_future.wait(None)?;
 
-                image_future
-                    .then_execute(
-                        self.render_context.queues().graphics().queue().clone(),
-                        preview_commands,
-                    )?
-                    .then_execute(
-                        self.render_context.queues().graphics().queue().clone(),
-                        draw,
-                    )?
-                    .boxed()
+                if let Some(preview_commands) = preview_commands {
+                    image_future
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            preview_commands,
+                        )?
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            draw,
+                        )?
+                        .boxed()
+                } else {
+                    image_future
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            draw,
+                        )?
+                        .boxed()
+                }
             }
-            Some((None, draw)) => image_future
-                .then_execute(
-                    self.render_context.queues().graphics().queue().clone(),
-                    preview_commands,
-                )?
-                .then_execute_same_queue(draw)?
-                .boxed(),
-            None => image_future
-                .then_execute(
-                    self.render_context.queues().graphics().queue().clone(),
-                    preview_commands,
-                )?
-                .boxed(),
+            Some((None, draw)) => {
+                if let Some(preview_commands) = preview_commands {
+                    image_future
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            preview_commands,
+                        )?
+                        .then_execute_same_queue(draw)?
+                        .boxed()
+                } else {
+                    image_future
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            draw,
+                        )?
+                        .boxed()
+                }
+            }
+            None => image_future.boxed(),
         };
 
         let next_frame_future = render_complete

@@ -6,6 +6,9 @@ pub use vulkano::{
 
 //Types and such
 pub mod vk {
+    // import the correct coordinate space from ultraviolet
+    pub use ultraviolet::projection::lh_ydown as projection;
+
     pub use vulkano::{
         DeviceSize,
         buffer::{

@@ -1,4 +1,5 @@
 #![feature(portable_simd)]
+#![feature(once_cell_try)]
 use std::sync::Arc;
 mod egui_impl;
 pub mod gpu_err;
@@ -17,6 +18,7 @@ pub mod id;
 pub mod render_device;
 pub mod stylus_events;
 pub mod tess;
+pub mod view_transform;
 use blend::{Blend, BlendMode};
 
 pub use id::{FuzzID, WeakID};
@@ -27,7 +29,7 @@ pub use tess::StrokeTessellator;
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 /// Obviously will be user specified on a per-document basis, but for now...
-const DOCUMENT_DIMENSION: u32 = 1024;
+const DOCUMENT_DIMENSION: u32 = 1080;
 /// Premultiplied RGBA16F for interesting effects (negative + overbright colors and alpha) with
 /// more than 11bit per channel precision in the \[0,1\] range.
 /// Will it be user specified in the future?
@@ -1459,10 +1461,16 @@ async fn stylus_event_collector(
 
     let mut current_stroke = None::<Stroke>;
 
+    let mut drag_start_pos = None::<(f32, f32)>;
+    let mut initial_transform = None::<view_transform::ViewTransform>;
+
     loop {
         match event_stream.recv().await {
             Ok(event_frame) => {
-                let matrix = document_preview.get_matrix().await.invert().unwrap();
+                // We need a transform in order to do any of our work!
+                let Some(mut transform) = document_preview.get_view_transform().await else {
+                    continue;
+                };
 
                 // Collect all the data we need from selections global immediately:
                 let (cur_document, cur_layer, cur_brush, ui_undos) = {
@@ -1491,11 +1499,16 @@ async fn stylus_event_collector(
                 }
 
                 let frame = action_listener.frame().ok();
-                let (key_undos, key_redos) = match frame {
-                    None => (0, 0),
+                let (key_undos, key_redos, is_pan, is_scrub, is_rotate, is_mirror) = match frame {
+                    None => (0, 0, false, false, false, false),
                     Some(f) => (
                         f.action_trigger_count(actions::Action::Undo),
                         f.action_trigger_count(actions::Action::Redo),
+                        f.is_action_held(actions::Action::ViewportPan),
+                        f.is_action_held(actions::Action::ViewportScrub),
+                        f.is_action_held(actions::Action::ViewportRotate),
+                        // An odd number of mirror requests, we assume two mirror requests cancel out
+                        f.action_trigger_count(actions::Action::ViewportFlipHorizontal) % 2 == 1,
                     ),
                 };
 
@@ -1577,64 +1590,132 @@ async fn stylus_event_collector(
                     }
                 }
 
-                for event in event_frame.iter() {
-                    if event.pressed {
-                        // Get stroke-in-progress or start anew.
-                        let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
-                            brush: cur_brush.clone(),
-                            id: Default::default(),
-                            points: Vec::new(),
-                        });
-                        let pos = matrix * cgmath::vec4(event.pos.0, event.pos.1, 0.0, 1.0);
-                        let pos = [
-                            pos.x * DOCUMENT_DIMENSION as f32,
-                            (1.0 - pos.y) * DOCUMENT_DIMENSION as f32,
-                        ];
+                if is_pan || is_scrub || is_rotate {
+                    // treat stylus events as viewport movement
+                    let mut new_transform = None::<view_transform::ViewTransform>;
+                    for event in event_frame.iter() {
+                        if event.pressed {
+                            let initial_transform =
+                                initial_transform.get_or_insert(transform.clone());
+                            let start_pos = drag_start_pos.get_or_insert(event.pos);
 
-                        // Calc cumulative distance from the start, or 0.0 if this is the first point.
-                        let dist = this_stroke
-                            .points
-                            .last()
-                            .map(|last| {
-                                // I should really be using a linalg library lmao
-                                let delta = [last.pos[0] - pos[0], last.pos[1] - pos[1]];
-                                last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
+                            let delta = (event.pos.0 - start_pos.0, event.pos.1 - start_pos.1);
+                            if is_scrub {
+                                // Up or right is zoom in. This is natural for me as a right-handed
+                                // person, but might ask around and see if this should be adjustable.
+                                // certainly the speed should be :P
+                                let scale = 1.01f32.powf(delta.0 - delta.1);
+
+                                // Take the initial transform, and scale about the first drag point.
+                                // If the transform becomes broken (returns err), don't use it.
+                                let mut new = initial_transform.clone();
+                                new.scale_about(
+                                    cgmath::Point2 {
+                                        x: start_pos.0,
+                                        y: start_pos.1,
+                                    },
+                                    scale,
+                                );
+                                new_transform = Some(new);
+                            } else if is_pan {
+                                let mut new = initial_transform.clone();
+                                new.pan(cgmath::Vector2 {
+                                    x: delta.0,
+                                    y: delta.1,
+                                });
+                                new_transform = Some(new);
+                            } else if is_rotate {
+                                let (viewport_pos, viewport_size) = document_preview.get_viewport();
+                                let viewport_middle = viewport_pos + viewport_size / 2.0;
+
+                                let start_angle = (start_pos.0 - viewport_middle.x)
+                                    .atan2(start_pos.1 - viewport_middle.y);
+                                let now_angle = (event.pos.0 - viewport_middle.x)
+                                    .atan2(event.pos.1 - viewport_middle.y);
+                                let delta = start_angle - now_angle;
+
+                                let mut new = initial_transform.clone();
+                                new.rotate_about(viewport_middle, cgmath::Rad(delta));
+                                new_transform = Some(new);
+                            }
+                        } else {
+                            initial_transform = None;
+                            drag_start_pos = None;
+                        }
+                    }
+                    // Set transform, if changed.
+                    if let Some(transform) = new_transform {
+                        document_preview
+                            .insert_document_transform(
+                                view_transform::DocumentTransform::Transform(transform),
+                            )
+                            .await;
+                    }
+                } else {
+                    // clear out drag/pan data. stinky bad
+                    initial_transform = None;
+                    drag_start_pos = None;
+
+                    // treat stylus as new strokes
+                    for event in event_frame.iter() {
+                        if event.pressed {
+                            // Get stroke-in-progress or start anew.
+                            let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
+                                brush: cur_brush.clone(),
+                                id: Default::default(),
+                                points: Vec::new(),
+                            });
+                            let Ok(pos) =
+                                transform.unproject(cgmath::point2(event.pos.0, event.pos.1))
+                            else {
+                                // If transform is ill-formed, we can't do work.
+                                continue;
+                            };
+
+                            // Calc cumulative distance from the start, or 0.0 if this is the first point.
+                            let dist = this_stroke
+                                .points
+                                .last()
+                                .map(|last| {
+                                    let delta = [last.pos[0] - pos.x, last.pos[1] - pos.y];
+                                    last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
+                                })
+                                .unwrap_or(0.0);
+
+                            this_stroke.points.push(StrokePoint {
+                                pos: [pos.x, pos.y],
+                                pressure: event.pressure.unwrap_or(1.0),
+                                dist,
                             })
-                            .unwrap_or(0.0);
+                        } else {
+                            if let Some(stroke) = current_stroke.take() {
+                                // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
+                                let immutable: ImmutableStroke = stroke.into();
 
-                        this_stroke.points.push(StrokePoint {
-                            pos,
-                            pressure: event.pressure.unwrap_or(1.0),
-                            dist,
-                        })
-                    } else {
-                        if let Some(stroke) = current_stroke.take() {
-                            // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
-                            let immutable: ImmutableStroke = stroke.into();
+                                let mut stroke_manager = globals.strokes().write().await;
 
-                            let mut stroke_manager = globals.strokes().write().await;
-
-                            let layer_data =
-                                stroke_manager.layers.entry(cur_layer).or_insert_with(|| {
-                                    StrokeLayerData {
+                                let layer_data = stroke_manager
+                                    .layers
+                                    .entry(cur_layer)
+                                    .or_insert_with(|| StrokeLayerData {
                                         strokes: vec![],
                                         undo_cursor_position: None,
-                                    }
-                                });
+                                    });
 
-                            // If there was an undo cursor, truncate everything after
-                            // and replace with new data.
-                            if let Some(cursor) = layer_data.undo_cursor_position.take() {
-                                layer_data.strokes.drain(cursor..);
+                                // If there was an undo cursor, truncate everything after
+                                // and replace with new data.
+                                if let Some(cursor) = layer_data.undo_cursor_position.take() {
+                                    layer_data.strokes.drain(cursor..);
+                                }
+
+                                let weak_ref = (&immutable).into();
+                                layer_data.strokes.push(immutable);
+
+                                render_send.send(RenderMessage::StrokeLayer {
+                                    layer: cur_layer,
+                                    kind: StrokeLayerRenderMessageKind::Append(weak_ref),
+                                })?;
                             }
-
-                            let weak_ref = (&immutable).into();
-                            layer_data.strokes.push(immutable);
-
-                            render_send.send(RenderMessage::StrokeLayer {
-                                layer: cur_layer,
-                                kind: StrokeLayerRenderMessageKind::Append(weak_ref),
-                            })?;
                         }
                     }
                 }

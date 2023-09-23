@@ -194,9 +194,9 @@ impl Default for ActionsToKeys {
             HotkeyCollection {
                 keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
                     alt: false,
-                    ctrl: true,
+                    ctrl: false,
                     shift: false,
-                    key: VirtualKeyCode::Space,
+                    key: VirtualKeyCode::S,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
@@ -210,6 +210,19 @@ impl Default for ActionsToKeys {
                     ctrl: false,
                     shift: false,
                     key: VirtualKeyCode::M,
+                }])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        keys.insert(
+            super::Action::ViewportRotate,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
+                    alt: false,
+                    ctrl: false,
+                    shift: false,
+                    key: VirtualKeyCode::R,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
