@@ -277,14 +277,13 @@ impl WindowRenderer {
         //Wait for previous frame to end. (required for safety of preview render proxy)
         self.last_frame_fence.take().map(|fence| fence.wait(None));
 
-        // Lmao
-        // Free up resources from the last time this frame index was rendered
-        // Todo: call much much sooner.
-        let preview_commands = {
-            // Safety - we synchronize on the previous frame above.
-            // The commands from last render will be done now :3
-            let preview_commands = unsafe { self.preview_renderer.render(idx)? };
-            preview_commands
+        let preview_commands = unsafe { self.preview_renderer.render(idx) };
+        let preview_commands = match preview_commands {
+            Ok(commands) => Some(commands),
+            Err(e) => {
+                log::warn!("Failed to build preview commands {e:?}");
+                None
+            }
         };
 
         let render_complete = match commands {
@@ -305,30 +304,45 @@ impl WindowRenderer {
                 // wait for the semaphore. For now, I just stall the thread.
                 transfer_future.wait(None)?;
 
-                image_future
-                    .then_execute(
-                        self.render_context.queues().graphics().queue().clone(),
-                        preview_commands,
-                    )?
-                    .then_execute(
-                        self.render_context.queues().graphics().queue().clone(),
-                        draw,
-                    )?
-                    .boxed()
+                if let Some(preview_commands) = preview_commands {
+                    image_future
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            preview_commands,
+                        )?
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            draw,
+                        )?
+                        .boxed()
+                } else {
+                    image_future
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            draw,
+                        )?
+                        .boxed()
+                }
             }
-            Some((None, draw)) => image_future
-                .then_execute(
-                    self.render_context.queues().graphics().queue().clone(),
-                    preview_commands,
-                )?
-                .then_execute_same_queue(draw)?
-                .boxed(),
-            None => image_future
-                .then_execute(
-                    self.render_context.queues().graphics().queue().clone(),
-                    preview_commands,
-                )?
-                .boxed(),
+            Some((None, draw)) => {
+                if let Some(preview_commands) = preview_commands {
+                    image_future
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            preview_commands,
+                        )?
+                        .then_execute_same_queue(draw)?
+                        .boxed()
+                } else {
+                    image_future
+                        .then_execute(
+                            self.render_context.queues().graphics().queue().clone(),
+                            draw,
+                        )?
+                        .boxed()
+                }
+            }
+            None => image_future.boxed(),
         };
 
         let next_frame_future = render_complete
