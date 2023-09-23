@@ -155,8 +155,8 @@ struct ProxySurfaceData {
     framebuffers: Box<[Arc<vk::Framebuffer>]>,
     document_image_bindings: [Arc<vk::PersistentDescriptorSet>; 2],
     // Lazily recorded command buffers. Must be rebuilt on viewport size/document view change.
-    // Todo. Get it working now, add fancy caching layer :P
-    // prerecorded_command_buffers: [parking_lot::RwLock<std::cell::OnceCell<Arc<vk::PrimaryAutoCommandBuffer>>>; 2],
+    // indexed by swapchain idx, then by image idx
+    prerecorded_command_buffers: Vec<[std::sync::OnceLock<Arc<vk::PrimaryAutoCommandBuffer>>; 2]>,
     cached_matrix: std::sync::OnceLock<[[f32; 4]; 4]>,
     transform: crate::view_transform::DocumentTransform,
     view_pos: cgmath::Point2<f32>,
@@ -195,11 +195,19 @@ impl ProxySurfaceData {
             .collect();
         let framebuffers = framebuffers.unwrap().into_boxed_slice();
 
+        let mut prerecorded_command_buffers =
+            Vec::with_capacity(render_surface.swapchain_images().len());
+        prerecorded_command_buffers.resize_with(prerecorded_command_buffers.capacity(), || {
+            [std::sync::OnceLock::new(), std::sync::OnceLock::new()]
+        });
+
         Self {
             context,
             pipeline,
             render_pass,
             surface_dimensions: render_surface.extent(),
+
+            prerecorded_command_buffers,
 
             framebuffers,
             document_image_bindings: [
@@ -217,7 +225,17 @@ impl ProxySurfaceData {
         &self,
         swapchain_idx: u32,
         image_idx: usize,
-    ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
+    ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
+        // Try to fetch from the cache:
+        let cached = self
+            .prerecorded_command_buffers
+            .get(swapchain_idx as usize)
+            .and_then(|bufs| bufs.get(image_idx))
+            .and_then(|lock| lock.get());
+        if let Some(cached) = cached {
+            return Ok(cached.clone());
+        }
+        // Didn't find a cached ver. build it:
         let framebuffer = self
             .framebuffers
             .get(swapchain_idx as usize)
@@ -230,7 +248,7 @@ impl ProxySurfaceData {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             self.context.allocators().command_buffer(),
             self.context.queues().graphics().idx(),
-            command_buffer::CommandBufferUsage::OneTimeSubmit,
+            command_buffer::CommandBufferUsage::MultipleSubmit,
         )?;
 
         let matrix = self
@@ -305,9 +323,26 @@ impl ProxySurfaceData {
             )
             .draw(4, 1, 0, 0)?
             .end_render_pass()?;
-        Ok(command_buffer.build()?)
+
+        let command_buffer = Arc::new(command_buffer.build()?);
+
+        // Try to insert into the cache
+        if let Some(lock) = self
+            .prerecorded_command_buffers
+            .get(swapchain_idx as usize)
+            .and_then(|bufs| bufs.get(image_idx))
+        {
+            let _ = lock.set(command_buffer.clone());
+        }
+
+        Ok(command_buffer)
     }
     fn clear_cache(&mut self) {
+        // Take and discard all cached command buffers
+        for [a, b] in self.prerecorded_command_buffers.iter_mut() {
+            a.take();
+            b.take();
+        }
         self.cached_matrix.take();
     }
     fn set_transform(&mut self, transform: crate::view_transform::DocumentTransform) {
@@ -648,8 +683,7 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
         Ok(self
             .surface_data
             .blocking_read()
-            .get_commands(swapchain_idx, image_idx)
-            .map(Into::into)?)
+            .get_commands(swapchain_idx, image_idx)?)
     }
     fn surface_changed(&self, render_surface: &render_device::RenderSurface) {
         let viewport = self.viewport.read().clone();

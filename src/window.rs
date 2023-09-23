@@ -229,6 +229,7 @@ impl WindowRenderer {
     fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
         static mut DOCUMENT_INTERFACE: std::sync::OnceLock<crate::DocumentUserInterface> =
             std::sync::OnceLock::new();
+        static mut LAST_VIEWPORT: Option<egui::Rect> = None;
 
         //Safety - Not running the ui concurrently, this cannot be accessed similtaneously.
         // very yucky. fixme soon.
@@ -239,17 +240,21 @@ impl WindowRenderer {
         let output = self.egui_ctx.update(|ctx| {
             document_interface.ui(&ctx);
         });
-
-        if let Some(view) = document_interface.get_document_viewport() {
-            let pos = view.left_top();
-            let size = view.size();
-            self.preview_renderer.viewport_changed(
-                ultraviolet::Vec2 { x: pos.x, y: pos.y },
-                ultraviolet::Vec2 {
-                    x: size.x,
-                    y: size.y,
-                },
-            );
+        let last_viewport = unsafe { &mut LAST_VIEWPORT };
+        let new_viewport = document_interface.get_document_viewport();
+        if *last_viewport != new_viewport {
+            *last_viewport = new_viewport;
+            if let Some(new_viewport) = new_viewport {
+                let pos = new_viewport.left_top();
+                let size = new_viewport.size();
+                self.preview_renderer.viewport_changed(
+                    ultraviolet::Vec2 { x: pos.x, y: pos.y },
+                    ultraviolet::Vec2 {
+                        x: size.x,
+                        y: size.y,
+                    },
+                );
+            }
         };
 
         output
