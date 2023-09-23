@@ -90,7 +90,7 @@ impl ViewTransform {
             decomposed: Decomposed2 {
                 rot: Rotation2::from_angle(rotation),
                 scale,
-                disp, // todo
+                disp,
             },
         }
     }
