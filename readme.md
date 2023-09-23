@@ -2,18 +2,22 @@
 
 Graphics accelerated vector-based paint program for people who like compositing software :3
 
-It doesn't do much more than let you scribble yet.
+In heavy development, many features are in-progress. But you can doodle to your heart's content!
 
-Platform support, in order of development priority:
-| **Platform**      | Pen input          | Pad input          |
-|-------------------|--------------------|--------------------|
-| Unix (Wayland)    |:white_large_square:|:white_large_square:|
-| Unix (Xorg)       |Partial             |None                 |
-| Windows (Ink)     |:white_large_square:|:white_large_square:|
-| Windows (wintab)  |:white_large_square:|:white_large_square:|
+## Building
+Requires the [most recent Rust nightly toolchain](https://www.rust-lang.org/tools/install). Clone this repo and execute `cargo run --release` from within the root directory of this repo!
+
+**Note the platform support below.** The app is fully cross platform and should run on any device (if not, please report) but tablet input is very much unfinished.
+
+| **Platform**      | Pen input   | Pad input   | Notes                              |
+|-------------------|-------------|-------------|------------------------------------|
+| Windows (Ink)     |None         |None         |                                    |
+| Unix (Xorg)       |Pressure only|None         |On wayland: `WINIT_UNIX_BACKEND=x11`|
+| Unix (Wayland)    |None         |None         |No universally supported tablet API |
+| Windows (wintab)  |None         |None         |Documentation tough to come accross |
 
 # Road to **0.2.0**
-To declare **0.2.0**, I would like to be able to somewhat freely draw a thing and save said thing to disk. Note-to-self: do so in a sustainable manner, such that completing 0.2.0 does not prevent me from developing 1.0.0, in both the burnout and technical debt sense :P
+To declare **0.2.0**, I would like to be able to freely doodle a thing and save it to disk. We're getting dangerously close!
 
  - [ ] File I/O
    - [ ] Read/Write custom vector image format
@@ -39,12 +43,13 @@ To declare **0.2.0**, I would like to be able to somewhat freely draw a thing an
    - [X] Initial layout
    - [X] A ~~simple~~ **✨robust and rebindable✨** hotkey system, with support for
          pen and pad buttons (although, pen+pad events are not yet reported)
-   - [ ] Infinite Undo/Redo
-   - [ ] Pan, Zoom, Scroll, Rotate, Mirror viewport
+   - [X] Infinite Undo/Redo
+   - [X] Pan, Zoom, Scroll, Rotate, Mirror viewport
    - [ ] Fit, 100% modes
 
 ## Long-term Goals
  * Support the "95%" GPU - For accessibility, this should work on low-end GPUs. Don't rely on overly niche vulkan extensions, but fall-forward on them if they provide sufficient benifit (eg, `EXT_mesh_shader`)
+    * Progress towards this goal is tracked in [assumptions.md](assumptions.md).
  * Survive extreme errors - recovery from swapchain, surface, device, or even window loss.
    * *No* important data should ever exist on the GPU alone - all buffers and images should be derived data.
  * Be able to run without a surface at all. For exporting files from command line.

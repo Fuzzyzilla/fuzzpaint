@@ -10,8 +10,9 @@ anyhow = "1.0.71"
 bitvec = "1.0.1"
 bytemuck = "1.13.1"
 cgmath = "0.18.0"
+dhat = { version = "0.3.2", optional = true }
 dirs = "5.0.1"
-egui = {version = "0.22.0", features = ["bytemuck"]}
+egui = { version = "0.22.0", features = ["bytemuck"] }
 env_logger = "0.10.0"
 image = "0.24.6"
 log = "0.4.18"
@@ -23,8 +24,14 @@ serde = { version = "1.0.188", features = ["derive", "rc"] }
 smallvec = { version = "1.10.0", features = ["serde"] }
 strum = { version = "0.25.0", features = ["derive"] }
 thiserror = "1.0.40"
-tokio = { version = "1.28.2", features = ["sync", "rt" ] }
+tokio = { version = "1.28.2", features = [
+    "sync",
+    "rt",
+    "macros",
+    "parking_lot",
+] }
 try-block = "0.1.0"
+ultraviolet = { version = "0.9.2", features = ["bytemuck"] }
 uuid = { version = "1.4.0", features = ["v4"] }
 vulkano = "0.33.0"
 vulkano-shaders = "0.33.0"
@@ -34,3 +41,6 @@ winit = { version = "0.28.6", features = ["serde"] }
 [profile.profiling]
 inherits = "release"
 debug = true
+
+[features]
+dhat_heap = ["dhat"]
