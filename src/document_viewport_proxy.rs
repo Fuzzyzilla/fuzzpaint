@@ -67,7 +67,7 @@ mod shaders {
             void main() {
                 uvec2 grid_coords = uvec2(gl_FragCoord.xy) / SIZE;
                 bool is_light = (grid_coords.x + grid_coords.y) % 2 == 0;
-                vec3 grid_color = vec3(vec3(is_light ? LIGHT : DARK));
+                vec3 grid_color = 1.0 - vec3(vec3(is_light ? LIGHT : DARK));
 
                 vec4 col = texture(image, uv);
                 // col is pre-multiplied, grid color is not. Combine!
@@ -635,6 +635,9 @@ impl DocumentViewportPreviewProxy {
             }
             crate::view_transform::DocumentTransform::Transform(t) => Some(t),
         }
+    }
+    pub fn get_viewport(&self) -> (cgmath::Point2<f32>, cgmath::Vector2<f32>) {
+        *self.viewport.read()
     }
 }
 impl PreviewRenderProxy for DocumentViewportPreviewProxy {

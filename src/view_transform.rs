@@ -39,39 +39,17 @@ impl ViewTransform {
         //todo!()
     }
     /// Rotate about this center in viewspace such that the center remains in the same spot in the viewport after rotating.
-    pub fn rotate_about(
-        &mut self,
-        view_center: cgmath::Point2<f32>,
-        rotate: cgmath::Rad<f32>,
-    ) -> Result<(), TransformError> {
-        let local_center = self.unproject(view_center)?.to_vec();
-        // Translate so that local center is at origin
-        self.decomposed.concat_self(&Decomposed2 {
-            disp: -1.0 * local_center,
-            rot: One::one(),
-            scale: 1.0,
-        });
-        // then rotate
-        self.decomposed.concat_self(&Decomposed2 {
-            disp: Zero::zero(),
-            rot: Rotation2::from_angle(rotate),
-            scale: 1.0,
-        });
-        // then translate back.
-        self.decomposed.concat_self(&Decomposed2 {
-            disp: local_center,
-            rot: One::one(),
-            scale: 1.0,
-        });
+    pub fn rotate_about(&mut self, view_center: cgmath::Point2<f32>, rotate: cgmath::Rad<f32>) {
+        // vec from mouse to top-left
+        let local_center = view_center.to_vec() - self.decomposed.disp;
+        let rotate = cgmath::Basis2::from_angle(rotate);
 
-        Ok(())
+        let local_center = rotate.rotate_vector(local_center);
+        self.decomposed.rot = rotate * self.decomposed.rot;
+        self.decomposed.disp = view_center.to_vec() - local_center;
     }
     /// Scale about this center in viewspace such that the center remains in the same spot in the viewport after scaling.
-    pub fn scale_about(
-        &mut self,
-        view_center: cgmath::Point2<f32>,
-        scale_by: f32,
-    ) -> Result<(), TransformError> {
+    pub fn scale_about(&mut self, view_center: cgmath::Point2<f32>, scale_by: f32) {
         // vec from mouse to top-left
         let local_center = view_center.to_vec() - self.decomposed.disp;
 
@@ -79,8 +57,6 @@ impl ViewTransform {
         self.decomposed.scale *= scale_by;
         // Scale that vec from mouse to top-left by the same factor.
         self.decomposed.disp = view_center.to_vec() - (local_center * scale_by);
-
-        Ok(())
     }
     /// Pan by this displacement in viewspace.
     pub fn pan(&mut self, delta: cgmath::Vector2<f32>) {

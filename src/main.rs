@@ -1499,13 +1499,14 @@ async fn stylus_event_collector(
                 }
 
                 let frame = action_listener.frame().ok();
-                let (key_undos, key_redos, is_pan, is_scrub, is_mirror) = match frame {
-                    None => (0, 0, false, false, false),
+                let (key_undos, key_redos, is_pan, is_scrub, is_rotate, is_mirror) = match frame {
+                    None => (0, 0, false, false, false, false),
                     Some(f) => (
                         f.action_trigger_count(actions::Action::Undo),
                         f.action_trigger_count(actions::Action::Redo),
                         f.is_action_held(actions::Action::ViewportPan),
                         f.is_action_held(actions::Action::ViewportScrub),
+                        f.is_action_held(actions::Action::ViewportRotate),
                         // An odd number of mirror requests, we assume two mirror requests cancel out
                         f.action_trigger_count(actions::Action::ViewportFlipHorizontal) % 2 == 1,
                     ),
@@ -1589,7 +1590,7 @@ async fn stylus_event_collector(
                     }
                 }
 
-                if is_pan || is_scrub {
+                if is_pan || is_scrub || is_rotate {
                     // treat stylus events as viewport movement
                     let mut new_transform = None::<view_transform::ViewTransform>;
                     for event in event_frame.iter() {
@@ -1608,24 +1609,33 @@ async fn stylus_event_collector(
                                 // Take the initial transform, and scale about the first drag point.
                                 // If the transform becomes broken (returns err), don't use it.
                                 let mut new = initial_transform.clone();
-                                if new
-                                    .scale_about(
-                                        cgmath::Point2 {
-                                            x: start_pos.0,
-                                            y: start_pos.1,
-                                        },
-                                        scale,
-                                    )
-                                    .is_ok()
-                                {
-                                    new_transform = Some(new);
-                                };
+                                new.scale_about(
+                                    cgmath::Point2 {
+                                        x: start_pos.0,
+                                        y: start_pos.1,
+                                    },
+                                    scale,
+                                );
+                                new_transform = Some(new);
                             } else if is_pan {
                                 let mut new = initial_transform.clone();
                                 new.pan(cgmath::Vector2 {
                                     x: delta.0,
                                     y: delta.1,
                                 });
+                                new_transform = Some(new);
+                            } else if is_rotate {
+                                let (viewport_pos, viewport_size) = document_preview.get_viewport();
+                                let viewport_middle = viewport_pos + viewport_size / 2.0;
+
+                                let start_angle = (start_pos.0 - viewport_middle.x)
+                                    .atan2(start_pos.1 - viewport_middle.y);
+                                let now_angle = (event.pos.0 - viewport_middle.x)
+                                    .atan2(event.pos.1 - viewport_middle.y);
+                                let delta = start_angle - now_angle;
+
+                                let mut new = initial_transform.clone();
+                                new.rotate_about(viewport_middle, cgmath::Rad(delta));
                                 new_transform = Some(new);
                             }
                         } else {
