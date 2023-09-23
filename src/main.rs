@@ -1461,8 +1461,8 @@ async fn stylus_event_collector(
 
     let mut current_stroke = None::<Stroke>;
 
-    let mut last_pos = None::<(f32, f32)>;
     let mut drag_start_pos = None::<(f32, f32)>;
+    let mut initial_transform = None::<view_transform::ViewTransform>;
 
     loop {
         match event_stream.recv().await {
@@ -1591,49 +1591,63 @@ async fn stylus_event_collector(
 
                 if is_pan || is_scrub {
                     // treat stylus events as viewport movement
+                    let mut new_transform = None::<view_transform::ViewTransform>;
                     for event in event_frame.iter() {
                         if event.pressed {
+                            let initial_transform =
+                                initial_transform.get_or_insert(transform.clone());
                             let start_pos = drag_start_pos.get_or_insert(event.pos);
 
-                            if let Some(delta) =
-                                last_pos.map(|pos| (event.pos.0 - pos.0, event.pos.1 - pos.1))
-                            {
-                                if is_scrub {
-                                    let scale = 1.0 + (delta.0 + delta.1) / 100.0;
-                                    let _ = transform.scale_about(
+                            let delta = (event.pos.0 - start_pos.0, event.pos.1 - start_pos.1);
+                            if is_scrub {
+                                // Up or right is zoom in. This is natural for me as a right-handed
+                                // person, but might ask around and see if this should be adjustable.
+                                // certainly the speed should be :P
+                                let scale = 1.01f32.powf(delta.0 - delta.1);
+
+                                // Take the initial transform, and scale about the first drag point.
+                                // If the transform becomes broken (returns err), don't use it.
+                                let mut new = initial_transform.clone();
+                                if new
+                                    .scale_about(
                                         cgmath::Point2 {
                                             x: start_pos.0,
                                             y: start_pos.1,
                                         },
                                         scale,
-                                    );
-                                } else if is_pan {
-                                    transform.pan(cgmath::Vector2 {
-                                        x: delta.0,
-                                        y: delta.1,
-                                    });
-                                }
+                                    )
+                                    .is_ok()
+                                {
+                                    new_transform = Some(new);
+                                };
+                            } else if is_pan {
+                                let mut new = initial_transform.clone();
+                                new.pan(cgmath::Vector2 {
+                                    x: delta.0,
+                                    y: delta.1,
+                                });
+                                new_transform = Some(new);
                             }
-
-                            last_pos = Some(event.pos);
                         } else {
-                            last_pos = None;
+                            initial_transform = None;
                             drag_start_pos = None;
                         }
                     }
-                    document_preview
-                        .insert_document_transform(view_transform::DocumentTransform::Transform(
-                            transform,
-                        ))
-                        .await;
+                    // Set transform, if changed.
+                    if let Some(transform) = new_transform {
+                        document_preview
+                            .insert_document_transform(
+                                view_transform::DocumentTransform::Transform(transform),
+                            )
+                            .await;
+                    }
                 } else {
                     // clear out drag/pan data. stinky bad
-                    last_pos = None;
+                    initial_transform = None;
                     drag_start_pos = None;
 
                     // treat stylus as new strokes
                     for event in event_frame.iter() {
-                        last_pos = Some(event.pos);
                         if event.pressed {
                             // Get stroke-in-progress or start anew.
                             let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
