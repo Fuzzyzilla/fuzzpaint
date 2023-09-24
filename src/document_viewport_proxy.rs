@@ -13,7 +13,7 @@ pub trait PreviewRenderProxy {
     unsafe fn render(
         &self,
         swapchain_image_idx: u32,
-    ) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>>;
+    ) -> AnyResult<smallvec::SmallVec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>>;
     /// The window surface has been invalidated and remade.
     fn surface_changed(&self, render_surface: &render_device::RenderSurface);
     /// Is this proxy requesting a redraw?
@@ -677,13 +677,16 @@ impl DocumentViewportPreviewProxy {
 }
 impl PreviewRenderProxy for DocumentViewportPreviewProxy {
     #[deny(unsafe_op_in_unsafe_fn)]
-    unsafe fn render(&self, swapchain_idx: u32) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>> {
+    unsafe fn render(
+        &self,
+        swapchain_idx: u32,
+    ) -> AnyResult<smallvec::SmallVec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>> {
         // Safety: contract forwarded to the contract of this fn.
         let image_idx = unsafe { self.read() };
-        Ok(self
+        Ok(smallvec::smallvec![self
             .surface_data
             .blocking_read()
-            .get_commands(swapchain_idx, image_idx)?)
+            .get_commands(swapchain_idx, image_idx)?])
     }
     fn surface_changed(&self, render_surface: &render_device::RenderSurface) {
         let viewport = self.viewport.read().clone();
