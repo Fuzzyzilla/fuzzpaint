@@ -67,6 +67,15 @@ impl GizmoTransform {
             decomposed: cgmath::Decomposed { scale, rot, disp },
         }
     }
+    pub fn inherit_all() -> Self {
+        Self {
+            origin_pinning: GizmoOriginPinning::Inherit,
+            rotation_pinning: GizmoTransformPinning::Inherit,
+            scale_pinning: GizmoTransformPinning::Inherit,
+            position: ultraviolet::Vec2 { x: 0.0, y: 0.0 },
+            rotation: 0.0,
+        }
+    }
 }
 
 /// Metadata for a click event, required to deal with transforms as the gizmo tree is searched for a hit.

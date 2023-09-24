@@ -39,7 +39,38 @@ impl WindowSurface {
 
         let (send, stream) = crate::actions::create_action_stream();
 
+        let mut test_gizmo_collection = {
+            use crate::gizmos::*;
+            let mut collection = Collection::new(transform::GizmoTransform {
+                position: ultraviolet::Vec2 { x: 10.0, y: 10.0 },
+                origin_pinning: transform::GizmoOriginPinning::Document,
+                scale_pinning: transform::GizmoTransformPinning::Document,
+                rotation: 0.0,
+                rotation_pinning: transform::GizmoTransformPinning::Viewport,
+            });
+            let square = Gizmo {
+                grab_cursor: CursorOrInvisible::Invisible,
+                visual: GizmoVisual::Shape {
+                    shape: RenderShape::Rectangle {
+                        position: ultraviolet::Vec2 { x: 0.0, y: 0.0 },
+                        size: ultraviolet::Vec2 { x: 20.0, y: 20.0 },
+                        rotation: 0.0,
+                    },
+                    texture: None,
+                    color: [128, 255, 255, 255],
+                },
+                hit_shape: GizmoShape::None,
+                hover_cursor: CursorOrInvisible::Invisible,
+                interaction: GizmoInteraction::None,
+                transform: transform::GizmoTransform::inherit_all(),
+            };
+            collection.push_top(square);
+            collection
+        };
+
         Ok(WindowRenderer {
+            gizmo_renderer: crate::gizmos::renderer::GizmoRenderer::new(render_context.clone())
+                .unwrap(),
             win: self.win,
             render_surface: Some(render_surface),
             swapchain_generation: 0,
@@ -50,6 +81,7 @@ impl WindowSurface {
             preview_renderer,
             action_collector:
                 crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
+            gizmo_collection: test_gizmo_collection,
             action_stream: stream,
             stylus_events: Default::default(),
         })
@@ -73,6 +105,8 @@ pub struct WindowRenderer {
     last_frame_fence: Option<vk::sync::future::FenceSignalFuture<Box<dyn GpuFuture>>>,
 
     preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
+    gizmo_renderer: crate::gizmos::renderer::GizmoRenderer,
+    gizmo_collection: crate::gizmos::Collection,
 }
 impl WindowRenderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
@@ -137,7 +171,8 @@ impl WindowRenderer {
                 self.win.set_cursor_visible(false);
             }
         } else {
-            self.win.set_cursor_icon(winit::window::CursorIcon::Crosshair)
+            self.win
+                .set_cursor_icon(winit::window::CursorIcon::Crosshair)
         }
     }
     pub fn run(mut self) -> ! {

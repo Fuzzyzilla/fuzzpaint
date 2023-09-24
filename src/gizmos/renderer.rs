@@ -32,20 +32,21 @@ mod shaders {
             
             layout(std430, push_constant) uniform Push {
                 mat4 transform;
+                vec4 gizmo_color;
             };
 
-            layout(location = 0) in vec2 inPos;
-            layout(location = 1) in vec4 inColor;
-            layout(location = 2) in vec2 inUV;
+            layout(location = 0) in vec2 pos;
+            layout(location = 1) in vec4 color;
+            layout(location = 2) in vec2 uv;
 
             layout(location = 0) out vec4 outColor;
             layout(location = 1) out vec2 outUV;
 
             void main() {
-                outColor = inColor;
-                outUV = inUV;
+                outColor = color * gizmo_color;
+                outUV = uv;
 
-                gl_Position = transform * vec4(inPos, 0.0, 1.0);
+                gl_Position = transform * vec4(pos, 0.0, 1.0);
             }"#
         }
     }
@@ -56,17 +57,13 @@ mod shaders {
             
             layout(set = 0, binding = 0) uniform sampler2D tex;
 
-            layout(std430, push_constant) uniform Push {
-                vec4 gizmo_color;
-            };
-
             layout(location = 0) in vec4 inColor;
             layout(location = 1) in vec2 inUV;
 
             layout(location = 0) out vec4 outColor;
 
             void main() {
-                outColor = texture(tex, inUV) * inColor * gizmo_color;
+                outColor = texture(tex, inUV) * inColor;
             }"#
         }
     }
@@ -75,17 +72,13 @@ mod shaders {
             ty: "fragment",
             src: r#"#version 460
 
-            layout(std430, push_constant) uniform Push {
-                vec4 gizmo_color;
-            };
-
             layout(location = 0) in vec4 inColor;
             layout(location = 1) in vec2 _;
 
             layout(location = 0) out vec4 outColor;
 
             void main() {
-                outColor = inColor * gizmo_color;
+                outColor = inColor;
             }"#
         }
     }
@@ -107,17 +100,12 @@ impl GizmoRenderer {
         context: &crate::render_device::RenderContext,
     ) -> anyhow::Result<(Arc<vk::PipelineLayout>, Arc<vk::PipelineLayout>)> {
         let push_constant_ranges = {
-            let matrix_range = vulkano::pipeline::layout::PushConstantRange {
+            let matrix_color_range = vulkano::pipeline::layout::PushConstantRange {
                 offset: 0,
                 stages: vulkano::shader::ShaderStages::VERTEX,
-                size: 4 * 4 * 4, //4x4 matrix of f32
+                size: 4 * 4 * 4 + 4 * 4, //4x4 matrix of f32, + vec4 of f32
             };
-            let color_range = vulkano::pipeline::layout::PushConstantRange {
-                offset: matrix_range.size, //start after matrix
-                stages: vulkano::shader::ShaderStages::FRAGMENT,
-                size: 4 * 4, //vec4 of f32
-            };
-            vec![matrix_range, color_range]
+            vec![matrix_color_range]
         };
         let mut texture_descriptor_set = std::collections::BTreeMap::new();
         texture_descriptor_set.insert(
@@ -127,7 +115,7 @@ impl GizmoRenderer {
                 variable_descriptor_count: false,
                 stages: vulkano::shader::ShaderStages::FRAGMENT,
                 ..vulkano::descriptor_set::layout::DescriptorSetLayoutBinding::descriptor_type(
-                    vulkano::descriptor_set::layout::DescriptorType::SampledImage,
+                    vulkano::descriptor_set::layout::DescriptorType::CombinedImageSampler,
                 )
             },
         );
@@ -261,6 +249,18 @@ impl GizmoRenderer {
             vulkano::pipeline::graphics::input_assembly::InputAssemblyState::new()
                 .topology(vk::PrimitiveTopology::TriangleList);
         let rasterization_state = vk::RasterizationState::new().cull_mode(vk::CullMode::None);
+        // ad hoc rendering for now, lazy lazy
+        let render_pass =
+            vulkano::pipeline::graphics::render_pass::PipelineRenderPassType::BeginRendering(
+                vulkano::pipeline::graphics::render_pass::PipelineRenderingCreateInfo {
+                    view_mask: 0,
+                    color_attachment_formats: vec![Some(vulkano::format::Format::B8G8R8A8_SRGB)],
+                    depth_attachment_format: None,
+                    stencil_attachment_format: None,
+                    ..Default::default()
+                },
+            );
+        let viewport = vk::ViewportState::viewport_dynamic_scissor_irrelevant();
         // Builder is !Clone TwT
         let textured_pipeline = vk::GraphicsPipeline::start()
             .vertex_shader(vertex.clone(), ())
@@ -269,6 +269,8 @@ impl GizmoRenderer {
             .fragment_shader(textured_fragment, ())
             .input_assembly_state(primitive_state.clone())
             .rasterization_state(rasterization_state.clone())
+            .render_pass(render_pass.clone())
+            .viewport_state(viewport.clone())
             .with_pipeline_layout(context.device().clone(), textured_pipeline_layout)?;
         let untextured_pipeline = vk::GraphicsPipeline::start()
             .vertex_shader(vertex, ())
@@ -277,6 +279,8 @@ impl GizmoRenderer {
             .fragment_shader(untextured_fragment, ())
             .input_assembly_state(primitive_state.clone())
             .rasterization_state(rasterization_state.clone())
+            .render_pass(render_pass)
+            .viewport_state(viewport.clone())
             .with_pipeline_layout(context.device().clone(), untextured_pipeline_layout)?;
         let (shapes, square, circle) = Self::make_shapes(context.as_ref())?;
 
@@ -290,10 +294,12 @@ impl GizmoRenderer {
             triangulated_square: square,
         })
     }
+    // Temporary api. passing around swapchain images and proj matrices like this feels dirty :P
     pub fn render_visit<'s>(
         &'s self,
+        into_image: vk::ImageView<vulkano::image::SwapchainImage>,
         document_transform: crate::view_transform::ViewTransform,
-        proj: &cgmath::Matrix4<f32>,
+        proj: cgmath::Matrix4<f32>,
     ) -> anyhow::Result<RenderVisitor<'s>> {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             self.context.allocators().command_buffer(),
@@ -307,7 +313,7 @@ impl GizmoRenderer {
             xform_stack: vec![document_transform],
             command_buffer,
             current_pipeline: None,
-            proj: *proj,
+            proj,
         })
     }
 }

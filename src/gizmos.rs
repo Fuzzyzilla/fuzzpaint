@@ -137,15 +137,15 @@ pub trait MutableGizmoVisitor<T> {
 }
 
 pub struct Gizmo {
-    visual: GizmoVisual,
+    pub visual: GizmoVisual,
 
-    interaction: GizmoInteraction,
-    hit_shape: GizmoShape,
+    pub interaction: GizmoInteraction,
+    pub hit_shape: GizmoShape,
 
-    hover_cursor: CursorOrInvisible,
-    grab_cursor: CursorOrInvisible,
+    pub hover_cursor: CursorOrInvisible,
+    pub grab_cursor: CursorOrInvisible,
 
-    transform: GizmoTransform,
+    pub transform: GizmoTransform,
 }
 
 /// A collection of many gizmos. It itself is a Gizmo,
@@ -156,6 +156,18 @@ pub struct Collection {
     children: Vec<AnyGizmo>,
 }
 impl Collection {
+    pub fn new(transform: GizmoTransform) -> Self {
+        Self {
+            transform,
+            children: Vec::new(),
+        }
+    }
+    pub fn push_top(&mut self, other: impl Into<AnyGizmo>) {
+        self.children.insert(0, other.into());
+    }
+    pub fn push_bottom(&mut self, other: impl Into<AnyGizmo>) {
+        self.children.push(other.into());
+    }
     fn evaluate_path_mut<'a>(&'a mut self, path: &'_ CollectionMeta) -> Option<&'a mut Gizmo> {
         let mut cur: Option<&'a mut [AnyGizmo]> = Some(&mut self.children);
         let mut found: Option<&'a mut Gizmo> = None;
@@ -208,6 +220,16 @@ enum AnyGizmo {
 enum AnyMeta {
     Gizmo(GizmoMeta),
     Collection(CollectionMeta),
+}
+impl From<Gizmo> for AnyGizmo {
+    fn from(value: Gizmo) -> Self {
+        Self::Gizmo(value)
+    }
+}
+impl From<Collection> for AnyGizmo {
+    fn from(value: Collection) -> Self {
+        Self::Collection(value)
+    }
 }
 impl From<GizmoMeta> for AnyMeta {
     fn from(value: GizmoMeta) -> Self {
