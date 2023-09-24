@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use vulkano::pipeline::Pipeline;
+use vulkano::pipeline::{graphics::vertex_input::Vertex, Pipeline};
 
 use crate::vk;
 #[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
@@ -102,15 +102,70 @@ pub struct GizmoRenderer {
 }
 impl GizmoRenderer {
     const CIRCLE_RES: usize = 16;
+    /// Create the layouts for both the textured and untextured pipelines, sharing the same push constant layout.
     fn layout(
         context: &crate::render_device::RenderContext,
-    ) -> anyhow::Result<Arc<vk::PipelineLayout>> {
-        todo!()
+    ) -> anyhow::Result<(Arc<vk::PipelineLayout>, Arc<vk::PipelineLayout>)> {
+        let push_constant_ranges = {
+            let matrix_range = vulkano::pipeline::layout::PushConstantRange {
+                offset: 0,
+                stages: vulkano::shader::ShaderStages::VERTEX,
+                size: 4 * 4 * 4, //4x4 matrix of f32
+            };
+            let color_range = vulkano::pipeline::layout::PushConstantRange {
+                offset: matrix_range.size, //start after matrix
+                stages: vulkano::shader::ShaderStages::FRAGMENT,
+                size: 4 * 4, //vec4 of f32
+            };
+            vec![matrix_range, color_range]
+        };
+        let mut texture_descriptor_set = std::collections::BTreeMap::new();
+        texture_descriptor_set.insert(
+            0,
+            vulkano::descriptor_set::layout::DescriptorSetLayoutBinding {
+                descriptor_count: 1,
+                variable_descriptor_count: false,
+                stages: vulkano::shader::ShaderStages::FRAGMENT,
+                ..vulkano::descriptor_set::layout::DescriptorSetLayoutBinding::descriptor_type(
+                    vulkano::descriptor_set::layout::DescriptorType::SampledImage,
+                )
+            },
+        );
+
+        let texture_descriptor_set = vk::DescriptorSetLayout::new(
+            context.device().clone(),
+            vulkano::descriptor_set::layout::DescriptorSetLayoutCreateInfo {
+                bindings: texture_descriptor_set,
+                push_descriptor: false,
+                ..Default::default()
+            },
+        )?;
+        let textured = vk::PipelineLayout::new(
+            context.device().clone(),
+            vulkano::pipeline::layout::PipelineLayoutCreateInfo {
+                set_layouts: vec![texture_descriptor_set],
+                push_constant_ranges: push_constant_ranges.clone(),
+                ..Default::default()
+            },
+        )?;
+        let untextured = vk::PipelineLayout::new(
+            context.device().clone(),
+            vulkano::pipeline::layout::PipelineLayoutCreateInfo {
+                set_layouts: Vec::new(),
+                push_constant_ranges,
+                ..Default::default()
+            },
+        )?;
+        Ok((textured, untextured))
     }
     /// Make static shape buffers. (unit square origin at 0.0, unit circle origin at 0.0)
     fn make_shapes(
         context: &crate::render_device::RenderContext,
-    ) -> anyhow::Result<(vk::Subbuffer<[GizmoVertex]>, vk::Subbuffer<[GizmoVertex]>)> {
+    ) -> anyhow::Result<(
+        vk::Subbuffer<[GizmoVertex]>,
+        vk::Subbuffer<[GizmoVertex]>,
+        vk::Subbuffer<[GizmoVertex]>,
+    )> {
         let mut vertices = Vec::with_capacity(6 + Self::CIRCLE_RES * 3);
         // Construct square
         {
@@ -187,10 +242,53 @@ impl GizmoRenderer {
         let square = triangulated_shapes.clone().slice(0..6);
         let circle = triangulated_shapes.clone().slice(6..);
 
-        Ok((square, circle))
+        Ok((triangulated_shapes, square, circle))
     }
     pub fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
-        todo!()
+        let vertex = shaders::vertex::load(context.device().clone())?;
+        let textured_fragment = shaders::fragment_textured::load(context.device().clone())?;
+        let untextured_fragment = shaders::fragment_untextured::load(context.device().clone())?;
+        let vertex = vertex.entry_point("main").unwrap();
+        let textured_fragment = textured_fragment.entry_point("main").unwrap();
+        let untextured_fragment = untextured_fragment.entry_point("main").unwrap();
+
+        let (textured_pipeline_layout, untextured_pipeline_layout) =
+            Self::layout(context.as_ref())?;
+
+        let blend = vk::ColorBlendState::new(1).blend_alpha();
+        let vertex_input = GizmoVertex::per_vertex();
+        let primitive_state =
+            vulkano::pipeline::graphics::input_assembly::InputAssemblyState::new()
+                .topology(vk::PrimitiveTopology::TriangleList);
+        let rasterization_state = vk::RasterizationState::new().cull_mode(vk::CullMode::None);
+        // Builder is !Clone TwT
+        let textured_pipeline = vk::GraphicsPipeline::start()
+            .vertex_shader(vertex.clone(), ())
+            .color_blend_state(blend.clone())
+            .vertex_input_state(vertex_input.clone())
+            .fragment_shader(textured_fragment, ())
+            .input_assembly_state(primitive_state.clone())
+            .rasterization_state(rasterization_state.clone())
+            .with_pipeline_layout(context.device().clone(), textured_pipeline_layout)?;
+        let untextured_pipeline = vk::GraphicsPipeline::start()
+            .vertex_shader(vertex, ())
+            .color_blend_state(blend)
+            .vertex_input_state(vertex_input.clone())
+            .fragment_shader(untextured_fragment, ())
+            .input_assembly_state(primitive_state.clone())
+            .rasterization_state(rasterization_state.clone())
+            .with_pipeline_layout(context.device().clone(), untextured_pipeline_layout)?;
+        let (shapes, square, circle) = Self::make_shapes(context.as_ref())?;
+
+        Ok(Self {
+            context: context,
+            textured_pipeline,
+            untextured_pipeline,
+
+            triangulated_shapes: shapes,
+            triangulated_circle: circle,
+            triangulated_square: square,
+        })
     }
     pub fn render_visit<'s>(
         &'s self,
