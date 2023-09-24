@@ -597,7 +597,48 @@ impl DocumentViewportPreviewProxy {
                 interaction: GizmoInteraction::None,
                 transform: transform::GizmoTransform::inherit_all(),
             };
+            let square2 = Gizmo {
+                grab_cursor: CursorOrInvisible::Invisible,
+                visual: GizmoVisual::Shape {
+                    shape: RenderShape::Rectangle {
+                        position: ultraviolet::Vec2 { x: 15.0, y: 8.0 },
+                        size: ultraviolet::Vec2 { x: 40.0, y: 10.0 },
+                        rotation: 0.0,
+                    },
+                    texture: None,
+                    color: [128, 0, 200, 255],
+                },
+                hit_shape: GizmoShape::None,
+                hover_cursor: CursorOrInvisible::Invisible,
+                interaction: GizmoInteraction::None,
+                transform: transform::GizmoTransform {
+                    origin_pinning: transform::GizmoOriginPinning::Inherit,
+                    rotation_pinning: transform::GizmoTransformPinning::Document,
+                    ..transform::GizmoTransform::inherit_all()
+                },
+            };
+            let circle = Gizmo {
+                grab_cursor: CursorOrInvisible::Invisible,
+                visual: GizmoVisual::Shape {
+                    shape: RenderShape::Ellipse {
+                        origin: ultraviolet::Vec2 { x: 10.0, y: 0.0 },
+                        radii: ultraviolet::Vec2 { x: 20.0, y: 20.0 },
+                        rotation: 0.0,
+                    },
+                    texture: None,
+                    color: [128, 0, 0, 128],
+                },
+                hit_shape: GizmoShape::None,
+                hover_cursor: CursorOrInvisible::Invisible,
+                interaction: GizmoInteraction::None,
+                transform: transform::GizmoTransform {
+                    scale_pinning: transform::GizmoTransformPinning::Document,
+                    ..transform::GizmoTransform::inherit_all()
+                },
+            };
             collection.push_top(square);
+            collection.push_top(square2);
+            collection.push_bottom(circle);
             collection
         };
 

@@ -94,7 +94,7 @@ pub struct GizmoRenderer {
     triangulated_circle: vk::Subbuffer<[GizmoVertex]>,
 }
 impl GizmoRenderer {
-    const CIRCLE_RES: usize = 16;
+    const CIRCLE_RES: usize = 32;
     /// Create the layouts for both the textured and untextured pipelines, sharing the same push constant layout.
     fn layout(
         context: &crate::render_device::RenderContext,
@@ -466,12 +466,10 @@ impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
                 }
             }
             super::RenderShape::Ellipse { .. } => {
-                if let Err(e) = self.command_buffer.draw(
-                    self.renderer.triangulated_circle.len() as u32,
-                    1,
-                    self.renderer.triangulated_circle.offset() as u32,
-                    0,
-                ) {
+                if let Err(e) =
+                    self.command_buffer
+                        .draw(GizmoRenderer::CIRCLE_RES as u32 * 3, 1, 6, 0)
+                {
                     return Some(e.into());
                 }
             }
