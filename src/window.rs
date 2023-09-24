@@ -287,7 +287,12 @@ impl WindowRenderer {
         //Wait for previous frame to end. (required for safety of preview render proxy)
         self.last_frame_fence.take().map(|fence| fence.wait(None));
 
-        let preview_commands = unsafe { self.preview_renderer.render(idx) };
+        let preview_commands = unsafe {
+            self.preview_renderer.render(
+                self.render_surface.as_ref().unwrap().swapchain_images()[idx as usize].clone(),
+                idx,
+            )
+        };
         let preview_commands = match preview_commands {
             Ok(commands) => commands,
             Err(e) => {

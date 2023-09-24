@@ -1469,7 +1469,7 @@ async fn stylus_event_collector(
         match event_stream.recv().await {
             Ok(event_frame) => {
                 // We need a transform in order to do any of our work!
-                let Some(mut transform) = document_preview.get_view_transform().await else {
+                let Some(transform) = document_preview.get_view_transform().await else {
                     continue;
                 };
 

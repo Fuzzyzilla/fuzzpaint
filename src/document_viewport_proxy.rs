@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::*;
+use crate::{gizmos::Gizmooooo, *};
 
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
 /// behind the Egui content.
@@ -12,6 +12,7 @@ pub trait PreviewRenderProxy {
     /// the previous render should be finished before the return result is executed.
     unsafe fn render(
         &self,
+        swapchain_image: Arc<vk::SwapchainImage>,
         swapchain_image_idx: u32,
     ) -> AnyResult<smallvec::SmallVec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>>;
     /// The window surface has been invalidated and remade.
@@ -386,6 +387,8 @@ pub struct DocumentViewportPreviewProxy {
     // Static render data ============
     render_pass: Arc<vk::RenderPass>,
     pipeline: Arc<vk::GraphicsPipeline>,
+    gizmo_renderer: Arc<crate::gizmos::renderer::GizmoRenderer>,
+    test_gizmo_collection: Arc<crate::gizmos::Collection>,
 
     // Surface-derived render data ===============
     surface_data: tokio::sync::RwLock<ProxySurfaceData>,
@@ -567,6 +570,37 @@ impl DocumentViewportPreviewProxy {
         // Wait for initialization to finish.
         initialize_future.wait(None)?;
 
+        let gizmo_renderer =
+            crate::gizmos::renderer::GizmoRenderer::new(render_surface.context().clone())?;
+        let test_gizmo_collection = {
+            use crate::gizmos::*;
+            let mut collection = Collection::new(transform::GizmoTransform {
+                position: ultraviolet::Vec2 { x: 10.0, y: 10.0 },
+                origin_pinning: transform::GizmoOriginPinning::Document,
+                scale_pinning: transform::GizmoTransformPinning::Viewport,
+                rotation: 0.0,
+                rotation_pinning: transform::GizmoTransformPinning::Viewport,
+            });
+            let square = Gizmo {
+                grab_cursor: CursorOrInvisible::Invisible,
+                visual: GizmoVisual::Shape {
+                    shape: RenderShape::Rectangle {
+                        position: ultraviolet::Vec2 { x: 0.0, y: 0.0 },
+                        size: ultraviolet::Vec2 { x: 20.0, y: 20.0 },
+                        rotation: 0.0,
+                    },
+                    texture: None,
+                    color: [128, 255, 255, 255],
+                },
+                hit_shape: GizmoShape::None,
+                hover_cursor: CursorOrInvisible::Invisible,
+                interaction: GizmoInteraction::None,
+                transform: transform::GizmoTransform::inherit_all(),
+            };
+            collection.push_top(square);
+            collection
+        };
+
         Ok(Self {
             render_context: render_surface.context().clone(),
 
@@ -584,6 +618,8 @@ impl DocumentViewportPreviewProxy {
             document_image_bindings,
 
             surface_data: surface_data.into(),
+            gizmo_renderer: gizmo_renderer.into(),
+            test_gizmo_collection: test_gizmo_collection.into(),
         })
     }
     /// Internal use only. After the user's buffer is deemed swappable, the read index in switched over and returned.
@@ -671,6 +707,23 @@ impl DocumentViewportPreviewProxy {
             crate::view_transform::DocumentTransform::Transform(t) => Some(t),
         }
     }
+    pub fn get_view_transform_sync(&self) -> Option<crate::view_transform::ViewTransform> {
+        // lock, clone, release asap
+        match { self.document_transform.blocking_read().clone() } {
+            crate::view_transform::DocumentTransform::Fit(f) => {
+                let (pos, size) = *self.viewport.read();
+                f.make_transform(
+                    cgmath::Vector2 {
+                        x: crate::DOCUMENT_DIMENSION as f32,
+                        y: crate::DOCUMENT_DIMENSION as f32,
+                    },
+                    pos,
+                    size,
+                )
+            }
+            crate::view_transform::DocumentTransform::Transform(t) => Some(t),
+        }
+    }
     pub fn get_viewport(&self) -> (cgmath::Point2<f32>, cgmath::Vector2<f32>) {
         *self.viewport.read()
     }
@@ -679,14 +732,37 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
     #[deny(unsafe_op_in_unsafe_fn)]
     unsafe fn render(
         &self,
+        swapchain_image: Arc<vk::SwapchainImage>,
         swapchain_idx: u32,
     ) -> AnyResult<smallvec::SmallVec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>> {
         // Safety: contract forwarded to the contract of this fn.
         let image_idx = unsafe { self.read() };
-        Ok(smallvec::smallvec![self
-            .surface_data
-            .blocking_read()
-            .get_commands(swapchain_idx, image_idx)?])
+        let read = self.surface_data.blocking_read();
+        let commands = read.get_commands(swapchain_idx, image_idx)?;
+
+        let proj = crate::vk::projection::orthographic_vk(
+            0.0,
+            read.surface_dimensions[0] as f32,
+            0.0,
+            read.surface_dimensions[1] as f32,
+            -1.0,
+            1.0,
+        );
+        let proj: [[f32; 4]; 4] = proj.into();
+        let proj: cgmath::Matrix4<f32> = proj.into();
+        let mut visitor = self.gizmo_renderer.render_visit(
+            swapchain_image,
+            [
+                read.surface_dimensions[0] as f32,
+                read.surface_dimensions[1] as f32,
+            ],
+            self.get_view_transform_sync().unwrap(),
+            proj,
+        )?;
+        self.test_gizmo_collection.visit_painter(&mut visitor);
+        let buffer = visitor.build()?;
+
+        Ok(smallvec::smallvec![commands, buffer.into()])
     }
     fn surface_changed(&self, render_surface: &render_device::RenderSurface) {
         let viewport = self.viewport.read().clone();

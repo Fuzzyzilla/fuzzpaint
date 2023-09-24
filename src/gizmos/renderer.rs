@@ -280,7 +280,7 @@ impl GizmoRenderer {
             .input_assembly_state(primitive_state.clone())
             .rasterization_state(rasterization_state.clone())
             .render_pass(render_pass)
-            .viewport_state(viewport.clone())
+            .viewport_state(viewport)
             .with_pipeline_layout(context.device().clone(), untextured_pipeline_layout)?;
         let (shapes, square, circle) = Self::make_shapes(context.as_ref())?;
 
@@ -297,7 +297,8 @@ impl GizmoRenderer {
     // Temporary api. passing around swapchain images and proj matrices like this feels dirty :P
     pub fn render_visit<'s>(
         &'s self,
-        into_image: vk::ImageView<vulkano::image::SwapchainImage>,
+        into_image: Arc<vk::SwapchainImage>,
+        image_size: [f32; 2],
         document_transform: crate::view_transform::ViewTransform,
         proj: cgmath::Matrix4<f32>,
     ) -> anyhow::Result<RenderVisitor<'s>> {
@@ -306,7 +307,30 @@ impl GizmoRenderer {
             self.context.queues().graphics().idx(),
             vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
         )?;
-        command_buffer.bind_vertex_buffers(0, self.triangulated_shapes.clone());
+        let attachment = vulkano::command_buffer::RenderingAttachmentInfo {
+            clear_value: None,
+            load_op: vulkano::render_pass::LoadOp::Load,
+            store_op: vulkano::render_pass::StoreOp::Store,
+            ..vulkano::command_buffer::RenderingAttachmentInfo::image_view(
+                vk::ImageView::new_default(into_image)?,
+            )
+        };
+        command_buffer
+            .begin_rendering(vulkano::command_buffer::RenderingInfo {
+                color_attachments: vec![Some(attachment)],
+                contents: vk::SubpassContents::Inline,
+                depth_attachment: None,
+                ..Default::default()
+            })?
+            .set_viewport(
+                0,
+                [vk::Viewport {
+                    depth_range: 0.0..1.0,
+                    dimensions: image_size,
+                    origin: [0.0; 2],
+                }],
+            )
+            .bind_vertex_buffers(0, self.triangulated_shapes.clone());
 
         Ok(RenderVisitor {
             renderer: self,
