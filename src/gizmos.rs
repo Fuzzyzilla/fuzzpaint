@@ -15,16 +15,40 @@ pub enum GizmoMeshMode {
     Triangles,
     LineStrip,
 }
+pub enum RenderShape {
+    Rectangle {
+        position: ultraviolet::Vec2,
+        size: ultraviolet::Vec2,
+        rotation: f32,
+    },
+    Ellipse {
+        origin: ultraviolet::Vec2,
+        radii: ultraviolet::Vec2,
+        rotation: f32,
+    },
+}
 
 /// How is a gizmo displayed?
 /// For efficiency in rendering, the options are intentionally limited.
 /// For more complex visuals, combined several gizmos in a group.
 pub enum GizmoVisual {
+    Shape {
+        shape: RenderShape,
+        /// The descriptor of the texture. Should image should be immutable, as read usage
+        /// lifetime is not currently bounded.
+        ///
+        /// Set binding 0 should be the combined image sampler, which will be rendered with
+        /// standard alpha blending.
+        texture: Option<std::sync::Arc<crate::vk::PersistentDescriptorSet>>,
+        /// RGBA color to multiply the whole gizmo by, linear with straight blending.
+        color: [u8; 4],
+    },
+    /*
     Mesh {
         /// Interpret mesh as TriangleList or as a wide LineStrip?
         /// Texturing is supported for lines.
         style: GizmoMeshMode,
-        /// The descriptor of the texture. Should be immutable, as read usage
+        /// The descriptor of the texture. Should image should be immutable, as read usage
         /// lifetime is not currently bounded.
         ///
         /// Set binding 0 should be the combined image sampler, which will be rendered with
@@ -43,7 +67,7 @@ pub enum GizmoVisual {
         /// If true, it will be re-uploaded to the GPU every frame,
         /// otherwise it may be cached and changes may be missed
         mutable: bool,
-    },
+    },*/
     None,
 }
 

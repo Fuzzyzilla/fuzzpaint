@@ -1,6 +1,3 @@
-use cgmath::Point2;
-
-
 /// The origin of the gizmo will be pinned according to it's position and this value.
 ///
 /// As of right now, no viewport pinning - that's a non-goal of this API. use egui for that ;)
@@ -27,66 +24,73 @@ pub enum GizmoTransformPinning {
 }
 
 pub struct GizmoTransform {
-    pub position: [f32; 2],
+    pub position: ultraviolet::Vec2,
     pub origin_pinning: GizmoOriginPinning,
     pub scale_pinning: GizmoTransformPinning,
     pub rotation: f32,
     pub rotation_pinning: GizmoTransformPinning,
 }
+impl GizmoTransform {
+    /// Apply this gizmo transform to the given document and parent gizmo transforms, returning a new transform representing
+    /// this gizmo transform's local space. For top level gizmos, it is valid for parent_transform to equal document_transform.
+    pub fn apply(
+        &self,
+        document_transform: &crate::view_transform::ViewTransform,
+        parent_transform: &crate::view_transform::ViewTransform,
+    ) -> crate::view_transform::ViewTransform {
+        use cgmath::{EuclideanSpace, Rotation2};
 
-/// An abosolute transformation, the units of which are contextual.
-#[derive(Copy, Clone)]
-pub struct AbsoluteTransform {
-    /// Where the 0,0 point of this object lands on the absolute coordinates.
-    origin: Point2<f32>,
-    /// Rotation in radians, + is CCW. 0 is in the direction of the absolute X axis.
-    rotation: f32,
-    /// How many absolute units per self unit?
-    scale: f32,
-}
-impl AbsoluteTransform {
-    const SCALE_EPSILON : f32 = 0.0001;
-    /// Invert the transform, returning it. None if not invertable (ie scale = ~0.0)
-    #[must_use = "Does not modify self - returns an inverted copy"]
-    pub fn invert(&self) -> Option<Self> {
-        if self.scale < Self::SCALE_EPSILON {
-            None
-        } else {
-            Some(
-                // This feels too simple to be right lol
-                Self {
-                    origin: -1.0 * self.origin,
-                    rotation: -self.rotation,
-                    scale: 1.0/self.scale,
-                }
-            )
+        let disp = match self.origin_pinning {
+            GizmoOriginPinning::Document => {
+                let pos = cgmath::point2(self.position.x, self.position.y);
+                document_transform.project(pos)
+            }
+            GizmoOriginPinning::Inherit => {
+                let pos = cgmath::point2(self.position.x, self.position.y);
+                parent_transform.project(pos)
+            }
         }
-    }
-    /// Project a point from the local space into the absolute space.
-    pub fn project(&self, point: Point2<f32>) -> Point2<f32> {
-        todo!()
+        .to_vec();
+        let scale = match self.scale_pinning {
+            GizmoTransformPinning::Document => document_transform.decomposed.scale,
+            GizmoTransformPinning::Inherit => parent_transform.decomposed.scale,
+            GizmoTransformPinning::Viewport => 1.0,
+        };
+        let rotation = cgmath::Basis2::from_angle(cgmath::Rad(self.rotation));
+        let rot = match self.rotation_pinning {
+            GizmoTransformPinning::Document => document_transform.decomposed.rot * rotation,
+            GizmoTransformPinning::Inherit => parent_transform.decomposed.rot * rotation,
+            GizmoTransformPinning::Viewport => rotation,
+        };
+
+        crate::view_transform::ViewTransform {
+            decomposed: cgmath::Decomposed { scale, rot, disp },
+        }
     }
 }
 
 /// Metadata for a click event, required to deal with transforms as the gizmo tree is searched for a hit.
 pub struct ClickInfo {
     /// Transform of this gizmo's parent, relative to the viewport coordinates.
-    parent_transform: AbsoluteTransform,
+    parent_transform: crate::view_transform::ViewTransform,
     /// Transform of the viewport coordinates into document coordinates.
-    viewport_to_document_transform: AbsoluteTransform,
+    viewport_to_document_transform: crate::view_transform::ViewTransform,
     /// Where in the viewport this click occured
-    coords_viewport: [f32; 2],
+    coords_viewport: ultraviolet::Vec2,
     /// Where in the document this click occured
-    coords_document: [f32; 2],
+    coords_document: ultraviolet::Vec2,
     /// Where in the local space this click occured
-    coords_local: [f32; 2],
+    coords_local: ultraviolet::Vec2,
 }
 impl ClickInfo {
     /// Create a info for the document transform and the given viewport mouse coordinate.
     /// `document_transform` maps viewport coordinates to document coordinates.
-    /// 
+    ///
     /// Returns None if `document_transform` is not an invertable transform (ie. if scale = ~0.0).
-    pub fn new(document_transform: AbsoluteTransform, click_coord_viewport: [f32; 2]) -> Option<Self> {
+    pub fn new(
+        document_transform: crate::view_transform::ViewTransform,
+        click_coord_viewport: ultraviolet::Vec2,
+    ) -> Option<Self> {
         todo!()
     }
 }
