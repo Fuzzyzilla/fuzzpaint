@@ -1432,6 +1432,7 @@ async fn render_worker(
 async fn stylus_event_collector(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     mut action_listener: actions::ActionListener,
+    mut tools: pen_tools::ToolState,
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
     render_send: tokio::sync::mpsc::UnboundedSender<RenderMessage>,
 ) -> AnyResult<()> {
@@ -1461,13 +1462,21 @@ async fn stylus_event_collector(
 
     loop {
         match event_stream.recv().await {
-            Ok(event_frame) => {
+            Ok(stylus_frame) => {
                 // We need a transform in order to do any of our work!
                 let Some(transform) = document_preview.get_view_transform().await else {
                     continue;
                 };
                 // Todo: These errors are recoverable.
-                let frame = action_listener.frame()?;
+                let action_frame = action_listener.frame()?;
+
+                let render = tools
+                    .process(&transform, stylus_frame, &action_frame, &render_send)
+                    .await;
+
+                if let Some(transform) = render.set_view {
+                    document_preview.insert_document_transform(transform).await;
+                }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
                 log::warn!("Lost {num} stylus frames!");
@@ -1523,7 +1532,11 @@ fn main() -> AnyResult<std::convert::Infallible> {
         // drop this unless we steal it.
         let _profiler = _profiler;
 
-        let result = {
+        let result: Result<((), ()), anyhow::Error> = 'block: {
+            let mut tools = match pen_tools::ToolState::new_from_renderer(&render_context) {
+                Ok(tools) => tools,
+                Err(e) => break 'block Err(e),
+            };
             // We don't expect this channel to get very large, but it's important
             // that messages don't get lost under any circumstance, lest an expensive
             // document rebuild be needed :P
@@ -1542,6 +1555,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
                     stylus_event_collector(
                         event_stream,
                         action_listener,
+                        tools,
                         document_view,
                         render_sender,
                     ),
