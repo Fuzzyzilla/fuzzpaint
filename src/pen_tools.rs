@@ -15,6 +15,7 @@
 // static dispatch, but i was getting way caught up in the weeds trying to implement
 // that and there's really no need :'P
 mod brush;
+mod dummy;
 mod viewport;
 
 trait MakePenTool {
@@ -33,6 +34,8 @@ trait PenTool {
         tool_output: &mut ToolStateOutput,
         render_output: &mut ToolRenderOutput,
     );
+    /// Called when the state is transitioning away from this tool.
+    fn exit(&mut self) {}
 }
 
 /// Allow tools to specify their transitions at runtime, or leave None
@@ -68,17 +71,21 @@ impl ToolStateOutput {
     }
 }
 /// Interface for tools to (optionally) insert and read render data.
-struct ToolRenderOutput<'a, 'g> {
+pub struct ToolRenderOutput<'a> {
     // A reference, to avoid the potentially expensive cost of cloning 500 times per second when the tool
     // doesn't end up caring :P
-    render_task_messages: &'a tokio::sync::mpsc::UnboundedSender<crate::RenderMessage>,
-    render_as: RenderAs<'g>,
+    pub render_task_messages: &'a tokio::sync::mpsc::UnboundedSender<crate::RenderMessage>,
+    pub render_as: RenderAs,
+    pub set_view: Option<crate::view_transform::DocumentTransform>,
+    /// Set the cursor icon to this if Some, or default if None.
+    pub cursor: Option<crate::gizmos::CursorOrInvisible>,
 }
-impl ToolRenderOutput<'_, '_> {}
 
-enum RenderAs<'g> {
+pub enum RenderAs {
     /// Render as this collection of gizmos
-    Gizmo(&'g crate::gizmos::Collection),
+    /// The lifetimes here would unfortunately require PenToo::process to be generic on 'g.
+    /// Need to figure out how to handle this efficiently! (gizmos are large, would be nice to elide excessive copying)
+    //Gizmo(&'g crate::gizmos::Collection),
     /// Render as this custom command buffer.
     /// Will be drawn after the document preview, before the GUI.
     Custom(std::sync::Arc<crate::vk::PrimaryAutoCommandBuffer>),
@@ -91,7 +98,7 @@ enum TransitionCondition {
     Held(crate::actions::Action),
     NotHeld(crate::actions::Action),
 }
-#[derive(Copy, Clone, strum::EnumIter, Hash)]
+#[derive(Copy, Clone, strum::EnumIter, Hash, PartialEq, Eq)]
 pub enum StateLayer {
     Brush,
     ViewportPan,
@@ -126,26 +133,28 @@ impl ToolState {
             base: StateLayer::Brush,
             layer: None,
             brush: brush::Brush::new_from_renderer(context)?,
-            document_pan: todo!(),
-            document_scrub: todo!(),
-            document_rotate: todo!(),
-            gizmos: todo!(),
+            document_pan: dummy::Dummy::new_from_renderer(context)?,
+            document_scrub: viewport::ViewportScrub::new_from_renderer(context)?,
+            document_rotate: dummy::Dummy::new_from_renderer(context)?,
+            gizmos: dummy::Dummy::new_from_renderer(context)?,
         })
     }
     /// Allow the tool to process the given stylus data and actions, optionally returning preview render commands,
     /// and possibly changing the tool's state.
-    pub async fn process(
+    pub async fn process<'r>(
         &mut self,
         view_transform: &crate::view_transform::ViewTransform,
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
-        render_task_messages: &tokio::sync::mpsc::UnboundedSender<crate::RenderMessage>,
-    ) {
+        render_task_messages: &'r tokio::sync::mpsc::UnboundedSender<crate::RenderMessage>,
+    ) -> ToolRenderOutput<'r> {
         // Prepare output structs
         let mut tool_output = ToolStateOutput { transition: None };
         let mut render_output = ToolRenderOutput {
             render_task_messages,
             render_as: RenderAs::None,
+            set_view: None,
+            cursor: None,
         };
 
         // Get current tool and run
@@ -166,6 +175,14 @@ impl ToolState {
             .transition
             .unwrap_or_else(|| ToolStateOutput::do_default(actions));
         self.apply_state_transition(transition);
+
+        let new_state = self.get_current_state();
+        // Changed - tell cur_state to exit
+        if cur_state != new_state {
+            self.tool_for_state(cur_state).exit();
+        }
+        // return the output, let the caller handle it.
+        render_output
     }
     fn tool_for_state(&mut self, state: StateLayer) -> &mut dyn PenTool {
         match state {
