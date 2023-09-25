@@ -3,6 +3,27 @@ enum ViewportManipulateType {
     Rotate,
     Scrub,
 }
+impl ViewportManipulateType {
+    fn cursor(&self, holding: bool) -> winit::window::CursorIcon {
+        match self {
+            Self::Pan => {
+                if holding {
+                    winit::window::CursorIcon::Grabbing
+                } else {
+                    winit::window::CursorIcon::Grab
+                }
+            }
+            Self::Rotate => winit::window::CursorIcon::EwResize,
+            Self::Scrub => {
+                if holding {
+                    winit::window::CursorIcon::NeswResize
+                } else {
+                    winit::window::CursorIcon::ZoomIn
+                }
+            }
+        }
+    }
+}
 struct ViewportManipulateBase {
     manipulate_type: ViewportManipulateType,
     original_transform: Option<crate::view_transform::ViewTransform>,
@@ -81,6 +102,9 @@ impl ViewportManipulateBase {
                 self.drag_start_pos = None;
             }
         }
+        render_output.cursor = Some(crate::gizmos::CursorOrInvisible::Icon(
+            self.manipulate_type.cursor(self.drag_start_pos.is_some()),
+        ));
         // Set transform, if changed.
         if let Some(transform) = new_transform {
             render_output.set_view = Some(crate::view_transform::DocumentTransform::Transform(

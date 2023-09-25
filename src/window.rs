@@ -137,8 +137,18 @@ impl WindowRenderer {
                 self.win.set_cursor_visible(false);
             }
         } else {
-            self.win
-                .set_cursor_icon(winit::window::CursorIcon::Crosshair)
+            let cursor = self.preview_renderer.cursor();
+            let cursor = cursor.unwrap_or(crate::gizmos::CursorOrInvisible::Icon(
+                winit::window::CursorIcon::Default,
+            ));
+
+            if let crate::gizmos::CursorOrInvisible::Icon(i) = cursor {
+                self.win.set_cursor_icon(i);
+                self.win.set_cursor_visible(true);
+            }
+            if let crate::gizmos::CursorOrInvisible::Invisible = cursor {
+                self.win.set_cursor_visible(false);
+            }
         }
     }
     pub fn run(mut self) -> ! {
