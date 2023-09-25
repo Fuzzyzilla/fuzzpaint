@@ -20,6 +20,7 @@ pub mod render_device;
 pub mod stylus_events;
 pub mod tess;
 pub mod view_transform;
+pub mod pen_tools;
 use blend::{Blend, BlendMode};
 
 pub use id::{FuzzID, WeakID};
