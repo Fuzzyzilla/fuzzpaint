@@ -1140,14 +1140,14 @@ impl Globals {
     }
 }
 static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
-enum RenderMessage {
+pub enum RenderMessage {
     SwitchDocument(WeakID<Document>),
     StrokeLayer {
         layer: WeakID<StrokeLayer>,
         kind: StrokeLayerRenderMessageKind,
     },
 }
-enum StrokeLayerRenderMessageKind {
+pub enum StrokeLayerRenderMessageKind {
     /// The blend settings (opacity, clip, mode) for the layer were modified.
     BlendChanged(Blend),
     /// A stroke was appended to the given layer.
