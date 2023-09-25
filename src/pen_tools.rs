@@ -133,7 +133,7 @@ impl ToolState {
             base: StateLayer::Brush,
             layer: None,
             brush: brush::Brush::new_from_renderer(context)?,
-            document_pan: dummy::Dummy::new_from_renderer(context)?,
+            document_pan: viewport::ViewportPan::new_from_renderer(context)?,
             document_scrub: viewport::ViewportScrub::new_from_renderer(context)?,
             document_rotate: dummy::Dummy::new_from_renderer(context)?,
             gizmos: dummy::Dummy::new_from_renderer(context)?,

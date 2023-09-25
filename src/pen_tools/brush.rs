@@ -17,7 +17,6 @@ impl super::MakePenTool for Brush {
 impl super::PenTool for Brush {
     fn exit(&mut self) {
         self.in_progress_stroke = None;
-        self.last_document = None;
     }
     /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
