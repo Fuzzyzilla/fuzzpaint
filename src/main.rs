@@ -1467,8 +1467,16 @@ async fn stylus_event_collector(
                 let Some(transform) = document_preview.get_view_transform().await else {
                     continue;
                 };
-                // Todo: These errors are recoverable.
-                let action_frame = action_listener.frame()?;
+
+                // Get the actions, returning if stream closed.
+                let action_frame = match action_listener.frame() {
+                    Ok(frame) => frame,
+                    Err(e) => match e {
+                        actions::ListenError::Closed => return Ok(()),
+                        // Todo: this is recoverable!
+                        actions::ListenError::Poisoned => todo!(),
+                    },
+                };
 
                 let render = tools
                     .process(&transform, stylus_frame, &action_frame, &render_send)

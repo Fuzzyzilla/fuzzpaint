@@ -82,21 +82,15 @@ pub struct ToolRenderOutput<'a> {
 }
 
 pub enum RenderAs {
-    /// Render as this collection of gizmos
-    /// The lifetimes here would unfortunately require PenToo::process to be generic on 'g.
-    /// Need to figure out how to handle this efficiently! (gizmos are large, would be nice to elide excessive copying)
-    //Gizmo(&'g crate::gizmos::Collection),
+    // Render as this collection of gizmos
+    // The lifetimes here would unfortunately require PenToo::process to be generic on 'g.
+    // Need to figure out how to handle this efficiently! (gizmos are large, would be nice to elide excessive copying)
+    // Gizmo(&'g crate::gizmos::Collection),
     /// Render as this custom command buffer.
     /// Will be drawn after the document preview, before the GUI.
     Custom(std::sync::Arc<crate::vk::PrimaryAutoCommandBuffer>),
     /// Do not render.
     None,
-}
-
-enum TransitionCondition {
-    Pressed(crate::actions::Action),
-    Held(crate::actions::Action),
-    NotHeld(crate::actions::Action),
 }
 #[derive(Copy, Clone, strum::EnumIter, Hash, PartialEq, Eq)]
 pub enum StateLayer {
@@ -111,7 +105,6 @@ enum Transition {
     /// state the base is!
     ToLayer(StateLayer),
     ToBase,
-    NoChange,
 }
 pub struct ToolState {
     /// User-defined base state (depending on what tool is selected via the UI)
@@ -195,7 +188,6 @@ impl ToolState {
     }
     fn apply_state_transition(&mut self, transition: Transition) {
         match transition {
-            Transition::NoChange => (),
             Transition::ToBase => self.layer = None,
             Transition::ToLayer(layer) => self.layer = Some(layer),
         }
