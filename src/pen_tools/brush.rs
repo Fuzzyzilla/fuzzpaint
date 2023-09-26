@@ -48,11 +48,6 @@ impl super::PenTool for Brush {
 
             (cur_document, cur_layer, brush, undos)
         };
-
-        render_output.cursor = Some(crate::gizmos::CursorOrInvisible::Icon(
-            winit::window::CursorIcon::Crosshair,
-        ));
-
         // This shouldn't be the responsibility of brush, but im just porting old code
         // as-is right now
         if Some(cur_document) != self.last_document {
@@ -210,6 +205,41 @@ impl super::PenTool for Brush {
                     );
                 }
             }
+        }
+        render_output.render_as = if let Some((stroke, last)) = self
+            .in_progress_stroke
+            .as_ref()
+            .and_then(|stroke| Some((stroke, stroke.points.last()?)))
+        {
+            let size = last.pressure;
+            // Lerp between spacing and size_mul (matches gpu tess behaviour)
+            let size = stroke.brush.spacing_px * (1.0 - size) + stroke.brush.size_mul * size;
+
+            let gizmo = crate::gizmos::Gizmo {
+                visual: crate::gizmos::GizmoVisual::Shape {
+                    shape: crate::gizmos::RenderShape::Ellipse {
+                        origin: ultraviolet::Vec2 {
+                            x: last.pos[0],
+                            y: last.pos[1],
+                        },
+                        radii: ultraviolet::Vec2 {
+                            x: size / 2.0,
+                            y: size / 2.0,
+                        },
+                        rotation: 0.0,
+                    },
+                    texture: None,
+                    color: [0, 0, 0, 200],
+                },
+                ..Default::default()
+            };
+            render_output.cursor = Some(crate::gizmos::CursorOrInvisible::Invisible);
+            super::RenderAs::InlineGizmos([gizmo].into())
+        } else {
+            render_output.cursor = Some(crate::gizmos::CursorOrInvisible::Icon(
+                winit::window::CursorIcon::Crosshair,
+            ));
+            super::RenderAs::None
         }
     }
 }

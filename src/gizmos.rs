@@ -147,6 +147,18 @@ pub struct Gizmo {
 
     pub transform: GizmoTransform,
 }
+impl Default for Gizmo {
+    fn default() -> Self {
+        Self {
+            visual: GizmoVisual::None,
+            hit_shape: GizmoShape::None,
+            grab_cursor: CursorOrInvisible::Icon(CursorIcon::Default),
+            hover_cursor: CursorOrInvisible::Icon(CursorIcon::Default),
+            interaction: GizmoInteraction::None,
+            transform: transform::GizmoTransform::inherit_all(),
+        }
+    }
+}
 
 /// A collection of many gizmos. It itself is a Gizmo,
 /// meaning Collections-in-Collections is supported.

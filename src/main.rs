@@ -1486,9 +1486,7 @@ async fn stylus_event_collector(
                     document_preview.insert_document_transform(transform).await;
                 }
                 document_preview.insert_cursor(render.cursor);
-                if let pen_tools::RenderAs::Custom(_) = render.render_as {
-                    //todo!
-                }
+                document_preview.insert_tool_render(render.render_as);
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
                 log::warn!("Lost {num} stylus frames!");

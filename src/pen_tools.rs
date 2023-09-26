@@ -82,14 +82,13 @@ pub struct ToolRenderOutput<'a> {
 }
 
 pub enum RenderAs {
-    // Render as this collection of gizmos
-    // The lifetimes here would unfortunately require PenToo::process to be generic on 'g.
-    // Need to figure out how to handle this efficiently! (gizmos are large, would be nice to elide excessive copying)
-    // Gizmo(&'g crate::gizmos::Collection),
-    /// Render as this custom command buffer.
-    /// Will be drawn after the document preview, before the GUI.
-    Custom(std::sync::Arc<crate::vk::PrimaryAutoCommandBuffer>),
-    /// Do not render.
+    /// Render as these gizmos, in order.
+    /// Gizmos are not interactible.
+    InlineGizmos(smallvec::SmallVec<[crate::gizmos::Gizmo; 1]>),
+    /// Render as this shared collection. Will be read locked during rendering.
+    /// Gizmo is not interactible.
+    SharedGizmoCollection(std::sync::Arc<tokio::sync::RwLock<crate::gizmos::Collection>>),
+    /// Nothing to render.
     None,
 }
 #[derive(Copy, Clone, strum::EnumIter, Hash, PartialEq, Eq)]
