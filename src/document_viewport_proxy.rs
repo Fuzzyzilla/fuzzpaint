@@ -740,9 +740,9 @@ impl DocumentViewportPreviewProxy {
         *self.document_transform.write().await = new.clone();
         self.surface_data.write().await.set_transform(new);
     }
-    pub async fn get_view_transform(&self) -> Option<crate::view_transform::ViewTransform> {
+    pub async fn get_view_transform(&self) -> Option<crate::pen_tools::ViewInfo> {
         // lock, clone, release asap
-        match { self.document_transform.read().await.clone() } {
+        let xform = match { self.document_transform.read().await.clone() } {
             crate::view_transform::DocumentTransform::Fit(f) => {
                 let (pos, size) = *self.viewport.read();
                 f.make_transform(
@@ -752,10 +752,20 @@ impl DocumentViewportPreviewProxy {
                     },
                     pos,
                     size,
-                )
+                )?
             }
-            crate::view_transform::DocumentTransform::Transform(t) => Some(t),
-        }
+            crate::view_transform::DocumentTransform::Transform(t) => t,
+        };
+        let (pos, size) = self.get_viewport();
+
+        Some(crate::pen_tools::ViewInfo {
+            transform: xform,
+            viewport_position: ultraviolet::Vec2 { x: pos.x, y: pos.y },
+            viewport_size: ultraviolet::Vec2 {
+                x: size.x,
+                y: size.y,
+            },
+        })
     }
     pub fn insert_cursor(&self, new_cursor: Option<crate::gizmos::CursorOrInvisible>) {
         if let Some(mut cursor) = self.cursor.write().ok() {

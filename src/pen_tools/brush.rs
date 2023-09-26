@@ -21,7 +21,7 @@ impl super::PenTool for Brush {
     /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
-        view_transform: &crate::view_transform::ViewTransform,
+        view_info: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         tool_output: &mut super::ToolStateOutput,
@@ -153,7 +153,9 @@ impl super::PenTool for Brush {
                         id: Default::default(),
                         points: Vec::new(),
                     });
-                let Ok(pos) = view_transform.unproject(cgmath::point2(event.pos.0, event.pos.1))
+                let Ok(pos) = view_info
+                    .transform
+                    .unproject(cgmath::point2(event.pos.0, event.pos.1))
                 else {
                     // If transform is ill-formed, we can't do work.
                     return;

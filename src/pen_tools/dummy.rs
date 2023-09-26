@@ -11,7 +11,7 @@ impl super::MakePenTool for Dummy {
 impl super::PenTool for Dummy {
     async fn process(
         &mut self,
-        view_transform: &crate::view_transform::ViewTransform,
+        view_transform: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         tool_output: &mut super::ToolStateOutput,

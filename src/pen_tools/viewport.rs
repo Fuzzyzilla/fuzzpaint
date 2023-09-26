@@ -36,7 +36,7 @@ impl ViewportManipulateBase {
     }
     async fn process(
         &mut self,
-        view_transform: &crate::view_transform::ViewTransform,
+        view_info: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
@@ -47,7 +47,7 @@ impl ViewportManipulateBase {
             if event.pressed {
                 let initial_transform = self
                     .original_transform
-                    .get_or_insert(view_transform.clone());
+                    .get_or_insert(view_info.transform.clone());
                 let start_pos = self.drag_start_pos.get_or_insert(ultraviolet::Vec2 {
                     x: event.pos.0,
                     y: event.pos.1,
@@ -82,19 +82,24 @@ impl ViewportManipulateBase {
                         new_transform = Some(new);
                     }
                     ViewportManipulateType::Rotate => {
-                        todo!()
-                        /*let (viewport_pos, viewport_size) = document_preview.get_viewport();
-                        let viewport_middle = viewport_pos + viewport_size / 2.0;
+                        let viewport_middle =
+                            view_info.viewport_position + view_info.viewport_size / 2.0;
 
-                        let start_angle = (start_pos.0 - viewport_middle.x)
-                            .atan2(start_pos.1 - viewport_middle.y);
+                        let start_angle = (start_pos.x - viewport_middle.x)
+                            .atan2(start_pos.y - viewport_middle.y);
                         let now_angle = (event.pos.0 - viewport_middle.x)
                             .atan2(event.pos.1 - viewport_middle.y);
                         let delta = start_angle - now_angle;
 
                         let mut new = initial_transform.clone();
-                        new.rotate_about(viewport_middle, cgmath::Rad(delta));
-                        new_transform = Some(new);*/
+                        new.rotate_about(
+                            cgmath::Point2 {
+                                x: viewport_middle.x,
+                                y: viewport_middle.y,
+                            },
+                            cgmath::Rad(delta),
+                        );
+                        new_transform = Some(new);
                     }
                 }
             } else {
@@ -138,20 +143,14 @@ impl super::PenTool for ViewportScrub {
     /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
-        view_transform: &crate::view_transform::ViewTransform,
+        view_info: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
         self.manipulate
-            .process(
-                view_transform,
-                stylus_input,
-                actions,
-                tool_output,
-                render_output,
-            )
+            .process(view_info, stylus_input, actions, tool_output, render_output)
             .await
     }
 }
@@ -179,20 +178,49 @@ impl super::PenTool for ViewportPan {
     /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
-        view_transform: &crate::view_transform::ViewTransform,
+        view_info: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
         self.manipulate
-            .process(
-                view_transform,
-                stylus_input,
-                actions,
-                tool_output,
-                render_output,
-            )
+            .process(view_info, stylus_input, actions, tool_output, render_output)
+            .await
+    }
+}
+pub struct ViewportRotate {
+    manipulate: ViewportManipulateBase,
+}
+impl super::MakePenTool for ViewportRotate {
+    fn new_from_renderer(
+        _: &std::sync::Arc<crate::render_device::RenderContext>,
+    ) -> anyhow::Result<Box<dyn super::PenTool>> {
+        Ok(Box::new(ViewportRotate {
+            manipulate: ViewportManipulateBase {
+                manipulate_type: ViewportManipulateType::Rotate,
+                original_transform: None,
+                drag_start_pos: None,
+            },
+        }))
+    }
+}
+#[async_trait::async_trait]
+impl super::PenTool for ViewportRotate {
+    fn exit(&mut self) {
+        self.manipulate.exit()
+    }
+    /// Process input, optionally returning a commandbuffer to be drawn.
+    async fn process(
+        &mut self,
+        view_info: &super::ViewInfo,
+        stylus_input: crate::stylus_events::StylusEventFrame,
+        actions: &crate::actions::ActionFrame,
+        tool_output: &mut super::ToolStateOutput,
+        render_output: &mut super::ToolRenderOutput,
+    ) {
+        self.manipulate
+            .process(view_info, stylus_input, actions, tool_output, render_output)
             .await
     }
 }

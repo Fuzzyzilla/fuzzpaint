@@ -23,12 +23,17 @@ trait MakePenTool {
         context: &std::sync::Arc<crate::render_device::RenderContext>,
     ) -> anyhow::Result<Box<dyn PenTool>>;
 }
+pub struct ViewInfo {
+    pub transform: crate::view_transform::ViewTransform,
+    pub viewport_position: ultraviolet::Vec2,
+    pub viewport_size: ultraviolet::Vec2,
+}
 #[async_trait::async_trait]
 trait PenTool {
     /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
-        view_transform: &crate::view_transform::ViewTransform,
+        view_info: &ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         tool_output: &mut ToolStateOutput,
@@ -127,7 +132,7 @@ impl ToolState {
             brush: brush::Brush::new_from_renderer(context)?,
             document_pan: viewport::ViewportPan::new_from_renderer(context)?,
             document_scrub: viewport::ViewportScrub::new_from_renderer(context)?,
-            document_rotate: dummy::Dummy::new_from_renderer(context)?,
+            document_rotate: viewport::ViewportRotate::new_from_renderer(context)?,
             gizmos: dummy::Dummy::new_from_renderer(context)?,
         })
     }
@@ -135,7 +140,7 @@ impl ToolState {
     /// and possibly changing the tool's state.
     pub async fn process<'r>(
         &mut self,
-        view_transform: &crate::view_transform::ViewTransform,
+        view_info: &ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         render_task_messages: &'r tokio::sync::mpsc::UnboundedSender<crate::RenderMessage>,
@@ -154,7 +159,7 @@ impl ToolState {
         let tool = self.tool_for_state(cur_state);
 
         tool.process(
-            view_transform,
+            view_info,
             stylus_input,
             actions,
             &mut tool_output,
