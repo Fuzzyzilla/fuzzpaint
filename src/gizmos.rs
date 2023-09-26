@@ -115,25 +115,27 @@ impl GizmoShape {
     }
 }
 
+use std::ops::ControlFlow;
+
 /// A kind of inverse iterator, where the visitor will be passed down the whole
 /// tree to visit every gizmo in order.
 pub trait GizmoVisitor<T> {
     /// Visit a [Gizmo]. Return Some to short circuit, None to continue.
-    fn visit_gizmo(&mut self, gizmo: &Gizmo) -> Option<T>;
+    fn visit_gizmo(&mut self, gizmo: &Gizmo) -> ControlFlow<T>;
     /// Visit a [Collection]. Return Some to short circuit, None to continue.
-    fn visit_collection(&mut self, gizmo: &Collection) -> Option<T>;
+    fn visit_collection(&mut self, gizmo: &Collection) -> ControlFlow<T>;
     /// The most recent [Collection] has been fully visited. Return Some to short circuit, None to continue.
-    fn end_collection(&mut self, gizmo: &Collection) -> Option<T>;
+    fn end_collection(&mut self, gizmo: &Collection) -> ControlFlow<T>;
 }
 
 /// [GizmoVisitor] except it accesses the Gizmos as mutable references.
 pub trait MutableGizmoVisitor<T> {
     /// Visit a [Gizmo]. Return Some to short circuit, None to continue.
-    fn visit_gizmo_mut(&mut self, gizmo: &mut Gizmo) -> Option<T>;
+    fn visit_gizmo_mut(&mut self, gizmo: &mut Gizmo) -> ControlFlow<T>;
     /// Visit a [Collection]. Return Some to short circuit, None to continue.
-    fn visit_collection_mut(&mut self, gizmo: &mut Collection) -> Option<T>;
+    fn visit_collection_mut(&mut self, gizmo: &mut Collection) -> ControlFlow<T>;
     /// The most recent [Collection] has been fully visited. Return Some to short circuit, None to continue.
-    fn end_collection_mut(&mut self, gizmo: &mut Collection) -> Option<T>;
+    fn end_collection_mut(&mut self, gizmo: &mut Collection) -> ControlFlow<T>;
 }
 
 pub struct Gizmo {
@@ -225,11 +227,13 @@ impl Collection {
 }
 
 // mem inefficient, implementation detail uwu
-enum AnyGizmo {
+/// must be public for Into\<AnyGizmo\> in Collections interface but don't use >:(
+pub enum AnyGizmo {
     Gizmo(Gizmo),
     Collection(Collection),
 }
-enum AnyMeta {
+/// must be public for Gizmooooo impl but don't use >:(
+pub enum AnyMeta {
     Gizmo(GizmoMeta),
     Collection(CollectionMeta),
 }
@@ -300,19 +304,20 @@ pub trait Gizmooooo: seal::_Sealed {
     /// Pass the visitor to self and all children!
     /// Should visit in painters order, back-to-front.
     /// Returns Some with the short circuit value, or None if never short circuited.
-    fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> Option<T>;
+    fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T>;
     /// Pass the visitor to self and all children!
     /// Should visit in hit order, front-to-back.
     /// Returns Some with the short circuit value, or None if never short circuited.
-    fn visit_hit<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> Option<T>;
+    fn visit_hit<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T>;
     /// Pass the visitor to self and all children!
     /// Should visit in painters order, back-to-front.
     /// Returns Some with the short circuit value, or None if never short circuited.
-    fn visit_painter_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> Option<T>;
+    fn visit_painter_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>)
+        -> ControlFlow<T>;
     /// Pass the visitor to self and all children!
     /// Should visit in hit order, front-to-back.
     /// Returns Some with the short circuit value, or None if never short circuited.
-    fn visit_hit_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> Option<T>;
+    fn visit_hit_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> ControlFlow<T>;
 }
 
 // Possible types of path emitted by a gizmo.
@@ -378,19 +383,22 @@ impl Gizmooooo for Gizmo {
         }
     }
 
-    fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> Option<T> {
+    fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T> {
         visitor.visit_gizmo(self)
     }
 
-    fn visit_hit<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> Option<T> {
+    fn visit_hit<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T> {
         visitor.visit_gizmo(self)
     }
 
-    fn visit_painter_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> Option<T> {
+    fn visit_painter_mut<T>(
+        &mut self,
+        visitor: &mut impl MutableGizmoVisitor<T>,
+    ) -> ControlFlow<T> {
         visitor.visit_gizmo_mut(self)
     }
 
-    fn visit_hit_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> Option<T> {
+    fn visit_hit_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> ControlFlow<T> {
         visitor.visit_gizmo_mut(self)
     }
 }
@@ -407,29 +415,37 @@ impl Gizmooooo for Collection {
             point_stack: Vec<[f32; 2]>,
         }
         impl GizmoVisitor<CursorOrInvisible> for CursorFindVisitor {
-            fn visit_collection(&mut self, gizmo: &Collection) -> Option<CursorOrInvisible> {
+            fn visit_collection(&mut self, gizmo: &Collection) -> ControlFlow<CursorOrInvisible> {
                 // todo: transform point.
                 let xformed = *self.point_stack.last().unwrap();
                 self.point_stack.push(xformed);
-                None
+                ControlFlow::Continue(())
             }
-            fn end_collection(&mut self, _: &Collection) -> Option<CursorOrInvisible> {
+            fn end_collection(&mut self, _: &Collection) -> ControlFlow<CursorOrInvisible> {
                 self.point_stack.pop();
-                None
+                ControlFlow::Continue(())
             }
-            fn visit_gizmo(&mut self, gizmo: &Gizmo) -> Option<CursorOrInvisible> {
+            fn visit_gizmo(&mut self, gizmo: &Gizmo) -> ControlFlow<CursorOrInvisible> {
                 // todo: transform point.
                 let xformed = *self.point_stack.last().unwrap();
                 // Short circuits the iteration if this returns Some
-                gizmo.cursor_at(xformed)
+                if let Some(cursor) = gizmo.cursor_at(xformed) {
+                    ControlFlow::Break(cursor)
+                } else {
+                    ControlFlow::Continue(())
+                }
             }
         }
         let mut visitor = CursorFindVisitor {
             point_stack: vec![point],
         };
 
-        // Visitor will find the correct icon to use, or None if no gizmos asserted an icon.
-        self.visit_hit(&mut visitor)
+        // Visitor will break with the correct icon to use, or Continue if no gizmos asserted an icon.
+        if let ControlFlow::Break(cursor) = self.visit_hit(&mut visitor) {
+            Some(cursor)
+        } else {
+            None
+        }
     }
 
     fn click_at(&mut self, point: [f32; 2]) -> Option<Self::Meta> {
@@ -441,7 +457,10 @@ impl Gizmooooo for Collection {
             points_stack: Vec<[f32; 2]>,
         }
         impl MutableGizmoVisitor<CollectionMeta> for ClickVisitor {
-            fn visit_collection_mut(&mut self, gizmo: &mut Collection) -> Option<CollectionMeta> {
+            fn visit_collection_mut(
+                &mut self,
+                gizmo: &mut Collection,
+            ) -> ControlFlow<CollectionMeta> {
                 // Advance the last path idx
                 *self.path.last_mut().unwrap() += 1;
                 // Start a new nested path
@@ -450,28 +469,29 @@ impl Gizmooooo for Collection {
                 // todo: transform
                 let xformed = *self.points_stack.last().unwrap();
                 self.points_stack.push(xformed);
-                None
+
+                ControlFlow::Continue(())
             }
-            fn visit_gizmo_mut(&mut self, gizmo: &mut Gizmo) -> Option<CollectionMeta> {
+            fn visit_gizmo_mut(&mut self, gizmo: &mut Gizmo) -> ControlFlow<CollectionMeta> {
                 // todo: transform
                 let xformed = *self.points_stack.last().unwrap();
                 match gizmo.click_at(xformed) {
-                    Some(meta) => Some(CollectionMeta(
+                    Some(meta) => ControlFlow::Break(CollectionMeta(
                         std::mem::take(&mut self.path).to_vec(),
                         meta,
                     )),
                     None => {
                         *self.path.last_mut().unwrap() += 1;
-                        None
+                        ControlFlow::Continue(())
                     }
                 }
             }
-            fn end_collection_mut(&mut self, _: &mut Collection) -> Option<CollectionMeta> {
+            fn end_collection_mut(&mut self, _: &mut Collection) -> ControlFlow<CollectionMeta> {
                 // Clear last nested path
                 self.path.pop();
                 self.points_stack.pop();
 
-                None
+                ControlFlow::Continue(())
             }
         }
 
@@ -480,7 +500,11 @@ impl Gizmooooo for Collection {
             points_stack: vec![point],
         };
 
-        self.visit_hit_mut(&mut visitor)
+        if let ControlFlow::Break(meta) = self.visit_hit_mut(&mut visitor) {
+            Some(meta)
+        } else {
+            None
+        }
     }
 
     fn grabbed_cursor(&self, path: &Self::Meta) -> CursorOrInvisible {
@@ -509,61 +533,48 @@ impl Gizmooooo for Collection {
         }
     }
 
-    fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> Option<T> {
-        if let Some(t) = visitor.visit_collection(self) {
-            return Some(t);
-        };
+    fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T> {
+        visitor.visit_collection(self)?;
 
         // In painters order- reverse the children
         for child in self.children.iter().rev() {
-            if let Some(t) = child.visit_painter(visitor) {
-                return Some(t);
-            }
+            child.visit_painter(visitor)?;
         }
 
         visitor.end_collection(self)
     }
 
-    fn visit_hit<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> Option<T> {
-        if let Some(t) = visitor.visit_collection(self) {
-            return Some(t);
-        };
+    fn visit_hit<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T> {
+        visitor.visit_collection(self)?;
 
         // In hit order- don't reverse the children
         for child in self.children.iter() {
-            if let Some(t) = child.visit_hit(visitor) {
-                return Some(t);
-            }
+            child.visit_hit(visitor)?;
         }
 
         visitor.end_collection(self)
     }
 
-    fn visit_painter_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> Option<T> {
-        if let Some(t) = visitor.visit_collection_mut(self) {
-            return Some(t);
-        };
+    fn visit_painter_mut<T>(
+        &mut self,
+        visitor: &mut impl MutableGizmoVisitor<T>,
+    ) -> ControlFlow<T> {
+        visitor.visit_collection_mut(self)?;
 
         // In painters order- reverse the children
         for child in self.children.iter_mut().rev() {
-            if let Some(t) = child.visit_painter_mut(visitor) {
-                return Some(t);
-            }
+            child.visit_painter_mut(visitor)?;
         }
 
         visitor.end_collection_mut(self)
     }
 
-    fn visit_hit_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> Option<T> {
-        if let Some(t) = visitor.visit_collection_mut(self) {
-            return Some(t);
-        };
+    fn visit_hit_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> ControlFlow<T> {
+        visitor.visit_collection_mut(self)?;
 
         // In hit order- don't reverse the children
         for child in self.children.iter_mut() {
-            if let Some(t) = child.visit_hit_mut(visitor) {
-                return Some(t);
-            }
+            child.visit_hit_mut(visitor)?;
         }
 
         visitor.end_collection_mut(self)
@@ -635,28 +646,31 @@ impl Gizmooooo for AnyGizmo {
         }
     }
 
-    fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> Option<T> {
+    fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T> {
         match self {
             AnyGizmo::Collection(g) => g.visit_painter(visitor),
             AnyGizmo::Gizmo(g) => g.visit_painter(visitor),
         }
     }
 
-    fn visit_hit<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> Option<T> {
+    fn visit_hit<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T> {
         match self {
             AnyGizmo::Collection(g) => g.visit_hit(visitor),
             AnyGizmo::Gizmo(g) => g.visit_hit(visitor),
         }
     }
 
-    fn visit_painter_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> Option<T> {
+    fn visit_painter_mut<T>(
+        &mut self,
+        visitor: &mut impl MutableGizmoVisitor<T>,
+    ) -> ControlFlow<T> {
         match self {
             AnyGizmo::Collection(g) => g.visit_painter_mut(visitor),
             AnyGizmo::Gizmo(g) => g.visit_painter_mut(visitor),
         }
     }
 
-    fn visit_hit_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> Option<T> {
+    fn visit_hit_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> ControlFlow<T> {
         match self {
             AnyGizmo::Collection(g) => g.visit_hit_mut(visitor),
             AnyGizmo::Gizmo(g) => g.visit_hit_mut(visitor),

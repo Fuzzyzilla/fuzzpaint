@@ -97,6 +97,13 @@ impl super::PenTool for Gizmo {
             Arc::new(collection.into())
         });
         render_output.render_as = super::RenderAs::SharedGizmoCollection(collection.clone());
-        // for event in stylus_input.iter() {}
+
+        // No work to do. Elide locking the gizmos
+        if stylus_input.is_empty() {
+            return;
+        }
+
+        let collection = collection.write().await;
+        for event in stylus_input.iter() {}
     }
 }

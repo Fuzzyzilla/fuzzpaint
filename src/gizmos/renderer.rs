@@ -359,11 +359,14 @@ impl RenderVisitor<'_> {
 }
 // Thats... a unique way to propogate errors... :P
 impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
-    fn visit_collection(&mut self, gizmo: &super::Collection) -> Option<anyhow::Error> {
+    fn visit_collection(
+        &mut self,
+        gizmo: &super::Collection,
+    ) -> std::ops::ControlFlow<anyhow::Error> {
         let Some(parent_xform) = self.xform_stack.last() else {
             // Shouldn't happen! visit_ and end_collection should be symmetric.
             // Some to short circuit the visitation
-            return Some(anyhow::anyhow!("xform stack empty!"));
+            return std::ops::ControlFlow::Break(anyhow::anyhow!("xform stack empty!"));
         };
         // unwrap ok - checked above.
         let base_xform = self.xform_stack.first().unwrap();
@@ -371,9 +374,9 @@ impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
 
         self.xform_stack.push(new_xform);
 
-        None
+        std::ops::ControlFlow::Continue(())
     }
-    fn visit_gizmo(&mut self, gizmo: &super::Gizmo) -> Option<anyhow::Error> {
+    fn visit_gizmo(&mut self, gizmo: &super::Gizmo) -> std::ops::ControlFlow<anyhow::Error> {
         // Get shape if any, early return if not.
         let super::GizmoVisual::Shape {
             shape,
@@ -381,13 +384,13 @@ impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
             color,
         } = &gizmo.visual
         else {
-            return None;
+            return std::ops::ControlFlow::Continue(());
         };
 
         let Some(parent_xform) = self.xform_stack.last() else {
             // Shouldn't happen! visit_ and end_collection should be symmetric.
             // Some to short circuit the visitation
-            return Some(anyhow::anyhow!("xform stack empty!"));
+            return std::ops::ControlFlow::Break(anyhow::anyhow!("xform stack empty!"));
         };
         // unwrap ok - checked above.
         let base_xform = self.xform_stack.first().unwrap();
@@ -462,7 +465,7 @@ impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
                     self.renderer.triangulated_square.offset() as u32,
                     0,
                 ) {
-                    return Some(e.into());
+                    return std::ops::ControlFlow::Break(e.into());
                 }
             }
             super::RenderShape::Ellipse { .. } => {
@@ -470,16 +473,18 @@ impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
                     self.command_buffer
                         .draw(GizmoRenderer::CIRCLE_RES as u32 * 3, 1, 6, 0)
                 {
-                    return Some(e.into());
+                    return std::ops::ControlFlow::Break(e.into());
                 }
             }
         }
-        None
+        std::ops::ControlFlow::Continue(())
     }
-    fn end_collection(&mut self, _: &super::Collection) -> Option<anyhow::Error> {
-        let Some(_) = self.xform_stack.pop() else {
-            return Some(anyhow::anyhow!("No xform  to pop!"));
-        };
-        None
+    fn end_collection(&mut self, _: &super::Collection) -> std::ops::ControlFlow<anyhow::Error> {
+        if let Some(_) = self.xform_stack.pop() {
+            std::ops::ControlFlow::Continue(())
+        } else {
+            // would be a gizmo implementation error.
+            std::ops::ControlFlow::Break(anyhow::anyhow!("Unbalanced gizmo tree!"))
+        }
     }
 }

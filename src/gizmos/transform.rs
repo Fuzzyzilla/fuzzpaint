@@ -83,7 +83,7 @@ pub struct ClickInfo {
     /// Transform of this gizmo's parent, relative to the viewport coordinates.
     parent_transform: crate::view_transform::ViewTransform,
     /// Transform of the viewport coordinates into document coordinates.
-    viewport_to_document_transform: crate::view_transform::ViewTransform,
+    document_transform: crate::view_transform::ViewTransform,
     /// Where in the viewport this click occured
     coords_viewport: ultraviolet::Vec2,
     /// Where in the document this click occured
