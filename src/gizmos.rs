@@ -219,6 +219,8 @@ pub trait GizmoTree {
     /// Should visit in hit order, front-to-back.
     /// Returns Some with the short circuit value, or None if never short circuited.
     fn visit_hit<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T>;
+}
+pub trait MutGizmoTree {
     /// Pass the visitor to self and all children!
     /// Should visit in painters order, back-to-front.
     /// Returns Some with the short circuit value, or None if never short circuited.
@@ -238,7 +240,8 @@ impl GizmoTree for Gizmo {
     fn visit_hit<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T> {
         visitor.visit_gizmo(self)
     }
-
+}
+impl MutGizmoTree for Gizmo {
     fn visit_painter_mut<T>(
         &mut self,
         visitor: &mut impl MutableGizmoVisitor<T>,
@@ -273,7 +276,8 @@ impl GizmoTree for Collection {
 
         visitor.end_collection(self)
     }
-
+}
+impl MutGizmoTree for Collection {
     fn visit_painter_mut<T>(
         &mut self,
         visitor: &mut impl MutableGizmoVisitor<T>,
@@ -314,7 +318,8 @@ impl GizmoTree for AnyGizmo {
             AnyGizmo::Gizmo(g) => g.visit_hit(visitor),
         }
     }
-
+}
+impl MutGizmoTree for AnyGizmo {
     fn visit_painter_mut<T>(
         &mut self,
         visitor: &mut impl MutableGizmoVisitor<T>,
