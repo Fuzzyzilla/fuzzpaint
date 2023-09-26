@@ -22,6 +22,9 @@ pub trait PreviewRenderProxy {
     /// The area used for this viewport has changed. Not the same as the surface - rather, the central area
     /// between UI elements where this proxy is visible. Proxies should still initialize the whole screen, however.
     fn viewport_changed(&self, position: ultraviolet::Vec2, size: ultraviolet::Vec2);
+
+    /// The cursor requested by the preview, or None for default.
+    fn cursor(&self) -> Option<crate::gizmos::CursorOrInvisible>;
 }
 
 mod shaders {
@@ -392,6 +395,9 @@ pub struct DocumentViewportPreviewProxy {
 
     // Surface-derived render data ===============
     surface_data: tokio::sync::RwLock<ProxySurfaceData>,
+
+    // User render data ============
+    cursor: std::sync::RwLock<Option<crate::gizmos::CursorOrInvisible>>,
 }
 
 impl DocumentViewportPreviewProxy {
@@ -661,6 +667,8 @@ impl DocumentViewportPreviewProxy {
             surface_data: surface_data.into(),
             gizmo_renderer: gizmo_renderer.into(),
             test_gizmo_collection: test_gizmo_collection.into(),
+
+            cursor: None.into(),
         })
     }
     /// Internal use only. After the user's buffer is deemed swappable, the read index in switched over and returned.
@@ -746,6 +754,11 @@ impl DocumentViewportPreviewProxy {
                 )
             }
             crate::view_transform::DocumentTransform::Transform(t) => Some(t),
+        }
+    }
+    pub fn insert_cursor(&self, new_cursor: Option<crate::gizmos::CursorOrInvisible>) {
+        if let Some(mut cursor) = self.cursor.write().ok() {
+            *cursor = new_cursor;
         }
     }
     pub fn get_view_transform_sync(&self) -> Option<crate::view_transform::ViewTransform> {
@@ -840,5 +853,8 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
     }
     fn has_update(&self) -> bool {
         self.redraw_requested()
+    }
+    fn cursor(&self) -> Option<crate::gizmos::CursorOrInvisible> {
+        self.cursor.read().ok().and_then(|read| *read)
     }
 }

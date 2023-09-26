@@ -192,8 +192,11 @@ impl ActionStream {
         }
     }
 }
+#[derive(thiserror::Error, Debug)]
 pub enum ListenError {
+    #[error("Listener poisoned")]
     Poisoned,
+    #[error("Listener closed")]
     Closed,
 }
 pub struct ActionListener {
