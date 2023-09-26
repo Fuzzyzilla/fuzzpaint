@@ -201,13 +201,6 @@ impl From<Collection> for AnyGizmo {
     }
 }
 
-mod seal {
-    pub trait _Sealed {}
-    impl _Sealed for super::AnyGizmo {}
-    impl _Sealed for super::Gizmo {}
-    impl _Sealed for super::Collection {}
-}
-
 use winit::window::CursorIcon;
 /// None to hide the cursor, or Some to choose a winit cursor.
 #[derive(Copy, Clone)]
@@ -215,11 +208,9 @@ pub enum CursorOrInvisible {
     Icon(CursorIcon),
     Invisible,
 }
-// Idk what to name this lol
-/// Sealed, because we assume Gizmo and GizmoCollection are the only two valid
-/// gizmos. Just keeps logic clean, and that's the whole point of the composable style
-/// of this API :3
-pub trait Gizmooooo: seal::_Sealed {
+
+/// A tree that can be visited (in several modes) by a [GizmoVisitor].
+pub trait GizmoTree {
     /// Pass the visitor to self and all children!
     /// Should visit in painters order, back-to-front.
     /// Returns Some with the short circuit value, or None if never short circuited.
@@ -239,7 +230,7 @@ pub trait Gizmooooo: seal::_Sealed {
     fn visit_hit_mut<T>(&mut self, visitor: &mut impl MutableGizmoVisitor<T>) -> ControlFlow<T>;
 }
 
-impl Gizmooooo for Gizmo {
+impl GizmoTree for Gizmo {
     fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T> {
         visitor.visit_gizmo(self)
     }
@@ -260,7 +251,7 @@ impl Gizmooooo for Gizmo {
     }
 }
 
-impl Gizmooooo for Collection {
+impl GizmoTree for Collection {
     fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T> {
         visitor.visit_collection(self)?;
 
@@ -309,7 +300,7 @@ impl Gizmooooo for Collection {
     }
 }
 
-impl Gizmooooo for AnyGizmo {
+impl GizmoTree for AnyGizmo {
     fn visit_painter<T>(&self, visitor: &mut impl GizmoVisitor<T>) -> ControlFlow<T> {
         match self {
             AnyGizmo::Collection(g) => g.visit_painter(visitor),

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{gizmos::Gizmooooo, *};
+use crate::{gizmos::GizmoTree, *};
 
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
 /// behind the Egui content.
