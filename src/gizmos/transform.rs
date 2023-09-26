@@ -77,29 +77,3 @@ impl GizmoTransform {
         }
     }
 }
-
-/// Metadata for a click event, required to deal with transforms as the gizmo tree is searched for a hit.
-pub struct ClickInfo {
-    /// Transform of this gizmo's parent, relative to the viewport coordinates.
-    parent_transform: crate::view_transform::ViewTransform,
-    /// Transform of the viewport coordinates into document coordinates.
-    document_transform: crate::view_transform::ViewTransform,
-    /// Where in the viewport this click occured
-    coords_viewport: ultraviolet::Vec2,
-    /// Where in the document this click occured
-    coords_document: ultraviolet::Vec2,
-    /// Where in the local space this click occured
-    coords_local: ultraviolet::Vec2,
-}
-impl ClickInfo {
-    /// Create a info for the document transform and the given viewport mouse coordinate.
-    /// `document_transform` maps viewport coordinates to document coordinates.
-    ///
-    /// Returns None if `document_transform` is not an invertable transform (ie. if scale = ~0.0).
-    pub fn new(
-        document_transform: crate::view_transform::ViewTransform,
-        click_coord_viewport: ultraviolet::Vec2,
-    ) -> Option<Self> {
-        todo!()
-    }
-}
