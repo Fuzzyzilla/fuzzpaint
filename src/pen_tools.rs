@@ -16,6 +16,7 @@
 // that and there's really no need :'P
 mod brush;
 mod dummy;
+mod gizmo;
 mod viewport;
 
 trait MakePenTool {
@@ -70,6 +71,8 @@ impl ToolStateOutput {
             Transition::ToLayer(StateLayer::ViewportRotate)
         } else if actions.is_action_held(Action::ViewportScrub) {
             Transition::ToLayer(StateLayer::ViewportScrub)
+        } else if actions.is_action_held(Action::Gizmo) {
+            Transition::ToLayer(StateLayer::Gizmos)
         } else {
             Transition::ToBase
         }
@@ -133,7 +136,7 @@ impl ToolState {
             document_pan: viewport::ViewportPan::new_from_renderer(context)?,
             document_scrub: viewport::ViewportScrub::new_from_renderer(context)?,
             document_rotate: viewport::ViewportRotate::new_from_renderer(context)?,
-            gizmos: dummy::Dummy::new_from_renderer(context)?,
+            gizmos: gizmo::Gizmo::new_from_renderer(context)?,
         })
     }
     /// Allow the tool to process the given stylus data and actions, optionally returning preview render commands,

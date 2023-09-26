@@ -72,6 +72,24 @@ impl ViewportManipulateBase {
                             scale,
                         );
                         new_transform = Some(new);
+
+                        let xformed_point = view_info.transform.unproject(cgmath::Point2 { x: event.pos.0, y: event.pos.1 });
+
+                        /*render_output.render_as = super::RenderAs::InlineGizmos(
+                            [crate::gizmos::Gizmo {
+                                visual: crate::gizmos::GizmoVisual::Shape {
+                                    shape: crate::gizmos::RenderShape::Rectangle {
+                                        position: ultraviolet::Vec2 { x: xformed_point.x, y: xformed_point.y },
+                                        size: ultraviolet::Vec2 { x: delta.0, y: () },
+                                        rotation: (),
+                                    },
+                                    texture: None,
+                                    color: [0, 0, 0, 128],
+                                },
+                                ..Default::default()
+                            }]
+                            .into(),
+                        )*/
                     }
                     ViewportManipulateType::Pan => {
                         let mut new = initial_transform.clone();

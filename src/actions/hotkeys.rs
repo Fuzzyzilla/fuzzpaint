@@ -229,6 +229,32 @@ impl Default for ActionsToKeys {
             },
         );
         keys.insert(
+            super::Action::Erase,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
+                    alt: false,
+                    ctrl: false,
+                    shift: false,
+                    key: VirtualKeyCode::E,
+                }])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        keys.insert(
+            super::Action::Gizmo,
+            HotkeyCollection {
+                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
+                    alt: false,
+                    ctrl: false,
+                    shift: false,
+                    key: VirtualKeyCode::G, // Should be just ctrl, but not possible yet.
+                }])),
+                pad_hotkeys: None,
+                pen_hotkeys: None,
+            },
+        );
+        keys.insert(
             super::Action::LayerNew,
             HotkeyCollection {
                 keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {

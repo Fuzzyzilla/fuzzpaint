@@ -24,6 +24,9 @@ pub enum Action {
     ViewportRotate,
     ViewportFlipHorizontal,
 
+    Gizmo,
+    Erase,
+
     LayerUp,
     LayerDown,
     LayerNew,
