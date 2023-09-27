@@ -1,4 +1,3 @@
-use crate::gpu_err::*;
 use crate::render_device::*;
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
@@ -29,7 +28,7 @@ pub struct EguiCtx {
     full_output: Option<egui::FullOutput>,
 }
 impl EguiCtx {
-    pub fn new(render_surface: &RenderSurface) -> GpuResult<Self> {
+    pub fn new(render_surface: &RenderSurface) -> anyhow::Result<Self> {
         let mut renderer = EguiRenderer::new(render_surface.context(), render_surface.format())?;
         renderer.gen_framebuffers(&render_surface)?;
 
@@ -47,7 +46,7 @@ impl EguiCtx {
     pub fn wants_pointer_input(&self) -> bool {
         self.ctx.wants_pointer_input()
     }
-    pub fn replace_surface(&mut self, surface: &RenderSurface) -> GpuResult<()> {
+    pub fn replace_surface(&mut self, surface: &RenderSurface) -> anyhow::Result<()> {
         self.renderer.gen_framebuffers(surface)
     }
     pub fn push_winit_event(&mut self, winit_event: &winit::event::Event<'static, ()>) {
@@ -120,7 +119,9 @@ impl EguiCtx {
         self.requested_redraw_times.retain(|&time| time > now);
 
         // Check if there's anything to draw!
-        let Some(output) = self.full_output.take() else {return None};
+        let Some(output) = self.full_output.take() else {
+            return None;
+        };
 
         let res: AnyResult<_> = try_block::try_block! {
             let transfer_commands = self.renderer.do_image_deltas(output.textures_delta).transpose()?;
@@ -201,8 +202,12 @@ impl EguiEventAccumulator {
                         self.is_empty = false;
                     }
                     WinEvent::MouseInput { state, button, .. } => {
-                        let Some(pos) = self.last_mouse_pos else {return};
-                        let Some(button) = Self::winit_to_egui_mouse_button(*button) else {return};
+                        let Some(pos) = self.last_mouse_pos else {
+                            return;
+                        };
+                        let Some(button) = Self::winit_to_egui_mouse_button(*button) else {
+                            return;
+                        };
                         self.events.push(GuiEvent::PointerButton {
                             pos,
                             button,
@@ -234,7 +239,10 @@ impl EguiEventAccumulator {
                         self.is_empty = false;
                     }
                     WinEvent::KeyboardInput { input, .. } => {
-                        let Some(key) = input.virtual_keycode.and_then(Self::winit_to_egui_key) else {return};
+                        let Some(key) = input.virtual_keycode.and_then(Self::winit_to_egui_key)
+                        else {
+                            return;
+                        };
                         let pressed = if let winit::event::ElementState::Pressed = input.state {
                             true
                         } else {
@@ -310,7 +318,9 @@ impl EguiEventAccumulator {
                     }
                     WinEvent::DroppedFile(path) => {
                         use std::io::Read;
-                        let Ok(file) = std::fs::File::open(path) else {return};
+                        let Ok(file) = std::fs::File::open(path) else {
+                            return;
+                        };
                         //Surely there's a better way
                         let last_modified =
                             if let Ok(Ok(modified)) = file.metadata().map(|md| md.modified()) {
@@ -616,7 +626,7 @@ impl EguiRenderer {
     pub fn new(
         render_context: &Arc<crate::render_device::RenderContext>,
         surface_format: vk::Format,
-    ) -> GpuResult<Self> {
+    ) -> anyhow::Result<Self> {
         let device = render_context.device().clone();
         let renderpass = vulkano::single_pass_renderpass!(
             device.clone(),
@@ -632,12 +642,10 @@ impl EguiRenderer {
                 color: [swapchain_color],
                 depth_stencil: {},
             },
-        )
-        .fatal()
-        .result()?;
+        )?;
 
-        let fragment = fs::load(device.clone()).fatal().result()?;
-        let vertex = vs::load(device.clone()).fatal().result()?;
+        let fragment = fs::load(device.clone())?;
+        let vertex = vs::load(device.clone())?;
 
         let fragment_entry = fragment.entry_point("main").unwrap();
         let vertex_entry = vertex.entry_point("main").unwrap();
@@ -673,9 +681,7 @@ impl EguiRenderer {
                 viewport_count_dynamic: false,
                 scissor_count_dynamic: false,
             })
-            .build(render_context.device().clone())
-            .fatal()
-            .result()?;
+            .build(render_context.device().clone())?;
 
         Ok(Self {
             remove_next_frame: Vec::new(),
@@ -689,22 +695,18 @@ impl EguiRenderer {
     pub fn gen_framebuffers(
         &mut self,
         surface: &crate::render_device::RenderSurface,
-    ) -> GpuResult<()> {
-        let framebuffers: GpuResult<Vec<_>> = surface
+    ) -> anyhow::Result<()> {
+        let framebuffers: anyhow::Result<Vec<_>> = surface
             .swapchain_images()
             .iter()
-            .map(|image| -> GpuResult<_> {
+            .map(|image| -> anyhow::Result<_> {
                 let fb = vk::Framebuffer::new(
                     self.render_pass.clone(),
                     vk::FramebufferCreateInfo {
-                        attachments: vec![vk::ImageView::new_default(image.clone())
-                            .fatal()
-                            .result()?],
+                        attachments: vec![vk::ImageView::new_default(image.clone())?],
                         ..Default::default()
                     },
-                )
-                .fatal()
-                .result()?;
+                )?;
 
                 Ok(fb)
             })
@@ -719,7 +721,7 @@ impl EguiRenderer {
         &self,
         present_img_index: u32,
         tesselated_geom: &[egui::epaint::ClippedPrimitive],
-    ) -> GpuResult<vk::PrimaryAutoCommandBuffer> {
+    ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
         let mut vert_buff_size = 0;
         let mut index_buff_size = 0;
         for clipped in tesselated_geom {
@@ -740,10 +742,8 @@ impl EguiRenderer {
                 self.render_context.allocators().command_buffer(),
                 self.render_context.queues().graphics().idx(),
                 vk::CommandBufferUsage::OneTimeSubmit,
-            )
-            .fatal()
-            .result()?;
-            return Ok(builder.build().fatal().result()?);
+            )?;
+            return Ok(builder.build()?);
         }
 
         let mut vertex_vec = Vec::with_capacity(vert_buff_size);
@@ -766,9 +766,7 @@ impl EguiRenderer {
                 ..Default::default()
             },
             vertex_vec,
-        )
-        .fatal()
-        .result()?;
+        )?;
         let indices = vk::Buffer::from_iter(
             self.render_context.allocators().memory(),
             vk::BufferCreateInfo {
@@ -780,9 +778,7 @@ impl EguiRenderer {
                 ..Default::default()
             },
             index_vec,
-        )
-        .fatal()
-        .result()?;
+        )?;
 
         let framebuffer = self
             .framebuffers
@@ -806,9 +802,7 @@ impl EguiRenderer {
             self.render_context.allocators().command_buffer(),
             self.render_context.queues().graphics().idx(),
             vk::CommandBufferUsage::OneTimeSubmit,
-        )
-        .fatal()
-        .result()?;
+        )?;
         command_buffer_builder
             .begin_render_pass(
                 vk::RenderPassBeginInfo {
@@ -816,9 +810,7 @@ impl EguiRenderer {
                     ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
                 },
                 vk::SubpassContents::Inline,
-            )
-            .fatal()
-            .result()?
+            )?
             .bind_pipeline_graphics(self.pipeline.clone())
             .bind_vertex_buffers(0, [vertices])
             .bind_index_buffer(indices)
@@ -870,16 +862,14 @@ impl EguiRenderer {
                         start_index_buffer_offset as u32,
                         start_vertex_buffer_offset as i32,
                         0,
-                    )
-                    .fatal()
-                    .result()?;
+                    )?;
                 start_index_buffer_offset += mesh.indices.len();
                 start_vertex_buffer_offset += mesh.vertices.len();
             }
         }
 
-        command_buffer_builder.end_render_pass().fatal().result()?;
-        let command_buffer = command_buffer_builder.build().fatal().result()?;
+        command_buffer_builder.end_render_pass()?;
+        let command_buffer = command_buffer_builder.build()?;
 
         Ok(command_buffer)
     }
@@ -904,7 +894,7 @@ impl EguiRenderer {
     pub fn do_image_deltas(
         &mut self,
         deltas: egui::TexturesDelta,
-    ) -> Option<GpuResult<vk::PrimaryAutoCommandBuffer>> {
+    ) -> Option<anyhow::Result<vk::PrimaryAutoCommandBuffer>> {
         // Deltas order of operations:
         // Set -> Draw -> Free
 
@@ -926,7 +916,7 @@ impl EguiRenderer {
     fn do_image_deltas_set(
         &mut self,
         deltas: egui::TexturesDelta,
-    ) -> GpuResult<vk::PrimaryAutoCommandBuffer> {
+    ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
         //Free is handled by do_image_deltas
 
         //Pre-allocate on the heap so we don't end up re-allocating a bunch as we populate
@@ -970,17 +960,13 @@ impl EguiRenderer {
                 ..Default::default()
             },
             data_vec.into_iter(),
-        )
-        .fatal()
-        .result()?;
+        )?;
 
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             self.render_context.allocators().command_buffer(),
             self.render_context.queues().transfer().idx(),
             vk::CommandBufferUsage::OneTimeSubmit,
-        )
-        .fatal()
-        .result()?;
+        )?;
 
         //In case we need to allocate new textures.
         let (texture_set_idx, texture_set_layout) = self.texture_set_layout();
@@ -989,7 +975,7 @@ impl EguiRenderer {
         for (id, delta) in &deltas.set {
             let entry = self.images.entry(*id);
             //Generate if non-existent yet!
-            let image: GpuResult<_> = match entry {
+            let image: anyhow::Result<_> = match entry {
                 std::collections::hash_map::Entry::Vacant(vacant) => {
                     let format = match delta.image {
                         egui::ImageData::Color(_) => vk::Format::R8G8B8A8_UNORM,
@@ -1014,9 +1000,7 @@ impl EguiRenderer {
                         vk::ImageUsage::TRANSFER_DST | vk::ImageUsage::SAMPLED,
                         vk::ImageCreateFlags::empty(),
                         std::iter::empty(), //A puzzling difference in API from buffers - this just means Exclusive access.
-                    )
-                    .fatal()
-                    .result()?;
+                    )?;
 
                     let egui_to_vk_filter =
                         |egui_filter: egui::epaint::textures::TextureFilter| match egui_filter {
@@ -1042,9 +1026,7 @@ impl EguiRenderer {
                             component_mapping: mapping,
                             ..vk::ImageViewCreateInfo::from_image(&image)
                         },
-                    )
-                    .fatal()
-                    .result()?;
+                    )?;
 
                     //Could optimize here, re-using the four possible options of sampler.
                     let sampler = vk::Sampler::new(
@@ -1055,9 +1037,7 @@ impl EguiRenderer {
 
                             ..Default::default()
                         },
-                    )
-                    .fatal()
-                    .result()?;
+                    )?;
 
                     let descriptor_set = vk::PersistentDescriptorSet::new(
                         self.render_context.allocators().descriptor_set(),
@@ -1067,9 +1047,7 @@ impl EguiRenderer {
                             view.clone(),
                             sampler.clone(),
                         )],
-                    )
-                    .fatal()
-                    .result()?;
+                    )?;
                     Ok(vacant
                         .insert(EguiTexture {
                             image,
@@ -1098,23 +1076,20 @@ impl EguiRenderer {
 
             let transfer_offset = delta.pos.unwrap_or([0, 0]);
 
-            command_buffer
-                .copy_buffer_to_image(vk::CopyBufferToImageInfo {
-                    //Update regions according to delta
-                    regions: smallvec::smallvec![vk::BufferImageCopy {
-                        buffer_offset: start_offset,
-                        image_offset: [transfer_offset[0] as u32, transfer_offset[1] as u32, 0],
-                        buffer_image_height: delta.image.height() as u32,
-                        buffer_row_length: delta.image.width() as u32,
-                        image_extent: [delta.image.width() as u32, delta.image.height() as u32, 1],
-                        ..transfer_info.regions[0].clone()
-                    }],
-                    ..transfer_info
-                })
-                .fatal()
-                .result()?;
+            command_buffer.copy_buffer_to_image(vk::CopyBufferToImageInfo {
+                //Update regions according to delta
+                regions: smallvec::smallvec![vk::BufferImageCopy {
+                    buffer_offset: start_offset,
+                    image_offset: [transfer_offset[0] as u32, transfer_offset[1] as u32, 0],
+                    buffer_image_height: delta.image.height() as u32,
+                    buffer_row_length: delta.image.width() as u32,
+                    image_extent: [delta.image.width() as u32, delta.image.height() as u32, 1],
+                    ..transfer_info.regions[0].clone()
+                }],
+                ..transfer_info
+            })?;
         }
 
-        Ok(command_buffer.build().fatal().result()?)
+        Ok(command_buffer.build()?)
     }
 }

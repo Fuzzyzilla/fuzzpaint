@@ -1,5 +1,4 @@
 use crate::egui_impl;
-use crate::gpu_err::*;
 use crate::render_device;
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
@@ -34,7 +33,7 @@ impl WindowSurface {
         render_surface: render_device::RenderSurface,
         render_context: Arc<render_device::RenderContext>,
         preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
-    ) -> GpuResult<WindowRenderer> {
+    ) -> anyhow::Result<WindowRenderer> {
         let egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
 
         let (send, stream) = crate::actions::create_action_stream();
