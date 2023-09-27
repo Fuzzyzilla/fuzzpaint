@@ -587,12 +587,6 @@ checksum = "9ea835d29036a4087793836fa931b08837ad5e957da9e23886b29586fb9b6650"
 
 [[package]]
 name = "ecolor"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f99fe3cac305af9d6d92971af60d0f7ea4d783201ef1673571567b6699964d9"
-
-[[package]]
-name = "ecolor"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e479a7fa3f23d4e794f8b2f8b3568dd4e47886ad1b12c9c095e141cb591eb63"
@@ -602,55 +596,29 @@ dependencies = [
 
 [[package]]
 name = "egui"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6412a21e0bde7c0918f7fb44bbbb86b5e1f88e63c026a4e747cc7af02f76dfbe"
-dependencies = [
- "ahash",
- "epaint 0.21.0",
- "nohash-hasher",
- "tracing",
-]
-
-[[package]]
-name = "egui"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3aef8ec3ae1b772f340170c65bf27d5b8c28f543a0116c844d2ac08d01123e7"
 dependencies = [
  "ahash",
- "epaint 0.22.0",
+ "epaint",
+ "log",
  "nohash-hasher",
 ]
 
 [[package]]
 name = "egui-winit"
-version = "0.21.1"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab43597ba41f0ce39a364ad83185594578bfd8b3409b99dbcbb01df23afc3dbb"
+checksum = "4a49155fd4a0a4fb21224407a91de0030847972ef90fc64edb63621caea61cb2"
 dependencies = [
- "android-activity",
  "arboard",
- "egui 0.21.0",
+ "egui",
  "instant",
+ "log",
+ "raw-window-handle",
  "smithay-clipboard",
- "tracing",
  "webbrowser",
- "winit",
-]
-
-[[package]]
-name = "egui_winit_vulkano"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "203c1ad521328c178e24d16f5b26ca151a5b1669adafa2c6aa9eb3f904cdfd52"
-dependencies = [
- "ahash",
- "egui 0.21.0",
- "egui-winit",
- "image",
- "vulkano 0.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "vulkano-shaders 0.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "winit",
 ]
 
@@ -659,12 +627,6 @@ name = "either"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a26ae43d7bcc3b814de94796a5e736d4029efb0ee900c12e2d54c993ad1a1e07"
-
-[[package]]
-name = "emath"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8ecd80612937e0267909d5351770fe150004e24dab93954f69ca62eecd3f77e"
 
 [[package]]
 name = "emath"
@@ -690,21 +652,6 @@ dependencies = [
 
 [[package]]
 name = "epaint"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12e78b5c58a1f7f621f9d546add2adce20636422c9b251e29f749e8a2f713c95"
-dependencies = [
- "ab_glyph",
- "ahash",
- "atomic_refcell",
- "ecolor 0.21.0",
- "emath 0.21.0",
- "nohash-hasher",
- "parking_lot",
-]
-
-[[package]]
-name = "epaint"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09333964d4d57f40a85338ba3ca5ed4716070ab184dcfed966b35491c5c64f3b"
@@ -713,8 +660,9 @@ dependencies = [
  "ahash",
  "atomic_refcell",
  "bytemuck",
- "ecolor 0.22.0",
- "emath 0.22.0",
+ "ecolor",
+ "emath",
+ "log",
  "nohash-hasher",
  "parking_lot",
 ]
@@ -914,8 +862,8 @@ dependencies = [
  "cgmath",
  "dhat",
  "dirs",
- "egui 0.22.0",
- "egui_winit_vulkano",
+ "egui",
+ "egui-winit",
  "env_logger",
  "image",
  "log",
@@ -931,8 +879,8 @@ dependencies = [
  "try-block",
  "ultraviolet",
  "uuid",
- "vulkano 0.33.0 (git+https://github.com/Fuzzyzilla/vulkano.git?branch=dual-src-fix)",
- "vulkano-shaders 0.33.0 (git+https://github.com/Fuzzyzilla/vulkano.git?branch=dual-src-fix)",
+ "vulkano",
+ "vulkano-shaders",
  "vulkano-win",
  "winit",
 ]
@@ -2405,26 +2353,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing"
-version = "0.1.37"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ce8c33a8d48bd45d624a6e523445fd21ec13d3653cd51f681abf67418f54eb8"
-dependencies = [
- "cfg-if",
- "pin-project-lite",
- "tracing-core",
-]
-
-[[package]]
-name = "tracing-core"
-version = "0.1.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0955b8137a1df6f1a2e9a37d8a6656291ff0297c1a97c24e0d8425fe2312f79a"
-dependencies = [
- "once_cell",
-]
-
-[[package]]
 name = "try-block"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2517,35 +2445,6 @@ dependencies = [
 [[package]]
 name = "vulkano"
 version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e1f15eeb9d93a05eb3c237332a10806eac1eb82444e54485bfcc1859c483c23"
-dependencies = [
- "ahash",
- "ash",
- "bytemuck",
- "core-graphics-types",
- "crossbeam-queue",
- "half",
- "heck",
- "indexmap 1.9.3",
- "libloading 0.7.4",
- "objc",
- "once_cell",
- "parking_lot",
- "proc-macro2",
- "quote",
- "regex",
- "serde",
- "serde_json",
- "smallvec",
- "thread_local",
- "vk-parse",
- "vulkano-macros 0.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "vulkano"
-version = "0.33.0"
 source = "git+https://github.com/Fuzzyzilla/vulkano.git?branch=dual-src-fix#fb270996dde63446a9f5f1d5a8e2182df8abc440"
 dependencies = [
  "ahash",
@@ -2568,19 +2467,7 @@ dependencies = [
  "smallvec",
  "thread_local",
  "vk-parse",
- "vulkano-macros 0.33.0 (git+https://github.com/Fuzzyzilla/vulkano.git?branch=dual-src-fix)",
-]
-
-[[package]]
-name = "vulkano-macros"
-version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "895b8a2cac1e7650d2d0552f2392da0970a358515ac11a34adaf19bfdc771b98"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
+ "vulkano-macros",
 ]
 
 [[package]]
@@ -2597,21 +2484,6 @@ dependencies = [
 [[package]]
 name = "vulkano-shaders"
 version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f8cf18e9becbc6d39f1c39e26bcf69546c93989553eb5748cd734a8a697a6e5"
-dependencies = [
- "ahash",
- "heck",
- "proc-macro2",
- "quote",
- "shaderc",
- "syn 1.0.109",
- "vulkano 0.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "vulkano-shaders"
-version = "0.33.0"
 source = "git+https://github.com/Fuzzyzilla/vulkano.git?branch=dual-src-fix#fb270996dde63446a9f5f1d5a8e2182df8abc440"
 dependencies = [
  "ahash",
@@ -2620,7 +2492,7 @@ dependencies = [
  "quote",
  "shaderc",
  "syn 1.0.109",
- "vulkano 0.33.0 (git+https://github.com/Fuzzyzilla/vulkano.git?branch=dual-src-fix)",
+ "vulkano",
 ]
 
 [[package]]
@@ -2631,7 +2503,7 @@ dependencies = [
  "core-graphics-types",
  "objc",
  "raw-window-handle",
- "vulkano 0.33.0 (git+https://github.com/Fuzzyzilla/vulkano.git?branch=dual-src-fix)",
+ "vulkano",
  "winit",
 ]
 

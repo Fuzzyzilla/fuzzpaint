@@ -34,7 +34,7 @@ impl WindowSurface {
         render_context: Arc<render_device::RenderContext>,
         preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
     ) -> anyhow::Result<WindowRenderer> {
-        let egui_ctx = egui_impl::EguiCtx::new(&render_surface)?;
+        let egui_ctx = egui_impl::EguiCtx::new(self.win.as_ref(), &render_surface)?;
 
         let (send, stream) = crate::actions::create_action_stream();
 
@@ -118,24 +118,10 @@ impl WindowRenderer {
 
         Ok(())
     }
-    fn apply_platform_output(&mut self, out: egui::PlatformOutput) {
-        //Todo: Copied text
-        if let Some(url) = out.open_url {
-            //Todo: x-platform lol
-            let out = std::process::Command::new("xdg-open").arg(url.url).spawn();
-            if let Err(e) = out {
-                log::error!("Failed to open url: {e:?}");
-            }
-        }
-
-        if self.egui_ctx.wants_pointer_input() {
-            if let Some(cursor) = egui_impl::egui_to_winit_cursor(out.cursor_icon) {
-                self.win.set_cursor_icon(cursor);
-                self.win.set_cursor_visible(true);
-            } else {
-                self.win.set_cursor_visible(false);
-            }
-        } else {
+    fn apply_platform_output(&mut self) {
+        // If egui did not assert a cursor, allow the document to provide an icon.
+        // winit_egui handles egui's requests for cursor otherwise.
+        if !self.egui_ctx.wants_pointer_input() {
             let cursor = self.preview_renderer.cursor();
             let cursor = cursor.unwrap_or(crate::gizmos::CursorOrInvisible::Icon(
                 winit::window::CursorIcon::Default,
@@ -157,15 +143,12 @@ impl WindowRenderer {
 
         event_loop.run(move |event, _, control_flow| {
             use winit::event::{Event, WindowEvent};
-
-            //Weird ownership problems here.
-            let Some(event) = event.to_static() else {
-                return;
-            };
-            self.egui_ctx.push_winit_event(&event);
-
             match event {
                 Event::WindowEvent { event, .. } => {
+                    if self.egui_ctx.push_winit_event(&event).consumed {
+                        // All is done :3
+                        return;
+                    };
                     self.action_collector.push_event(&event);
                     match event {
                         WindowEvent::CloseRequested => {
@@ -216,9 +199,8 @@ impl WindowRenderer {
                 }
                 Event::MainEventsCleared => {
                     //Draw!
-                    if let Some(output) = self.do_ui() {
-                        self.apply_platform_output(output);
-                    };
+                    self.do_ui();
+                    self.apply_platform_output();
 
                     if self.egui_ctx.needs_redraw() || self.preview_renderer.has_update() {
                         self.window().request_redraw()
@@ -240,7 +222,7 @@ impl WindowRenderer {
             }
         });
     }
-    fn do_ui(&mut self) -> Option<egui::PlatformOutput> {
+    fn do_ui(&mut self) {
         static mut DOCUMENT_INTERFACE: std::sync::OnceLock<crate::DocumentUserInterface> =
             std::sync::OnceLock::new();
         static mut LAST_VIEWPORT: Option<egui::Rect> = None;
@@ -251,7 +233,7 @@ impl WindowRenderer {
             DOCUMENT_INTERFACE.get_or_init(Default::default);
             DOCUMENT_INTERFACE.get_mut().unwrap()
         };
-        let output = self.egui_ctx.update(|ctx| {
+        self.egui_ctx.update(self.win.as_ref(), |ctx| {
             document_interface.ui(&ctx);
         });
         let last_viewport = unsafe { &mut LAST_VIEWPORT };
@@ -270,8 +252,6 @@ impl WindowRenderer {
                 );
             }
         };
-
-        output
     }
     fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =
