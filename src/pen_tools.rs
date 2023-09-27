@@ -136,7 +136,7 @@ impl ToolState {
             document_pan: viewport::ViewportPan::new_from_renderer(context)?,
             document_scrub: viewport::ViewportScrub::new_from_renderer(context)?,
             document_rotate: viewport::ViewportRotate::new_from_renderer(context)?,
-            gizmos: gizmo::Gizmo::new_from_renderer(context)?,
+            gizmos: gizmo::GizmoManipulator::new_from_renderer(context)?,
         })
     }
     /// Allow the tool to process the given stylus data and actions, optionally returning preview render commands,
