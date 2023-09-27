@@ -118,7 +118,7 @@ impl WindowRenderer {
 
         Ok(())
     }
-    fn apply_platform_output(&mut self) {
+    fn apply_document_cursor(&mut self) {
         // If egui did not assert a cursor, allow the document to provide an icon.
         // winit_egui handles egui's requests for cursor otherwise.
         if !self.egui_ctx.wants_pointer_input() {
@@ -145,11 +145,10 @@ impl WindowRenderer {
             use winit::event::{Event, WindowEvent};
             match event {
                 Event::WindowEvent { event, .. } => {
-                    if self.egui_ctx.push_winit_event(&event).consumed {
-                        // All is done :3
-                        return;
-                    };
-                    self.action_collector.push_event(&event);
+                    let consumed = self.egui_ctx.push_winit_event(&event).consumed;
+                    if !consumed {
+                        self.action_collector.push_event(&event);
+                    }
                     match event {
                         WindowEvent::CloseRequested => {
                             *control_flow = winit::event_loop::ControlFlow::Exit;
@@ -163,7 +162,7 @@ impl WindowRenderer {
                         }
                         WindowEvent::CursorMoved { position, .. } => {
                             // Only take if egui doesn't want it!
-                            if !self.egui_ctx.wants_pointer_input() {
+                            if !consumed {
                                 self.stylus_events.push_position(position.into());
                             }
                         }
@@ -172,7 +171,7 @@ impl WindowRenderer {
 
                             if pressed {
                                 // Only take if egui doesn't want it!
-                                if !self.egui_ctx.wants_pointer_input() {
+                                if !consumed {
                                     self.stylus_events.set_mouse_pressed(true)
                                 }
                             } else {
@@ -200,7 +199,7 @@ impl WindowRenderer {
                 Event::MainEventsCleared => {
                     //Draw!
                     self.do_ui();
-                    self.apply_platform_output();
+                    self.apply_document_cursor();
 
                     if self.egui_ctx.needs_redraw() || self.preview_renderer.has_update() {
                         self.window().request_redraw()
@@ -215,7 +214,7 @@ impl WindowRenderer {
                 }
                 Event::RedrawEventsCleared => {
                     *control_flow = winit::event_loop::ControlFlow::WaitUntil(
-                        std::time::Instant::now() + std::time::Duration::from_millis(100),
+                        std::time::Instant::now() + std::time::Duration::from_secs(2),
                     );
                 }
                 _ => (),
