@@ -1,7 +1,52 @@
 use std::sync::Arc;
 
+use crate::gizmos::GizmoTree;
+
+mod visitors {
+    use crate::gizmos::*;
+    use std::ops::ControlFlow;
+    pub struct CursorFindVisitor {
+        pub viewport_cursor: ultraviolet::Vec2,
+        pub xform_stack: Vec<crate::view_transform::ViewTransform>,
+    }
+    impl crate::gizmos::GizmoVisitor<CursorOrInvisible> for CursorFindVisitor {
+        fn visit_collection(&mut self, gizmo: &Collection) -> ControlFlow<CursorOrInvisible> {
+            // todo: transform point.
+            let xformed = gizmo.transform.apply(
+                self.xform_stack.first().unwrap(),
+                self.xform_stack.last().unwrap(),
+            );
+            self.xform_stack.push(xformed);
+            ControlFlow::Continue(())
+        }
+        fn end_collection(&mut self, _: &Collection) -> ControlFlow<CursorOrInvisible> {
+            self.xform_stack.pop();
+            ControlFlow::Continue(())
+        }
+        fn visit_gizmo(&mut self, gizmo: &Gizmo) -> ControlFlow<CursorOrInvisible> {
+            let xform = gizmo.transform.apply(
+                self.xform_stack.first().unwrap(),
+                self.xform_stack.last().unwrap(),
+            );
+            let point = self.viewport_cursor;
+            let xformed_point = xform
+                .unproject(cgmath::Point2 {
+                    x: point.x,
+                    y: point.y,
+                })
+                .unwrap();
+            // Short circuits the iteration if this returns Some
+            if gizmo.hit_shape.hit([xformed_point.x, xformed_point.y]) {
+                ControlFlow::Break(gizmo.hover_cursor)
+            } else {
+                ControlFlow::Continue(())
+            }
+        }
+    }
+}
 pub struct Gizmo {
     shared_collection: Option<std::sync::Arc<tokio::sync::RwLock<crate::gizmos::Collection>>>,
+    cursor_latch: Option<crate::gizmos::CursorOrInvisible>,
 }
 
 impl super::MakePenTool for Gizmo {
@@ -10,6 +55,7 @@ impl super::MakePenTool for Gizmo {
     ) -> anyhow::Result<Box<dyn super::PenTool>> {
         Ok(Box::new(Gizmo {
             shared_collection: None,
+            cursor_latch: None,
         }))
     }
 }
@@ -17,6 +63,7 @@ impl super::MakePenTool for Gizmo {
 impl super::PenTool for Gizmo {
     fn exit(&mut self) {
         self.shared_collection = None;
+        self.cursor_latch = None;
     }
     /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
@@ -76,15 +123,18 @@ impl super::PenTool for Gizmo {
                 grab_cursor: CursorOrInvisible::Invisible,
                 visual: GizmoVisual::Shape {
                     shape: RenderShape::Ellipse {
-                        origin: ultraviolet::Vec2 { x: 10.0, y: 0.0 },
+                        origin: ultraviolet::Vec2 { x: 0.0, y: 0.0 },
                         radii: ultraviolet::Vec2 { x: 20.0, y: 20.0 },
                         rotation: 0.0,
                     },
                     texture: None,
                     color: [128, 0, 0, 128],
                 },
-                hit_shape: GizmoShape::None,
-                hover_cursor: CursorOrInvisible::Invisible,
+                hit_shape: GizmoShape::Ring {
+                    outer: 20.0,
+                    inner: 10.0,
+                },
+                hover_cursor: CursorOrInvisible::Icon(winit::window::CursorIcon::Help),
                 interaction: GizmoInteraction::None,
                 transform: transform::GizmoTransform {
                     scale_pinning: transform::GizmoTransformPinning::Document,
@@ -98,12 +148,24 @@ impl super::PenTool for Gizmo {
         });
         render_output.render_as = super::RenderAs::SharedGizmoCollection(collection.clone());
 
-        // No work to do. Elide locking the gizmos
-        if stylus_input.is_empty() {
-            return;
-        }
+        if let Some(last) = stylus_input.last() {
+            let collection = collection.write().await;
+            let point = ultraviolet::Vec2 {
+                x: last.pos.0,
+                y: last.pos.1,
+            };
+            let base_xform = view_info.transform.clone();
+            let mut visitor = visitors::CursorFindVisitor {
+                viewport_cursor: point,
+                xform_stack: vec![base_xform],
+            };
 
-        let collection = collection.write().await;
-        for event in stylus_input.iter() {}
+            if let std::ops::ControlFlow::Break(cursor) = collection.visit_hit(&mut visitor) {
+                self.cursor_latch = Some(cursor);
+            } else {
+                self.cursor_latch = None;
+            }
+        }
+        render_output.cursor = self.cursor_latch;
     }
 }

@@ -165,7 +165,7 @@ impl Default for Gizmo {
 /// A collection of many gizmos. It itself is a Gizmo,
 /// meaning Collections-in-Collections is supported.
 pub struct Collection {
-    transform: GizmoTransform,
+    pub transform: GizmoTransform,
     /// Children of this gizmo, sorted top to bottom.
     children: Vec<AnyGizmo>,
 }
