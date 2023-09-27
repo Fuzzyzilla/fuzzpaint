@@ -47,6 +47,11 @@ pub mod interface {
         // Color and eraser settings
         #[format(R32G32B32A32_SFLOAT)]
         pub modulate: [f32; 4],
+        /// 1.0 for eraser, 0.0 otherwise.
+        #[format(R32_SFLOAT)]
+        pub is_eraser: f32,
+        #[format(R32G32B32_SFLOAT)]
+        pub pad: [f32; 3],
     }
     #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone)]
     // Match align with GLSL std430.
@@ -258,6 +263,8 @@ impl GpuStampTess {
                     modulate: stroke.brush.color_modulate,
                     density,
                     size_mul: stroke.brush.size_mul,
+                    is_eraser: if stroke.brush.is_eraser { 1.0 } else { 0.0 },
+                    pad: [0.0; 3],
                 };
 
                 num_groups_per_info.push(num_groups);

@@ -752,6 +752,12 @@ mod stroke_renderer {
             path: "src/shaders/stamp.vert",
         }
     }
+    mod frag {
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            path: "src/shaders/stamp.frag",
+        }
+    }
 
     pub struct StrokeLayerRenderer {
         context: Arc<crate::render_device::RenderContext>,
@@ -818,14 +824,7 @@ mod stroke_renderer {
                 (view, sampler)
             };
 
-            // Safety: dual_src_blend currently broken in vulkano - pull request submitted, for now
-            // no erase U_U
-            let frag = unsafe {
-                vulkano::shader::ShaderModule::from_bytes(
-                    context.device().clone(),
-                    include_bytes!("shaders/stamp.frag.spv"),
-                )
-            }?;
+            let frag = frag::load(context.device().clone())?;
             let vert = vert::load(context.device().clone())?;
             // Unwraps ok here, using GLSL where "main" is the only allowed entry point.
             let frag = frag.entry_point("main").unwrap();
@@ -836,8 +835,8 @@ mod stroke_renderer {
             let mut premul_dyn_constants = vk::ColorBlendState::new(1);
             premul_dyn_constants.blend_constants = vk::StateMode::Fixed([1.0; 4]);
             premul_dyn_constants.attachments[0].blend = Some(vk::AttachmentBlend {
-                alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-                color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+                alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::Src1Alpha,
+                color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::Src1Color,
                 alpha_destination:
                     vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
                 color_destination:
