@@ -13,8 +13,10 @@ pub mod actions;
 pub mod blend;
 pub mod brush;
 pub mod document_viewport_proxy;
+pub mod gizmos;
 pub mod gpu_tess;
 pub mod id;
+pub mod pen_tools;
 pub mod render_device;
 pub mod stylus_events;
 pub mod tess;
@@ -1138,14 +1140,14 @@ impl Globals {
     }
 }
 static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
-enum RenderMessage {
+pub enum RenderMessage {
     SwitchDocument(WeakID<Document>),
     StrokeLayer {
         layer: WeakID<StrokeLayer>,
         kind: StrokeLayerRenderMessageKind,
     },
 }
-enum StrokeLayerRenderMessageKind {
+pub enum StrokeLayerRenderMessageKind {
     /// The blend settings (opacity, clip, mode) for the layer were modified.
     BlendChanged(Blend),
     /// A stroke was appended to the given layer.
@@ -1430,6 +1432,7 @@ async fn render_worker(
 async fn stylus_event_collector(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     mut action_listener: actions::ActionListener,
+    mut tools: pen_tools::ToolState,
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
     render_send: tokio::sync::mpsc::UnboundedSender<RenderMessage>,
 ) -> AnyResult<()> {
@@ -1457,268 +1460,33 @@ async fn stylus_event_collector(
         document_selections.cur_layer = Some(default_layer);
     }
 
-    let mut last_document = None;
-
-    let mut current_stroke = None::<Stroke>;
-
-    let mut drag_start_pos = None::<(f32, f32)>;
-    let mut initial_transform = None::<view_transform::ViewTransform>;
-
     loop {
         match event_stream.recv().await {
-            Ok(event_frame) => {
+            Ok(stylus_frame) => {
                 // We need a transform in order to do any of our work!
-                let Some(mut transform) = document_preview.get_view_transform().await else {
+                let Some(transform) = document_preview.get_view_transform().await else {
                     continue;
                 };
 
-                // Collect all the data we need from selections global immediately:
-                let (cur_document, cur_layer, cur_brush, ui_undos) = {
-                    let read = globals.selections().read().await;
-                    let Some(cur_document) = read.cur_document else {
-                        continue;
-                    };
-                    let Some(cur_layer) = read
-                        .document_selections
-                        .get(&cur_document)
-                        .and_then(|selections| selections.cur_layer)
-                    else {
-                        continue;
-                    };
-                    let brush = read.brush_settings.clone();
-
-                    let undos = read.undos.swap(0, std::sync::atomic::Ordering::Relaxed) as usize;
-
-                    (cur_document, cur_layer, brush, undos)
+                // Get the actions, returning if stream closed.
+                let action_frame = match action_listener.frame() {
+                    Ok(frame) => frame,
+                    Err(e) => match e {
+                        actions::ListenError::Closed => return Ok(()),
+                        // Todo: this is recoverable!
+                        actions::ListenError::Poisoned => todo!(),
+                    },
                 };
 
-                if Some(cur_document) != last_document {
-                    last_document = Some(cur_document.clone());
-                    // Notify renderer of the change
-                    render_send.send(RenderMessage::SwitchDocument(cur_document.clone()))?;
+                let render = tools
+                    .process(&transform, stylus_frame, &action_frame, &render_send)
+                    .await;
+
+                if let Some(transform) = render.set_view {
+                    document_preview.insert_document_transform(transform).await;
                 }
-
-                let frame = action_listener.frame().ok();
-                let (key_undos, key_redos, is_pan, is_scrub, is_rotate, is_mirror) = match frame {
-                    None => (0, 0, false, false, false, false),
-                    Some(f) => (
-                        f.action_trigger_count(actions::Action::Undo),
-                        f.action_trigger_count(actions::Action::Redo),
-                        f.is_action_held(actions::Action::ViewportPan),
-                        f.is_action_held(actions::Action::ViewportScrub),
-                        f.is_action_held(actions::Action::ViewportRotate),
-                        // An odd number of mirror requests, we assume two mirror requests cancel out
-                        f.action_trigger_count(actions::Action::ViewportFlipHorizontal) % 2 == 1,
-                    ),
-                };
-
-                // Assume redos cancel out undos
-                let net_undos = (key_undos + ui_undos) as isize - (key_redos as isize);
-
-                if net_undos != 0 {
-                    let mut stroke_manager = globals.strokes().write().await;
-
-                    let layer_data =
-                        stroke_manager
-                            .layers
-                            .entry(cur_layer)
-                            .or_insert_with(|| StrokeLayerData {
-                                strokes: vec![],
-                                undo_cursor_position: None,
-                            });
-
-                    match (layer_data.undo_cursor_position, net_undos) {
-                        // Redone when nothing undone - do nothin!
-                        (None, ..=0) => (),
-                        // New undos!
-                        (None, undos @ 1..) => {
-                            // `as` cast ok - we checked that it's positive.
-                            // clamp undos to the size of the data.
-                            let undos = layer_data.strokes.len().min(undos as usize);
-                            // Subtract won't overflow
-                            layer_data.undo_cursor_position =
-                                Some(layer_data.strokes.len() - undos);
-                            // broadcast the truncation request
-                            render_send.send(RenderMessage::StrokeLayer {
-                                layer: cur_layer,
-                                kind: StrokeLayerRenderMessageKind::Truncate(undos),
-                            })?;
-                        }
-                        // Redos when there were outstanding undos
-                        (Some(old_cursor), negative_redos @ ..=0) => {
-                            // weird conventions I invented here :V
-                            // `as` cast ok - we checked that it's negative, and inverted it.
-                            let redos = (-negative_redos) as usize;
-                            let new_cursor = old_cursor.saturating_add(redos);
-
-                            // This many redos will move cursor past the end
-                            let bounds = if new_cursor >= layer_data.strokes.len() {
-                                layer_data.undo_cursor_position = None;
-                                // append all strokes from the cursor onward
-                                old_cursor..layer_data.strokes.len()
-                            } else {
-                                layer_data.undo_cursor_position = Some(new_cursor);
-
-                                // append all strokes from the old cursor until the new
-                                old_cursor..new_cursor
-                            };
-
-                            // Tell the renderer to append these strokes once more
-                            for stroke in &layer_data.strokes[bounds] {
-                                render_send.send(RenderMessage::StrokeLayer {
-                                    layer: cur_layer,
-                                    kind: StrokeLayerRenderMessageKind::Append(stroke.into()),
-                                })?;
-                            }
-                        }
-                        // There were outstanding undos, and we're adding to them.
-                        (Some(old_cursor), undos @ 1..) => {
-                            // Prevent undos from taking index below 0
-                            // `as` cast ok - we checked that it's positive
-                            let undos = old_cursor.min(undos as usize);
-
-                            // Won't overflow
-                            layer_data.undo_cursor_position = Some(old_cursor - undos);
-
-                            render_send.send(RenderMessage::StrokeLayer {
-                                layer: cur_layer,
-                                kind: StrokeLayerRenderMessageKind::Truncate(undos),
-                            })?;
-                        }
-                        // All cases are handled.
-                        _ => unreachable!(),
-                    }
-                }
-
-                if is_pan || is_scrub || is_rotate {
-                    // treat stylus events as viewport movement
-                    let mut new_transform = None::<view_transform::ViewTransform>;
-                    for event in event_frame.iter() {
-                        if event.pressed {
-                            let initial_transform =
-                                initial_transform.get_or_insert(transform.clone());
-                            let start_pos = drag_start_pos.get_or_insert(event.pos);
-
-                            let delta = (event.pos.0 - start_pos.0, event.pos.1 - start_pos.1);
-                            if is_scrub {
-                                // Up or right is zoom in. This is natural for me as a right-handed
-                                // person, but might ask around and see if this should be adjustable.
-                                // certainly the speed should be :P
-                                let scale = 1.01f32.powf(delta.0 - delta.1);
-
-                                // Take the initial transform, and scale about the first drag point.
-                                // If the transform becomes broken (returns err), don't use it.
-                                let mut new = initial_transform.clone();
-                                new.scale_about(
-                                    cgmath::Point2 {
-                                        x: start_pos.0,
-                                        y: start_pos.1,
-                                    },
-                                    scale,
-                                );
-                                new_transform = Some(new);
-                            } else if is_pan {
-                                let mut new = initial_transform.clone();
-                                new.pan(cgmath::Vector2 {
-                                    x: delta.0,
-                                    y: delta.1,
-                                });
-                                new_transform = Some(new);
-                            } else if is_rotate {
-                                let (viewport_pos, viewport_size) = document_preview.get_viewport();
-                                let viewport_middle = viewport_pos + viewport_size / 2.0;
-
-                                let start_angle = (start_pos.0 - viewport_middle.x)
-                                    .atan2(start_pos.1 - viewport_middle.y);
-                                let now_angle = (event.pos.0 - viewport_middle.x)
-                                    .atan2(event.pos.1 - viewport_middle.y);
-                                let delta = start_angle - now_angle;
-
-                                let mut new = initial_transform.clone();
-                                new.rotate_about(viewport_middle, cgmath::Rad(delta));
-                                new_transform = Some(new);
-                            }
-                        } else {
-                            initial_transform = None;
-                            drag_start_pos = None;
-                        }
-                    }
-                    // Set transform, if changed.
-                    if let Some(transform) = new_transform {
-                        document_preview
-                            .insert_document_transform(
-                                view_transform::DocumentTransform::Transform(transform),
-                            )
-                            .await;
-                    }
-                } else {
-                    // clear out drag/pan data. stinky bad
-                    initial_transform = None;
-                    drag_start_pos = None;
-
-                    // treat stylus as new strokes
-                    for event in event_frame.iter() {
-                        if event.pressed {
-                            // Get stroke-in-progress or start anew.
-                            let this_stroke = current_stroke.get_or_insert_with(|| Stroke {
-                                brush: cur_brush.clone(),
-                                id: Default::default(),
-                                points: Vec::new(),
-                            });
-                            let Ok(pos) =
-                                transform.unproject(cgmath::point2(event.pos.0, event.pos.1))
-                            else {
-                                // If transform is ill-formed, we can't do work.
-                                continue;
-                            };
-
-                            // Calc cumulative distance from the start, or 0.0 if this is the first point.
-                            let dist = this_stroke
-                                .points
-                                .last()
-                                .map(|last| {
-                                    let delta = [last.pos[0] - pos.x, last.pos[1] - pos.y];
-                                    last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
-                                })
-                                .unwrap_or(0.0);
-
-                            this_stroke.points.push(StrokePoint {
-                                pos: [pos.x, pos.y],
-                                pressure: event.pressure.unwrap_or(1.0),
-                                dist,
-                            })
-                        } else {
-                            if let Some(stroke) = current_stroke.take() {
-                                // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
-                                let immutable: ImmutableStroke = stroke.into();
-
-                                let mut stroke_manager = globals.strokes().write().await;
-
-                                let layer_data = stroke_manager
-                                    .layers
-                                    .entry(cur_layer)
-                                    .or_insert_with(|| StrokeLayerData {
-                                        strokes: vec![],
-                                        undo_cursor_position: None,
-                                    });
-
-                                // If there was an undo cursor, truncate everything after
-                                // and replace with new data.
-                                if let Some(cursor) = layer_data.undo_cursor_position.take() {
-                                    layer_data.strokes.drain(cursor..);
-                                }
-
-                                let weak_ref = (&immutable).into();
-                                layer_data.strokes.push(immutable);
-
-                                render_send.send(RenderMessage::StrokeLayer {
-                                    layer: cur_layer,
-                                    kind: StrokeLayerRenderMessageKind::Append(weak_ref),
-                                })?;
-                            }
-                        }
-                    }
-                }
+                document_preview.insert_cursor(render.cursor);
+                document_preview.insert_tool_render(render.render_as);
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
                 log::warn!("Lost {num} stylus frames!");
@@ -1774,7 +1542,11 @@ fn main() -> AnyResult<std::convert::Infallible> {
         // drop this unless we steal it.
         let _profiler = _profiler;
 
-        let result = {
+        let result: Result<((), ()), anyhow::Error> = 'block: {
+            let mut tools = match pen_tools::ToolState::new_from_renderer(&render_context) {
+                Ok(tools) => tools,
+                Err(e) => break 'block Err(e),
+            };
             // We don't expect this channel to get very large, but it's important
             // that messages don't get lost under any circumstance, lest an expensive
             // document rebuild be needed :P
@@ -1793,6 +1565,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
                     stylus_event_collector(
                         event_stream,
                         action_listener,
+                        tools,
                         document_view,
                         render_sender,
                     ),

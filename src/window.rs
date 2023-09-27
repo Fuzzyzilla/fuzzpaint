@@ -129,11 +129,26 @@ impl WindowRenderer {
             }
         }
 
-        if let Some(cursor) = egui_impl::egui_to_winit_cursor(out.cursor_icon) {
-            self.win.set_cursor_icon(cursor);
-            self.win.set_cursor_visible(true);
+        if self.egui_ctx.wants_pointer_input() {
+            if let Some(cursor) = egui_impl::egui_to_winit_cursor(out.cursor_icon) {
+                self.win.set_cursor_icon(cursor);
+                self.win.set_cursor_visible(true);
+            } else {
+                self.win.set_cursor_visible(false);
+            }
         } else {
-            self.win.set_cursor_visible(false);
+            let cursor = self.preview_renderer.cursor();
+            let cursor = cursor.unwrap_or(crate::gizmos::CursorOrInvisible::Icon(
+                winit::window::CursorIcon::Default,
+            ));
+
+            if let crate::gizmos::CursorOrInvisible::Icon(i) = cursor {
+                self.win.set_cursor_icon(i);
+                self.win.set_cursor_visible(true);
+            }
+            if let crate::gizmos::CursorOrInvisible::Invisible = cursor {
+                self.win.set_cursor_visible(false);
+            }
         }
     }
     pub fn run(mut self) -> ! {
@@ -282,12 +297,17 @@ impl WindowRenderer {
         //Wait for previous frame to end. (required for safety of preview render proxy)
         self.last_frame_fence.take().map(|fence| fence.wait(None));
 
-        let preview_commands = unsafe { self.preview_renderer.render(idx) };
+        let preview_commands = unsafe {
+            self.preview_renderer.render(
+                self.render_surface.as_ref().unwrap().swapchain_images()[idx as usize].clone(),
+                idx,
+            )
+        };
         let preview_commands = match preview_commands {
-            Ok(commands) => Some(commands),
+            Ok(commands) => commands,
             Err(e) => {
                 log::warn!("Failed to build preview commands {e:?}");
-                None
+                Default::default()
             }
         };
 
@@ -309,43 +329,36 @@ impl WindowRenderer {
                 // wait for the semaphore. For now, I just stall the thread.
                 transfer_future.wait(None)?;
 
-                if let Some(preview_commands) = preview_commands {
-                    image_future
+                let mut future = image_future.boxed();
+
+                for buffer in preview_commands.into_iter() {
+                    future = future
                         .then_execute(
                             self.render_context.queues().graphics().queue().clone(),
-                            preview_commands,
+                            buffer,
                         )?
-                        .then_execute(
-                            self.render_context.queues().graphics().queue().clone(),
-                            draw,
-                        )?
-                        .boxed()
-                } else {
-                    image_future
-                        .then_execute(
-                            self.render_context.queues().graphics().queue().clone(),
-                            draw,
-                        )?
-                        .boxed()
+                        .boxed();
                 }
+
+                future
+                    .then_execute(
+                        self.render_context.queues().graphics().queue().clone(),
+                        draw,
+                    )?
+                    .boxed()
             }
             Some((None, draw)) => {
-                if let Some(preview_commands) = preview_commands {
-                    image_future
+                let mut future = image_future.boxed();
+
+                for buffer in preview_commands.into_iter() {
+                    future = future
                         .then_execute(
                             self.render_context.queues().graphics().queue().clone(),
-                            preview_commands,
+                            buffer,
                         )?
-                        .then_execute_same_queue(draw)?
-                        .boxed()
-                } else {
-                    image_future
-                        .then_execute(
-                            self.render_context.queues().graphics().queue().clone(),
-                            draw,
-                        )?
-                        .boxed()
+                        .boxed();
                 }
+                future.then_execute_same_queue(draw)?.boxed()
             }
             None => image_future.boxed(),
         };

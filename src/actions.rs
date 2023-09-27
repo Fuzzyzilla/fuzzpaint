@@ -24,6 +24,9 @@ pub enum Action {
     ViewportRotate,
     ViewportFlipHorizontal,
 
+    Gizmo,
+    Erase,
+
     LayerUp,
     LayerDown,
     LayerNew,
@@ -192,8 +195,11 @@ impl ActionStream {
         }
     }
 }
+#[derive(thiserror::Error, Debug)]
 pub enum ListenError {
+    #[error("Listener poisoned")]
     Poisoned,
+    #[error("Listener closed")]
     Closed,
 }
 pub struct ActionListener {

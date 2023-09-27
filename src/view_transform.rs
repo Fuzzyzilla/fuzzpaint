@@ -14,11 +14,14 @@ pub struct ViewTransform {
 
     // current convention is to position based on top-left corner. This is an
     // implementation detail however!
-    decomposed: Decomposed2,
+    pub decomposed: Decomposed2,
 }
+
+#[derive(Debug, thiserror::Error)]
 pub enum TransformError {
     /// The transform cannot be inverted anymore, and has become useless.
     /// Occurs if scale gets too close to zero.
+    #[error("Uninvertable")]
     Uninvertable,
 }
 
@@ -200,7 +203,7 @@ impl Default for DocumentFit {
     fn default() -> Self {
         Self {
             flip_x: false,
-            rotation: cgmath::Rad(1.0),
+            rotation: Zero::zero(),
         }
     }
 }
