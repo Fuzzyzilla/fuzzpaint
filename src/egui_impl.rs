@@ -1,4 +1,3 @@
-use crate::gpu_err::*;
 use crate::render_device::*;
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
@@ -21,91 +20,81 @@ pub fn prepend_textures_delta(into: &mut egui::TexturesDelta, mut from: egui::Te
 
 pub struct EguiCtx {
     ctx: egui::Context,
-    events: EguiEventAccumulator,
+    state: egui_winit::State,
     renderer: EguiRenderer,
 
-    requested_redraw_times: std::collections::VecDeque<std::time::Instant>,
-    immediate_redraw: bool,
+    redraw_requested: bool,
     full_output: Option<egui::FullOutput>,
 }
 impl EguiCtx {
-    pub fn new(render_surface: &RenderSurface) -> GpuResult<Self> {
+    pub fn new(
+        window: &winit::window::Window,
+        render_surface: &RenderSurface,
+    ) -> anyhow::Result<Self> {
         let mut renderer = EguiRenderer::new(render_surface.context(), render_surface.format())?;
         renderer.gen_framebuffers(&render_surface)?;
 
+        let mut state = egui_winit::State::new(window);
+        state.set_pixels_per_point(egui_winit::native_pixels_per_point(window));
+        let properties = render_surface.context().physical_device().properties();
+        let max_size = properties.max_image_dimension2_d;
+        state.set_max_texture_side(max_size as usize);
+
         Ok(Self {
             ctx: Default::default(),
-            events: Default::default(),
+            state,
             renderer,
-            immediate_redraw: true,
-            requested_redraw_times: std::collections::VecDeque::from_iter(std::iter::once(
-                std::time::Instant::now(),
-            )),
+            redraw_requested: true,
             full_output: None,
         })
     }
     pub fn wants_pointer_input(&self) -> bool {
         self.ctx.wants_pointer_input()
     }
-    pub fn replace_surface(&mut self, surface: &RenderSurface) -> GpuResult<()> {
+    pub fn replace_surface(&mut self, surface: &RenderSurface) -> anyhow::Result<()> {
         self.renderer.gen_framebuffers(surface)
     }
-    pub fn push_winit_event(&mut self, winit_event: &winit::event::Event<'static, ()>) {
-        self.events.accumulate(winit_event)
+    pub fn push_winit_event<'e>(
+        &mut self,
+        winit_event: &winit::event::WindowEvent<'e>,
+    ) -> egui_winit::EventResponse {
+        let response = self.state.on_event(&self.ctx, winit_event);
+        if response.repaint {
+            self.redraw_requested = true;
+        }
+        response
     }
     pub fn update(
         &'_ mut self,
+        window: &winit::window::Window,
         f: impl FnOnce(&'_ egui::Context) -> (),
-    ) -> Option<egui::PlatformOutput> {
-        if self.needs_refresh() {
-            //Call into user code to draw
-            self.ctx.begin_frame(self.events.take_raw_input());
-            f(&self.ctx);
-            let mut output = self.ctx.end_frame();
+    ) {
+        //Call into user code to draw
+        self.ctx.begin_frame(self.state.take_egui_input(window));
+        f(&self.ctx);
+        let mut output = self.ctx.end_frame();
 
-            //If there were outstanding deltas, accumulate those
-            if let Some(old) = self.full_output.take() {
-                prepend_textures_delta(&mut output.textures_delta, old.textures_delta);
-            }
-
-            // handle repaint time
-            if output.repaint_after.is_zero() {
-                self.immediate_redraw = true;
-            } else {
-                //Egui returns astronomically large number if it doesn't want a redraw - triggers overflow lol
-                let requested_instant = std::time::Instant::now().checked_add(output.repaint_after);
-
-                if let Some(instant) = requested_instant {
-                    //Insert sorted
-                    match self.requested_redraw_times.binary_search(&instant) {
-                        Ok(..) => (), //A redraw is already scheduled for this exact instant
-                        Err(pos) => self.requested_redraw_times.insert(pos, instant),
-                    }
-                }
-            }
-
-            //return platform outputs
-            let platform_output = output.platform_output.take();
-            self.full_output = Some(output);
-            Some(platform_output)
-        } else {
-            None
+        //If there were outstanding deltas, accumulate those
+        if let Some(old) = self.full_output.take() {
+            prepend_textures_delta(&mut output.textures_delta, old.textures_delta);
         }
+
+        // handle repaint time
+        if output.repaint_after.is_zero() {
+            self.redraw_requested = true;
+        } else {
+            //Egui returns astronomically large number if it doesn't want a redraw - triggers overflow lol
+            // let requested_instant = std::time::Instant::now().checked_add(output.repaint_after);
+            // wawa, not implemented
+        }
+
+        self.state
+            .handle_platform_output(window, &self.ctx, output.platform_output.clone());
+        //return platform outputs
+        self.full_output = Some(output);
     }
     pub fn needs_redraw(&self) -> bool {
-        self.immediate_redraw
-            || self
-                .requested_redraw_times
-                .front()
-                .map_or(false, |&time| time < std::time::Instant::now())
-    }
-    pub fn needs_refresh(&self) -> bool {
-        let redraw_is_past = self
-            .requested_redraw_times
-            .front()
-            .map_or(false, |&time| time < std::time::Instant::now());
-
-        !self.events.is_empty() || redraw_is_past
+        self.redraw_requested
     }
     pub fn build_commands(
         &mut self,
@@ -114,13 +103,12 @@ impl EguiCtx {
         Option<vk::PrimaryAutoCommandBuffer>,
         vk::PrimaryAutoCommandBuffer,
     )> {
-        self.immediate_redraw = false;
-        let now = std::time::Instant::now();
-        //Remove past redraw requests.
-        self.requested_redraw_times.retain(|&time| time > now);
+        self.redraw_requested = false;
 
         // Check if there's anything to draw!
-        let Some(output) = self.full_output.take() else {return None};
+        let Some(output) = self.full_output.take() else {
+            return None;
+        };
 
         let res: AnyResult<_> = try_block::try_block! {
             let transfer_commands = self.renderer.do_image_deltas(output.textures_delta).transpose()?;
@@ -132,382 +120,6 @@ impl EguiCtx {
         };
 
         Some(res.unwrap()) //also stinky
-    }
-}
-
-struct EguiEventAccumulator {
-    events: Vec<egui::Event>,
-    last_mouse_pos: Option<egui::Pos2>,
-    last_modifiers: egui::Modifiers,
-    //egui keys are 8-bit, so allocate 256 bools.
-    held_keys: bitvec::array::BitArray<[u64; 4]>,
-    has_focus: bool,
-    hovered_files: Vec<egui::HoveredFile>,
-    dropped_files: Vec<egui::DroppedFile>,
-    screen_rect: Option<egui::Rect>,
-    pixels_per_point: f32,
-
-    last_taken: std::time::Instant,
-    start_time: std::time::Instant,
-
-    is_empty: bool,
-}
-impl EguiEventAccumulator {
-    pub fn new() -> Self {
-        Self {
-            events: Vec::new(),
-            last_mouse_pos: None,
-            held_keys: bitvec::array::BitArray::ZERO,
-            last_modifiers: egui::Modifiers::NONE,
-            has_focus: true,
-            hovered_files: Vec::new(),
-            dropped_files: Vec::new(),
-            screen_rect: None,
-            pixels_per_point: 1.0,
-            is_empty: false,
-
-            start_time: std::time::Instant::now(),
-            last_taken: std::time::Instant::now(),
-        }
-    }
-    pub fn accumulate(&mut self, event: &winit::event::Event<()>) {
-        use egui::Event as GuiEvent;
-        use winit::event::Event as SysEvent;
-        //TODOS: Copy/Cut/Paste, IME, Touch, AssistKit.
-        match event {
-            SysEvent::WindowEvent { event, .. } => {
-                use winit::event::WindowEvent as WinEvent;
-                match event {
-                    WinEvent::Resized(size) => {
-                        self.screen_rect = Some(egui::Rect {
-                            min: egui::pos2(0.0, 0.0),
-                            max: egui::pos2(size.width as f32, size.height as f32),
-                        });
-                        self.is_empty = false;
-                    }
-                    WinEvent::ScaleFactorChanged { scale_factor, .. } => {
-                        self.pixels_per_point = *scale_factor as f32;
-                        self.is_empty = false;
-                    }
-                    WinEvent::CursorLeft { .. } => {
-                        self.last_mouse_pos = None;
-                        self.events.push(GuiEvent::PointerGone);
-                        self.is_empty = false;
-                    }
-                    WinEvent::CursorMoved { position, .. } => {
-                        let position = egui::pos2(position.x as f32, position.y as f32);
-                        self.last_mouse_pos = Some(position);
-                        self.events.push(GuiEvent::PointerMoved(position));
-                        self.is_empty = false;
-                    }
-                    WinEvent::MouseInput { state, button, .. } => {
-                        let Some(pos) = self.last_mouse_pos else {return};
-                        let Some(button) = Self::winit_to_egui_mouse_button(*button) else {return};
-                        self.events.push(GuiEvent::PointerButton {
-                            pos,
-                            button,
-                            pressed: if let winit::event::ElementState::Pressed = state {
-                                true
-                            } else {
-                                false
-                            },
-                            modifiers: self.last_modifiers,
-                        });
-                        self.is_empty = false;
-                    }
-                    WinEvent::ModifiersChanged(state) => {
-                        self.last_modifiers = egui::Modifiers {
-                            alt: state.alt(),
-                            command: state.ctrl(),
-                            ctrl: state.ctrl(),
-                            mac_cmd: false,
-                            shift: state.shift(),
-                        };
-                        self.is_empty = false;
-                    }
-                    WinEvent::ReceivedCharacter(ch) => {
-                        //Various ascii codes that winit emits which break Egui
-                        if ('\x00'..'\x20').contains(ch) || *ch == '\x7F' {
-                            return;
-                        };
-                        self.events.push(GuiEvent::Text(ch.to_string()));
-                        self.is_empty = false;
-                    }
-                    WinEvent::KeyboardInput { input, .. } => {
-                        let Some(key) = input.virtual_keycode.and_then(Self::winit_to_egui_key) else {return};
-                        let pressed = if let winit::event::ElementState::Pressed = input.state {
-                            true
-                        } else {
-                            false
-                        };
-
-                        let prev_pressed = {
-                            let mut key_state = self.held_keys.get_mut(key as u8 as usize).unwrap();
-                            let prev_pressed = key_state.clone();
-                            *key_state = pressed;
-                            prev_pressed
-                        };
-
-                        self.events.push(GuiEvent::Key {
-                            key,
-                            pressed,
-                            repeat: prev_pressed && pressed,
-                            modifiers: self.last_modifiers,
-                        });
-                        self.is_empty = false;
-                    }
-                    WinEvent::MouseWheel { delta, .. } => {
-                        let (unit, delta, pix_delta) = match delta {
-                            winit::event::MouseScrollDelta::LineDelta(x, y) => {
-                                (
-                                    egui::MouseWheelUnit::Line,
-                                    egui::vec2(*x, *y),
-                                    //TODO: This 10.0 constant should come from the OS-defined
-                                    //line size, for accessibility.
-                                    egui::vec2(*x, *y) * 10.0,
-                                )
-                            }
-                            winit::event::MouseScrollDelta::PixelDelta(delta) => (
-                                egui::MouseWheelUnit::Point,
-                                egui::vec2(delta.x as f32, delta.y as f32),
-                                egui::vec2(delta.x as f32, delta.y as f32),
-                            ),
-                        };
-                        self.events.push(GuiEvent::MouseWheel {
-                            unit,
-                            delta,
-                            modifiers: self.last_modifiers,
-                        });
-
-                        //Emit scroll event as well.
-                        {
-                            let mut delta = pix_delta;
-
-                            if self.last_modifiers.shift {
-                                // Transpose scroll delta
-                                std::mem::swap(&mut delta.x, &mut delta.y);
-                            }
-
-                            self.events.push(GuiEvent::Scroll(delta));
-                        }
-                        self.is_empty = false;
-                    }
-                    WinEvent::TouchpadMagnify { delta, .. } => {
-                        self.events.push(GuiEvent::Zoom(*delta as f32));
-                        self.is_empty = false;
-                    }
-                    WinEvent::Focused(has_focus) => {
-                        self.has_focus = *has_focus;
-                        self.events.push(GuiEvent::WindowFocused(self.has_focus));
-                        self.is_empty = false;
-                    }
-                    WinEvent::HoveredFile(path) => {
-                        self.hovered_files.push(egui::HoveredFile {
-                            mime: String::new(),
-                            path: Some(path.clone()),
-                        });
-                        self.is_empty = false;
-                    }
-                    WinEvent::DroppedFile(path) => {
-                        use std::io::Read;
-                        let Ok(file) = std::fs::File::open(path) else {return};
-                        //Surely there's a better way
-                        let last_modified =
-                            if let Ok(Ok(modified)) = file.metadata().map(|md| md.modified()) {
-                                Some(modified)
-                            } else {
-                                None
-                            };
-
-                        let bytes: Option<std::sync::Arc<[u8]>> = {
-                            let mut reader = std::io::BufReader::new(file);
-                            let mut data = Vec::new();
-
-                            if let Ok(_) = reader.read_to_end(&mut data) {
-                                Some(data.into())
-                            } else {
-                                None
-                            }
-                        };
-
-                        self.dropped_files.push(egui::DroppedFile {
-                            name: path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned(),
-                            bytes,
-                            last_modified,
-                            path: Some(path.clone()),
-                        });
-                        self.is_empty = false;
-                    }
-                    _ => (),
-                }
-            }
-            _ => (),
-        }
-    }
-    pub fn winit_to_egui_mouse_button(
-        winit_button: winit::event::MouseButton,
-    ) -> Option<egui::PointerButton> {
-        use egui::PointerButton as EguiButton;
-        use winit::event::MouseButton as WinitButton;
-        match winit_button {
-            WinitButton::Left => Some(EguiButton::Primary),
-            WinitButton::Right => Some(EguiButton::Secondary),
-            WinitButton::Middle => Some(EguiButton::Middle),
-            WinitButton::Other(id) => match id {
-                0 => Some(EguiButton::Extra1),
-                1 => Some(EguiButton::Extra2),
-                _ => None,
-            },
-        }
-    }
-    pub fn winit_to_egui_key(winit_button: winit::event::VirtualKeyCode) -> Option<egui::Key> {
-        use egui::Key as egui_key;
-        use winit::event::VirtualKeyCode as winit_key;
-        match winit_button {
-            winit_key::Key0 | winit_key::Numpad0 => Some(egui_key::Num0),
-            winit_key::Key1 | winit_key::Numpad1 => Some(egui_key::Num1),
-            winit_key::Key2 | winit_key::Numpad2 => Some(egui_key::Num2),
-            winit_key::Key3 | winit_key::Numpad3 => Some(egui_key::Num5),
-            winit_key::Key4 | winit_key::Numpad4 => Some(egui_key::Num6),
-            winit_key::Key5 | winit_key::Numpad5 => Some(egui_key::Num4),
-            winit_key::Key6 | winit_key::Numpad6 => Some(egui_key::Num3),
-            winit_key::Key7 | winit_key::Numpad7 => Some(egui_key::Num7),
-            winit_key::Key8 | winit_key::Numpad8 => Some(egui_key::Num8),
-            winit_key::Key9 | winit_key::Numpad9 => Some(egui_key::Num9),
-
-            winit_key::Up => Some(egui_key::ArrowUp),
-            winit_key::Down => Some(egui_key::ArrowDown),
-            winit_key::Left => Some(egui_key::ArrowLeft),
-            winit_key::Right => Some(egui_key::ArrowRight),
-
-            winit_key::PageUp => Some(egui_key::PageUp),
-            winit_key::PageDown => Some(egui_key::PageDown),
-
-            winit_key::Home => Some(egui_key::Home),
-            winit_key::End => Some(egui_key::End),
-
-            winit_key::NumpadEnter | winit_key::Return => Some(egui_key::Enter),
-
-            winit_key::Escape => Some(egui_key::Escape),
-
-            winit_key::Space => Some(egui_key::Space),
-            winit_key::Tab => Some(egui_key::Tab),
-
-            winit_key::Delete => Some(egui_key::Delete),
-            winit_key::Back => Some(egui_key::Backspace),
-
-            winit_key::Insert => Some(egui_key::Insert),
-
-            //Help
-            winit_key::A => Some(egui_key::A),
-            winit_key::B => Some(egui_key::B),
-            winit_key::C => Some(egui_key::C),
-            winit_key::D => Some(egui_key::D),
-            winit_key::E => Some(egui_key::E),
-            winit_key::F => Some(egui_key::F),
-            winit_key::G => Some(egui_key::G),
-            winit_key::H => Some(egui_key::H),
-            winit_key::I => Some(egui_key::I),
-            winit_key::J => Some(egui_key::J),
-            winit_key::K => Some(egui_key::K),
-            winit_key::L => Some(egui_key::L),
-            winit_key::M => Some(egui_key::M),
-            winit_key::N => Some(egui_key::N),
-            winit_key::O => Some(egui_key::O),
-            winit_key::P => Some(egui_key::P),
-            winit_key::Q => Some(egui_key::Q),
-            winit_key::R => Some(egui_key::R),
-            winit_key::S => Some(egui_key::S),
-            winit_key::T => Some(egui_key::T),
-            winit_key::U => Some(egui_key::U),
-            winit_key::V => Some(egui_key::V),
-            winit_key::W => Some(egui_key::W),
-            winit_key::X => Some(egui_key::X),
-            winit_key::Y => Some(egui_key::Y),
-            winit_key::Z => Some(egui_key::Z),
-
-            _ => None,
-        }
-    }
-    pub fn is_empty(&self) -> bool {
-        self.is_empty
-    }
-    pub fn take_raw_input(&mut self) -> egui::RawInput {
-        self.is_empty = true;
-
-        // Take the old time, update it, and find the delta
-        let old_time = std::mem::replace(&mut self.last_taken, std::time::Instant::now());
-        let time_delta = self.last_taken - old_time;
-
-        egui::RawInput {
-            modifiers: self.last_modifiers,
-            events: std::mem::take(&mut self.events),
-            focused: self.has_focus,
-            //Unclear whether this should be taken or cloned.
-            hovered_files: std::mem::take(&mut self.hovered_files),
-            dropped_files: std::mem::take(&mut self.dropped_files),
-
-            predicted_dt: time_delta.as_secs_f32(),
-            //Time since app launch.
-            time: Some((self.last_taken - self.start_time).as_secs_f64()),
-
-            screen_rect: self.screen_rect,
-            pixels_per_point: Some(self.pixels_per_point),
-            max_texture_side: Some(4096),
-            //We cannot know yet!
-            ..Default::default()
-        }
-    }
-}
-impl Default for EguiEventAccumulator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub fn egui_to_winit_cursor(cursor: egui::CursorIcon) -> Option<winit::window::CursorIcon> {
-    use egui::CursorIcon as GuiCursor;
-    use winit::window::CursorIcon as WinCursor;
-    match cursor {
-        GuiCursor::Alias => Some(WinCursor::Alias),
-        GuiCursor::AllScroll => Some(WinCursor::AllScroll),
-        GuiCursor::Cell => Some(WinCursor::Cell),
-        GuiCursor::ContextMenu => Some(WinCursor::ContextMenu),
-        GuiCursor::Copy => Some(WinCursor::Copy),
-        GuiCursor::Crosshair => Some(WinCursor::Crosshair),
-        GuiCursor::Default => Some(WinCursor::Default),
-        GuiCursor::Grab => Some(WinCursor::Grab),
-        GuiCursor::Grabbing => Some(WinCursor::Grabbing),
-        GuiCursor::Help => Some(WinCursor::Help),
-        GuiCursor::Move => Some(WinCursor::Move),
-        GuiCursor::NoDrop => Some(WinCursor::NoDrop),
-        GuiCursor::None => None,
-        GuiCursor::NotAllowed => Some(WinCursor::NotAllowed),
-        GuiCursor::PointingHand => Some(WinCursor::Hand),
-        GuiCursor::Progress => Some(WinCursor::Progress),
-        GuiCursor::ResizeColumn => Some(WinCursor::ColResize),
-        GuiCursor::ResizeEast => Some(WinCursor::EResize),
-        GuiCursor::ResizeHorizontal => Some(WinCursor::EwResize),
-        GuiCursor::ResizeNeSw => Some(WinCursor::NeswResize),
-        GuiCursor::ResizeNorth => Some(WinCursor::NResize),
-        GuiCursor::ResizeNorthEast => Some(WinCursor::NeResize),
-        GuiCursor::ResizeNorthWest => Some(WinCursor::NwResize),
-        GuiCursor::ResizeNwSe => Some(WinCursor::NwseResize),
-        GuiCursor::ResizeRow => Some(WinCursor::RowResize),
-        GuiCursor::ResizeSouth => Some(WinCursor::SResize),
-        GuiCursor::ResizeSouthEast => Some(WinCursor::SeResize),
-        GuiCursor::ResizeSouthWest => Some(WinCursor::SwResize),
-        GuiCursor::ResizeVertical => Some(WinCursor::NsResize),
-        GuiCursor::ResizeWest => Some(WinCursor::WResize),
-        GuiCursor::Text => Some(WinCursor::Text),
-        GuiCursor::VerticalText => Some(WinCursor::VerticalText),
-        GuiCursor::Wait => Some(WinCursor::Wait),
-        GuiCursor::ZoomIn => Some(WinCursor::ZoomIn),
-        GuiCursor::ZoomOut => Some(WinCursor::ZoomOut),
     }
 }
 
@@ -616,7 +228,7 @@ impl EguiRenderer {
     pub fn new(
         render_context: &Arc<crate::render_device::RenderContext>,
         surface_format: vk::Format,
-    ) -> GpuResult<Self> {
+    ) -> anyhow::Result<Self> {
         let device = render_context.device().clone();
         let renderpass = vulkano::single_pass_renderpass!(
             device.clone(),
@@ -632,12 +244,10 @@ impl EguiRenderer {
                 color: [swapchain_color],
                 depth_stencil: {},
             },
-        )
-        .fatal()
-        .result()?;
+        )?;
 
-        let fragment = fs::load(device.clone()).fatal().result()?;
-        let vertex = vs::load(device.clone()).fatal().result()?;
+        let fragment = fs::load(device.clone())?;
+        let vertex = vs::load(device.clone())?;
 
         let fragment_entry = fragment.entry_point("main").unwrap();
         let vertex_entry = vertex.entry_point("main").unwrap();
@@ -673,9 +283,7 @@ impl EguiRenderer {
                 viewport_count_dynamic: false,
                 scissor_count_dynamic: false,
             })
-            .build(render_context.device().clone())
-            .fatal()
-            .result()?;
+            .build(render_context.device().clone())?;
 
         Ok(Self {
             remove_next_frame: Vec::new(),
@@ -689,22 +297,18 @@ impl EguiRenderer {
     pub fn gen_framebuffers(
         &mut self,
         surface: &crate::render_device::RenderSurface,
-    ) -> GpuResult<()> {
-        let framebuffers: GpuResult<Vec<_>> = surface
+    ) -> anyhow::Result<()> {
+        let framebuffers: anyhow::Result<Vec<_>> = surface
             .swapchain_images()
             .iter()
-            .map(|image| -> GpuResult<_> {
+            .map(|image| -> anyhow::Result<_> {
                 let fb = vk::Framebuffer::new(
                     self.render_pass.clone(),
                     vk::FramebufferCreateInfo {
-                        attachments: vec![vk::ImageView::new_default(image.clone())
-                            .fatal()
-                            .result()?],
+                        attachments: vec![vk::ImageView::new_default(image.clone())?],
                         ..Default::default()
                     },
-                )
-                .fatal()
-                .result()?;
+                )?;
 
                 Ok(fb)
             })
@@ -719,7 +323,7 @@ impl EguiRenderer {
         &self,
         present_img_index: u32,
         tesselated_geom: &[egui::epaint::ClippedPrimitive],
-    ) -> GpuResult<vk::PrimaryAutoCommandBuffer> {
+    ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
         let mut vert_buff_size = 0;
         let mut index_buff_size = 0;
         for clipped in tesselated_geom {
@@ -740,10 +344,8 @@ impl EguiRenderer {
                 self.render_context.allocators().command_buffer(),
                 self.render_context.queues().graphics().idx(),
                 vk::CommandBufferUsage::OneTimeSubmit,
-            )
-            .fatal()
-            .result()?;
-            return Ok(builder.build().fatal().result()?);
+            )?;
+            return Ok(builder.build()?);
         }
 
         let mut vertex_vec = Vec::with_capacity(vert_buff_size);
@@ -766,9 +368,7 @@ impl EguiRenderer {
                 ..Default::default()
             },
             vertex_vec,
-        )
-        .fatal()
-        .result()?;
+        )?;
         let indices = vk::Buffer::from_iter(
             self.render_context.allocators().memory(),
             vk::BufferCreateInfo {
@@ -780,9 +380,7 @@ impl EguiRenderer {
                 ..Default::default()
             },
             index_vec,
-        )
-        .fatal()
-        .result()?;
+        )?;
 
         let framebuffer = self
             .framebuffers
@@ -806,9 +404,7 @@ impl EguiRenderer {
             self.render_context.allocators().command_buffer(),
             self.render_context.queues().graphics().idx(),
             vk::CommandBufferUsage::OneTimeSubmit,
-        )
-        .fatal()
-        .result()?;
+        )?;
         command_buffer_builder
             .begin_render_pass(
                 vk::RenderPassBeginInfo {
@@ -816,9 +412,7 @@ impl EguiRenderer {
                     ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
                 },
                 vk::SubpassContents::Inline,
-            )
-            .fatal()
-            .result()?
+            )?
             .bind_pipeline_graphics(self.pipeline.clone())
             .bind_vertex_buffers(0, [vertices])
             .bind_index_buffer(indices)
@@ -870,16 +464,14 @@ impl EguiRenderer {
                         start_index_buffer_offset as u32,
                         start_vertex_buffer_offset as i32,
                         0,
-                    )
-                    .fatal()
-                    .result()?;
+                    )?;
                 start_index_buffer_offset += mesh.indices.len();
                 start_vertex_buffer_offset += mesh.vertices.len();
             }
         }
 
-        command_buffer_builder.end_render_pass().fatal().result()?;
-        let command_buffer = command_buffer_builder.build().fatal().result()?;
+        command_buffer_builder.end_render_pass()?;
+        let command_buffer = command_buffer_builder.build()?;
 
         Ok(command_buffer)
     }
@@ -904,7 +496,7 @@ impl EguiRenderer {
     pub fn do_image_deltas(
         &mut self,
         deltas: egui::TexturesDelta,
-    ) -> Option<GpuResult<vk::PrimaryAutoCommandBuffer>> {
+    ) -> Option<anyhow::Result<vk::PrimaryAutoCommandBuffer>> {
         // Deltas order of operations:
         // Set -> Draw -> Free
 
@@ -926,7 +518,7 @@ impl EguiRenderer {
     fn do_image_deltas_set(
         &mut self,
         deltas: egui::TexturesDelta,
-    ) -> GpuResult<vk::PrimaryAutoCommandBuffer> {
+    ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
         //Free is handled by do_image_deltas
 
         //Pre-allocate on the heap so we don't end up re-allocating a bunch as we populate
@@ -970,17 +562,13 @@ impl EguiRenderer {
                 ..Default::default()
             },
             data_vec.into_iter(),
-        )
-        .fatal()
-        .result()?;
+        )?;
 
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             self.render_context.allocators().command_buffer(),
             self.render_context.queues().transfer().idx(),
             vk::CommandBufferUsage::OneTimeSubmit,
-        )
-        .fatal()
-        .result()?;
+        )?;
 
         //In case we need to allocate new textures.
         let (texture_set_idx, texture_set_layout) = self.texture_set_layout();
@@ -989,7 +577,7 @@ impl EguiRenderer {
         for (id, delta) in &deltas.set {
             let entry = self.images.entry(*id);
             //Generate if non-existent yet!
-            let image: GpuResult<_> = match entry {
+            let image: anyhow::Result<_> = match entry {
                 std::collections::hash_map::Entry::Vacant(vacant) => {
                     let format = match delta.image {
                         egui::ImageData::Color(_) => vk::Format::R8G8B8A8_UNORM,
@@ -1014,9 +602,7 @@ impl EguiRenderer {
                         vk::ImageUsage::TRANSFER_DST | vk::ImageUsage::SAMPLED,
                         vk::ImageCreateFlags::empty(),
                         std::iter::empty(), //A puzzling difference in API from buffers - this just means Exclusive access.
-                    )
-                    .fatal()
-                    .result()?;
+                    )?;
 
                     let egui_to_vk_filter =
                         |egui_filter: egui::epaint::textures::TextureFilter| match egui_filter {
@@ -1042,9 +628,7 @@ impl EguiRenderer {
                             component_mapping: mapping,
                             ..vk::ImageViewCreateInfo::from_image(&image)
                         },
-                    )
-                    .fatal()
-                    .result()?;
+                    )?;
 
                     //Could optimize here, re-using the four possible options of sampler.
                     let sampler = vk::Sampler::new(
@@ -1055,9 +639,7 @@ impl EguiRenderer {
 
                             ..Default::default()
                         },
-                    )
-                    .fatal()
-                    .result()?;
+                    )?;
 
                     let descriptor_set = vk::PersistentDescriptorSet::new(
                         self.render_context.allocators().descriptor_set(),
@@ -1067,9 +649,7 @@ impl EguiRenderer {
                             view.clone(),
                             sampler.clone(),
                         )],
-                    )
-                    .fatal()
-                    .result()?;
+                    )?;
                     Ok(vacant
                         .insert(EguiTexture {
                             image,
@@ -1098,23 +678,20 @@ impl EguiRenderer {
 
             let transfer_offset = delta.pos.unwrap_or([0, 0]);
 
-            command_buffer
-                .copy_buffer_to_image(vk::CopyBufferToImageInfo {
-                    //Update regions according to delta
-                    regions: smallvec::smallvec![vk::BufferImageCopy {
-                        buffer_offset: start_offset,
-                        image_offset: [transfer_offset[0] as u32, transfer_offset[1] as u32, 0],
-                        buffer_image_height: delta.image.height() as u32,
-                        buffer_row_length: delta.image.width() as u32,
-                        image_extent: [delta.image.width() as u32, delta.image.height() as u32, 1],
-                        ..transfer_info.regions[0].clone()
-                    }],
-                    ..transfer_info
-                })
-                .fatal()
-                .result()?;
+            command_buffer.copy_buffer_to_image(vk::CopyBufferToImageInfo {
+                //Update regions according to delta
+                regions: smallvec::smallvec![vk::BufferImageCopy {
+                    buffer_offset: start_offset,
+                    image_offset: [transfer_offset[0] as u32, transfer_offset[1] as u32, 0],
+                    buffer_image_height: delta.image.height() as u32,
+                    buffer_row_length: delta.image.width() as u32,
+                    image_extent: [delta.image.width() as u32, delta.image.height() as u32, 1],
+                    ..transfer_info.regions[0].clone()
+                }],
+                ..transfer_info
+            })?;
         }
 
-        Ok(command_buffer.build().fatal().result()?)
+        Ok(command_buffer.build()?)
     }
 }

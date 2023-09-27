@@ -2,7 +2,6 @@
 #![feature(once_cell_try)]
 use std::sync::Arc;
 mod egui_impl;
-pub mod gpu_err;
 pub mod vulkano_prelude;
 pub mod window;
 use brush::BrushStyle;
