@@ -22,6 +22,8 @@ struct InputStrokeInfo {
     float size_mul;
     // Color and eraser settings
     vec4 modulate;
+    float is_eraser;
+    vec3 pad;
 };
 struct InputStrokeVertex {
     vec2 pos;
@@ -186,7 +188,7 @@ void main() {
     const float radius = mix(info.density, info.size_mul * 0.5, interp.pressure);
     const vec2 cossin = vec2(cos(rotation), sin(rotation)) * radius;
     const mat2 rotation_matrix = mat2(cossin.xy, vec2(-cossin.y, cossin.x));
-    const float vertex_erase = 0.0;
+    const float vertex_erase = info.is_eraser;
 
     const OutputStrokeVertex topleft = OutputStrokeVertex(
         rotation_matrix * vec2(-1.0) + interp.pos,

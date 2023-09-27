@@ -149,7 +149,10 @@ impl super::PenTool for Brush {
                 let this_stroke = self
                     .in_progress_stroke
                     .get_or_insert_with(|| crate::Stroke {
-                        brush: cur_brush.clone(),
+                        brush: crate::StrokeBrushSettings {
+                            is_eraser: actions.is_action_held(crate::actions::Action::Erase),
+                            ..cur_brush.clone()
+                        },
                         id: Default::default(),
                         points: Vec::new(),
                     });
