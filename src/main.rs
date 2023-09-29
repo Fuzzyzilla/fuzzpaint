@@ -3,6 +3,7 @@
 use std::sync::Arc;
 mod egui_impl;
 pub mod vulkano_prelude;
+pub mod repositories;
 pub mod window;
 use brush::BrushStyle;
 use cgmath::{Matrix4, SquareMatrix};
