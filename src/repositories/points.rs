@@ -7,7 +7,7 @@
 //! data to disk in the future.
 
 /// Get the shared global instance of the point repository.
-pub fn globa() -> &'static PointRepository {
+pub fn global() -> &'static PointRepository {
     static REPO: std::sync::OnceLock<PointRepository> = std::sync::OnceLock::new();
     REPO.get_or_init(PointRepository::new)
 }
@@ -60,6 +60,11 @@ impl PointRepository {
             allocs: Default::default(),
         }
     }
+    /// Get the memory usage of resident data (uncompressed in RAM), in bytes.
+    pub fn current_resident_usage(&self) -> usize {
+        let num_packs = self.packs.read().len();
+        num_packs.saturating_mul(PACK_SIZE)
+    }
     /// Insert the collection into the repository, yielding a unique ID.
     /// Fails if the length of the collection is > 0x10_00_00
     pub fn insert(&self, collection: &[crate::StrokePoint]) -> Option<PointCollectionID> {
@@ -93,7 +98,7 @@ impl PointRepository {
                 let pack_id = {
                     let mut write = parking_lot::RwLockUpgradableReadGuard::upgrade(pack_reads);
                     write.push(new_pack);
-                    write.len()
+                    write.len() - 1
                 };
                 // populate info
                 let info = PointCollectionAllocInfo {

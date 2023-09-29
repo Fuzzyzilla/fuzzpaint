@@ -179,11 +179,18 @@ impl GpuStampTess {
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
+        let point_repo = crate::repositories::points::global();
         let count = strokes
             .iter()
-            .map(|stroke| stroke.points.len() as u64)
-            .try_fold(0, u64::checked_add);
-        let count = count.ok_or_else(|| anyhow::anyhow!("Packed point buffer too long!"))?;
+            .map(|stroke| point_repo.len_of(stroke.point_collection))
+            .try_fold(0, |fold, optional_length| {
+                optional_length.and_then(|length| u64::checked_add(length as u64, fold))
+            });
+        // Would be nice to differentiate these errors, but currently we don't handle many errors
+        // anyway...
+        let count = count.ok_or_else(|| {
+            anyhow::anyhow!("Packed point buffer too long, or contains invalid point collections!")
+        })?;
 
         if count == 0 {
             anyhow::bail!("Tess invoked on zero points!")
@@ -200,13 +207,18 @@ impl GpuStampTess {
             },
             count,
         )?;
-        // Copy every vertex in order (in a block so that the write guard is dropped asap)
+        // Copy every vertex in order
         {
-            packed_points
-                .write()?
-                .iter_mut()
-                .zip(strokes.iter().flat_map(|stroke| stroke.points.iter()))
-                .for_each(|(output, input)| *output = (*input).into());
+            let mut write = packed_points.write()?;
+            let mut cursor = 0;
+            for stroke in strokes.iter() {
+                let points = point_repo.try_get(stroke.point_collection)?;
+                write[cursor..(cursor + points.len())]
+                    .iter_mut()
+                    .zip(points.iter())
+                    .for_each(|(into, from)| *into = (*from).into());
+                cursor += points.len();
+            }
         }
 
         self.tess_buffer(strokes, packed_points)
@@ -232,6 +244,8 @@ impl GpuStampTess {
 
         let mut num_groups_per_info = Vec::new();
 
+        let point_repo = crate::repositories::points::global();
+
         let input_infos = vk::Buffer::from_iter(
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
@@ -244,18 +258,26 @@ impl GpuStampTess {
             },
             strokes.iter().map(|stroke| {
                 let density = stroke.brush.spacing_px;
+                let (num_expected_stamps, num_points) = {
+                    // If not found, ignore by claiming 0 stamps.
+                    if let Ok(points) = point_repo.try_get(stroke.point_collection) {
+                        let dist = points
+                            .last()
+                            .map(|last| (last.dist / density).ceil() as u32)
+                            .unwrap_or(0);
+                        let num_points = points.len() as u32;
 
-                let num_expected_stamps = stroke
-                    .points
-                    .last()
-                    .map(|last| (last.dist / density).ceil() as u32)
-                    .unwrap_or(0);
+                        (dist, num_points)
+                    } else {
+                        (0, 0)
+                    }
+                };
                 let num_expected_verts = num_expected_stamps * 6;
                 let num_groups = num_expected_stamps.div_ceil(self.work_size);
 
                 let info = interface::InputStrokeInfo {
                     start_point_idx: point_index_counter,
-                    num_points: stroke.points.len() as u32,
+                    num_points,
                     out_vert_offset: vertex_output_index_counter,
                     out_vert_limit: num_expected_verts,
                     start_group: group_index_counter,
@@ -268,7 +290,7 @@ impl GpuStampTess {
                 };
 
                 num_groups_per_info.push(num_groups);
-                point_index_counter += stroke.points.len() as u32;
+                point_index_counter += num_points;
                 group_index_counter += num_groups;
                 vertex_output_index_counter += num_expected_verts;
 

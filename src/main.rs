@@ -2,8 +2,8 @@
 #![feature(once_cell_try)]
 use std::sync::Arc;
 mod egui_impl;
-pub mod vulkano_prelude;
 pub mod repositories;
+pub mod vulkano_prelude;
 pub mod window;
 use brush::BrushStyle;
 use cgmath::{Matrix4, SquareMatrix};
@@ -1049,14 +1049,17 @@ impl Default for StrokeLayerManager {
 pub struct ImmutableStroke {
     id: FuzzID<Stroke>,
     brush: StrokeBrushSettings,
-    points: Arc<[StrokePoint]>,
+    point_collection: repositories::points::PointCollectionID,
 }
 impl From<Stroke> for ImmutableStroke {
     fn from(value: Stroke) -> Self {
+        let point_collection = repositories::points::global()
+            .insert(&value.points)
+            .unwrap();
         Self {
             id: value.id,
             brush: value.brush,
-            points: value.points.into(),
+            point_collection,
         }
     }
 }
@@ -1068,14 +1071,14 @@ pub struct WeakStroke {
     // Not a weak reference, despite the name. I hadn't thought of this til now x3
     // to me it makes sense that the existence of this weak reference should keep the
     // resource alive.
-    points: Arc<[StrokePoint]>,
+    point_collection: repositories::points::WeakPointCollectionID,
 }
 impl From<&ImmutableStroke> for WeakStroke {
     fn from(value: &ImmutableStroke) -> Self {
         Self {
             id: value.id.weak(),
             brush: value.brush.clone(),
-            points: value.points.clone(),
+            point_collection: value.point_collection.weak(),
         }
     }
 }
