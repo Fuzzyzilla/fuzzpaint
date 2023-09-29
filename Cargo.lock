@@ -872,6 +872,7 @@ dependencies = [
  "egui-winit",
  "env_logger",
  "hashbrown 0.14.0",
+ "human_bytes",
  "image",
  "log",
  "parking_lot",
@@ -1060,6 +1061,12 @@ checksum = "5444c27eef6923071f7ebcc33e3444508466a76f7a2b93da00ed6e19f30c1ddb"
 dependencies = [
  "windows-sys 0.48.0",
 ]
+
+[[package]]
+name = "human_bytes"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91f255a4535024abf7640cb288260811fc14794f62b063652ed349f9a6c2348e"
 
 [[package]]
 name = "humantime"

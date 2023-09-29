@@ -60,10 +60,19 @@ impl PointRepository {
             allocs: Default::default(),
         }
     }
-    /// Get the memory usage of resident data (uncompressed in RAM), in bytes.
-    pub fn current_resident_usage(&self) -> usize {
-        let num_packs = self.packs.read().len();
-        num_packs.saturating_mul(PACK_SIZE)
+    /// Get the memory usage of resident data (uncompressed in RAM), in bytes, and the capacity.
+    pub fn resident_usage(&self) -> (usize, usize) {
+        let read = self.packs.read();
+        let num_packs = read.len();
+        let capacity = num_packs
+            .saturating_mul(PACK_SIZE)
+            .saturating_mul(std::mem::size_of::<crate::StrokePoint>());
+        let usage = read
+            .iter()
+            .map(|pack| pack.usage())
+            .fold(0, usize::saturating_add)
+            .saturating_mul(std::mem::size_of::<crate::StrokePoint>());
+        (usage, capacity)
     }
     /// Insert the collection into the repository, yielding a unique ID.
     /// Fails if the length of the collection is > 0x10_00_00
@@ -204,6 +213,10 @@ impl PointPack {
         } else {
             None
         }
+    }
+    // Get the number of points currently in use.
+    fn usage(&self) -> usize {
+        *self.bump_free_idx.lock()
     }
     fn new() -> Self {
         let size = std::mem::size_of::<crate::StrokePoint>() * PACK_SIZE;

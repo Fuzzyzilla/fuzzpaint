@@ -655,6 +655,14 @@ impl DocumentUserInterface {
                             }
                         })
                 });
+                ui.separator();
+                ui.label("Memory Usage Stats");
+                let point_resident_usage = repositories::points::global().resident_usage();
+                ui.label(format!(
+                    "Point repository: {}/{}",
+                    human_bytes::human_bytes(point_resident_usage.0 as f64),
+                    human_bytes::human_bytes(point_resident_usage.1 as f64),
+                ));
             }
 
             /* Old Image picker, useful later
