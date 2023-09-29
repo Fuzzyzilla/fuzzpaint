@@ -6,6 +6,12 @@
 //! however, the API is constructed to allow for smart in-memory compression or dumping old
 //! data to disk in the future.
 
+/// Get the shared global instance of the point repository.
+pub fn globa() -> &'static PointRepository {
+    static REPO: std::sync::OnceLock<PointRepository> = std::sync::OnceLock::new();
+    REPO.get_or_init(PointRepository::new)
+}
+
 pub struct PointCollectionIDMarker;
 pub type PointCollectionID = crate::FuzzID<PointCollectionIDMarker>;
 pub type WeakPointCollectionID = crate::WeakID<PointCollectionIDMarker>;
@@ -47,6 +53,13 @@ pub struct PointRepository {
         parking_lot::RwLock<hashbrown::HashMap<WeakPointCollectionID, PointCollectionAllocInfo>>,
 }
 impl PointRepository {
+    fn new() -> Self {
+        // Self doesn't impl Default as we don't want any ctors to be public.
+        Self {
+            packs: Default::default(),
+            allocs: Default::default(),
+        }
+    }
     /// Insert the collection into the repository, yielding a unique ID.
     /// Fails if the length of the collection is > 0x10_00_00
     pub fn insert(&self, collection: &[crate::StrokePoint]) -> Option<PointCollectionID> {
@@ -208,3 +221,8 @@ impl PointPack {
         }
     }
 }
+// Safety - the pointer refers to heap mem, and can be transferred.
+unsafe impl Send for PointPack {}
+
+// Safety - The mutex prevents similtaneous mutable and immutable access.
+unsafe impl Sync for PointPack {}
