@@ -56,7 +56,7 @@ pub enum Command {
     Dummy,
 }
 
-pub enum DoUndo<'c> {
-    Do(&'c Command),
-    Undo(&'c Command),
+pub enum DoUndo<'c, T> {
+    Do(&'c T),
+    Undo(&'c T),
 }

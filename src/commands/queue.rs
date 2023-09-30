@@ -36,7 +36,8 @@ pub struct DocumentCommandListener {
     inner: std::sync::Arc<parking_lot::RwLock<DocumentCommandQueueInner>>,
 }
 impl DocumentCommandListener {
-    pub fn update(&mut self, f: impl FnMut(super::DoUndo<'_>)) {
+    /// Forwards the state of this listener to match the global queue.
+    pub fn update(&mut self, f: impl FnMut(super::DoUndo<'_, super::Command>)) {
         let lock = self.inner.read();
         let traverse = traverse(&lock.command_tree, self.cursor, lock.cursor).unwrap();
         self.cursor = lock.cursor;
@@ -46,10 +47,10 @@ impl DocumentCommandListener {
 
 // Traverses the shortest path from one tree node to another.
 // A traversal is an optional walk up to the closest ancestor, followed by walking down.
-struct TreeTraverser<'t> {
+struct TreeTraverser<'t, T> {
     // current point of the traversal
-    cur: slab_tree::NodeRef<'t, super::Command>,
-    tree: &'t slab_tree::Tree<super::Command>,
+    cur: slab_tree::NodeRef<'t, T>,
+    tree: &'t slab_tree::Tree<T>,
 
     // Common ancestor. May be equal to end, but never equal to start (we'd be walking down then).
     // Or None if we're walking down (i.e. start *is* the common ancestor)
@@ -60,8 +61,8 @@ struct TreeTraverser<'t> {
     end: slab_tree::NodeId,
 }
 
-impl<'t> Iterator for TreeTraverser<'t> {
-    type Item = super::DoUndo<'t>;
+impl<'t, T> Iterator for TreeTraverser<'t, T> {
+    type Item = super::DoUndo<'t, T>;
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(ancestor) = self.ancestor {
             // Ancestor is Some, we're going up!
@@ -117,8 +118,8 @@ impl<'t> Iterator for TreeTraverser<'t> {
 
 /// Find the ID of the nearest ancestor of A and B, or None if the IDs do not come from the same tree.
 /// The endpoints themselves could be the ancestor, if one is a parent of another!
-fn nearest_ancestor(
-    tree: &slab_tree::Tree<super::Command>,
+fn nearest_ancestor<T>(
+    tree: &slab_tree::Tree<T>,
     a: slab_tree::NodeId,
     b: slab_tree::NodeId,
 ) -> Option<slab_tree::NodeId> {
@@ -139,11 +140,11 @@ fn nearest_ancestor(
 
 /// Create an iterator that traverses the shortest path between start and end nodes, or None if the start
 /// and end nodes are not from the same tree.
-fn traverse<'t>(
-    tree: &'t slab_tree::Tree<super::Command>,
+fn traverse<'t, T>(
+    tree: &'t slab_tree::Tree<T>,
     start: slab_tree::NodeId,
     end: slab_tree::NodeId,
-) -> Option<TreeTraverser<'t>> {
+) -> Option<TreeTraverser<'t, T>> {
     let ancestor = nearest_ancestor(tree, start, end)?;
 
     // Find the path from the ancestor to the end.
