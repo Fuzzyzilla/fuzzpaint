@@ -7,7 +7,7 @@
 pub mod queue;
 
 pub enum LayerCommand {
-    Created(crate::FuzzID<crate::StrokeLayer>),
+    Created(crate::WeakID<crate::StrokeLayer>),
     Stroke(StrokeCommand),
 }
 /* Todo: need to figure out how documents play into all this...
@@ -20,7 +20,7 @@ pub enum DocumentCommand {
 */
 pub enum StrokeCommand {
     Created {
-        id: crate::FuzzID<crate::Stroke>,
+        id: crate::WeakID<crate::Stroke>,
         brush: crate::StrokeBrushSettings,
         points: crate::repositories::points::WeakPointCollectionID,
     },
@@ -51,9 +51,12 @@ pub enum MetaCommand {
 pub enum Command {
     Meta(MetaCommand),
     Layer(LayerCommand),
+    // We need a dummy command to serve as the root of the command tree. :V
+    // Invalid anywhere else.
+    Dummy,
 }
 
-enum DoUndo<'c> {
+pub enum DoUndo<'c> {
     Do(&'c Command),
     Undo(&'c Command),
 }

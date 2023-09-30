@@ -25,6 +25,7 @@ rayon = "1.7.0"
 rfd = "0.11.4"
 ron = "0.8.1"
 serde = { version = "1.0.188", features = ["derive", "rc"] }
+slab_tree = "0.3.2"
 smallvec = { version = "1.10.0", features = ["serde"] }
 strum = { version = "0.25.0", features = ["derive"] }
 thiserror = "1.0.40"
