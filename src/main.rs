@@ -1,6 +1,7 @@
 #![feature(portable_simd)]
 #![feature(once_cell_try)]
 use std::sync::Arc;
+pub mod commands;
 mod egui_impl;
 pub mod repositories;
 pub mod vulkano_prelude;
