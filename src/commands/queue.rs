@@ -148,29 +148,32 @@ fn traverse<'t, T>(
     let ancestor = nearest_ancestor(tree, start, end)?;
 
     // Find the path from the ancestor to the end.
-    // This is expensive! :O Ma
+    // This is expensive!
     let path_down = {
         let mut path_down = Vec::<(slab_tree::NodeId, usize)>::new();
-        // Will be some - nearest_ancestor already checked.
-        let mut cur_ref = tree.get(end)?;
-        loop {
-            // Will be Some, as we know there's a common ancestor. Will break before this becomes None.
-            let parent = cur_ref.parent()?;
-            // Will be found - of course the child is a child of it's parent :P
-            let (child_idx, _) = parent
-                .children()
-                .enumerate()
-                .find(|(_, node)| node.node_id() == cur_ref.node_id())?;
-            // Default to the zero'th child. That way, nodes with only one child won't
-            // be collected, otherwise we're just storing the whole tree! :P
-            if child_idx != 0 {
-                path_down.push((parent.node_id(), child_idx));
-            }
+        // Early escape if there is no path down needed!
+        if ancestor != end {
+            // Will be some - nearest_ancestor already checked.
+            let mut cur_ref = tree.get(end)?;
+            loop {
+                // Will be Some, as we know there's a common ancestor. Will break before this becomes None.
+                let parent = cur_ref.parent()?;
+                // Will be found - of course the child is a child of it's parent :P
+                let (child_idx, _) = parent
+                    .children()
+                    .enumerate()
+                    .find(|(_, node)| node.node_id() == cur_ref.node_id())?;
+                // Default to the zero'th child. That way, nodes with only one child won't
+                // be collected, otherwise we're just storing the whole tree! :P
+                if child_idx != 0 {
+                    path_down.push((parent.node_id(), child_idx));
+                }
 
-            if parent.node_id() == ancestor {
-                break;
+                if parent.node_id() == ancestor {
+                    break;
+                }
+                cur_ref = tree.get(parent.node_id())?;
             }
-            cur_ref = tree.get(parent.node_id())?;
         }
         path_down
     };
@@ -182,4 +185,134 @@ fn traverse<'t, T>(
         path_down,
         end,
     })
+}
+
+#[cfg(test)]
+mod test {
+    use super::{nearest_ancestor, traverse};
+    ///```
+    ///         0     <deleted>
+    ///        / \        |
+    ///       /   \       |
+    ///      1     2      8
+    ///     /|\    |\     |
+    ///    / | \   | \    |
+    ///   3  4  5  6  7   9
+    fn make_test_tree() -> (
+        hashbrown::HashMap<i32, slab_tree::NodeId>,
+        slab_tree::Tree<i32>,
+    ) {
+        let mut node_map = hashbrown::HashMap::with_capacity(7);
+        let mut tree = slab_tree::TreeBuilder::new()
+            .with_capacity(7)
+            .with_root(0)
+            .build();
+        let mut root = tree.root_mut().unwrap();
+        node_map.insert(0, root.node_id());
+
+        let mut left = root.append(1);
+        node_map.insert(1, left.node_id());
+        node_map.insert(3, left.append(3).node_id());
+        node_map.insert(4, left.append(4).node_id());
+        node_map.insert(5, left.append(5).node_id());
+        let mut right = root.append(2);
+        node_map.insert(2, right.node_id());
+        node_map.insert(6, right.append(6).node_id());
+        node_map.insert(7, right.append(7).node_id());
+        // Make floating tree fragment
+        let mut float = right.append(-1);
+        let mut float = float.append(8);
+        node_map.insert(8, float.node_id());
+        node_map.insert(9, float.append(9).node_id());
+        right.remove_last(slab_tree::RemoveBehavior::OrphanChildren);
+
+        (node_map, tree)
+    }
+    #[test]
+    fn test_ancestor() {
+        let (ids, tree) = make_test_tree();
+        macro_rules! id_of {
+            ($id:expr) => {
+                ids.get(&$id).copied().unwrap()
+            };
+        }
+
+        // At root
+        assert_eq!(
+            nearest_ancestor(&tree, id_of!(2), id_of!(1)),
+            Some(id_of!(0))
+        );
+        // Symmetric
+        assert_eq!(
+            nearest_ancestor(&tree, id_of!(1), id_of!(2)),
+            Some(id_of!(0))
+        );
+        // Disconnected tree
+        assert_eq!(
+            nearest_ancestor(&tree, id_of!(8), id_of!(9)),
+            Some(id_of!(8))
+        );
+        // Deeper down
+        assert_eq!(
+            nearest_ancestor(&tree, id_of!(3), id_of!(5)),
+            Some(id_of!(1))
+        );
+        // Identity
+        assert_eq!(
+            nearest_ancestor(&tree, id_of!(1), id_of!(1)),
+            Some(id_of!(1))
+        );
+        // Distinct trees
+        assert_eq!(nearest_ancestor(&tree, id_of!(1), id_of!(9)), None);
+    }
+    #[test]
+    fn test_traverse() {
+        use super::super::DoUndo;
+        let (ids, tree) = make_test_tree();
+        macro_rules! id_of {
+            ($id:expr) => {
+                ids.get(&$id).copied().unwrap()
+            };
+        }
+
+        // Long traversal
+        assert!(Iterator::eq(
+            traverse(&tree, id_of!(7), id_of!(5)).unwrap(),
+            [
+                DoUndo::Undo(&7),
+                DoUndo::Undo(&2),
+                DoUndo::Do(&1),
+                DoUndo::Do(&5)
+            ]
+            .into_iter()
+        ));
+        // Reverse traversal
+        assert!(Iterator::eq(
+            traverse(&tree, id_of!(5), id_of!(7)).unwrap(),
+            [
+                DoUndo::Undo(&5),
+                DoUndo::Undo(&1),
+                DoUndo::Do(&2),
+                DoUndo::Do(&7),
+            ]
+            .into_iter()
+        ));
+        // End at parent
+        assert!(Iterator::eq(
+            traverse(&tree, id_of!(6), id_of!(0)).unwrap(),
+            [DoUndo::Undo(&6), DoUndo::Undo(&2),].into_iter()
+        ));
+        // Start at parent
+        assert!(Iterator::eq(
+            traverse(&tree, id_of!(0), id_of!(3)).unwrap(),
+            [DoUndo::Do(&1), DoUndo::Do(&3),].into_iter()
+        ));
+        // Identity
+        assert!(Iterator::eq(
+            traverse(&tree, id_of!(2), id_of!(2)).unwrap(),
+            [].into_iter()
+        ));
+        // Broken tree
+        assert!(traverse(&tree, id_of!(6), id_of!(9)).is_none());
+    }
 }

@@ -56,6 +56,7 @@ pub enum Command {
     Dummy,
 }
 
+#[derive(PartialEq, Eq)]
 pub enum DoUndo<'c, T> {
     Do(&'c T),
     Undo(&'c T),
