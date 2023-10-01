@@ -39,16 +39,16 @@ impl std::ops::Deref for PointCollectionReadLock {
 
 #[derive(Clone)]
 struct PointCollectionAllocInfo {
-    /// Which PointPack is it in?
+    /// Which PointSlab is it in?
     /// (currently an index)
-    pack_id: usize,
-    /// What point index into that pack does it start?
+    slab_id: usize,
+    /// What point index into that slab does it start?
     start: usize,
     /// How many points long?
     len: usize,
 }
 pub struct PointRepository {
-    packs: parking_lot::RwLock<Vec<PointPack>>,
+    slabs: parking_lot::RwLock<Vec<PointSlab>>,
     allocs:
         parking_lot::RwLock<hashbrown::HashMap<WeakPointCollectionID, PointCollectionAllocInfo>>,
 }
@@ -56,20 +56,20 @@ impl PointRepository {
     fn new() -> Self {
         // Self doesn't impl Default as we don't want any ctors to be public.
         Self {
-            packs: Default::default(),
+            slabs: Default::default(),
             allocs: Default::default(),
         }
     }
     /// Get the memory usage of resident data (uncompressed in RAM), in bytes, and the capacity.
     pub fn resident_usage(&self) -> (usize, usize) {
-        let read = self.packs.read();
-        let num_packs = read.len();
-        let capacity = num_packs
-            .saturating_mul(PACK_SIZE)
+        let read = self.slabs.read();
+        let num_slabs = read.len();
+        let capacity = num_slabs
+            .saturating_mul(SLAB_SIZE)
             .saturating_mul(std::mem::size_of::<crate::StrokePoint>());
         let usage = read
             .iter()
-            .map(|pack| pack.usage())
+            .map(|slab| slab.usage())
             .fold(0, usize::saturating_add)
             .saturating_mul(std::mem::size_of::<crate::StrokePoint>());
         (usage, capacity)
@@ -77,21 +77,21 @@ impl PointRepository {
     /// Insert the collection into the repository, yielding a unique ID.
     /// Fails if the length of the collection is > 0x10_00_00
     pub fn insert(&self, collection: &[crate::StrokePoint]) -> Option<PointCollectionID> {
-        if collection.len() <= PACK_SIZE {
-            // Find a pack where `try_bump` succeeds.
-            let pack_reads = self.packs.upgradable_read();
-            if let Some((pack_id, start)) = pack_reads
+        if collection.len() <= SLAB_SIZE {
+            // Find a slab where `try_bump` succeeds.
+            let slab_reads = self.slabs.upgradable_read();
+            if let Some((slab_id, start)) = slab_reads
                 .iter()
                 .enumerate()
-                .find_map(|(idx, pack)| Some((idx, pack.try_bump_write(collection)?)))
+                .find_map(|(idx, slab)| Some((idx, slab.try_bump_write(collection)?)))
             {
                 // We don't need this lock anymore!
-                drop(pack_reads);
+                drop(slab_reads);
 
                 // populate info
                 let info = PointCollectionAllocInfo {
                     len: collection.len(),
-                    pack_id,
+                    slab_id: slab_id,
                     start,
                 };
                 // generate a new id and write metadata
@@ -99,20 +99,20 @@ impl PointRepository {
                 self.allocs.write().insert(id.weak(), info);
                 Some(id)
             } else {
-                // No packs were found with space to bump. Make a new one
-                let new_pack = PointPack::new();
+                // No slabs were found with space to bump. Make a new one
+                let new_slab = PointSlab::new();
                 // Unwrap is infallible - we checked the size requirement, so there's certainly room!
-                let start = new_pack.try_bump_write(collection).unwrap();
-                // put the pack into self, getting it's index
-                let pack_id = {
-                    let mut write = parking_lot::RwLockUpgradableReadGuard::upgrade(pack_reads);
-                    write.push(new_pack);
+                let start = new_slab.try_bump_write(collection).unwrap();
+                // put the slab into self, getting it's index
+                let slab_id = {
+                    let mut write = parking_lot::RwLockUpgradableReadGuard::upgrade(slab_reads);
+                    write.push(new_slab);
                     write.len() - 1
                 };
                 // populate info
                 let info = PointCollectionAllocInfo {
                     len: collection.len(),
-                    pack_id,
+                    slab_id,
                     start,
                 };
                 // generate a new id and write metadata
@@ -143,44 +143,44 @@ impl PointRepository {
             .get(&id)
             .ok_or(super::TryRepositoryError::NotFound)?
             .clone();
-        let packs_read = self.packs.read();
-        let Some(pack) = packs_read.get(alloc.pack_id) else {
+        let slabs_read = self.slabs.read();
+        let Some(slab) = slabs_read.get(alloc.slab_id) else {
             // Implementation bug!
-            log::debug!("{id} allocation found, but pack doesn't exist!");
+            log::debug!("{id} allocation found, but slab doesn't exist!");
             return Err(super::TryRepositoryError::NotFound);
         };
         // Check the alloc range is reasonable
         debug_assert!(alloc
             .start
             .checked_add(alloc.len)
-            .is_some_and(|last| last <= PACK_SIZE));
+            .is_some_and(|last| last <= SLAB_SIZE));
 
-        let Some(slice) = pack.try_read(alloc.start, alloc.len) else {
+        let Some(slice) = slab.try_read(alloc.start, alloc.len) else {
             // Implementation bug!
-            log::debug!("{id} allocation found, but out of bounds within it's pack!");
+            log::debug!("{id} allocation found, but out of bounds within it's slab!");
             return Err(super::TryRepositoryError::NotFound);
         };
         Ok(PointCollectionReadLock { points: slice })
     }
 }
 // A large collection of continguous points on the heap
-struct PointPack {
-    /// a non-null pointer to array of PACK_SIZE points.
+struct PointSlab {
+    /// a non-null pointer to array of slab_SIZE points.
     points: *mut crate::StrokePoint,
     /// Current past-the-end index for the allocator.
     /// Indices before this are considered immutable, after are considered mutable.
     bump_free_idx: parking_lot::Mutex<usize>,
 }
-const PACK_SIZE: usize = 1024 * 1024;
-impl PointPack {
+const SLAB_SIZE: usize = 1024 * 1024;
+impl PointSlab {
     /// Try to allocate and write a contiguous section of points, returning the start idx of where it was written.
     /// If not enough space, the `self` is left unchanged and None is returned.
     fn try_bump_write(&self, data: &[crate::StrokePoint]) -> Option<usize> {
-        if data.len() <= PACK_SIZE {
+        if data.len() <= SLAB_SIZE {
             let mut free_idx = self.bump_free_idx.lock();
             let old_idx = *free_idx;
             let new_idx = old_idx.checked_add(data.len())?;
-            if new_idx > PACK_SIZE {
+            if new_idx > SLAB_SIZE {
                 None
             } else {
                 // Safety - No shared mutable or immutable access can occur here,
@@ -219,7 +219,7 @@ impl PointPack {
         *self.bump_free_idx.lock()
     }
     fn new() -> Self {
-        let size = std::mem::size_of::<crate::StrokePoint>() * PACK_SIZE;
+        let size = std::mem::size_of::<crate::StrokePoint>() * SLAB_SIZE;
         let align = std::mem::align_of::<crate::StrokePoint>();
         debug_assert!(size != 0);
         debug_assert!(align != 0 && align.is_power_of_two());
@@ -232,7 +232,7 @@ impl PointPack {
         };
         assert!(!points.is_null());
         // We do not dealloc points at any point.
-        // The packs will be re-used for the lifetime of the program.
+        // The slabs will be re-used for the lifetime of the program.
         Self {
             points,
             bump_free_idx: 0.into(),
@@ -240,7 +240,7 @@ impl PointPack {
     }
 }
 // Safety - the pointer refers to heap mem, and can be transferred.
-unsafe impl Send for PointPack {}
+unsafe impl Send for PointSlab {}
 
 // Safety - The mutex prevents similtaneous mutable and immutable access.
-unsafe impl Sync for PointPack {}
+unsafe impl Sync for PointSlab {}

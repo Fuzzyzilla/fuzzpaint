@@ -190,7 +190,7 @@ fn traverse<'t, T>(
 #[cfg(test)]
 mod test {
     use super::{nearest_ancestor, traverse};
-    ///```
+    ///```ignore
     ///         0     <deleted>
     ///        / \        |
     ///       /   \       |
@@ -262,7 +262,7 @@ mod test {
             nearest_ancestor(&tree, id_of!(1), id_of!(1)),
             Some(id_of!(1))
         );
-        // Distinct trees
+        // Broken tree
         assert_eq!(nearest_ancestor(&tree, id_of!(1), id_of!(9)), None);
     }
     #[test]
