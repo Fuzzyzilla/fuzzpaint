@@ -9,6 +9,8 @@
 //!
 //! There exists one command queue per document.
 
+use std::sync::Arc;
+
 pub struct CommandAtomsWriter {}
 struct DocumentCommandQueueInner {
     /// Tree structure of commands, where undos create branches.
@@ -17,6 +19,7 @@ struct DocumentCommandQueueInner {
     command_tree: slab_tree::Tree<super::Command>,
     // "Pointer" into the tree where the most recent command took place.
     cursor: slab_tree::NodeId,
+    root: slab_tree::NodeId,
 }
 pub struct DocumentCommandQueue {
     /// Mutable inner bits.
@@ -24,27 +27,101 @@ pub struct DocumentCommandQueue {
     document: crate::FuzzID<crate::Document>,
 }
 impl DocumentCommandQueue {
-    /// Atomically push write some number of commands in an Atoms scope, such that they are treated as one larger command.
-    /// Ordering between threads is not guarunteed, other than the fact that no commands from other threads are written inside the resulting atoms scope.
-    pub fn write_atoms(&self, f: impl FnOnce(&mut CommandAtomsWriter)) {}
+    pub fn new() -> Self {
+        let command_tree = slab_tree::TreeBuilder::new()
+            .with_root(super::Command::Dummy)
+            .build();
+        let root = command_tree.root_id().unwrap();
+        Self {
+            inner: Arc::new(
+                DocumentCommandQueueInner {
+                    cursor: root,
+                    command_tree,
+                    root,
+                }
+                .into(),
+            ),
+            document: Default::default(),
+        }
+    }
+    /// Write some number of commands in an Atoms scope, such that they are treated as one larger command.
+    pub fn write_atoms(&self, _f: impl FnOnce(&mut CommandAtomsWriter)) {
+        todo!()
+    }
+    pub fn undo_n(&self, num: usize) {
+        // Linearly walk up the tree num steps. Todo: a more sophisticated approach, allowing for full navigation
+        // of the tree!
+        let mut lock = self.inner.write();
+        let Some(ancestors) = lock
+            .command_tree
+            .get(lock.cursor)
+            .map(|this| this.ancestors())
+        else {
+            // Cursor not found - shouldn't be possible, as the tree is never trimmed!
+            log::warn!("Node {:?} not found in document tree!", lock.cursor);
+            lock.cursor = lock.root;
+            return;
+        };
+        let new_cursor = ancestors.take(num).last();
+        lock.cursor = new_cursor.map(|node| node.node_id()).unwrap_or(lock.root)
+    }
+    pub fn redo_n(&self, num: usize) {
+        // Step down the tree, taking the last (most recent) child every time.
+        let mut lock = self.inner.write();
+        for _ in 0..num {
+            let Some(this) = lock.command_tree.get(lock.cursor) else {
+                // Cursor not found - shouldn't be possible, as the tree is never trimmed!
+                // Reset
+                log::warn!("Node {:?} not found in document tree!", lock.cursor);
+                lock.cursor = lock.root;
+                return;
+            };
+            let Some(last_child) = this.last_child() else {
+                // We've gone as deep as we can go!
+                return;
+            };
+            lock.cursor = last_child.node_id();
+        }
+    }
+    /// Create a listener that starts at the beginning of history.
+    pub fn listen_from_start(&self) -> DocumentCommandListener {
+        let start = self.inner.read().root;
+        DocumentCommandListener {
+            _document: self.document.weak(),
+            cursor: start,
+            inner: std::sync::Arc::downgrade(&self.inner),
+        }
+    }
+    /// Create a listener that will only see new activity
+    pub fn listen_from_now(&self) -> DocumentCommandListener {
+        let start = self.inner.read().cursor;
+        DocumentCommandListener {
+            _document: self.document.weak(),
+            cursor: start,
+            inner: std::sync::Arc::downgrade(&self.inner),
+        }
+    }
 }
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum ListenerError {
     #[error("Document no longer available")]
     DocumentClosed,
-    // Hints that something has gone horribly wrong!
+    // Hints that something has gone horribly wrong internally!
     #[error("Command tree malformed: {}", .0)]
     TreeMalformed(TraverseError),
 }
 pub struct DocumentCommandListener {
-    document: crate::WeakID<crate::Document>,
+    _document: crate::WeakID<crate::Document>,
     // Cursor into the tree that this listener has last seen,
     // When more events are requested, the path to the "true" cursor is found and traversed.
     cursor: slab_tree::NodeId,
     inner: std::sync::Weak<parking_lot::RwLock<DocumentCommandQueueInner>>,
 }
 impl DocumentCommandListener {
-    /// Forwards the state of this listener to match the global queue.
+    /// Forwards the state of this listener to match the global queue, calling the closure with every command
+    /// done and undone on the way.
+    ///
+    /// The closure must not write to the parent queue - it will cause a deadlock!
     pub fn update<T>(
         &mut self,
         f: impl FnMut(super::DoUndo<'_, super::Command>),
@@ -215,7 +292,7 @@ fn traverse<'t, T>(
 }
 
 #[cfg(test)]
-mod test {
+mod traversal_test {
     use super::{nearest_ancestor, traverse, TraverseError};
     ///```ignore
     ///         0     <deleted>
@@ -229,7 +306,7 @@ mod test {
         hashbrown::HashMap<i32, slab_tree::NodeId>,
         slab_tree::Tree<i32>,
     ) {
-        let mut node_map = hashbrown::HashMap::with_capacity(7);
+        let mut node_map = hashbrown::HashMap::with_capacity(11);
         let mut tree = slab_tree::TreeBuilder::new()
             .with_capacity(7)
             .with_root(0)

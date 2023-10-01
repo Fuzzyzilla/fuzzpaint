@@ -10,14 +10,9 @@ pub enum LayerCommand {
     Created(crate::WeakID<crate::StrokeLayer>),
     Stroke(StrokeCommand),
 }
-/* Todo: need to figure out how documents play into all this...
-pub enum DocumentCommand {
-    Created(crate::FuzzID<crate::Document>),
-    Layer(LayerCommand),
-    // Order or blend of layers changed. Unsure how to represent this. :V
-    // BlendGraph,
+pub enum GraphCommand {
+    // Waaa
 }
-*/
 pub enum StrokeCommand {
     Created {
         id: crate::WeakID<crate::Stroke>,
@@ -31,9 +26,6 @@ pub enum StrokeCommand {
     },
 }
 pub enum ScopeType {
-    /// Commands are grouped because they were amalgamated after the user undid many commands
-    /// and made an edit. All commands that were trucated from this operation are then pushed as a `Redo` scope.
-    Redo,
     /// Commands are grouped because they were individual parts in part of a single, larger operation.
     Atoms,
 }
@@ -41,9 +33,9 @@ pub enum ScopeType {
 pub enum MetaCommand {
     /// Bundle many commands into one big group. Can be nested many times.
     /// Grouped commands are treated as a single command, as far as the user can tell.
-    PushScope(ScopeType),
-    /// Pop the recent scope.
-    PopScope,
+    // Instead of storing these inline to the tree, store them in a separate slice.
+    // Prevents invalid usage (i.e., tree branching in the middle of a scope!)
+    Scope(ScopeType, Box<[Command]>),
     /// The document was saved.
     Save,
 }
@@ -51,6 +43,7 @@ pub enum MetaCommand {
 pub enum Command {
     Meta(MetaCommand),
     Layer(LayerCommand),
+    Graph(GraphCommand),
     // We need a dummy command to serve as the root of the command tree. :V
     // Invalid anywhere else.
     Dummy,
