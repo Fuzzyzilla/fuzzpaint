@@ -28,20 +28,36 @@ impl DocumentCommandQueue {
     /// Ordering between threads is not guarunteed, other than the fact that no commands from other threads are written inside the resulting atoms scope.
     pub fn write_atoms(&self, f: impl FnOnce(&mut CommandAtomsWriter)) {}
 }
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+pub enum ListenerError {
+    #[error("Document no longer available")]
+    DocumentClosed,
+    // Hints that something has gone horribly wrong!
+    #[error("Command tree malformed: {}", .0)]
+    TreeMalformed(TraverseError),
+}
 pub struct DocumentCommandListener {
     document: crate::WeakID<crate::Document>,
     // Cursor into the tree that this listener has last seen,
     // When more events are requested, the path to the "true" cursor is found and traversed.
     cursor: slab_tree::NodeId,
-    inner: std::sync::Arc<parking_lot::RwLock<DocumentCommandQueueInner>>,
+    inner: std::sync::Weak<parking_lot::RwLock<DocumentCommandQueueInner>>,
 }
 impl DocumentCommandListener {
     /// Forwards the state of this listener to match the global queue.
-    pub fn update(&mut self, f: impl FnMut(super::DoUndo<'_, super::Command>)) {
-        let lock = self.inner.read();
-        let traverse = traverse(&lock.command_tree, self.cursor, lock.cursor).unwrap();
+    pub fn update<T>(
+        &mut self,
+        f: impl FnMut(super::DoUndo<'_, super::Command>),
+    ) -> Result<(), ListenerError> {
+        let inner = self.inner.upgrade().ok_or(ListenerError::DocumentClosed)?;
+        let lock = inner.read();
+        let traverse = traverse(&lock.command_tree, self.cursor, lock.cursor)
+            .map_err(|traverse| ListenerError::TreeMalformed(traverse))?;
         self.cursor = lock.cursor;
-        traverse.for_each(f)
+
+        traverse.for_each(f);
+
+        Ok(())
     }
 }
 
@@ -122,9 +138,9 @@ fn nearest_ancestor<T>(
     tree: &slab_tree::Tree<T>,
     a: slab_tree::NodeId,
     b: slab_tree::NodeId,
-) -> Option<slab_tree::NodeId> {
-    let a_node = tree.get(a)?;
-    let b_node = tree.get(b)?;
+) -> Result<slab_tree::NodeId, TraverseError> {
+    let a_node = tree.get(a).ok_or(TraverseError::NotFound)?;
+    let b_node = tree.get(b).ok_or(TraverseError::NotFound)?;
 
     // Collect the ID of A, followed by the ancestors of A.
     let parents_of_a: Vec<_> = std::iter::once(a)
@@ -136,33 +152,43 @@ fn nearest_ancestor<T>(
     std::iter::once(b)
         .chain(b_node.ancestors().map(|node| node.node_id()))
         .find(|b_ancestor| parents_of_a.contains(b_ancestor))
+        .ok_or(TraverseError::Disconnected)
 }
 
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+pub enum TraverseError {
+    #[error("Nodes come from disconnected subtrees")]
+    Disconnected,
+    #[error("Node ID not present in tree")]
+    NotFound,
+}
 /// Create an iterator that traverses the shortest path between start and end nodes, or None if the start
 /// and end nodes are not from the same tree.
 fn traverse<'t, T>(
     tree: &'t slab_tree::Tree<T>,
     start: slab_tree::NodeId,
     end: slab_tree::NodeId,
-) -> Option<TreeTraverser<'t, T>> {
+) -> Result<TreeTraverser<'t, T>, TraverseError> {
     let ancestor = nearest_ancestor(tree, start, end)?;
 
     // Find the path from the ancestor to the end.
     // This is expensive!
     let path_down = {
         let mut path_down = Vec::<(slab_tree::NodeId, usize)>::new();
-        // Early escape if there is no path down needed!
+        // Early escape if end is the nearest ancestor -
+        // There will be no drilling down phase of the traversal.
         if ancestor != end {
             // Will be some - nearest_ancestor already checked.
-            let mut cur_ref = tree.get(end)?;
+            let mut cur_ref = tree.get(end).unwrap();
             loop {
                 // Will be Some, as we know there's a common ancestor. Will break before this becomes None.
-                let parent = cur_ref.parent()?;
+                let parent = cur_ref.parent().unwrap();
                 // Will be found - of course the child is a child of it's parent :P
                 let (child_idx, _) = parent
                     .children()
                     .enumerate()
-                    .find(|(_, node)| node.node_id() == cur_ref.node_id())?;
+                    .find(|(_, node)| node.node_id() == cur_ref.node_id())
+                    .unwrap();
                 // Default to the zero'th child. That way, nodes with only one child won't
                 // be collected, otherwise we're just storing the whole tree! :P
                 if child_idx != 0 {
@@ -172,14 +198,15 @@ fn traverse<'t, T>(
                 if parent.node_id() == ancestor {
                     break;
                 }
-                cur_ref = tree.get(parent.node_id())?;
+                cur_ref = tree.get(parent.node_id()).unwrap();
             }
         }
         path_down
     };
 
-    Some(TreeTraverser {
-        cur: tree.get(start)?,
+    Ok(TreeTraverser {
+        // Unwrap ok - Checked by nearest_ancestor
+        cur: tree.get(start).unwrap(),
         tree,
         ancestor: (ancestor != start).then_some(ancestor),
         path_down,
@@ -189,7 +216,7 @@ fn traverse<'t, T>(
 
 #[cfg(test)]
 mod test {
-    use super::{nearest_ancestor, traverse};
+    use super::{nearest_ancestor, traverse, TraverseError};
     ///```ignore
     ///         0     <deleted>
     ///        / \        |
@@ -238,32 +265,20 @@ mod test {
         }
 
         // At root
-        assert_eq!(
-            nearest_ancestor(&tree, id_of!(2), id_of!(1)),
-            Some(id_of!(0))
-        );
+        assert_eq!(nearest_ancestor(&tree, id_of!(2), id_of!(1)), Ok(id_of!(0)));
         // Symmetric
-        assert_eq!(
-            nearest_ancestor(&tree, id_of!(1), id_of!(2)),
-            Some(id_of!(0))
-        );
+        assert_eq!(nearest_ancestor(&tree, id_of!(1), id_of!(2)), Ok(id_of!(0)));
         // Disconnected tree
-        assert_eq!(
-            nearest_ancestor(&tree, id_of!(8), id_of!(9)),
-            Some(id_of!(8))
-        );
+        assert_eq!(nearest_ancestor(&tree, id_of!(8), id_of!(9)), Ok(id_of!(8)));
         // Deeper down
-        assert_eq!(
-            nearest_ancestor(&tree, id_of!(3), id_of!(5)),
-            Some(id_of!(1))
-        );
+        assert_eq!(nearest_ancestor(&tree, id_of!(3), id_of!(5)), Ok(id_of!(1)));
         // Identity
-        assert_eq!(
-            nearest_ancestor(&tree, id_of!(1), id_of!(1)),
-            Some(id_of!(1))
-        );
+        assert_eq!(nearest_ancestor(&tree, id_of!(1), id_of!(1)), Ok(id_of!(1)));
         // Broken tree
-        assert_eq!(nearest_ancestor(&tree, id_of!(1), id_of!(9)), None);
+        assert_eq!(
+            nearest_ancestor(&tree, id_of!(1), id_of!(9)),
+            Err(TraverseError::Disconnected)
+        );
     }
     #[test]
     fn test_traverse() {
@@ -313,6 +328,6 @@ mod test {
             [].into_iter()
         ));
         // Broken tree
-        assert!(traverse(&tree, id_of!(6), id_of!(9)).is_none());
+        assert!(traverse(&tree, id_of!(6), id_of!(9)).is_err());
     }
 }
