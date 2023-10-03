@@ -21,6 +21,7 @@ pub mod pen_tools;
 pub mod render_device;
 pub mod stylus_events;
 pub mod tess;
+pub mod ui;
 pub mod view_transform;
 use blend::{Blend, BlendMode};
 
@@ -124,621 +125,23 @@ impl GlobalHotkeys {
 }
 
 pub struct StrokeLayer {
-    id: FuzzID<Self>,
-    name: String,
-    blend: blend::Blend,
-}
-impl Default for StrokeLayer {
-    fn default() -> Self {
-        let id = Default::default();
-        Self {
-            name: format!("Layer {}", id),
-            id,
-            blend: Default::default(),
-        }
-    }
+    pub id: WeakID<Self>,
+    pub name: String,
+    pub blend: blend::Blend,
 }
 pub struct Document {
     /// The path from which the file was loaded, or None if opened as new.
-    path: Option<std::path::PathBuf>,
+    pub path: Option<std::path::PathBuf>,
     /// Name of the document, from its path or generated.
-    name: String,
+    pub name: String,
 
     // In structure, a document is rather similar to a GroupLayer :O
     /// Layers that make up this document
-    layer_top_level: Vec<StrokeLayer>,
+    pub layer_top_level: Vec<StrokeLayer>,
 
     /// ID that is unique within this execution of the program
-    id: FuzzID<Document>,
+    pub id: WeakID<Document>,
 }
-impl Default for Document {
-    fn default() -> Self {
-        let id = FuzzID::default();
-        Self {
-            path: None,
-            layer_top_level: Vec::new(),
-            name: format!("New Document {}", id.id()),
-            id,
-        }
-    }
-}
-impl Document {
-    // Internal structure in public interface???
-    pub fn layers_mut(&mut self) -> &mut Vec<StrokeLayer> {
-        &mut self.layer_top_level
-    }
-}
-
-struct PerDocumentInterface {
-    zoom: f32,
-    rotate: f32,
-}
-impl Default for PerDocumentInterface {
-    fn default() -> Self {
-        Self {
-            zoom: 100.0,
-            rotate: 0.0,
-        }
-    }
-}
-pub struct DocumentUserInterface {
-    color: egui::Color32,
-
-    // modal_stack: Vec<Box<dyn FnMut(&mut egui::Ui) -> ()>>,
-    brushes: Vec<brush::Brush>,
-
-    document_interfaces: std::collections::HashMap<WeakID<Document>, PerDocumentInterface>,
-
-    viewport: egui::Rect,
-}
-impl Default for DocumentUserInterface {
-    fn default() -> Self {
-        let new_brush = brush::Brush::default();
-        Self {
-            color: egui::Color32::BLUE,
-            brushes: vec![new_brush],
-            document_interfaces: Default::default(),
-
-            viewport: egui::Rect {
-                min: egui::Pos2::ZERO,
-                max: egui::Pos2::ZERO,
-            },
-        }
-    }
-}
-
-impl DocumentUserInterface {
-    /// Get the available area for document rendering, in logical pixels.
-    /// None if there is no space for a viewport.
-    pub fn get_document_viewport(&self) -> Option<egui::Rect> {
-        // Avoid giving a zero or negative size viewport.
-        let size = self.viewport.size();
-
-        if size.x > 0.0 && size.y > 0.0 {
-            Some(self.viewport)
-        } else {
-            None
-        }
-    }
-    fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut Blend) {
-        ui.horizontal(|ui| {
-            //alpha symbol for clipping (allocates every frame - why??)
-            ui.toggle_value(
-                &mut blend.alpha_clip,
-                egui::RichText::new("α").monospace().strong(),
-            )
-            .on_hover_text("Alpha clip");
-
-            ui.add(
-                egui::DragValue::new(&mut blend.opacity)
-                    .fixed_decimals(2)
-                    .speed(0.01)
-                    .clamp_range(0.0..=1.0),
-            );
-            egui::ComboBox::new(id, "")
-                .selected_text(blend.mode.as_ref())
-                .show_ui(ui, |ui| {
-                    for blend_mode in <BlendMode as strum::IntoEnumIterator>::iter() {
-                        ui.selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref());
-                    }
-                });
-        });
-    }
-    fn layer_edit(
-        ui: &mut egui::Ui,
-        cur_layer: &mut Option<WeakID<StrokeLayer>>,
-        layer: &mut StrokeLayer,
-    ) {
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(cur_layer, Some(layer.id.weak()), "✏");
-                ui.text_edit_singleline(&mut layer.name);
-            })
-            .response
-            .on_hover_ui(|ui| {
-                ui.label(format!("{}", layer.id));
-            });
-
-            Self::ui_layer_blend(ui, &layer.id, &mut layer.blend);
-        });
-    }
-    /*
-    fn target_layer(&self) -> Option<LayerID> {
-        let id = self.cur_document?;
-        // Selected layer of the currently focused document, if any
-        self.document_interfaces.get(&id)?.cur_layer
-    }
-    fn ui_layer_iter(
-        ui: &mut egui::Ui,
-        document_interface: &mut PerDocumentInterface,
-        layers: &mut [LayerNode],
-    ) {
-        if layers.is_empty() {
-            ui.label(
-                egui::RichText::new("Empty, for now...")
-                    .italics()
-                    .color(egui::Color32::DARK_GRAY),
-            );
-        }
-        for layer in layers.iter_mut() {
-            ui.group(|ui| {
-                match layer {
-                    LayerNode::Group {
-                        layer,
-                        children,
-                        id,
-                    } => {
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut document_interface.cur_layer,
-                                Some(id.weak()),
-                                "🗀",
-                            );
-                            ui.text_edit_singleline(&mut layer.name);
-                        })
-                        .response
-                        .on_hover_ui(|ui| {
-                            ui.label(format!("{}", id));
-                            ui.label(format!("{}", layer.id));
-                        });
-
-                        let mut passthrough = layer.blend.is_none();
-                        ui.checkbox(&mut passthrough, "Passthrough");
-                        if !passthrough {
-                            //Get or insert default is unstable? :V
-                            let blend = layer.blend.get_or_insert_with(Default::default);
-
-                            Self::ui_layer_blend(ui, &id, blend);
-                        } else {
-                            layer.blend = None;
-                        }
-
-                        let children = children.get_mut();
-                        egui::CollapsingHeader::new("Children")
-                            .id_source(&id)
-                            .default_open(true)
-                            .enabled(!children.is_empty())
-                            .show_unindented(ui, |ui| {
-                                Self::ui_layer_slice(ui, document_interface, children);
-                            });
-                    }
-                    LayerNode::StrokeLayer { layer, id } => {
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut document_interface.cur_layer,
-                                Some(id.weak()),
-                                "✏",
-                            );
-                            ui.text_edit_singleline(&mut layer.name);
-                        })
-                        .response
-                        .on_hover_ui(|ui| {
-                            ui.label(format!("{}", id));
-                            ui.label(format!("{}", layer.id));
-                        });
-
-                        Self::ui_layer_blend(ui, id, &mut layer.blend);
-                    }
-                }
-            })
-            .response
-            .context_menu(|ui| {
-                if ui.button("Focus Subtree...").clicked() {
-                    document_interface.focused_subtree = Some(layer.id().weak());
-                }
-            });
-        }
-    }*/
-    pub fn ui(&mut self, ctx: &egui::Context) {
-        let globals = GLOBALS.get_or_init(Globals::new);
-        let mut selections = globals.selections().blocking_write();
-        let mut documents = globals.documents().blocking_write();
-        egui::TopBottomPanel::top("file").show(&ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
-                    .on_hover_text("Baa");
-                egui::menu::bar(ui, |ui| {
-                    ui.menu_button("File", |ui| {
-                        let add_button = |ui: &mut egui::Ui, label, shortcut| -> egui::Response {
-                            let mut button = egui::Button::new(label);
-                            if let Some(shortcut) = shortcut {
-                                button = button.shortcut_text(shortcut);
-                            }
-                            ui.add(button)
-                        };
-                        if add_button(ui, "New", Some("Ctrl+N")).clicked() {
-                            let document = Document::default();
-                            self.document_interfaces
-                                .insert(document.id.weak(), Default::default());
-                            documents.push(document);
-                        };
-                        let _ = add_button(ui, "Save", Some("Ctrl+S"));
-                        let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
-                        let _ = add_button(ui, "Open", Some("Ctrl+O"));
-                        let _ = add_button(ui, "Open as new", None);
-                        let _ = add_button(ui, "Export", None);
-                    });
-                    ui.menu_button("Edit", |_| ());
-                    ui.menu_button("Image", |ui| {
-                        if ui.button("Image Size").clicked() {
-                            /*self.push_modal(|ui| {
-                                ui.label("Hai :>");
-                            });*/
-                        };
-                    });
-                });
-            });
-        });
-        egui::TopBottomPanel::bottom("Nav").show(&ctx, |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                //Everything here is BACKWARDS!!
-
-                ui.label(":V");
-
-                ui.add(egui::Separator::default().vertical());
-
-                // if there is no current document, there is nothing for us to do here
-                let Some(document) = selections.cur_document else {
-                    return;
-                };
-
-                // Get (or create) the document interface
-                let interface = self.document_interfaces.entry(document).or_default();
-
-                //Zoom controls
-                if ui.small_button("⟲").clicked() {
-                    interface.zoom = 100.0;
-                }
-                if ui.small_button("➕").clicked() {
-                    //Next power of two
-                    interface.zoom =
-                        (2.0f32.powf(((interface.zoom / 100.0).log2() + 0.001).ceil()) * 100.0)
-                            .max(12.5);
-                }
-
-                ui.add(
-                    egui::Slider::new(&mut interface.zoom, 12.5..=12800.0)
-                        .logarithmic(true)
-                        .clamp_to_range(true)
-                        .suffix("%")
-                        .trailing_fill(true),
-                );
-
-                if ui.small_button("➖").clicked() {
-                    //Previous power of two
-                    interface.zoom =
-                        (2.0f32.powf(((interface.zoom / 100.0).log2() - 0.001).floor()) * 100.0)
-                            .max(12.5);
-                }
-
-                ui.add(egui::Separator::default().vertical());
-
-                //Rotate controls
-                if ui.small_button("⟲").clicked() {
-                    interface.rotate = 0.0;
-                };
-                if ui.drag_angle(&mut interface.rotate).changed() {
-                    interface.rotate = interface.rotate % std::f32::consts::TAU;
-                }
-
-                ui.add(egui::Separator::default().vertical());
-
-                if ui.button("⮪").clicked() {
-                    selections
-                        .undos
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                };
-            });
-        });
-
-        egui::SidePanel::right("Layers").show(&ctx, |ui| {
-            ui.label("Layers");
-            ui.separator();
-
-            // if there is no current document, there is nothing for us to do here
-            let Some(document_id) = selections.cur_document else {
-                return;
-            };
-
-            // Find the document, otherwise clear selection
-            let Some(document) = documents.iter_mut().find(|doc| &doc.id == document_id) else {
-                selections.cur_document = None;
-                return;
-            };
-
-            let document_selections = selections
-                .document_selections
-                .entry(document_id)
-                .or_default();
-
-            ui.horizontal(|ui| {
-                if ui.button("➕").clicked() {
-                    let layer = StrokeLayer::default();
-                    let new_weak_id = layer.id.weak();
-                    if let Some(selected) = document_selections.cur_layer {
-                        let layers = document.layers_mut();
-                        let selected_index = layers
-                            .iter()
-                            .enumerate()
-                            .find(|(_, layer)| layer.id.weak() == selected)
-                            .map(|(idx, _)| idx);
-                        if let Some(index) = selected_index {
-                            // Insert atop selected index
-                            document.layers_mut().insert(index + 1, layer)
-                        } else {
-                            // Selected layer not found! Just insert at top
-                            document.layers_mut().push(layer)
-                        }
-                    } else {
-                        document.layers_mut().push(layer)
-                    }
-                    // Select the new layer
-                    document_selections.cur_layer = Some(new_weak_id);
-                }
-
-                let folder_button = egui::Button::new("🗀");
-                ui.add_enabled(false, folder_button);
-
-                let _ = ui.button("⤵").on_hover_text("Merge down");
-                if ui.button("✖").on_hover_text("Delete layer").clicked() {
-                    if let Some(selected) = document_selections.cur_layer.take() {
-                        let layers = document.layers_mut();
-                        // Find the index of the selected layer
-                        let selected_index = layers
-                            .iter()
-                            .enumerate()
-                            .find(|(_, layer)| layer.id.weak() == selected)
-                            .map(|(idx, _)| idx);
-                        // Remove, if found
-                        if let Some(idx) = selected_index {
-                            layers.remove(idx);
-                        }
-                    }
-                };
-            });
-            /*
-            if let Some(subtree) = document_interface.focused_subtree {
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("⬅").clicked() {
-                        document_interface.focused_subtree = None;
-                    }
-                    ui.label(format!("Viewing subtree of {subtree}"));
-                });
-            }*/
-
-            ui.separator();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                let layers = document.layers_mut();
-                for layer in layers.iter_mut().rev() {
-                    Self::layer_edit(ui, &mut document_selections.cur_layer, layer);
-                }
-                /*
-                match document_interface
-                    .focused_subtree
-                    .and_then(|tree| document.layers.find_mut_children_of(tree))
-                {
-                    Some(subtree) => {
-                        Self::ui_layer_slice(ui, document_interface, subtree);
-                    }
-                    None => {
-                        document_interface.focused_subtree = None;
-                        Self::ui_layer_slice(
-                            ui,
-                            document_interface,
-                            &mut document.layers.top_level,
-                        );
-                    }
-                }*/
-            });
-        });
-
-        egui::SidePanel::left("Color picker").show(&ctx, |ui| {
-            {
-                let settings = &mut selections.brush_settings;
-                ui.label("Color");
-                ui.separator();
-                // Why..
-                let mut color = egui::Rgba::from_rgba_premultiplied(
-                    settings.color_modulate[0],
-                    settings.color_modulate[1],
-                    settings.color_modulate[2],
-                    settings.color_modulate[3],
-                );
-                if egui::color_picker::color_edit_button_rgba(
-                    ui,
-                    &mut color,
-                    egui::color_picker::Alpha::OnlyBlend,
-                )
-                .changed()
-                {
-                    settings.color_modulate = color.to_array();
-                };
-            }
-
-            ui.separator();
-            ui.label("Brushes");
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                if ui.button("➕").clicked() {
-                    let brush = brush::Brush::default();
-                    self.brushes.push(brush);
-                }
-                if ui.button("✖").on_hover_text("Delete brush").clicked() {
-                    if let Some(id) = selections.cur_brush.take() {
-                        self.brushes.retain(|brush| brush.id() != id);
-                    }
-                };
-                ui.toggle_value(&mut selections.brush_settings.is_eraser, "Erase");
-            });
-            ui.separator();
-
-            for brush in self.brushes.iter_mut() {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.radio_value(&mut selections.cur_brush, Some(brush.id().weak()), "");
-                        ui.text_edit_singleline(brush.name_mut());
-                    })
-                    .response
-                    .on_hover_ui(|ui| {
-                        ui.label(format!("{}", brush.id()));
-
-                        //Smol optimization to avoid formatters
-                        let mut buf = uuid::Uuid::encode_buffer();
-                        let uuid = brush.universal_id().as_hyphenated().encode_upper(&mut buf);
-                        ui.label(&uuid[..]);
-                    });
-                    egui::CollapsingHeader::new("Settings")
-                        .id_source(brush.id())
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            let mut brush_kind = brush.style().brush_kind();
-
-                            egui::ComboBox::new(brush.id(), "")
-                                .selected_text(brush_kind.as_ref())
-                                .show_ui(ui, |ui| {
-                                    for kind in
-                                        <brush::BrushKind as strum::IntoEnumIterator>::iter()
-                                    {
-                                        ui.selectable_value(&mut brush_kind, kind, kind.as_ref());
-                                    }
-                                });
-
-                            //Changed by user, switch to defaults for the new kind
-                            if brush_kind != brush.style().brush_kind() {
-                                *brush.style_mut() = brush::BrushStyle::default_for(brush_kind);
-                            }
-
-                            match brush.style_mut() {
-                                brush::BrushStyle::Stamped { .. } => {
-                                    let slider = egui::widgets::Slider::new(
-                                        &mut selections.brush_settings.size_mul,
-                                        2.0..=50.0,
-                                    )
-                                    .clamp_to_range(true)
-                                    .logarithmic(true)
-                                    .suffix("px");
-
-                                    ui.add(slider);
-
-                                    let slider2 = egui::widgets::Slider::new(
-                                        &mut selections.brush_settings.spacing_px,
-                                        0.1..=10.0,
-                                    )
-                                    .clamp_to_range(true)
-                                    .logarithmic(true)
-                                    .suffix("px");
-
-                                    ui.add(slider2);
-                                }
-                                brush::BrushStyle::Rolled => {}
-                            }
-                        })
-                });
-                ui.separator();
-                ui.label("Memory Usage Stats");
-                let point_resident_usage = repositories::points::global().resident_usage();
-                ui.label(format!(
-                    "Point repository: {}/{}",
-                    human_bytes::human_bytes(point_resident_usage.0 as f64),
-                    human_bytes::human_bytes(point_resident_usage.1 as f64),
-                ));
-            }
-
-            /* Old Image picker, useful later
-                'image_fail: {
-                let Some(path) = rfd::FileDialog::new()
-                    .add_filter("images", &["png"])
-                    .set_directory(".")
-                    .pick_file() else {break 'image_fail};
-
-                let Ok(image) = image::open(path) else {break 'image_fail};
-                let image = image.to_rgba8();
-                let image_size = image.dimensions();
-                let image_size = [image_size.0 as usize, image_size.1 as usize];
-                let image_data = image.as_bytes();
-
-                let image = egui::ColorImage::from_rgba_unmultiplied(image_size, image_data);
-
-                let handle = ctx.load_texture("Brush texture", image, egui::TextureOptions::LINEAR);
-
-                brush.image = Some(handle);
-                brush.image_uv = egui::Rect{min: egui::Pos2::ZERO, max: egui::Pos2 {x: 1.0, y: 1.0}};
-            }*/
-        });
-
-        egui::TopBottomPanel::top("documents").show(&ctx, |ui| {
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let mut deleted_ids = smallvec::SmallVec::<[_; 1]>::new();
-                    for document in documents.iter() {
-                        egui::containers::Frame::group(ui.style())
-                            .outer_margin(egui::Margin::symmetric(0.0, 0.0))
-                            .inner_margin(egui::Margin::symmetric(0.0, 0.0))
-                            .multiply_with_opacity(
-                                if selections.cur_document == Some(document.id.weak()) {
-                                    1.0
-                                } else {
-                                    0.0
-                                },
-                            )
-                            .rounding(egui::Rounding {
-                                ne: 2.0,
-                                nw: 2.0,
-                                ..0.0.into()
-                            })
-                            .show(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut selections.cur_document,
-                                    Some(document.id.weak()),
-                                    &document.name,
-                                );
-                                if ui.small_button("✖").clicked() {
-                                    deleted_ids.push(document.id.weak());
-                                    //Disselect if deleted.
-                                    if selections.cur_document == Some(document.id.weak()) {
-                                        selections.cur_document = None;
-                                    }
-                                }
-                            })
-                            .response
-                            .on_hover_ui(|ui| {
-                                ui.label(format!("{}", document.id));
-                            });
-                    }
-                    documents.retain(|document| !deleted_ids.contains(&document.id.weak()));
-                    for id in deleted_ids.into_iter() {
-                        self.document_interfaces.remove(&id);
-                    }
-                });
-            });
-        });
-
-        self.viewport = ctx.available_rect();
-    }
-}
-
 mod stroke_renderer {
     /// The data managed by the renderer.
     /// For now, in persuit of actually getting a working product one day,
@@ -1344,8 +747,7 @@ async fn render_worker(
                         // need to track this locally, this info could be from wayyy in the future.
                         let blend_info: Vec<_> = {
                             let read = globals.documents.read().await;
-                            let Some(doc) =
-                                read.iter().find(|doc| doc.id.weak() == document_to_draw)
+                            let Some(doc) = read.iter().find(|doc| doc.id == document_to_draw)
                             else {
                                 // Document not found, nothin to draw.
                                 continue;
@@ -1356,7 +758,7 @@ async fn render_worker(
                                 .filter_map(|layer| {
                                     Some((
                                         layer.blend.clone(),
-                                        cached_renders.get(&layer.id.weak())?.view.clone(),
+                                        cached_renders.get(&layer.id)?.view.clone(),
                                     ))
                                 })
                                 .collect()
@@ -1403,7 +805,7 @@ async fn render_worker(
                 // <rerender viewport>
                 let blend_info: Vec<_> = {
                     let read = globals.documents.read().await;
-                    let Some(doc) = read.iter().find(|doc| doc.id.weak() == *new_document) else {
+                    let Some(doc) = read.iter().find(|doc| doc.id == *new_document) else {
                         // Document not found, nothin to draw.
                         continue;
                     };
@@ -1413,7 +815,7 @@ async fn render_worker(
                         .filter_map(|layer| {
                             Some((
                                 layer.blend.clone(),
-                                cached_renders.get(&layer.id.weak())?.view.clone(),
+                                cached_renders.get(&layer.id)?.view.clone(),
                             ))
                         })
                         .collect()
@@ -1447,8 +849,9 @@ async fn stylus_event_collector(
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
     render_send: tokio::sync::mpsc::UnboundedSender<RenderMessage>,
 ) -> AnyResult<()> {
-    let globals = GLOBALS.get_or_init(Globals::new);
     // Create a document and a few layers and select them, to speed up testing iterations :P
+    /*
+    let globals = GLOBALS.get_or_init(Globals::new);
     {
         let (default_document, default_layer) = {
             let mut document = Document::default();
@@ -1469,7 +872,7 @@ async fn stylus_event_collector(
             .entry(default_document)
             .or_default();
         document_selections.cur_layer = Some(default_layer);
-    }
+    }*/
 
     loop {
         match event_stream.recv().await {
@@ -1530,6 +933,9 @@ fn main() -> AnyResult<std::convert::Infallible> {
 
     GLOBALS.get_or_init(Globals::new);
 
+    let (send, _) = std::sync::mpsc::channel();
+    let ui = ui::MainUI::new(send);
+
     // Test image generators.
     //let (image, future) = make_test_image(render_context.clone())?;
     //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("/home/aspen/Pictures/thesharc.png"))?;
@@ -1542,6 +948,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
         render_surface,
         render_context.clone(),
         document_view.clone(),
+        ui,
     )?;
 
     let event_stream = window_renderer.stylus_events();
