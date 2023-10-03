@@ -20,8 +20,8 @@ pub enum NodeType {
 }
 
 // Shhh.. they're secretly the same type >:3c
-pub struct LeafID(slab_tree::NodeId);
-pub struct NodeID(slab_tree::NodeId);
+pub struct LeafID(id_tree::NodeId);
+pub struct NodeID(id_tree::NodeId);
 pub enum AnyID {
     Leaf(LeafID),
     Node(NodeID),
@@ -37,7 +37,7 @@ impl From<NodeID> for AnyID {
     }
 }
 impl AnyID {
-    fn into_raw(self) -> slab_tree::NodeId {
+    fn into_raw(self) -> id_tree::NodeId {
         match self {
             AnyID::Leaf(LeafID(id)) => id,
             AnyID::Node(NodeID(id)) => id,
@@ -45,12 +45,12 @@ impl AnyID {
     }
 }
 
-pub enum Node {
+pub enum NodeData {
     Root,
     Node(NodeType),
     Leaf(LeafType),
 }
-impl Node {
+impl NodeData {
     fn is_leaf(&self) -> bool {
         match self {
             Self::Leaf(..) => true,
@@ -84,7 +84,7 @@ pub enum ReparentError {
 }
 
 pub struct BlendGraph {
-    tree: slab_tree::Tree<Node>,
+    tree: id_tree::Tree<NodeData>,
 }
 impl BlendGraph {
     /// Add a new group of the given type into the parent, or the root if none.
@@ -100,42 +100,47 @@ impl BlendGraph {
     where
         ChildID: Into<AnyID>,
     {
-        let mut parent = if let Some(parent) = parent {
-            self.tree
-                .get_mut(parent.0)
-                .ok_or(AddError::ParentNotFound)?
-        } else {
-            self.tree.root_mut().unwrap()
-        };
+        /*
+                let mut parent = if let Some(parent) = parent {
+                    self.tree
+                        .get(&parent.0)
+                        .map_err(|_| AddError::ParentNotFound)?
+                } else {
+                    self.tree.get(self.tree.root_node_id().unwrap()).unwrap()
+                };
 
-        // Make sure we didn't get our IDs crossed up!
-        assert!(parent.data().is_node());
+                // Make sure we didn't get our IDs crossed up!
+                assert!(parent.data().is_node());
+                let new_node = id_tree::Node::new(NodeData::Node(ty));
+                self.tree
+                    .insert(new_node, id_tree::InsertBehavior::UnderNode(parent));
 
-        // Find where to add
-        let id = if let Some(child_id) = above_child.map(|any| Into::<AnyID>::into(any).into_raw())
-        {
-            let Some((child_idx, _)) = parent
-                .as_ref()
-                .children()
-                .enumerate()
-                .find(|(_, child)| child.node_id() == child_id)
-            else {
-                return Err(AddError::ChildNotFound);
-            };
-            // add at bottom, swap it forward by child_idx+1 steps. (There is no other way to do this with this crate afaict lol)
-            let mut child = parent.prepend(Node::Node(ty));
+                // Find where to add
+                let id = if let Some(child_id) = above_child.map(|any| Into::<AnyID>::into(any).into_raw())
+                {
+                    let Some((child_idx, _)) = parent
+                        .as_ref()
+                        .children()
+                        .enumerate()
+                        .find(|(_, child)| child.node_id() == child_id)
+                    else {
+                        return Err(AddError::ChildNotFound);
+                    };
+                    // add at bottom, swap it forward by child_idx+1 steps. (There is no other way to do this with this crate afaict lol)
+                    let mut child = parent.prepend(NodeData::Node(ty));
 
-            for _ in 0..child_idx + 1 {
-                child.swap_next_sibling();
-            }
+                    for _ in 0..child_idx + 1 {
+                        child.swap_next_sibling();
+                    }
 
-            child.node_id()
-        } else {
-            // Just add at bottom.
-            parent.prepend(Node::Node(ty)).node_id()
-        };
-
+                    child.node_id()
+                } else {
+                    // Just add at bottom.
+                    parent.prepend(NodeData::Node(ty)).node_id()
+                };
         Ok(NodeID(id))
+        */
+        todo!()
     }
     /// A helper for add_group, adding at the bottom. Identical to calling it with None for above_child.
     pub fn add_group_bottom(

@@ -873,6 +873,7 @@ dependencies = [
  "env_logger",
  "hashbrown 0.14.0",
  "human_bytes",
+ "id_tree",
  "image",
  "log",
  "parking_lot",
@@ -1074,6 +1075,15 @@ name = "humantime"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
+
+[[package]]
+name = "id_tree"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcd9db8dd5be8bde5a2624ed4b2dfb74368fe7999eb9c4940fd3ca344b61071a"
+dependencies = [
+ "snowflake",
+]
 
 [[package]]
 name = "idna"
