@@ -21,7 +21,7 @@ impl<T: std::any::Any> std::cmp::PartialEq<FuzzID<T>> for FuzzID<T> {
         self.weak() == other.weak()
     }
 }
-impl<T: std::any::Any> std::cmp::Eq for FuzzID<T>{}
+impl<T: std::any::Any> std::cmp::Eq for FuzzID<T> {}
 impl<T: std::any::Any> std::cmp::PartialEq<WeakID<T>> for &FuzzID<T> {
     fn eq(&self, other: &WeakID<T>) -> bool {
         self.weak() == *other
@@ -50,7 +50,7 @@ pub struct WeakID<T: std::any::Any> {
 impl<T: std::any::Any> WeakID<T> {
     pub fn empty() -> Self {
         Self {
-            id : 0,
+            id: 0,
             _phantom: Default::default(),
         }
     }
@@ -155,5 +155,16 @@ impl<T: std::any::Any> std::fmt::Display for WeakID<T> {
             std::any::type_name::<T>().rsplit("::").next().unwrap(),
             self.id
         )
+    }
+}
+impl<T: std::any::Any> std::fmt::Debug for WeakID<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <WeakID<T> as std::fmt::Display>::fmt(self, f)
+    }
+}
+
+impl<T: std::any::Any> std::fmt::Debug for FuzzID<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <FuzzID<T> as std::fmt::Display>::fmt(self, f)
     }
 }

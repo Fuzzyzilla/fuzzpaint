@@ -933,8 +933,13 @@ fn main() -> AnyResult<std::convert::Infallible> {
 
     GLOBALS.get_or_init(Globals::new);
 
-    let (send, _) = std::sync::mpsc::channel();
+    let (send, recv) = std::sync::mpsc::channel();
     let ui = ui::MainUI::new(send);
+    std::thread::spawn(move || {
+        while let Ok(recv) = recv.recv() {
+            log::trace!("UI Message: {recv:?}");
+        }
+    });
 
     // Test image generators.
     //let (image, future) = make_test_image(render_context.clone())?;

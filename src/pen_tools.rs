@@ -99,7 +99,7 @@ pub enum RenderAs {
     /// Nothing to render.
     None,
 }
-#[derive(Copy, Clone, strum::EnumIter, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, strum::EnumIter, Hash, PartialEq, Eq, Debug)]
 pub enum StateLayer {
     Brush,
     ViewportPan,

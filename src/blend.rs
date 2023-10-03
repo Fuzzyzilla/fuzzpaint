@@ -15,7 +15,7 @@ impl Default for BlendMode {
 }
 
 /// Blend mode for an object, including a mode, opacity modulate, and alpha clip
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Blend {
     pub mode: BlendMode,
     pub opacity: f32,
