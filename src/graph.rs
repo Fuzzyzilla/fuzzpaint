@@ -50,8 +50,11 @@ impl NodeType {
 }
 
 // Shhh.. they're secretly the same type >:3c
+#[derive(Debug, Clone)]
 pub struct LeafID(id_tree::NodeId);
+#[derive(Debug, Clone)]
 pub struct NodeID(id_tree::NodeId);
+#[derive(Debug, Clone)]
 pub enum AnyID {
     Leaf(LeafID),
     Node(NodeID),
@@ -192,6 +195,44 @@ pub struct BlendGraph {
     tree: id_tree::Tree<NodeData>,
 }
 impl BlendGraph {
+    pub fn new() -> Self {
+        Self {
+            tree: id_tree::TreeBuilder::new()
+                .with_root(id_tree::Node::new(NodeData {
+                    name: String::new(),
+                    ty: NodeDataTy::Root,
+                }))
+                .build(),
+        }
+    }
+    /// Iterate the children of the root node
+    pub fn iter_top_level(&'_ self) -> impl Iterator<Item = (AnyID, &'_ NodeData)> + '_ {
+        self.iter_children_of_raw(self.tree.root_node_id().unwrap())
+            .unwrap()
+    }
+    /// Iterate the children of this node
+    pub fn iter_node(
+        &'_ self,
+        node: &'_ NodeID,
+    ) -> Option<impl Iterator<Item = (AnyID, &'_ NodeData)> + '_> {
+        self.iter_children_of_raw(&node.0)
+    }
+    /// Iterate the children of this raw ID. A helper method for all various iters!
+    fn iter_children_of_raw(
+        &'_ self,
+        node_id: &id_tree::NodeId,
+    ) -> Option<impl Iterator<Item = (AnyID, &'_ NodeData)> + '_> {
+        Some(self.tree.children_ids(node_id).ok()?.map(|node_id| {
+            let node = self.tree.get(node_id).unwrap().data();
+            let id = match node.ty {
+                NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(node_id.clone())),
+                NodeDataTy::Node(_) => AnyID::Node(NodeID(node_id.clone())),
+                // Invalid tree state.
+                _ => panic!("Root encountered during iteration!"),
+            };
+            (id, node)
+        }))
+    }
     pub fn add_node(
         &mut self,
         location: Location,
@@ -219,5 +260,16 @@ impl BlendGraph {
     /// (for example on passthrough nodes or Note leaves)
     pub fn blend_of(&self, target: impl Into<AnyID>) -> Result<Option<crate::Blend>, TargetError> {
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn uwu() {
+        let graph = super::BlendGraph::new();
+        graph
+            .iter_top_level()
+            .for_each(|(id, data)| log::trace!("{id:?}"))
     }
 }
