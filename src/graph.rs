@@ -12,10 +12,17 @@ pub enum LeafType {
     Note,
 }
 impl LeafType {
-    pub fn blend_of(&self) -> Option<crate::Blend> {
+    pub fn blend(&self) -> Option<crate::Blend> {
         match self {
             Self::StrokeLayer { blend, .. } => Some(*blend),
             Self::SolidColor { blend, .. } => Some(*blend),
+            Self::Note => None,
+        }
+    }
+    pub fn blend_mut(&mut self) -> Option<&mut crate::Blend> {
+        match self {
+            Self::StrokeLayer { blend, .. } => Some(blend),
+            Self::SolidColor { blend, .. } => Some(blend),
             Self::Note => None,
         }
     }
@@ -28,10 +35,16 @@ pub enum NodeType {
     GroupedBlend(crate::Blend),
 }
 impl NodeType {
-    pub fn blend_of(&self) -> Option<crate::Blend> {
+    pub fn blend(&self) -> Option<crate::Blend> {
         match self {
             Self::Passthrough => None,
             Self::GroupedBlend(blend) => Some(*blend),
+        }
+    }
+    pub fn blend_mut(&mut self) -> Option<&mut crate::Blend> {
+        match self {
+            Self::Passthrough => None,
+            Self::GroupedBlend(blend) => Some(blend),
         }
     }
 }
@@ -80,10 +93,73 @@ impl NodeDataTy {
             _ => false,
         }
     }
+    pub fn blend(&self) -> Option<crate::Blend> {
+        match self {
+            Self::Node(n) => n.blend(),
+            Self::Leaf(l) => l.blend(),
+            Self::Root => None,
+        }
+    }
+    pub fn blend_mut(&mut self) -> Option<&mut crate::Blend> {
+        match self {
+            Self::Node(n) => n.blend_mut(),
+            Self::Leaf(l) => l.blend_mut(),
+            Self::Root => None,
+        }
+    }
 }
-struct NodeData {
+pub struct NodeData {
+    // NOT public, as we users could break the tree by accessing this!
     ty: NodeDataTy,
-    name: String,
+    pub name: String,
+}
+impl NodeData {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
+    pub fn is_leaf(&self) -> bool {
+        self.ty.is_leaf()
+    }
+    pub fn is_node(&self) -> bool {
+        self.ty.is_node()
+    }
+    pub fn leaf(&self) -> Option<&LeafType> {
+        if let NodeDataTy::Leaf(l) = &self.ty {
+            Some(l)
+        } else {
+            None
+        }
+    }
+    pub fn leaf_mut(&mut self) -> Option<&mut LeafType> {
+        if let NodeDataTy::Leaf(l) = &mut self.ty {
+            Some(l)
+        } else {
+            None
+        }
+    }
+    pub fn node(&self) -> Option<&NodeType> {
+        if let NodeDataTy::Node(n) = &self.ty {
+            Some(n)
+        } else {
+            None
+        }
+    }
+    pub fn node_mut(&mut self) -> Option<&mut NodeType> {
+        if let NodeDataTy::Node(n) = &mut self.ty {
+            Some(n)
+        } else {
+            None
+        }
+    }
+    pub fn blend(&self) -> Option<crate::Blend> {
+        self.ty.blend()
+    }
+    pub fn blend_mut(&mut self) -> Option<&mut crate::Blend> {
+        self.ty.blend_mut()
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
