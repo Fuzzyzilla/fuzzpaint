@@ -77,6 +77,14 @@ impl AnyID {
         }
     }
 }
+impl AsRef<id_tree::NodeId> for AnyID {
+    fn as_ref(&self) -> &id_tree::NodeId {
+        match self {
+            AnyID::Leaf(LeafID(id)) => id,
+            AnyID::Node(NodeID(id)) => id,
+        }
+    }
+}
 
 enum NodeDataTy {
     Root,
@@ -181,13 +189,17 @@ pub enum ReparentError {
     WouldCycle,
 }
 
-pub enum Location {
+pub enum Location<'a> {
     /// Calculate the index and parent, such that the location
     /// referenced is the sibling above this node.
-    AboveSelection(AnyID),
+    AboveSelection(&'a AnyID),
     /// Set as the nth child of this node, where top = 0
-    IndexIntoNode(NodeID, usize),
+    ///
+    /// An index too large will be clamped to the bottom position.
+    IndexIntoNode(&'a NodeID, usize),
     /// Set as the nth child of the root, where top = 0
+    ///
+    /// An index too large will be clamped to the bottom position.
     IndexIntoRoot(usize),
 }
 
@@ -233,19 +245,85 @@ impl BlendGraph {
             (id, node)
         }))
     }
+    /// Convert a location to a parent and child idx
+    /// Ok result does not mean the node is for sure safe - Location::IndexIntoNode is unchecked!
+    fn find_location<'a>(
+        &'a self,
+        location: Location<'a>,
+    ) -> Result<(&'a id_tree::NodeId, usize), TargetError> {
+        match location {
+            Location::AboveSelection(selection) => {
+                let selection_id = selection.as_ref();
+                let node = self
+                    .tree
+                    .get(selection_id)
+                    .map_err(|_| TargetError::TargetNotFound)?;
+                // unwrap ok - node is NOT the root, if it were that would be a structural error!
+                let parent = node.parent().unwrap();
+                let (idx, _) = self
+                    .tree
+                    .children_ids(parent)
+                    // unwrap ok - parent will be in the tree if the child was! (checked above)
+                    .unwrap()
+                    .enumerate()
+                    .find(|(_, id)| *id == selection_id)
+                    // Unwrap ok - the child must be a child of it's parent of course!
+                    .unwrap();
+                Ok((parent, idx))
+            }
+            Location::IndexIntoNode(node, idx) => Ok((&node.0, idx)),
+            Location::IndexIntoRoot(idx) => Ok((self.tree.root_node_id().unwrap(), idx)),
+        }
+    }
     pub fn add_node(
         &mut self,
         location: Location,
-        node_ty: NodeType,
+        name: String,
+        ty: NodeType,
     ) -> Result<NodeID, TargetError> {
-        todo!();
+        let node = id_tree::Node::new(NodeData {
+            name,
+            ty: NodeDataTy::Node(ty),
+        });
+        // Convert this location to a parent ID and a child idx.
+        let (parent_id, idx) = self.find_location(location)?;
+        let parent_id = parent_id.to_owned();
+
+        // Check for errors again, since IndexIntoNode hasn't been checked yet.
+        let new_node = self
+            .tree
+            .insert(node, id_tree::InsertBehavior::UnderNode(&parent_id))
+            .map_err(|_| TargetError::TargetNotFound)?;
+
+        // unwrap ok - we just added it, of course it will be found!
+        self.tree.make_nth_sibling(&new_node, idx).unwrap();
+
+        Ok(NodeID(new_node))
     }
     pub fn add_leaf(
         &mut self,
         location: Location,
-        leaf_ty: LeafType,
-    ) -> Result<NodeID, TargetError> {
-        todo!();
+        name: String,
+        ty: LeafType,
+    ) -> Result<LeafID, TargetError> {
+        let node = id_tree::Node::new(NodeData {
+            name,
+            ty: NodeDataTy::Leaf(ty),
+        });
+        // Convert this location to a parent ID and a child idx.
+        let (parent_id, idx) = self.find_location(location)?;
+        let parent_id = parent_id.to_owned();
+
+        // Check for errors again, since IndexIntoNode hasn't been checked yet.
+        let new_node = self
+            .tree
+            .insert(node, id_tree::InsertBehavior::UnderNode(&parent_id))
+            .map_err(|_| TargetError::TargetNotFound)?;
+
+        // unwrap ok - we just added it, of course it will be found!
+        self.tree.make_nth_sibling(&new_node, idx).unwrap();
+
+        Ok(LeafID(new_node))
     }
     /// Reparent the target onto a new parent.
     /// Children are brought along for the ride!
@@ -254,12 +332,39 @@ impl BlendGraph {
         target: impl Into<AnyID>,
         destination: Location,
     ) -> Result<(), ReparentError> {
-        todo!();
+        let target_id = Into::<AnyID>::into(target).into_raw();
+        let (destination_id, idx) = self
+            .find_location(destination)
+            .map_err(|_| ReparentError::DestinationNotFound)?;
+        if self
+            .tree
+            .ancestor_ids(destination_id)
+            .map_err(|_| ReparentError::DestinationNotFound)?
+            .any(|ancestor| ancestor == &target_id)
+        {
+            return Err(ReparentError::WouldCycle);
+        }
+        let destination_id = destination_id.to_owned();
+
+        self.tree
+            .move_node(&target_id, id_tree::MoveBehavior::ToParent(&destination_id))
+            .map_err(|_| ReparentError::DestinationNotFound)?;
+
+        // unwrap ok - move_node already checked.
+        self.tree.make_nth_sibling(&target_id, idx).unwrap();
+
+        Ok(())
     }
     /// Get the blend of the given node, or None if no blend is assigned
     /// (for example on passthrough nodes or Note leaves)
     pub fn blend_of(&self, target: impl Into<AnyID>) -> Result<Option<crate::Blend>, TargetError> {
-        todo!()
+        let target_id = Into::<AnyID>::into(target).into_raw();
+        Ok(self
+            .tree
+            .get(&target_id)
+            .map_err(|_| TargetError::TargetNotFound)?
+            .data()
+            .blend())
     }
 }
 
