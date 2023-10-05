@@ -245,6 +245,39 @@ impl BlendGraph {
             (id, node)
         }))
     }
+    /// Iterate the children of this raw ID. A helper method for all various iters!
+    fn iter_mut_children_of_raw(
+        &'_ mut self,
+        node_id: &id_tree::NodeId,
+    ) -> Option<impl Iterator<Item = (AnyID, &'_ mut NodeData)> + '_> {
+        // uh oh, impossible with this lib!
+        /*
+        Some(self.tree.children_ids(node_id).ok()?.map(|node_id| {
+            let node = self.tree.get_mut(node_id).unwrap().data_mut();
+            let id = match node.ty {
+                NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(node_id.clone())),
+                NodeDataTy::Node(_) => AnyID::Node(NodeID(node_id.clone())),
+                // Invalid tree state.
+                _ => panic!("Root encountered during iteration!"),
+            };
+            (id, node)
+        }))*/
+
+        /* //Also doesn't work??
+        let ids: Vec<_> = self.tree.children_ids(node_id).ok()?.cloned().collect();
+
+        Some(ids.into_iter().map(|node_id| -> (AnyID, &'_ mut NodeData) {
+            let node = self.tree.get_mut(&node_id).unwrap().data_mut();
+            let id = match node.ty {
+                NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(node_id.clone())),
+                NodeDataTy::Node(_) => AnyID::Node(NodeID(node_id.clone())),
+                // Invalid tree state.
+                _ => panic!("Root encountered during iteration!"),
+            };
+            (id, node)
+        }))*/
+        Some(std::iter::empty())
+    }
     /// Convert a location to a parent and child idx
     /// Ok result does not mean the node is for sure safe - Location::IndexIntoNode is unchecked!
     fn find_location<'a>(
