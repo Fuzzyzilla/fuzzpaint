@@ -50,11 +50,11 @@ impl NodeType {
 }
 
 // Shhh.. they're secretly the same type >:3c
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct LeafID(id_tree::NodeId);
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct NodeID(id_tree::NodeId);
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum AnyID {
     Leaf(LeafID),
     Node(NodeID),
