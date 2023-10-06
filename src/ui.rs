@@ -272,10 +272,15 @@ impl MainUI {
                                 crate::graph::Location::IndexIntoNode(id, 0)
                             }
                             Some(any) => crate::graph::Location::AboveSelection(any),
-                            None => crate::graph::Location::IndexIntoRoot(0),
+                            // No selection, add into the root of the viewed subree
+                            None => match self.test_graph_focus.as_ref() {
+                                Some(root) => crate::graph::Location::IndexIntoNode(root, 0),
+                                None => crate::graph::Location::IndexIntoRoot(0),
+                            },
                         }
                     };
                 }
+
                 if ui
                     .button(STROKE_LAYER_ICON)
                     .on_hover_text("Add Stroke Layer")
@@ -370,14 +375,17 @@ impl MainUI {
                     ui.label(egui::RichText::new("Displaying subtree...").italics());
                 });
             }
-
-            graph_edit_recurse(
-                ui,
-                &self.test_blend_graph,
-                self.test_graph_focus.clone(),
-                &mut self.test_graph_selection,
-                &mut self.test_graph_focus,
-            );
+            egui::ScrollArea::new([false, true])
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    graph_edit_recurse(
+                        ui,
+                        &self.test_blend_graph,
+                        self.test_graph_focus.clone(),
+                        &mut self.test_graph_selection,
+                        &mut self.test_graph_focus,
+                    )
+                });
         });
 
         egui::SidePanel::left("Color picker").show(&ctx, |ui| {
@@ -576,6 +584,48 @@ fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut crate
             });
     });
 }
+fn ui_passthrough_or_blend(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash,
+    blend: &mut Option<crate::blend::Blend>,
+) {
+    ui.horizontal(|ui| {
+        if let Some(blend) = blend.as_mut() {
+            ui.toggle_value(
+                &mut blend.alpha_clip,
+                egui::RichText::new("α").monospace().strong(),
+            )
+            .on_hover_text("Alpha clip");
+            ui.add(
+                egui::DragValue::new(&mut blend.opacity)
+                    .fixed_decimals(2)
+                    .speed(0.01)
+                    .clamp_range(0.0..=1.0),
+            );
+        };
+
+        egui::ComboBox::new(id, "")
+            .selected_text(
+                blend
+                    .map(|blend| blend.mode.as_ref().to_string())
+                    .unwrap_or("Passthrough".to_string()),
+            )
+            .show_ui(ui, |ui| {
+                ui.selectable_value(blend, None, "Passthrough");
+                ui.separator();
+                for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
+                    ui.selectable_value(
+                        blend,
+                        Some(crate::blend::Blend {
+                            mode: blend_mode,
+                            ..Default::default()
+                        }),
+                        blend_mode.as_ref(),
+                    );
+                }
+            });
+    });
+}
 fn graph_edit_recurse(
     ui: &mut egui::Ui,
     graph: &crate::graph::BlendGraph,
@@ -634,7 +684,7 @@ fn graph_edit_recurse(
         // Type-specific UI elements
         match (data.leaf(), data.node()) {
             (Some(_), None) => {}
-            (None, Some(_)) => {
+            (None, Some(n)) => {
                 // Unwrap nodeID:
                 let crate::graph::AnyID::Node(node_id) = id.clone() else {
                     panic!("Node data and ID mismatch!")
@@ -645,8 +695,11 @@ fn graph_edit_recurse(
                         *focused_node = Some(node_id.clone())
                     }
                 });
+                // Display node type - passthrough or grouped blend
+                let mut blend = n.blend();
+                ui_passthrough_or_blend(ui, id.clone(), &mut blend);
 
-                // Node - display children!
+                // display children!
                 egui::CollapsingHeader::new("Children")
                     .default_open(true)
                     .show(ui, |ui| {
