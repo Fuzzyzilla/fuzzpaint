@@ -10,6 +10,7 @@
 //! There exists one command queue per document.
 
 use std::sync::Arc;
+pub mod state;
 
 pub struct CommandAtomsWriter {}
 struct DocumentCommandQueueInner {
@@ -118,23 +119,31 @@ pub struct DocumentCommandListener {
     inner: std::sync::Weak<parking_lot::RwLock<DocumentCommandQueueInner>>,
 }
 impl DocumentCommandListener {
-    /// Forwards the state of this listener to match the global queue, calling the closure with every command
-    /// done and undone on the way.
-    ///
-    /// The closure must not write to the parent queue - it will cause a deadlock!
-    pub fn update<T>(
-        &mut self,
-        f: impl FnMut(super::DoUndo<'_, super::Command>),
-    ) -> Result<(), ListenerError> {
-        let inner = self.inner.upgrade().ok_or(ListenerError::DocumentClosed)?;
-        let lock = inner.read();
-        let traverse = traverse(&lock.command_tree, self.cursor, lock.cursor)
-            .map_err(|traverse| ListenerError::TreeMalformed(traverse))?;
-        self.cursor = lock.cursor;
-
-        traverse.for_each(f);
-
-        Ok(())
+    /// Locks the shared state, without forwarding this listener's point in time.
+    /// See [state::CommandQueueLock]
+    pub fn peek_lock_state(&self) -> Result<state::CommandQueueLock, ListenerError> {
+        todo!()
+    }
+    /// Locks the shared state, bringing this listener up-to-date in the process.
+    /// See [state::CommandQueueLock]
+    pub fn forward_lock_state(&mut self) -> Result<state::CommandQueueLock, ListenerError> {
+        let state = self.peek_lock_state()?;
+        // update foward cursor
+        todo!();
+        Ok(state)
+    }
+    /// Locks or clones the shared state, without forwarding this listener's point in time.
+    /// See [state::CommandQueueCloneLock]
+    pub fn peek_clone_state(&self) -> Result<state::CommandQueueCloneLock, ListenerError> {
+        todo!()
+    }
+    /// Locks or clones the shared state, bringing this listener up-to-date in the process.
+    /// See [state::CommandQueueCloneLock]
+    pub fn forward_clone_state(&mut self) -> Result<state::CommandQueueCloneLock, ListenerError> {
+        let state = self.peek_clone_state()?;
+        // update foward cursor
+        todo!();
+        Ok(state)
     }
 }
 
