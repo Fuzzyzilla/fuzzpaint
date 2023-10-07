@@ -16,6 +16,7 @@ pub mod brush;
 pub mod document_viewport_proxy;
 pub mod gizmos;
 pub mod gpu_tess;
+pub mod graph;
 pub mod id;
 pub mod pen_tools;
 pub mod render_device;

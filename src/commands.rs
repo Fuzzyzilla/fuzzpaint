@@ -10,7 +10,39 @@ pub enum LayerCommand {
     Created(crate::WeakID<crate::StrokeLayer>),
     Stroke(StrokeCommand),
 }
+use crate::graph;
 pub enum GraphCommand {
+    // Todo: IDs are not stable, due to id_tree's inner workings.
+    // Thus this is merely a conceptual sketch :P
+    BlendChanged {
+        from: crate::blend::Blend,
+        to: crate::blend::Blend,
+        target: crate::graph::AnyID,
+    },
+    Reparent {
+        target: crate::graph::AnyID,
+        /// New parent, or None if root.
+        destination: Option<crate::graph::NodeID>,
+        child_idx: usize,
+    },
+    LeafCreated {
+        id: crate::graph::LeafID,
+        ty: crate::graph::LeafType,
+    },
+    LeafTyChanged {
+        target: crate::graph::LeafID,
+        old_ty: crate::graph::LeafType,
+        ty: crate::graph::LeafType,
+    },
+    NodeCreated {
+        id: crate::graph::NodeID,
+        ty: crate::graph::NodeType,
+    },
+    NodeTyChanged {
+        target: crate::graph::NodeID,
+        old_ty: crate::graph::NodeType,
+        ty: crate::graph::NodeType,
+    },
     // Waaa
 }
 pub enum StrokeCommand {

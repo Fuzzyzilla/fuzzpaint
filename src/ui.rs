@@ -1,5 +1,10 @@
 pub mod requests;
 
+const STROKE_LAYER_ICON: &'static str = "✏";
+const NOTE_LAYER_ICON: &'static str = "🖹";
+const FILL_LAYER_ICON: &'static str = "⬛";
+const GROUP_ICON: &'static str = "🗀";
+
 trait UILayer {
     /// Perform UI operations. If `is_background`, a layer is open above this layer - display
     /// as greyed out and ignore input!
@@ -30,6 +35,10 @@ pub struct MainUI {
     requests_send: requests::RequestSender,
     // Only some during a drag event on the view rotation slider. Not to be used aside from that! :P
     rotation_drag_value: Option<f32>,
+    // Testinggg
+    test_blend_graph: crate::graph::BlendGraph,
+    test_graph_selection: Option<crate::graph::AnyID>,
+    test_graph_focus: Option<crate::graph::NodeID>,
 }
 impl MainUI {
     pub fn new(requests_send: requests::RequestSender) -> Self {
@@ -40,6 +49,9 @@ impl MainUI {
             cur_document: None,
             rotation_drag_value: None,
             requests_send,
+            test_blend_graph: crate::graph::BlendGraph::new(),
+            test_graph_selection: None,
+            test_graph_focus: None,
         }
     }
     /// Main UI and any modals, with the top bar, layers, brushes, color, etc. To be displayed in front of the document and it's gizmos.
@@ -237,8 +249,6 @@ impl MainUI {
         egui::SidePanel::right("Layers").show(&ctx, |ui| {
             ui.label("Layers");
             ui.separator();
-
-            // if there is no current document, there is nothing for us to do here
             // if there is no current document, there is nothing for us to do here
             let Some(document) = self.cur_document else {
                 return;
@@ -253,77 +263,139 @@ impl MainUI {
             };
 
             ui.horizontal(|ui| {
-                if ui.button("➕").clicked() {
-                    let layer_id = crate::FuzzID::<crate::StrokeLayer>::default();
-                    let layer = crate::StrokeLayer {
-                        id: layer_id.weak(),
-                        name: format!("{layer_id}"),
-                        blend: Default::default(),
-                    };
-                    if let Some(selected) = interface.cur_layer {
-                        let selected_index = interface
-                            .layers
-                            .iter()
-                            .enumerate()
-                            .find(|(_, id)| **id == selected)
-                            .map(|(idx, _)| idx);
-                        if let Some(index) = selected_index {
-                            // Insert atop selected index
-                            interface.layers.insert(index, layer_id.weak());
-                        } else {
-                            // Selected layer not found! Just insert at top
-                            interface.layers.push(layer_id.weak());
+                // Copied logic since we can't borrow test_graph_selection throughout this whole
+                // ui section
+                macro_rules! add_location {
+                    () => {
+                        match self.test_graph_selection.as_ref() {
+                            Some(crate::graph::AnyID::Node(id)) => {
+                                crate::graph::Location::IndexIntoNode(id, 0)
+                            }
+                            Some(any) => crate::graph::Location::AboveSelection(any),
+                            // No selection, add into the root of the viewed subree
+                            None => match self.test_graph_focus.as_ref() {
+                                Some(root) => crate::graph::Location::IndexIntoNode(root, 0),
+                                None => crate::graph::Location::IndexIntoRoot(0),
+                            },
                         }
-                    } else {
-                        interface.layers.push(layer_id.weak());
-                    }
-                    // Select the new layer
-                    interface.cur_layer = Some(layer_id.weak());
-
-                    let _ = self.requests_send.send(requests::UiRequest::Document {
-                        target: document,
-                        request: requests::DocumentRequest::NewLayer(layer_id),
-                    });
+                    };
                 }
 
-                let folder_button = egui::Button::new("🗀");
-                ui.add_enabled(false, folder_button);
+                if ui
+                    .button(STROKE_LAYER_ICON)
+                    .on_hover_text("Add Stroke Layer")
+                    .clicked()
+                {
+                    self.test_graph_selection = self
+                        .test_blend_graph
+                        .add_leaf(
+                            add_location!(),
+                            "Stroke Layer".to_string(),
+                            crate::graph::LeafType::StrokeLayer {
+                                blend: Default::default(),
+                                source: crate::WeakID::empty(),
+                            },
+                        )
+                        .ok()
+                        .map(Into::into);
+                }
+                if ui
+                    .button(NOTE_LAYER_ICON)
+                    .on_hover_text("Add Note")
+                    .clicked()
+                {
+                    self.test_graph_selection = self
+                        .test_blend_graph
+                        .add_leaf(
+                            add_location!(),
+                            "Note".to_string(),
+                            crate::graph::LeafType::Note,
+                        )
+                        .ok()
+                        .map(Into::into);
+                }
+                if ui
+                    .button(FILL_LAYER_ICON)
+                    .on_hover_text("Add Fill Layer")
+                    .clicked()
+                {
+                    self.test_graph_selection = self
+                        .test_blend_graph
+                        .add_leaf(
+                            add_location!(),
+                            "Fill".to_string(),
+                            crate::graph::LeafType::SolidColor {
+                                blend: Default::default(),
+                                source: [Default::default(); 4],
+                            },
+                        )
+                        .ok()
+                        .map(Into::into);
+                }
+
+                ui.add(egui::Separator::default().vertical());
+
+                if ui.button(GROUP_ICON).on_hover_text("Add Group").clicked() {
+                    self.test_graph_selection = self
+                        .test_blend_graph
+                        .add_node(
+                            add_location!(),
+                            "Group Layer".to_string(),
+                            crate::graph::NodeType::Passthrough,
+                        )
+                        .ok()
+                        .map(Into::into);
+                };
+
+                ui.add(egui::Separator::default().vertical());
 
                 let merge_button = egui::Button::new("⤵");
                 ui.add_enabled(false, merge_button);
 
                 if ui.button("✖").on_hover_text("Delete layer").clicked() {
-                    if let Some(selected) = interface.cur_layer.take() {
-                        // Find the index of the selected layer
-                        let selected_index = interface
-                            .layers
-                            .iter()
-                            .enumerate()
-                            .find(|(_, id)| **id == selected)
-                            .map(|(idx, _)| idx);
-                        // Remove, if found
-                        if let Some(idx) = selected_index {
-                            interface.layers.remove(idx);
-                            let _ = self.requests_send.send(requests::UiRequest::Document {
-                                target: document,
-                                request: requests::DocumentRequest::Layer {
-                                    target: selected,
-                                    request: requests::LayerRequest::Deleted,
-                                },
-                            });
-                        }
-                    }
+                    /*
+                    if let Some(id) = self.test_graph_selection.take() {
+                        self.test_blend_graph.reparent(id, destination)
+                    }*/
                 };
             });
 
             ui.separator();
-            /*
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                let layers = document.layers_mut();
-                for layer in layers.iter_mut().rev() {
-                    Self::layer_edit(ui, &mut document_selections.cur_layer, layer);
-                }
-            });*/
+
+            // Strange visual flicker when this button is clicked,
+            // as the header remains for one frame after the graph switches back.
+            // This could become more problematic if the client doesn't refresh the UI
+            // one frame after, as the header would stay but there's no subtree selected!
+            // Eh, todo. :P
+            if self.test_graph_focus.is_some() {
+                ui.horizontal(|ui| {
+                    if ui.small_button("⬅").clicked() {
+                        self.test_graph_focus = None;
+                    }
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Subtree of {}",
+                            self.test_graph_focus
+                                .as_ref()
+                                .and_then(|subtree| self.test_blend_graph.get(subtree.clone()))
+                                .map(|data| data.name())
+                                .unwrap_or("Unknown")
+                        ))
+                        .italics(),
+                    );
+                });
+            }
+            egui::ScrollArea::new([false, true])
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    graph_edit_recurse(
+                        ui,
+                        &self.test_blend_graph,
+                        self.test_graph_focus.clone(),
+                        &mut self.test_graph_selection,
+                        &mut self.test_graph_focus,
+                    )
+                });
         });
 
         egui::SidePanel::left("Color picker").show(&ctx, |ui| {
@@ -447,7 +519,7 @@ impl MainUI {
                 ui.horizontal(|ui| {
                     let mut deleted_ids =
                         smallvec::SmallVec::<[crate::WeakID<crate::Document>; 1]>::new();
-                    for (document_id, interface) in self.documents.iter() {
+                    for (document_id, _) in self.documents.iter() {
                         egui::containers::Frame::group(ui.style())
                             .outer_margin(egui::Margin::symmetric(0.0, 0.0))
                             .inner_margin(egui::Margin::symmetric(0.0, 0.0))
@@ -501,7 +573,6 @@ impl MainUI {
 
 fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut crate::blend::Blend) {
     ui.horizontal(|ui| {
-        //alpha symbol for clipping (allocates every frame - why??)
         ui.toggle_value(
             &mut blend.alpha_clip,
             egui::RichText::new("α").monospace().strong(),
@@ -523,21 +594,154 @@ fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut crate
             });
     });
 }
-fn layer_edit(
+fn ui_passthrough_or_blend(
     ui: &mut egui::Ui,
-    cur_layer: &mut Option<crate::WeakID<crate::StrokeLayer>>,
-    layer: &mut crate::StrokeLayer,
+    id: impl std::hash::Hash,
+    blend: &mut Option<crate::blend::Blend>,
 ) {
-    ui.group(|ui| {
-        ui.horizontal(|ui| {
-            ui.selectable_value(cur_layer, Some(layer.id), "✏");
-            ui.text_edit_singleline(&mut layer.name);
-        })
-        .response
-        .on_hover_ui(|ui| {
-            ui.label(format!("{}", layer.id));
-        });
+    ui.horizontal(|ui| {
+        if let Some(blend) = blend.as_mut() {
+            ui.toggle_value(
+                &mut blend.alpha_clip,
+                egui::RichText::new("α").monospace().strong(),
+            )
+            .on_hover_text("Alpha clip");
+            ui.add(
+                egui::DragValue::new(&mut blend.opacity)
+                    .fixed_decimals(2)
+                    .speed(0.01)
+                    .clamp_range(0.0..=1.0),
+            );
+        };
 
-        ui_layer_blend(ui, &layer.id, &mut layer.blend);
+        egui::ComboBox::new(id, "")
+            .selected_text(
+                blend
+                    .map(|blend| blend.mode.as_ref().to_string())
+                    .unwrap_or("Passthrough".to_string()),
+            )
+            .show_ui(ui, |ui| {
+                ui.selectable_value(blend, None, "Passthrough");
+                ui.separator();
+                for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
+                    ui.selectable_value(
+                        blend,
+                        Some(crate::blend::Blend {
+                            mode: blend_mode,
+                            ..Default::default()
+                        }),
+                        blend_mode.as_ref(),
+                    );
+                }
+            });
     });
+}
+fn graph_edit_recurse(
+    ui: &mut egui::Ui,
+    graph: &crate::graph::BlendGraph,
+    root: Option<crate::graph::NodeID>,
+    selected_node: &mut Option<crate::graph::AnyID>,
+    focused_node: &mut Option<crate::graph::NodeID>,
+) {
+    // Weird type for static iterator dispatch for the anonymous iterators exposed by graph.
+    // Certainly there's an API change I should make to remove this weird necessity :P
+    enum EitherIter<I, R, N>
+    where
+        R: Iterator<Item = I>,
+        N: Iterator<Item = I>,
+    {
+        TopLevel(R),
+        Node(N),
+    }
+    impl<I, R, N> Iterator for EitherIter<I, R, N>
+    where
+        R: Iterator<Item = I>,
+        N: Iterator<Item = I>,
+    {
+        type Item = I;
+        fn next(&mut self) -> Option<Self::Item> {
+            match self {
+                EitherIter::Node(n) => n.next(),
+                EitherIter::TopLevel(r) => r.next(),
+            }
+        }
+    }
+    let mut iter = match root {
+        Some(root) => EitherIter::Node(graph.iter_node(&root).unwrap()),
+        None => EitherIter::TopLevel(graph.iter_top_level()),
+    };
+    let mut first = true;
+    // Iterate!
+    for (id, data) in iter {
+        if !first {
+            ui.separator();
+        }
+        // Name and selection
+        let header_response = ui.horizontal(|ui| {
+            // Choose an icon based on the type of the node:
+            let icon = if let Some(leaf) = data.leaf() {
+                match leaf {
+                    crate::graph::LeafType::Note => NOTE_LAYER_ICON,
+                    crate::graph::LeafType::StrokeLayer { .. } => STROKE_LAYER_ICON,
+                    crate::graph::LeafType::SolidColor { .. } => FILL_LAYER_ICON,
+                }
+            } else {
+                GROUP_ICON
+            };
+            ui.selectable_value(selected_node, Some(id.clone()), icon);
+
+            let mut name = data.name().to_string();
+
+            // Fetch from last frame - are we hovered?
+            let name_hovered_key = egui::Id::new((id.clone(), "name-hovered"));
+            let hovered: Option<bool> = ui.data(|data| data.get_temp(name_hovered_key));
+            let edit = egui::TextEdit::singleline(&mut name).frame(hovered.unwrap_or(false));
+            let name_response = ui.add(edit);
+
+            // Send data to next frame, to tell that we're hovered or not.
+            let interacted = name_response.has_focus() || name_response.hovered();
+            ui.data_mut(|data| data.insert_temp(name_hovered_key, interacted));
+
+            // Forward the response of the header items for right clicks, as it takes up all the click area!
+            name_response
+        });
+        // Type-specific UI elements
+        match (data.leaf(), data.node()) {
+            (Some(_), None) => {}
+            (None, Some(n)) => {
+                // Unwrap nodeID:
+                let crate::graph::AnyID::Node(node_id) = id.clone() else {
+                    panic!("Node data and ID mismatch!")
+                };
+                // Option to focus this subtree:
+                header_response.inner.context_menu(|ui| {
+                    if ui.button("Focus Subtree").clicked() {
+                        *focused_node = Some(node_id.clone())
+                    }
+                });
+                // Display node type - passthrough or grouped blend
+                let mut blend = n.blend();
+                ui_passthrough_or_blend(ui, id.clone(), &mut blend);
+
+                // display children!
+                egui::CollapsingHeader::new(egui::RichText::new("Children").italics().weak())
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        graph_edit_recurse(ui, graph, Some(node_id), selected_node, focused_node)
+                    });
+            }
+            (None, None) => (),
+            (Some(_), Some(_)) => panic!("Node is both a leaf and node???"),
+        }
+        // Blend, if any.
+        if let Some(mut blend) = data.blend() {
+            ui_layer_blend(ui, id, &mut blend)
+        }
+        first = false;
+    }
+
+    // (round about way to determine that) it's empty!
+    if first {
+        ui.label(egui::RichText::new("Nothing here...").italics().weak());
+    }
 }
