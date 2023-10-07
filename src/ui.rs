@@ -372,7 +372,17 @@ impl MainUI {
                     if ui.small_button("⬅").clicked() {
                         self.test_graph_focus = None;
                     }
-                    ui.label(egui::RichText::new("Displaying subtree...").italics());
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Subtree of {}",
+                            self.test_graph_focus
+                                .as_ref()
+                                .and_then(|subtree| self.test_blend_graph.get(subtree.clone()))
+                                .map(|data| data.name())
+                                .unwrap_or("Unknown")
+                        ))
+                        .italics(),
+                    );
                 });
             }
             egui::ScrollArea::new([false, true])
@@ -679,7 +689,21 @@ fn graph_edit_recurse(
                 GROUP_ICON
             };
             ui.selectable_value(selected_node, Some(id.clone()), icon);
-            ui.label(data.name());
+
+            let mut name = data.name().to_string();
+
+            // Fetch from last frame - are we hovered?
+            let name_hovered_key = egui::Id::new((id.clone(), "name-hovered"));
+            let hovered: Option<bool> = ui.data(|data| data.get_temp(name_hovered_key));
+            let edit = egui::TextEdit::singleline(&mut name).frame(hovered.unwrap_or(false));
+            let name_response = ui.add(edit);
+
+            // Send data to next frame, to tell that we're hovered or not.
+            let interacted = name_response.has_focus() || name_response.hovered();
+            ui.data_mut(|data| data.insert_temp(name_hovered_key, interacted));
+
+            // Forward the response of the header items for right clicks, as it takes up all the click area!
+            name_response
         });
         // Type-specific UI elements
         match (data.leaf(), data.node()) {
@@ -690,7 +714,7 @@ fn graph_edit_recurse(
                     panic!("Node data and ID mismatch!")
                 };
                 // Option to focus this subtree:
-                header_response.response.context_menu(|ui| {
+                header_response.inner.context_menu(|ui| {
                     if ui.button("Focus Subtree").clicked() {
                         *focused_node = Some(node_id.clone())
                     }
@@ -700,7 +724,7 @@ fn graph_edit_recurse(
                 ui_passthrough_or_blend(ui, id.clone(), &mut blend);
 
                 // display children!
-                egui::CollapsingHeader::new("Children")
+                egui::CollapsingHeader::new(egui::RichText::new("Children").italics().weak())
                     .default_open(true)
                     .show(ui, |ui| {
                         graph_edit_recurse(ui, graph, Some(node_id), selected_node, focused_node)

@@ -317,6 +317,10 @@ impl BlendGraph {
             Location::IndexIntoRoot(idx) => Ok((self.tree.root_node_id().unwrap(), idx)),
         }
     }
+    pub fn get(&self, id: impl Into<AnyID>) -> Option<&NodeData> {
+        let id = Into::<AnyID>::into(id).into_raw();
+        self.tree.get(&id).ok().map(|node| node.data())
+    }
     pub fn add_node(
         &mut self,
         location: Location,
