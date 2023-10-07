@@ -1,3 +1,5 @@
+pub mod rendering;
+
 pub enum LeafType {
     StrokeLayer {
         blend: crate::Blend,
@@ -54,10 +56,17 @@ impl NodeType {
 pub struct LeafID(id_tree::NodeId);
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct NodeID(id_tree::NodeId);
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnyID {
     Leaf(LeafID),
     Node(NodeID),
+}
+impl std::hash::Hash for AnyID {
+    // Forego including type in the hash, as we assume the invariant that a
+    // Leaf and Node may not have the same ID.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_ref().hash(state)
+    }
 }
 impl From<LeafID> for AnyID {
     fn from(value: LeafID) -> Self {
