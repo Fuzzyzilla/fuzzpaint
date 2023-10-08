@@ -1,6 +1,6 @@
 pub struct Brush {
     in_progress_stroke: Option<crate::Stroke>,
-    last_document: Option<crate::WeakID<crate::Document>>,
+    last_document: Option<crate::FuzzID<crate::Document>>,
 }
 
 impl super::MakePenTool for Brush {
@@ -118,7 +118,7 @@ impl super::PenTool for Brush {
                         let _ = render_output.render_task_messages.send(
                             crate::RenderMessage::StrokeLayer {
                                 layer: cur_layer,
-                                kind: crate::StrokeLayerRenderMessageKind::Append(stroke.into()),
+                                kind: crate::StrokeLayerRenderMessageKind::Append(stroke.clone()),
                             },
                         );
                     }
@@ -198,14 +198,12 @@ impl super::PenTool for Brush {
                     if let Some(cursor) = layer_data.undo_cursor_position.take() {
                         layer_data.strokes.drain(cursor..);
                     }
-
-                    let weak_ref = (&immutable).into();
-                    layer_data.strokes.push(immutable);
+                    layer_data.strokes.push(immutable.clone());
 
                     let _ = render_output.render_task_messages.send(
                         crate::RenderMessage::StrokeLayer {
                             layer: cur_layer,
-                            kind: crate::StrokeLayerRenderMessageKind::Append(weak_ref),
+                            kind: crate::StrokeLayerRenderMessageKind::Append(immutable),
                         },
                     );
                 }

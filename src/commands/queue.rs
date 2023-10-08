@@ -88,7 +88,7 @@ impl DocumentCommandQueue {
     pub fn listen_from_start(&self) -> DocumentCommandListener {
         let start = self.inner.read().root;
         DocumentCommandListener {
-            _document: self.document.weak(),
+            _document: self.document,
             cursor: start,
             inner: std::sync::Arc::downgrade(&self.inner),
         }
@@ -97,7 +97,7 @@ impl DocumentCommandQueue {
     pub fn listen_from_now(&self) -> DocumentCommandListener {
         let start = self.inner.read().cursor;
         DocumentCommandListener {
-            _document: self.document.weak(),
+            _document: self.document,
             cursor: start,
             inner: std::sync::Arc::downgrade(&self.inner),
         }
@@ -112,7 +112,7 @@ pub enum ListenerError {
     TreeMalformed(TraverseError),
 }
 pub struct DocumentCommandListener {
-    _document: crate::WeakID<crate::Document>,
+    _document: crate::FuzzID<crate::Document>,
     // Cursor into the tree that this listener has last seen,
     // When more events are requested, the path to the "true" cursor is found and traversed.
     cursor: slab_tree::NodeId,

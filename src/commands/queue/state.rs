@@ -32,5 +32,5 @@ impl CommandQueueCloneLock {
 pub trait CommandQueueStateReader {
     fn graph(&self) -> &crate::graph::BlendGraph;
     fn stroke_layers(&self) -> &[crate::StrokeLayer];
-    fn stroke_layer(&self, id: &crate::WeakID<crate::StrokeLayer>) -> Option<&crate::StrokeLayer>;
+    fn stroke_layer(&self, id: &crate::FuzzID<crate::StrokeLayer>) -> Option<&crate::StrokeLayer>;
 }

@@ -3,7 +3,7 @@ pub mod rendering;
 pub enum LeafType {
     StrokeLayer {
         blend: crate::Blend,
-        source: crate::WeakID<crate::StrokeLayer>,
+        source: crate::FuzzID<crate::StrokeLayer>,
     },
     SolidColor {
         blend: crate::Blend,

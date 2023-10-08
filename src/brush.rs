@@ -1,7 +1,6 @@
 //! # Brush
 
 pub type BrushID = crate::id::FuzzID<Brush>;
-pub type WeakBrushID = crate::id::WeakID<Brush>;
 
 #[derive(PartialEq, Eq, Hash, strum::AsRefStr, strum::EnumIter, Copy, Clone)]
 pub enum BrushKind {
@@ -71,11 +70,11 @@ impl Default for Brush {
 }
 
 pub fn todo_brush() -> Brush {
+    static TODO_ID: std::sync::OnceLock<BrushID> = std::sync::OnceLock::new();
     Brush {
         name: "Todo".into(),
         style: Default::default(),
-        // Needed to get a consistent yet bogus ID for testing.
-        id: unsafe { crate::FuzzID::dummy() },
+        id: *TODO_ID.get_or_init(Default::default),
         // Example UUID from wikipedia lol
         universal_id: uuid::uuid!("123e4567-e89b-12d3-a456-426614174000"),
     }

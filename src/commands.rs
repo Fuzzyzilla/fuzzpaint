@@ -7,7 +7,7 @@
 pub mod queue;
 
 pub enum LayerCommand {
-    Created(crate::WeakID<crate::StrokeLayer>),
+    Created(crate::FuzzID<crate::StrokeLayer>),
     Stroke(StrokeCommand),
 }
 use crate::graph;
@@ -47,14 +47,14 @@ pub enum GraphCommand {
 }
 pub enum StrokeCommand {
     Created {
-        id: crate::WeakID<crate::Stroke>,
+        id: crate::FuzzID<crate::Stroke>,
         brush: crate::StrokeBrushSettings,
-        points: crate::repositories::points::WeakPointCollectionID,
+        points: crate::repositories::points::PointCollectionID,
     },
     ReassignPoints {
-        id: crate::WeakID<crate::Stroke>,
-        from: crate::repositories::points::WeakPointCollectionID,
-        to: crate::repositories::points::WeakPointCollectionID,
+        id: crate::FuzzID<crate::Stroke>,
+        from: crate::repositories::points::PointCollectionID,
+        to: crate::repositories::points::PointCollectionID,
     },
 }
 pub enum ScopeType {

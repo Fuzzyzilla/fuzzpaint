@@ -17,10 +17,10 @@ trait UILayer {
     ) -> bool;
 }
 struct PerDocumentData {
-    cur_layer: Option<crate::WeakID<crate::StrokeLayer>>,
+    cur_layer: Option<crate::FuzzID<crate::StrokeLayer>>,
     // Still dirty... UI should be the ground truth for this! But at the same time, the document should own it's blend graph.
     // Hmmmm...
-    layers: Vec<crate::WeakID<crate::StrokeLayer>>,
+    layers: Vec<crate::FuzzID<crate::StrokeLayer>>,
 }
 pub struct MainUI {
     // Could totally be static dispatch, but for simplicity:
@@ -29,8 +29,8 @@ pub struct MainUI {
     /// Displayed as windows on the document viewport.
     inlays: Vec<Box<dyn UILayer>>,
 
-    documents: Vec<(crate::WeakID<crate::Document>, PerDocumentData)>,
-    cur_document: Option<crate::WeakID<crate::Document>>,
+    documents: Vec<(crate::FuzzID<crate::Document>, PerDocumentData)>,
+    cur_document: Option<crate::FuzzID<crate::Document>>,
 
     requests_send: requests::RequestSender,
     // Only some during a drag event on the view rotation slider. Not to be used aside from that! :P
@@ -96,9 +96,8 @@ impl MainUI {
                         };
                         if add_button(ui, "New", Some("Ctrl+N")).clicked() {
                             let id = crate::FuzzID::<crate::Document>::default();
-                            let weak = id.weak();
                             let document = crate::Document {
-                                id: weak,
+                                id,
                                 layer_top_level: vec![],
                                 name: "Uwu".into(),
                                 path: None,
@@ -107,7 +106,7 @@ impl MainUI {
                                 cur_layer: None,
                                 layers: vec![],
                             };
-                            self.documents.push((weak, interface));
+                            self.documents.push((id, interface));
 
                             let _ = self
                                 .requests_send
@@ -293,7 +292,7 @@ impl MainUI {
                             "Stroke Layer".to_string(),
                             crate::graph::LeafType::StrokeLayer {
                                 blend: Default::default(),
-                                source: crate::WeakID::empty(),
+                                source: crate::FuzzID::default(),
                             },
                         )
                         .ok()
@@ -518,7 +517,7 @@ impl MainUI {
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let mut deleted_ids =
-                        smallvec::SmallVec::<[crate::WeakID<crate::Document>; 1]>::new();
+                        smallvec::SmallVec::<[crate::FuzzID<crate::Document>; 1]>::new();
                     for (document_id, _) in self.documents.iter() {
                         egui::containers::Frame::group(ui.style())
                             .outer_margin(egui::Margin::symmetric(0.0, 0.0))
