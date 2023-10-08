@@ -6,13 +6,13 @@
 
 // Collection of pending IDs by type.
 static ID_SERVER: std::sync::OnceLock<
-    parking_lot::RwLock<std::collections::HashMap<std::any::TypeId, std::sync::atomic::AtomicU64>>,
+    parking_lot::RwLock<hashbrown::HashMap<std::any::TypeId, std::sync::atomic::AtomicU64>>,
 > = std::sync::OnceLock::new();
 
 /// ID that is guarunteed unique within this execution of the program.
 /// IDs with different types may share a value but should not be considered equal.
 pub struct FuzzID<T: std::any::Any> {
-    id: u64,
+    id: std::num::NonZeroU64,
     // Namespace marker
     _phantom: std::marker::PhantomData<T>,
 }
@@ -36,7 +36,7 @@ impl<T: std::any::Any> std::hash::Hash for FuzzID<T> {
     /// comparisons between hashes from different executions of the program.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::any::TypeId::of::<T>().hash(state);
-        state.write_u64(self.id);
+        self.id.hash(state)
     }
 }
 
@@ -44,7 +44,7 @@ impl<T: std::any::Any> FuzzID<T> {
     /// Get the raw numeric value of this ID.
     /// IDs from differing namespaces may share the same numeric ID!
     pub fn id(&self) -> u64 {
-        self.id
+        self.id.get()
     }
 }
 impl<T: std::any::Any> Default for FuzzID<T> {
@@ -67,10 +67,17 @@ impl<T: std::any::Any> Default for FuzzID<T> {
             }
         };
 
-        // Incredibly unrealistic - At one brush stroke per second, 24/7/365, it will take
-        // half a trillion years to overflow. This assert is debug-only, to catch exhaustion from some
-        // programming error.
-        debug_assert!(id != 0, "{} ID overflow!", std::any::type_name::<T>());
+        // Incredibly unrealistic for this to fail - At one brush stroke per second, 24/7/365, it will take
+        // half a trillion years to overflow!
+        let Some(id) = std::num::NonZeroU64::new(id) else {
+            log::error!("{} ID overflow! Aborting!", std::any::type_name::<T>());
+            log::logger().flush();
+            // Panic is not enough - we cannot allow any threads to continue, global state is unfixably borked!
+            // We could instead return an option type, allowing threads to clean up properly but still preventing
+            // future ID allocations. However, this failure case is so absurd I don't think it's worth degrading the usability
+            // of this API.
+            std::process::abort();
+        };
 
         Self {
             id,
