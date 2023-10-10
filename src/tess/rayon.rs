@@ -18,7 +18,11 @@ impl<'data> RayonStreamTessellator<'data> {
     }
 }
 impl<'data> StreamStrokeTessellator<'data> for RayonStreamTessellator<'data> {
-    fn tessellate(&mut self, vertices: &mut [TessellatedStrokeVertex], infos: &mut [super::TessellatedStrokeInfo]) -> super::StreamStatus {
+    fn tessellate(
+        &mut self,
+        vertices: &mut [TessellatedStrokeVertex],
+        infos: &mut [super::TessellatedStrokeInfo],
+    ) -> super::StreamStatus {
         todo!()
     }
 }

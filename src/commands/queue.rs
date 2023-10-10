@@ -10,7 +10,7 @@
 //! There exists one command queue per document.
 
 use std::sync::Arc;
-pub mod state;
+pub mod state_reader;
 
 pub struct CommandAtomsWriter {}
 struct DocumentCommandQueueInner {
@@ -120,26 +120,28 @@ pub struct DocumentCommandListener {
 }
 impl DocumentCommandListener {
     /// Locks the shared state, without forwarding this listener's point in time.
-    /// See [state::CommandQueueLock]
-    pub fn peek_lock_state(&self) -> Result<state::CommandQueueLock, ListenerError> {
+    /// See [state_reader::CommandQueueLock]
+    pub fn peek_lock_state(&self) -> Result<state_reader::CommandQueueLock, ListenerError> {
         todo!()
     }
     /// Locks the shared state, bringing this listener up-to-date in the process.
-    /// See [state::CommandQueueLock]
-    pub fn forward_lock_state(&mut self) -> Result<state::CommandQueueLock, ListenerError> {
+    /// See [state_reader::CommandQueueLock]
+    pub fn forward_lock_state(&mut self) -> Result<state_reader::CommandQueueLock, ListenerError> {
         let state = self.peek_lock_state()?;
         // update foward cursor
         todo!();
         Ok(state)
     }
     /// Locks or clones the shared state, without forwarding this listener's point in time.
-    /// See [state::CommandQueueCloneLock]
-    pub fn peek_clone_state(&self) -> Result<state::CommandQueueCloneLock, ListenerError> {
+    /// See [state_reader::CommandQueueCloneLock]
+    pub fn peek_clone_state(&self) -> Result<state_reader::CommandQueueCloneLock, ListenerError> {
         todo!()
     }
     /// Locks or clones the shared state, bringing this listener up-to-date in the process.
-    /// See [state::CommandQueueCloneLock]
-    pub fn forward_clone_state(&mut self) -> Result<state::CommandQueueCloneLock, ListenerError> {
+    /// See [state_reader::CommandQueueCloneLock]
+    pub fn forward_clone_state(
+        &mut self,
+    ) -> Result<state_reader::CommandQueueCloneLock, ListenerError> {
         let state = self.peek_clone_state()?;
         // update foward cursor
         todo!();

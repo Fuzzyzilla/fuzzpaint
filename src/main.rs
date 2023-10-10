@@ -10,6 +10,7 @@ use vulkano::command_buffer;
 use vulkano_prelude::*;
 pub mod actions;
 pub mod blend;
+pub mod borrowed_state;
 pub mod brush;
 pub mod document_viewport_proxy;
 pub mod gizmos;

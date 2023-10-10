@@ -29,8 +29,16 @@ impl CommandQueueCloneLock {
         todo!();
     }
 }
+use crate::borrowed_state;
 pub trait CommandQueueStateReader {
-    fn graph(&self) -> &crate::graph::BlendGraph;
-    fn stroke_layers(&self) -> &[crate::StrokeLayer];
-    fn stroke_layer(&self, id: &crate::FuzzID<crate::StrokeLayer>) -> Option<&crate::StrokeLayer>;
+    fn graph(&self) -> &borrowed_state::BorrowedBlendGraph;
+    fn stroke_layers(&self) -> &[borrowed_state::BorrowedStrokeLayer];
+    fn stroke_layer(
+        &self,
+        id: borrowed_state::StrokeLayerID,
+    ) -> Option<&borrowed_state::BorrowedStrokeLayer>;
+    type ChangesIter<'s>: Iterator<Item = super::super::DoUndo<'s, super::super::Command>> + 's
+    where
+        Self: 's;
+    fn changes(&self) -> Self::ChangesIter<'_>;
 }
