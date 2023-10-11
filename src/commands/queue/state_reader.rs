@@ -8,10 +8,30 @@
 /// It is an error for the task that owns this lock to attempt to push to the queue! Doing so
 /// will result in a deadlock.
 pub struct CommandQueueLock {}
+enum OwnedDoUndo<C> {
+    Do(C),
+    Undo(C),
+}
+impl<C> From<super::super::DoUndo<'_, C>> for OwnedDoUndo<C>
+where
+    C: Clone,
+{
+    fn from(value: super::super::DoUndo<'_, C>) -> Self {
+        match value {
+            super::super::DoUndo::Do(c) => Self::Do(c.clone()),
+            super::super::DoUndo::Undo(c) => Self::Undo(c.clone()),
+        }
+    }
+}
 /// Represents a weak lock on the global queue state, that will create a copy of the state if the queue is modified.
 /// As such, it may drift out-of-date and may incur additional allocations. Use for long operations, to prevent
 /// blocking other threads from pushing to the queue!
-pub struct CommandQueueCloneLock {}
+pub struct CommandQueueCloneLock {
+    /// Eager clone of the commands. Since commands are immutable, it *should*
+    /// be possible to architect this to not need to clone. But for now since queue's
+    /// commands are stored in a Vec, their addresses are not 'static :/
+    commands: Vec<OwnedDoUndo<super::super::Command>>,
+}
 pub enum Stale {
     /// The locked state has commands not present in the true state.
     /// i.e., the path from this state to true state contains at least one `Undo`
@@ -29,14 +49,11 @@ impl CommandQueueCloneLock {
         todo!();
     }
 }
-use crate::borrowed_state;
+use crate::state;
 pub trait CommandQueueStateReader {
-    fn graph(&self) -> &borrowed_state::BorrowedBlendGraph;
-    fn stroke_layers(&self) -> &[borrowed_state::BorrowedStrokeLayer];
-    fn stroke_layer(
-        &self,
-        id: borrowed_state::StrokeLayerID,
-    ) -> Option<&borrowed_state::BorrowedStrokeLayer>;
+    fn graph(&self) -> &state::borrowed::BlendGraph;
+    fn stroke_layers(&self) -> &[state::borrowed::StrokeLayer];
+    fn stroke_layer(&self, id: state::StrokeLayerID) -> Option<&state::borrowed::StrokeLayer>;
     type ChangesIter<'s>: Iterator<Item = super::super::DoUndo<'s, super::super::Command>> + 's
     where
         Self: 's;

@@ -10,6 +10,7 @@
 //! There exists one command queue per document.
 
 use std::sync::Arc;
+mod queue_state;
 pub mod state_reader;
 
 pub struct CommandAtomsWriter {}

@@ -36,9 +36,9 @@ pub struct MainUI {
     // Only some during a drag event on the view rotation slider. Not to be used aside from that! :P
     rotation_drag_value: Option<f32>,
     // Testinggg
-    test_blend_graph: crate::graph::BlendGraph,
-    test_graph_selection: Option<crate::graph::AnyID>,
-    test_graph_focus: Option<crate::graph::NodeID>,
+    test_blend_graph: crate::state::graph::BlendGraph,
+    test_graph_selection: Option<crate::state::graph::AnyID>,
+    test_graph_focus: Option<crate::state::graph::NodeID>,
 }
 impl MainUI {
     pub fn new(requests_send: requests::RequestSender) -> Self {
@@ -49,7 +49,7 @@ impl MainUI {
             cur_document: None,
             rotation_drag_value: None,
             requests_send,
-            test_blend_graph: crate::graph::BlendGraph::new(),
+            test_blend_graph: crate::state::graph::BlendGraph::new(),
             test_graph_selection: None,
             test_graph_focus: None,
         }
@@ -267,14 +267,14 @@ impl MainUI {
                 macro_rules! add_location {
                     () => {
                         match self.test_graph_selection.as_ref() {
-                            Some(crate::graph::AnyID::Node(id)) => {
-                                crate::graph::Location::IndexIntoNode(id, 0)
+                            Some(crate::state::graph::AnyID::Node(id)) => {
+                                crate::state::graph::Location::IndexIntoNode(id, 0)
                             }
-                            Some(any) => crate::graph::Location::AboveSelection(any),
+                            Some(any) => crate::state::graph::Location::AboveSelection(any),
                             // No selection, add into the root of the viewed subree
                             None => match self.test_graph_focus.as_ref() {
-                                Some(root) => crate::graph::Location::IndexIntoNode(root, 0),
-                                None => crate::graph::Location::IndexIntoRoot(0),
+                                Some(root) => crate::state::graph::Location::IndexIntoNode(root, 0),
+                                None => crate::state::graph::Location::IndexIntoRoot(0),
                             },
                         }
                     };
@@ -290,7 +290,7 @@ impl MainUI {
                         .add_leaf(
                             add_location!(),
                             "Stroke Layer".to_string(),
-                            crate::graph::LeafType::StrokeLayer {
+                            crate::state::graph::LeafType::StrokeLayer {
                                 blend: Default::default(),
                                 source: crate::FuzzID::default(),
                             },
@@ -308,7 +308,7 @@ impl MainUI {
                         .add_leaf(
                             add_location!(),
                             "Note".to_string(),
-                            crate::graph::LeafType::Note,
+                            crate::state::graph::LeafType::Note,
                         )
                         .ok()
                         .map(Into::into);
@@ -323,7 +323,7 @@ impl MainUI {
                         .add_leaf(
                             add_location!(),
                             "Fill".to_string(),
-                            crate::graph::LeafType::SolidColor {
+                            crate::state::graph::LeafType::SolidColor {
                                 blend: Default::default(),
                                 source: [Default::default(); 4],
                             },
@@ -340,7 +340,7 @@ impl MainUI {
                         .add_node(
                             add_location!(),
                             "Group Layer".to_string(),
-                            crate::graph::NodeType::Passthrough,
+                            crate::state::graph::NodeType::Passthrough,
                         )
                         .ok()
                         .map(Into::into);
@@ -637,10 +637,10 @@ fn ui_passthrough_or_blend(
 }
 fn graph_edit_recurse(
     ui: &mut egui::Ui,
-    graph: &crate::graph::BlendGraph,
-    root: Option<crate::graph::NodeID>,
-    selected_node: &mut Option<crate::graph::AnyID>,
-    focused_node: &mut Option<crate::graph::NodeID>,
+    graph: &crate::state::graph::BlendGraph,
+    root: Option<crate::state::graph::NodeID>,
+    selected_node: &mut Option<crate::state::graph::AnyID>,
+    focused_node: &mut Option<crate::state::graph::NodeID>,
 ) {
     // Weird type for static iterator dispatch for the anonymous iterators exposed by graph.
     // Certainly there's an API change I should make to remove this weird necessity :P
@@ -680,9 +680,9 @@ fn graph_edit_recurse(
             // Choose an icon based on the type of the node:
             let icon = if let Some(leaf) = data.leaf() {
                 match leaf {
-                    crate::graph::LeafType::Note => NOTE_LAYER_ICON,
-                    crate::graph::LeafType::StrokeLayer { .. } => STROKE_LAYER_ICON,
-                    crate::graph::LeafType::SolidColor { .. } => FILL_LAYER_ICON,
+                    crate::state::graph::LeafType::Note => NOTE_LAYER_ICON,
+                    crate::state::graph::LeafType::StrokeLayer { .. } => STROKE_LAYER_ICON,
+                    crate::state::graph::LeafType::SolidColor { .. } => FILL_LAYER_ICON,
                 }
             } else {
                 GROUP_ICON
@@ -709,7 +709,7 @@ fn graph_edit_recurse(
             (Some(_), None) => {}
             (None, Some(n)) => {
                 // Unwrap nodeID:
-                let crate::graph::AnyID::Node(node_id) = id.clone() else {
+                let crate::state::graph::AnyID::Node(node_id) = id.clone() else {
                     panic!("Node data and ID mismatch!")
                 };
                 // Option to focus this subtree:

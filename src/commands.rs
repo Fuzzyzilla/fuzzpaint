@@ -6,42 +6,43 @@
 
 pub mod queue;
 
+use crate::state;
+
 pub enum LayerCommand {
-    Created(crate::FuzzID<crate::StrokeLayer>),
+    Created(state::StrokeLayerID),
     Stroke(StrokeCommand),
 }
-use crate::graph;
 pub enum GraphCommand {
     // Todo: IDs are not stable, due to id_tree's inner workings.
     // Thus this is merely a conceptual sketch :P
     BlendChanged {
         from: crate::blend::Blend,
         to: crate::blend::Blend,
-        target: crate::graph::AnyID,
+        target: state::graph::AnyID,
     },
     Reparent {
-        target: crate::graph::AnyID,
+        target: state::graph::AnyID,
         /// New parent, or None if root.
-        destination: Option<crate::graph::NodeID>,
+        destination: Option<state::graph::NodeID>,
         child_idx: usize,
     },
     LeafCreated {
-        id: crate::graph::LeafID,
-        ty: crate::graph::LeafType,
+        id: state::graph::LeafID,
+        ty: state::graph::LeafType,
     },
     LeafTyChanged {
-        target: crate::graph::LeafID,
-        old_ty: crate::graph::LeafType,
-        ty: crate::graph::LeafType,
+        target: state::graph::LeafID,
+        old_ty: state::graph::LeafType,
+        ty: state::graph::LeafType,
     },
     NodeCreated {
-        id: crate::graph::NodeID,
-        ty: crate::graph::NodeType,
+        id: state::graph::NodeID,
+        ty: state::graph::NodeType,
     },
     NodeTyChanged {
-        target: crate::graph::NodeID,
-        old_ty: crate::graph::NodeType,
-        ty: crate::graph::NodeType,
+        target: state::graph::NodeID,
+        old_ty: state::graph::NodeType,
+        ty: state::graph::NodeType,
     },
     // Waaa
 }
