@@ -4,6 +4,7 @@ mod stable_id;
 // FuzzNodeID is NOT public!
 pub use stable_id::{AnyID, LeafID, NodeID};
 
+#[derive(Clone)]
 pub enum LeafType {
     StrokeLayer {
         blend: crate::Blend,
@@ -33,6 +34,7 @@ impl LeafType {
         }
     }
 }
+#[derive(Clone)]
 pub enum NodeType {
     /// Leaves are grouped for organization only, and the blend graph
     /// treats it as if it were simply it's children
@@ -55,6 +57,7 @@ impl NodeType {
     }
 }
 
+#[derive(Clone)]
 enum NodeDataTy {
     Root,
     Node(NodeType),
@@ -88,6 +91,7 @@ impl NodeDataTy {
         }
     }
 }
+#[derive(Clone)]
 pub struct NodeData {
     // NOT public, as we users could break the tree by accessing this!
     ty: NodeDataTy,
@@ -401,14 +405,50 @@ impl BlendGraph {
             .blend())
     }
 }
+/// Very expensive clone impl!
+impl Clone for BlendGraph {
+    fn clone(&self) -> Self {
+        let tree_clone = self.tree.clone();
+        let mut new_ids = stable_id::StableIDMap::with_capacity(self.ids.capacity());
+
+        // id_tree's NodeIds get scrombled when cloning, but we want the old FuzzID based references
+        // to still work. Reconstruct!
+        self.tree
+            .traverse_post_order_ids(self.tree.root_node_id().unwrap())
+            .unwrap()
+            .zip(
+                tree_clone
+                    .traverse_post_order_ids(tree_clone.root_node_id().unwrap())
+                    .unwrap(),
+            )
+            .for_each(|(original_id, new_id)| {
+                // get the FuzzID that corresponds with this node
+                if let Some(original_fuzz_id) = self.ids.fuzz_id_from(&original_id) {
+                    new_ids.insert_pair(new_id, *original_fuzz_id);
+                }
+            });
+        Self {
+            tree: tree_clone,
+            ids: new_ids,
+        }
+    }
+}
 
 #[cfg(test)]
 mod test {
+    use super::*;
     #[test]
-    fn uwu() {
-        let graph = super::BlendGraph::new();
-        graph
-            .iter_top_level()
-            .for_each(|(id, data)| log::trace!("{id:?}"))
+    fn id_transitivity() {
+        let mut graph = BlendGraph::new();
+        let soup_id = graph
+            .add_leaf(
+                Location::IndexIntoRoot(0),
+                "Soup!".to_string(),
+                LeafType::Note,
+            )
+            .unwrap();
+
+        let clone = graph.clone();
+        assert_eq!(clone.get(soup_id).map(|node| node.name()), Some("Soup!"))
     }
 }

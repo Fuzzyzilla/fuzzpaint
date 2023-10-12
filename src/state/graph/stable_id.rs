@@ -57,7 +57,7 @@ impl AnyID {
         }
     }
 }
-pub struct StableIDMap {
+pub(super) struct StableIDMap {
     fuzz_to_id: hashbrown::HashMap<FuzzNodeID, id_tree::NodeId>,
     id_to_fuzz: hashbrown::HashMap<id_tree::NodeId, FuzzNodeID>,
 }
@@ -70,6 +70,15 @@ impl Default for StableIDMap {
     }
 }
 impl StableIDMap {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            fuzz_to_id: hashbrown::HashMap::with_capacity(capacity),
+            id_to_fuzz: hashbrown::HashMap::with_capacity(capacity),
+        }
+    }
+    pub fn capacity(&self) -> usize {
+        self.fuzz_to_id.capacity().max(self.id_to_fuzz.capacity())
+    }
     pub fn tree_id_from_any<'s>(&'s self, any: &'_ AnyID) -> Option<&'s id_tree::NodeId> {
         self.fuzz_to_id.get(any.as_ref())
     }
@@ -94,6 +103,11 @@ impl StableIDMap {
                 new
             }
         }
+    }
+    /// Insert a specific correlation between tree id and fuzz id
+    pub fn insert_pair(&mut self, tree: id_tree::NodeId, fuzz: FuzzNodeID) {
+        self.fuzz_to_id.insert(fuzz.clone(), tree.clone());
+        self.id_to_fuzz.insert(tree, fuzz);
     }
     pub fn erase_tree_id(&mut self, tree: &id_tree::NodeId) {
         if let Some(id) = self.id_to_fuzz.remove(tree) {
