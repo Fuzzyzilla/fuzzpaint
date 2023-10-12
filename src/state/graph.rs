@@ -1,4 +1,8 @@
 pub mod rendering;
+mod stable_id;
+// Re-export the various public ids
+// FuzzNodeID is NOT public!
+pub use stable_id::{AnyID, LeafID, NodeID};
 
 pub enum LeafType {
     StrokeLayer {
@@ -47,50 +51,6 @@ impl NodeType {
         match self {
             Self::Passthrough => None,
             Self::GroupedBlend(blend) => Some(blend),
-        }
-    }
-}
-
-// Shhh.. they're secretly the same type >:3c
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct LeafID(id_tree::NodeId);
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct NodeID(id_tree::NodeId);
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AnyID {
-    Leaf(LeafID),
-    Node(NodeID),
-}
-impl std::hash::Hash for AnyID {
-    // Forego including type in the hash, as we assume the invariant that a
-    // Leaf and Node may not have the same ID.
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_ref().hash(state)
-    }
-}
-impl From<LeafID> for AnyID {
-    fn from(value: LeafID) -> Self {
-        Self::Leaf(value)
-    }
-}
-impl From<NodeID> for AnyID {
-    fn from(value: NodeID) -> Self {
-        Self::Node(value)
-    }
-}
-impl AnyID {
-    fn into_raw(self) -> id_tree::NodeId {
-        match self {
-            AnyID::Leaf(LeafID(id)) => id,
-            AnyID::Node(NodeID(id)) => id,
-        }
-    }
-}
-impl AsRef<id_tree::NodeId> for AnyID {
-    fn as_ref(&self) -> &id_tree::NodeId {
-        match self {
-            AnyID::Leaf(LeafID(id)) => id,
-            AnyID::Node(NodeID(id)) => id,
         }
     }
 }
@@ -214,6 +174,7 @@ pub enum Location<'a> {
 
 pub struct BlendGraph {
     tree: id_tree::Tree<NodeData>,
+    ids: stable_id::StableIDMap,
 }
 impl BlendGraph {
     pub fn new() -> Self {
@@ -224,6 +185,7 @@ impl BlendGraph {
                     ty: NodeDataTy::Root,
                 }))
                 .build(),
+            ids: Default::default(),
         }
     }
     /// Iterate the children of the root node
@@ -232,11 +194,11 @@ impl BlendGraph {
             .unwrap()
     }
     /// Iterate the children of this node
-    pub fn iter_node(
-        &'_ self,
+    pub fn iter_node<'s>(
+        &'s self,
         node: &'_ NodeID,
-    ) -> Option<impl Iterator<Item = (AnyID, &'_ NodeData)> + '_> {
-        self.iter_children_of_raw(&node.0)
+    ) -> Option<impl Iterator<Item = (AnyID, &'s NodeData)> + 's> {
+        self.iter_children_of_raw(self.ids.tree_id_from_node(node)?)
     }
     /// Iterate the children of this raw ID. A helper method for all various iters!
     fn iter_children_of_raw(
@@ -245,9 +207,15 @@ impl BlendGraph {
     ) -> Option<impl Iterator<Item = (AnyID, &'_ NodeData)> + '_> {
         Some(self.tree.children_ids(node_id).ok()?.map(|node_id| {
             let node = self.tree.get(node_id).unwrap().data();
+            let fuz_id = self
+                .ids
+                .fuzz_id_from(node_id)
+                // Stinky! Nothing we can do here (except filter it out?)
+                // This would be a bug, so report it with expect.
+                .expect("Unknown node encountered in iteration");
             let id = match node.ty {
-                NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(node_id.clone())),
-                NodeDataTy::Node(_) => AnyID::Node(NodeID(node_id.clone())),
+                NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(*fuz_id)),
+                NodeDataTy::Node(_) => AnyID::Node(NodeID(*fuz_id)),
                 // Invalid tree state.
                 _ => panic!("Root encountered during iteration!"),
             };
@@ -295,10 +263,13 @@ impl BlendGraph {
     ) -> Result<(&'a id_tree::NodeId, usize), TargetError> {
         match location {
             Location::AboveSelection(selection) => {
-                let selection_id = selection.as_ref();
+                let selection_tree_id = self
+                    .ids
+                    .tree_id_from_any(selection)
+                    .ok_or(TargetError::TargetNotFound)?;
                 let node = self
                     .tree
-                    .get(selection_id)
+                    .get(selection_tree_id)
                     .map_err(|_| TargetError::TargetNotFound)?;
                 // unwrap ok - node is NOT the root, if it were that would be a structural error!
                 let parent = node.parent().unwrap();
@@ -308,18 +279,25 @@ impl BlendGraph {
                     // unwrap ok - parent will be in the tree if the child was! (checked above)
                     .unwrap()
                     .enumerate()
-                    .find(|(_, id)| *id == selection_id)
+                    .find(|(_, id)| *id == selection_tree_id)
                     // Unwrap ok - the child must be a child of it's parent of course!
                     .unwrap();
                 Ok((parent, idx))
             }
-            Location::IndexIntoNode(node, idx) => Ok((&node.0, idx)),
+            Location::IndexIntoNode(node, idx) => {
+                let selection_tree_id = self
+                    .ids
+                    .tree_id_from_node(node)
+                    .ok_or(TargetError::TargetNotFound)?;
+                Ok((selection_tree_id, idx))
+            }
             Location::IndexIntoRoot(idx) => Ok((self.tree.root_node_id().unwrap(), idx)),
         }
     }
     pub fn get(&self, id: impl Into<AnyID>) -> Option<&NodeData> {
-        let id = Into::<AnyID>::into(id).into_raw();
-        self.tree.get(&id).ok().map(|node| node.data())
+        let id = Into::<AnyID>::into(id);
+        let tree_id = self.ids.tree_id_from_any(&id)?;
+        self.tree.get(tree_id).ok().map(|node| node.data())
     }
     pub fn add_node(
         &mut self,
@@ -344,7 +322,7 @@ impl BlendGraph {
         // unwrap ok - we just added it, of course it will be found!
         self.tree.make_nth_sibling(&new_node, idx).unwrap();
 
-        Ok(NodeID(new_node))
+        Ok(NodeID(*self.ids.get_or_insert_tree_id(new_node)))
     }
     pub fn add_leaf(
         &mut self,
@@ -369,7 +347,7 @@ impl BlendGraph {
         // unwrap ok - we just added it, of course it will be found!
         self.tree.make_nth_sibling(&new_node, idx).unwrap();
 
-        Ok(LeafID(new_node))
+        Ok(LeafID(*self.ids.get_or_insert_tree_id(new_node)))
     }
     /// Reparent the target onto a new parent.
     /// Children are brought along for the ride!
@@ -378,7 +356,11 @@ impl BlendGraph {
         target: impl Into<AnyID>,
         destination: Location,
     ) -> Result<(), ReparentError> {
-        let target_id = Into::<AnyID>::into(target).into_raw();
+        let target_id = Into::<AnyID>::into(target);
+        let target_tree_id = self
+            .ids
+            .tree_id_from_any(&target_id)
+            .ok_or(ReparentError::TargetError(TargetError::TargetNotFound))?;
         let (destination_id, idx) = self
             .find_location(destination)
             .map_err(|_| ReparentError::DestinationNotFound)?;
@@ -386,28 +368,34 @@ impl BlendGraph {
             .tree
             .ancestor_ids(destination_id)
             .map_err(|_| ReparentError::DestinationNotFound)?
-            .any(|ancestor| ancestor == &target_id)
+            .any(|ancestor| ancestor == target_tree_id)
         {
             return Err(ReparentError::WouldCycle);
         }
         let destination_id = destination_id.to_owned();
 
         self.tree
-            .move_node(&target_id, id_tree::MoveBehavior::ToParent(&destination_id))
+            .move_node(
+                target_tree_id,
+                id_tree::MoveBehavior::ToParent(&destination_id),
+            )
             .map_err(|_| ReparentError::DestinationNotFound)?;
 
         // unwrap ok - move_node already checked.
-        self.tree.make_nth_sibling(&target_id, idx).unwrap();
+        self.tree.make_nth_sibling(&target_tree_id, idx).unwrap();
 
         Ok(())
     }
     /// Get the blend of the given node, or None if no blend is assigned
     /// (for example on passthrough nodes or Note leaves)
     pub fn blend_of(&self, target: impl Into<AnyID>) -> Result<Option<crate::Blend>, TargetError> {
-        let target_id = Into::<AnyID>::into(target).into_raw();
         Ok(self
             .tree
-            .get(&target_id)
+            .get(
+                self.ids
+                    .tree_id_from_any(&target.into())
+                    .ok_or(TargetError::TargetNotFound)?,
+            )
             .map_err(|_| TargetError::TargetNotFound)?
             .data()
             .blend())
