@@ -49,7 +49,7 @@ impl MainUI {
             cur_document: None,
             rotation_drag_value: None,
             requests_send,
-            test_blend_graph: crate::state::graph::BlendGraph::new(),
+            test_blend_graph: Default::default(),
             test_graph_selection: None,
             test_graph_focus: None,
         }

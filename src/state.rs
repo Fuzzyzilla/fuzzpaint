@@ -6,6 +6,7 @@ pub type StrokeLayerID = crate::FuzzID<StrokeLayer>;
 
 use crate::FuzzID;
 
+#[derive(Clone)]
 pub struct StrokeLayer {
     pub id: StrokeLayerID,
     pub strokes: Vec<ImmutableStroke>,
@@ -26,6 +27,16 @@ pub struct Document {
     /// ID that is unique within this execution of the program
     pub id: DocumentID,
     // Size, position, dpi, ect todo!
+}
+impl Default for Document {
+    fn default() -> Self {
+        let id = Default::default();
+        Self {
+            path: None,
+            name: format!("{}", id),
+            id,
+        }
+    }
 }
 
 #[derive(Clone)]

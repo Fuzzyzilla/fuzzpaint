@@ -8,13 +8,13 @@ pub mod queue;
 
 use crate::state;
 
+#[derive(Clone)]
 pub enum LayerCommand {
     Created(state::StrokeLayerID),
     Stroke(StrokeCommand),
 }
+#[derive(Clone)]
 pub enum GraphCommand {
-    // Todo: IDs are not stable, due to id_tree's inner workings.
-    // Thus this is merely a conceptual sketch :P
     BlendChanged {
         from: crate::blend::Blend,
         to: crate::blend::Blend,
@@ -46,6 +46,7 @@ pub enum GraphCommand {
     },
     // Waaa
 }
+#[derive(Clone)]
 pub enum StrokeCommand {
     Created {
         id: crate::FuzzID<crate::Stroke>,
@@ -58,11 +59,13 @@ pub enum StrokeCommand {
         to: crate::repositories::points::PointCollectionID,
     },
 }
+#[derive(Clone)]
 pub enum ScopeType {
     /// Commands are grouped because they were individual parts in part of a single, larger operation.
     Atoms,
 }
 /// Commands about commands!
+#[derive(Clone)]
 pub enum MetaCommand {
     /// Bundle many commands into one big group. Can be nested many times.
     /// Grouped commands are treated as a single command, as far as the user can tell.
@@ -73,6 +76,7 @@ pub enum MetaCommand {
     Save,
 }
 
+#[derive(Clone)]
 pub enum Command {
     Meta(MetaCommand),
     Layer(LayerCommand),

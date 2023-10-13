@@ -180,8 +180,8 @@ pub struct BlendGraph {
     tree: id_tree::Tree<NodeData>,
     ids: stable_id::StableIDMap,
 }
-impl BlendGraph {
-    pub fn new() -> Self {
+impl Default for BlendGraph {
+    fn default() -> Self {
         Self {
             tree: id_tree::TreeBuilder::new()
                 .with_root(id_tree::Node::new(NodeData {
@@ -192,6 +192,8 @@ impl BlendGraph {
             ids: Default::default(),
         }
     }
+}
+impl BlendGraph {
     /// Iterate the children of the root node
     pub fn iter_top_level(&'_ self) -> impl Iterator<Item = (AnyID, &'_ NodeData)> + '_ {
         self.iter_children_of_raw(self.tree.root_node_id().unwrap())
@@ -439,7 +441,7 @@ mod test {
     use super::*;
     #[test]
     fn id_transitivity() {
-        let mut graph = BlendGraph::new();
+        let mut graph = BlendGraph::default();
         let soup_id = graph
             .add_leaf(
                 Location::IndexIntoRoot(0),

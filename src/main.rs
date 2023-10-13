@@ -1,5 +1,6 @@
 #![feature(portable_simd)]
 #![feature(once_cell_try)]
+#![feature(return_position_impl_trait_in_trait)]
 use std::sync::Arc;
 pub mod commands;
 mod egui_impl;
