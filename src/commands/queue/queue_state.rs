@@ -1,3 +1,4 @@
+use crate::commands::*;
 use crate::state::{self, borrowed};
 
 pub struct State {
@@ -28,6 +29,16 @@ impl State {
             },
             graph: self.graph.clone(),
             present: self.present.clone(),
+        }
+    }
+}
+impl CommandConsumer<Command> for State {
+    fn apply(&mut self, action: DoUndo<Command>) -> Result<(), CommandError> {
+        match action {
+            DoUndo::Do(c) | DoUndo::Undo(c) => match c {
+                Command::Graph(..) => self.graph.apply(action.filter_map(Command::graph).unwrap()),
+                _ => Ok(()),
+            },
         }
     }
 }

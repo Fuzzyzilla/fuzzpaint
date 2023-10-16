@@ -8,6 +8,17 @@ pub mod queue;
 
 use crate::state;
 
+#[derive(thiserror::Error, Debug)]
+pub enum CommandError {
+    #[error("The state this command was constructed for does not match the true state.")]
+    MismatchedState,
+    #[error("A resource ID referenced by the command is not known.")]
+    UnknownResource,
+}
+pub trait CommandConsumer<C> {
+    fn apply(&mut self, command: DoUndo<'_, C>) -> Result<(), CommandError>;
+}
+
 #[derive(Clone)]
 pub enum LayerCommand {
     Created(state::StrokeLayerID),
@@ -23,12 +34,18 @@ pub enum GraphCommand {
     Reparent {
         target: state::graph::AnyID,
         /// New parent, or None if root.
-        destination: Option<state::graph::NodeID>,
-        child_idx: usize,
+        new_parent: Option<state::graph::NodeID>,
+        new_child_idx: usize,
+        /// Old parent, or None if root.
+        old_parent: Option<state::graph::NodeID>,
+        old_child_idx: usize,
     },
     LeafCreated {
-        id: state::graph::LeafID,
+        target: state::graph::LeafID,
         ty: state::graph::LeafType,
+        /// New parent, or None if root.
+        destination: Option<state::graph::NodeID>,
+        child_idx: usize,
     },
     LeafTyChanged {
         target: state::graph::LeafID,
@@ -36,15 +53,17 @@ pub enum GraphCommand {
         ty: state::graph::LeafType,
     },
     NodeCreated {
-        id: state::graph::NodeID,
+        target: state::graph::NodeID,
         ty: state::graph::NodeType,
+        /// New parent, or None if root.
+        destination: Option<state::graph::NodeID>,
+        child_idx: usize,
     },
     NodeTyChanged {
         target: state::graph::NodeID,
         old_ty: state::graph::NodeType,
         ty: state::graph::NodeType,
     },
-    // Waaa
 }
 #[derive(Clone)]
 pub enum StrokeCommand {
@@ -73,7 +92,10 @@ pub enum MetaCommand {
     // Prevents invalid usage (i.e., tree branching in the middle of a scope!)
     Scope(ScopeType, Box<[Command]>),
     /// The document was saved.
-    Save,
+    ///
+    /// Of course, the concept of "undo"-ing a save does not make sense, but this
+    /// event is still very much part of the command tree!
+    Save(std::path::PathBuf),
 }
 
 #[derive(Clone)]
@@ -85,9 +107,49 @@ pub enum Command {
     // Invalid anywhere else.
     Dummy,
 }
+impl Command {
+    pub fn meta(&self) -> Option<&MetaCommand> {
+        match self {
+            Self::Meta(m) => Some(m),
+            _ => None,
+        }
+    }
+    pub fn layer(&self) -> Option<&LayerCommand> {
+        match self {
+            Self::Layer(m) => Some(m),
+            _ => None,
+        }
+    }
+    pub fn graph(&self) -> Option<&GraphCommand> {
+        match self {
+            Self::Graph(m) => Some(m),
+            _ => None,
+        }
+    }
+    pub fn dummy(&self) -> Option<()> {
+        match self {
+            Self::Dummy => Some(()),
+            _ => None,
+        }
+    }
+}
 
 #[derive(PartialEq, Eq)]
 pub enum DoUndo<'c, T> {
     Do(&'c T),
     Undo(&'c T),
+}
+impl<'c, T> DoUndo<'c, T> {
+    /// Apply a closure to the inner type T, maintaining the
+    /// Do or Undo status. Returns None if the closure returns None.
+    pub fn filter_map<Func, Return>(&self, f: Func) -> Option<DoUndo<'c, Return>>
+    where
+        Func: FnOnce(&'c T) -> Option<&'c Return>,
+        Return: 'c,
+    {
+        match self {
+            Self::Do(c) => Some(DoUndo::Do(f(c)?)),
+            Self::Undo(c) => Some(DoUndo::Undo(f(c)?)),
+        }
+    }
 }

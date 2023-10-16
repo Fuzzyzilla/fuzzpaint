@@ -4,7 +4,7 @@ mod stable_id;
 // FuzzNodeID is NOT public!
 pub use stable_id::{AnyID, LeafID, NodeID};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum LeafType {
     StrokeLayer {
         blend: crate::Blend,
@@ -34,7 +34,7 @@ impl LeafType {
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum NodeType {
     /// Leaves are grouped for organization only, and the blend graph
     /// treats it as if it were simply it's children
@@ -57,7 +57,7 @@ impl NodeType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum NodeDataTy {
     Root,
     Node(NodeType),
@@ -93,8 +93,11 @@ impl NodeDataTy {
 }
 #[derive(Clone)]
 pub struct NodeData {
-    // NOT public, as we users could break the tree by accessing this!
+    // NOT public, as we users could break the tree by mutating this!
     ty: NodeDataTy,
+    // NOT public, the user could break the command queue by mutating this!
+    /// Represents whether the command that created this node has been undone.
+    deleted: bool,
     pub name: String,
 }
 impl NodeData {
@@ -148,17 +151,19 @@ impl NodeData {
 
 #[derive(thiserror::Error, Debug)]
 pub enum TargetError {
-    #[error("The target ID is not known to this blend graph!")]
+    #[error("The ID is not known to this blend graph")]
     TargetNotFound,
+    #[error("The target ID is deleted")]
+    TargetDeleted,
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum ReparentError {
-    #[error("{}", .0)]
+    #[error("The target could not be found: {}", .0)]
     TargetError(TargetError),
-    #[error("The destination ID is not known to this blend graph.")]
-    DestinationNotFound,
-    #[error("Cannot reparent to one of the node's [grand]children!")]
+    #[error("The destination could not be found: {}", .0)]
+    DestinationError(TargetError),
+    #[error("Cannot reparent to one of the node's own [grand]children")]
     WouldCycle,
 }
 
@@ -187,6 +192,7 @@ impl Default for BlendGraph {
                 .with_root(id_tree::Node::new(NodeData {
                     name: String::new(),
                     ty: NodeDataTy::Root,
+                    deleted: false,
                 }))
                 .build(),
             ids: Default::default(),
@@ -211,21 +217,26 @@ impl BlendGraph {
         &'_ self,
         node_id: &id_tree::NodeId,
     ) -> Option<impl Iterator<Item = (AnyID, &'_ NodeData)> + '_> {
-        Some(self.tree.children_ids(node_id).ok()?.map(|node_id| {
+        Some(self.tree.children_ids(node_id).ok()?.filter_map(|node_id| {
             let node = self.tree.get(node_id).unwrap().data();
-            let fuz_id = self
-                .ids
-                .fuzz_id_from(node_id)
-                // Stinky! Nothing we can do here (except filter it out?)
-                // This would be a bug, so report it with expect.
-                .expect("Unknown node encountered in iteration");
-            let id = match node.ty {
-                NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(*fuz_id)),
-                NodeDataTy::Node(_) => AnyID::Node(NodeID(*fuz_id)),
-                // Invalid tree state.
-                _ => panic!("Root encountered during iteration!"),
-            };
-            (id, node)
+            // Skip children marked as deleted
+            if node.deleted {
+                None
+            } else {
+                let fuz_id = self
+                    .ids
+                    .fuzz_id_from(node_id)
+                    // Stinky! Nothing we can do here (except filter it out?)
+                    // This would be a bug, so report it with expect.
+                    .expect("Unknown node encountered in iteration");
+                let id = match node.ty {
+                    NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(*fuz_id)),
+                    NodeDataTy::Node(_) => AnyID::Node(NodeID(*fuz_id)),
+                    // Invalid tree state.
+                    _ => panic!("Root encountered during iteration!"),
+                };
+                Some((id, node))
+            }
         }))
     }
     /// Iterate the children of this raw ID. A helper method for all various iters!
@@ -262,7 +273,7 @@ impl BlendGraph {
         Some(std::iter::empty())
     }
     /// Convert a location to a parent and child idx
-    /// Ok result does not mean the node is for sure safe - Location::IndexIntoNode is unchecked!
+    /// Ok result implies the node is both present and not deleted.
     fn find_location<'a>(
         &'a self,
         location: Location<'a>,
@@ -277,6 +288,9 @@ impl BlendGraph {
                     .tree
                     .get(selection_tree_id)
                     .map_err(|_| TargetError::TargetNotFound)?;
+                if node.data().deleted {
+                    return Err(TargetError::TargetDeleted);
+                }
                 // unwrap ok - node is NOT the root, if it were that would be a structural error!
                 let parent = node.parent().unwrap();
                 let (idx, _) = self
@@ -295,7 +309,18 @@ impl BlendGraph {
                     .ids
                     .tree_id_from_node(node)
                     .ok_or(TargetError::TargetNotFound)?;
-                Ok((selection_tree_id, idx))
+
+                let node_deleted = self
+                    .tree
+                    .get(&selection_tree_id)
+                    .ok()
+                    .map(|node| node.data().deleted);
+
+                match node_deleted {
+                    None => Err(TargetError::TargetNotFound),
+                    Some(true) => Err(TargetError::TargetDeleted),
+                    Some(false) => Ok((selection_tree_id, idx)),
+                }
             }
             Location::IndexIntoRoot(idx) => Ok((self.tree.root_node_id().unwrap(), idx)),
         }
@@ -305,6 +330,17 @@ impl BlendGraph {
         let tree_id = self.ids.tree_id_from_any(&id)?;
         self.tree.get(tree_id).ok().map(|node| node.data())
     }
+    pub fn get_mut(&mut self, id: impl Into<AnyID>) -> Option<&mut NodeData> {
+        let id = Into::<AnyID>::into(id);
+        let tree_id = self.ids.tree_id_from_any(&id)?;
+        self.tree.get_mut(tree_id).ok().map(|node| node.data_mut())
+    }
+    pub fn get_node_mut(&mut self, id: NodeID) -> Option<&mut NodeType> {
+        self.get_mut(id).and_then(NodeData::node_mut)
+    }
+    pub fn get_leaf_mut(&mut self, id: LeafID) -> Option<&mut LeafType> {
+        self.get_mut(id).and_then(NodeData::leaf_mut)
+    }
     pub fn add_node(
         &mut self,
         location: Location,
@@ -313,6 +349,7 @@ impl BlendGraph {
     ) -> Result<NodeID, TargetError> {
         let node = id_tree::Node::new(NodeData {
             name,
+            deleted: false,
             ty: NodeDataTy::Node(ty),
         });
         // Convert this location to a parent ID and a child idx.
@@ -338,6 +375,7 @@ impl BlendGraph {
     ) -> Result<LeafID, TargetError> {
         let node = id_tree::Node::new(NodeData {
             name,
+            deleted: false,
             ty: NodeDataTy::Leaf(ty),
         });
         // Convert this location to a parent ID and a child idx.
@@ -369,25 +407,26 @@ impl BlendGraph {
             .ok_or(ReparentError::TargetError(TargetError::TargetNotFound))?;
         let (destination_id, idx) = self
             .find_location(destination)
-            .map_err(|_| ReparentError::DestinationNotFound)?;
+            .map_err(|e| ReparentError::DestinationError(e))?;
         if self
             .tree
             .ancestor_ids(destination_id)
-            .map_err(|_| ReparentError::DestinationNotFound)?
+            .map_err(|_| ReparentError::DestinationError(TargetError::TargetNotFound))?
             .any(|ancestor| ancestor == target_tree_id)
         {
             return Err(ReparentError::WouldCycle);
         }
         let destination_id = destination_id.to_owned();
 
+        // Destination is checked, target is not.
         self.tree
             .move_node(
                 target_tree_id,
                 id_tree::MoveBehavior::ToParent(&destination_id),
             )
-            .map_err(|_| ReparentError::DestinationNotFound)?;
+            .map_err(|_| ReparentError::DestinationError(TargetError::TargetNotFound))?;
 
-        // unwrap ok - move_node already checked.
+        // unwrap ok - move_node already checked presence of target.
         self.tree.make_nth_sibling(&target_tree_id, idx).unwrap();
 
         Ok(())
@@ -395,7 +434,7 @@ impl BlendGraph {
     /// Get the blend of the given node, or None if no blend is assigned
     /// (for example on passthrough nodes or Note leaves)
     pub fn blend_of(&self, target: impl Into<AnyID>) -> Result<Option<crate::Blend>, TargetError> {
-        Ok(self
+        let node_data = self
             .tree
             .get(
                 self.ids
@@ -403,8 +442,12 @@ impl BlendGraph {
                     .ok_or(TargetError::TargetNotFound)?,
             )
             .map_err(|_| TargetError::TargetNotFound)?
-            .data()
-            .blend())
+            .data();
+        if node_data.deleted {
+            Err(TargetError::TargetDeleted)
+        } else {
+            Ok(node_data.blend())
+        }
     }
 }
 /// Very expensive clone impl!
@@ -432,6 +475,214 @@ impl Clone for BlendGraph {
         Self {
             tree: tree_clone,
             ids: new_ids,
+        }
+    }
+}
+
+impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGraph {
+    fn apply(
+        &mut self,
+        command: crate::commands::DoUndo<'_, crate::commands::GraphCommand>,
+    ) -> Result<(), crate::commands::CommandError> {
+        use crate::commands::*;
+
+        match command {
+            DoUndo::Do(GraphCommand::BlendChanged { from, to, target })
+            | DoUndo::Undo(GraphCommand::BlendChanged {
+                to: from,
+                from: to,
+                target,
+            }) => {
+                // Get a mut reference to the node's blend, checking that it matches
+                // old state before assigning new state.
+
+                // if-let chains pls...
+                let Some(node) = self.get_mut(*target) else {
+                    return Err(CommandError::UnknownResource);
+                };
+                if node.deleted {
+                    return Err(CommandError::MismatchedState);
+                }
+                let Some(blend) = node.blend_mut() else {
+                    return Err(CommandError::MismatchedState);
+                };
+                if blend != from {
+                    return Err(CommandError::MismatchedState);
+                }
+                *blend = to.clone();
+                Ok(())
+            }
+            DoUndo::Do(GraphCommand::LeafTyChanged { target, old_ty, ty })
+            | DoUndo::Undo(GraphCommand::LeafTyChanged {
+                old_ty: ty,
+                ty: old_ty,
+                target,
+            }) => {
+                // Get a mut reference to the leaf ty, checking that it matches
+                // old state before assigning new state.
+                let Some(node) = self.get_leaf_mut(*target) else {
+                    return Err(CommandError::UnknownResource);
+                };
+                if node != old_ty {
+                    return Err(CommandError::MismatchedState);
+                }
+                *node = ty.clone();
+                Ok(())
+            }
+            DoUndo::Do(GraphCommand::NodeTyChanged { target, old_ty, ty })
+            | DoUndo::Undo(GraphCommand::NodeTyChanged {
+                old_ty: ty,
+                ty: old_ty,
+                target,
+            }) => {
+                // Get a mut reference to the node ty, checking that it matches
+                // old state before assigning new state.
+                let Some(node) = self.get_node_mut(*target) else {
+                    return Err(CommandError::UnknownResource);
+                };
+                if node != old_ty {
+                    return Err(CommandError::MismatchedState);
+                }
+                *node = ty.clone();
+                Ok(())
+            }
+            DoUndo::Do(GraphCommand::NodeCreated {
+                target,
+                ty,
+                child_idx,
+                destination,
+            }) => {
+                // This case only reachable with undo then redo.
+                // Clear the deleted flag!
+                let Some(node) = self.get_mut(*target) else {
+                    return Err(CommandError::UnknownResource);
+                };
+                if node.node() != Some(ty) || !node.deleted {
+                    return Err(CommandError::MismatchedState);
+                }
+                // todo: check child_idx and destination.
+                // problem is it won't necessarily still be in that location
+                // because of newly appended nodes!
+                node.deleted = false;
+                Ok(())
+            }
+            DoUndo::Undo(GraphCommand::NodeCreated {
+                target,
+                ty,
+                child_idx,
+                destination,
+            }) => {
+                let Some(node) = self.get_mut(*target) else {
+                    return Err(CommandError::UnknownResource);
+                };
+                if node.node() != Some(ty) || node.deleted {
+                    return Err(CommandError::MismatchedState);
+                }
+                // todo: check child_idx and destination.
+                // problem is it won't necessarily still be in that location
+                // because of newly appended nodes!
+                node.deleted = true;
+                Ok(())
+            }
+            DoUndo::Do(GraphCommand::LeafCreated {
+                target,
+                ty,
+                child_idx,
+                destination,
+            }) => {
+                // This case only reachable with undo then redo.
+                // Clear the deleted flag!
+                let Some(node) = self.get_mut(*target) else {
+                    return Err(CommandError::UnknownResource);
+                };
+                if node.leaf() != Some(ty) || !node.deleted {
+                    return Err(CommandError::MismatchedState);
+                }
+                // todo: check child_idx and destination.
+                // problem is it won't necessarily still be in that location
+                // because of newly appended nodes!
+                node.deleted = false;
+                Ok(())
+            }
+            DoUndo::Undo(GraphCommand::LeafCreated {
+                target,
+                ty,
+                child_idx,
+                destination,
+            }) => {
+                let Some(node) = self.get_mut(*target) else {
+                    return Err(CommandError::UnknownResource);
+                };
+                if node.leaf() != Some(ty) || node.deleted {
+                    return Err(CommandError::MismatchedState);
+                }
+                // todo: check child_idx and destination.
+                // problem is it won't necessarily still be in that location
+                // because of newly appended nodes!
+                node.deleted = true;
+                Ok(())
+            }
+            DoUndo::Do(GraphCommand::Reparent {
+                target,
+                new_parent,
+                new_child_idx,
+                old_parent,
+                old_child_idx,
+            })
+            | DoUndo::Undo(GraphCommand::Reparent {
+                target,
+                old_parent: new_parent,
+                old_child_idx: new_child_idx,
+                new_parent: old_parent,
+                new_child_idx: old_child_idx,
+            }) => {
+                let result = self.reparent(
+                    *target,
+                    match new_parent {
+                        Some(parent) => Location::IndexIntoNode(parent, *new_child_idx),
+                        None => Location::IndexIntoRoot(*new_child_idx),
+                    },
+                );
+
+                // Get the expected current parent's nodeId, or none if root is parent.
+                let old_parent_tree_id = match old_parent.map(|p| self.ids.tree_id_from_node(&p)) {
+                    Some(None) => return Err(CommandError::UnknownResource),
+                    Some(Some(id)) => Some(id),
+                    None => None,
+                };
+
+                // Compare this to the actual parent.
+                if self
+                    .tree
+                    .get(
+                        self.ids
+                            .tree_id_from_any(target)
+                            .ok_or(CommandError::UnknownResource)?,
+                    )
+                    .map_err(|_| CommandError::UnknownResource)?
+                    .parent()
+                    != old_parent_tree_id
+                {
+                    return Err(CommandError::MismatchedState);
+                };
+
+                // todo: check old_child_idx.
+                // problem is it won't necessarily still be in that location
+                // because of newly appended nodes!
+
+                match result {
+                    Err(
+                        ReparentError::TargetError(TargetError::TargetNotFound)
+                        | ReparentError::DestinationError(TargetError::TargetNotFound),
+                    ) => Err(CommandError::UnknownResource),
+                    Err(
+                        ReparentError::TargetError(TargetError::TargetDeleted)
+                        | ReparentError::DestinationError(TargetError::TargetDeleted)
+                        | ReparentError::WouldCycle,
+                    ) => Err(CommandError::MismatchedState),
+                    Ok(()) => Ok(()),
+                }
+            }
         }
     }
 }

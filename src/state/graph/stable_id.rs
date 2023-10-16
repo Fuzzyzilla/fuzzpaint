@@ -5,11 +5,11 @@
 pub(super) type FuzzNodeID = crate::FuzzID<id_tree::NodeId>;
 
 // Shhh.. they're secretly the same type >:3c
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct LeafID(pub(super) FuzzNodeID);
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct NodeID(pub(super) FuzzNodeID);
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum AnyID {
     Leaf(LeafID),
     Node(NodeID),
