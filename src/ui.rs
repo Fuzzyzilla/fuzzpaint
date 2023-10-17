@@ -280,6 +280,7 @@ impl MainUI {
                     };
                 }
 
+                /*
                 if ui
                     .button(STROKE_LAYER_ICON)
                     .on_hover_text("Add Stroke Layer")
@@ -344,7 +345,7 @@ impl MainUI {
                         )
                         .ok()
                         .map(Into::into);
-                };
+                };*/
 
                 ui.add(egui::Separator::default().vertical());
 

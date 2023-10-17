@@ -332,18 +332,18 @@ impl BlendGraph {
         let tree_id = self.ids.tree_id_from_any(&id)?;
         self.tree.get(tree_id).ok().map(|node| node.data())
     }
-    pub fn get_mut(&mut self, id: impl Into<AnyID>) -> Option<&mut NodeData> {
+    fn get_mut(&mut self, id: impl Into<AnyID>) -> Option<&mut NodeData> {
         let id = Into::<AnyID>::into(id);
         let tree_id = self.ids.tree_id_from_any(&id)?;
         self.tree.get_mut(tree_id).ok().map(|node| node.data_mut())
     }
-    pub fn get_node_mut(&mut self, id: NodeID) -> Option<&mut NodeType> {
+    fn get_node_mut(&mut self, id: NodeID) -> Option<&mut NodeType> {
         self.get_mut(id).and_then(NodeData::node_mut)
     }
-    pub fn get_leaf_mut(&mut self, id: LeafID) -> Option<&mut LeafType> {
+    fn get_leaf_mut(&mut self, id: LeafID) -> Option<&mut LeafType> {
         self.get_mut(id).and_then(NodeData::leaf_mut)
     }
-    pub fn add_node(
+    fn add_node(
         &mut self,
         location: Location,
         name: String,
@@ -369,7 +369,7 @@ impl BlendGraph {
 
         Ok(NodeID(*self.ids.get_or_insert_tree_id(new_node)))
     }
-    pub fn add_leaf(
+    fn add_leaf(
         &mut self,
         location: Location,
         name: String,
@@ -397,7 +397,7 @@ impl BlendGraph {
     }
     /// Reparent the target onto a new parent.
     /// Children are brought along for the ride!
-    pub fn reparent(
+    fn reparent(
         &mut self,
         target: impl Into<AnyID>,
         destination: Location,
