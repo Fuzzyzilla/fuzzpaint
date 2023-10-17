@@ -2,8 +2,8 @@ use crate::commands::*;
 use crate::state::{self, borrowed};
 
 pub struct State {
-    pub stroke_layers: Vec<state::StrokeLayer>,
-    pub document: state::Document,
+    //pub stroke_layers: Vec<state::StrokeLayer>,
+    //pub document: state::Document,
     pub graph: state::graph::BlendGraph,
     /// The node in the command tree that this state corresponds to
     pub present: slab_tree::NodeId,
@@ -11,8 +11,8 @@ pub struct State {
 impl State {
     pub fn new(root: slab_tree::NodeId) -> Self {
         Self {
-            stroke_layers: Default::default(),
-            document: Default::default(),
+            //stroke_layers: Default::default(),
+            //document: Default::default(),
             graph: Default::default(),
             present: root,
         }
@@ -22,12 +22,12 @@ impl State {
     pub fn fork(&self) -> Self {
         // For now, this is just clone.
         Self {
-            stroke_layers: self.stroke_layers.clone(),
-            document: state::Document {
+            //stroke_layers: self.stroke_layers.clone(),
+            /*document: state::Document {
                 id: self.document.id,
                 path: self.document.path.clone(),
                 name: self.document.name.clone(),
-            },
+            },*/
             graph: self.graph.clone(),
             present: self.present.clone(),
         }

@@ -18,12 +18,12 @@ pub enum CommandError {
 pub trait CommandConsumer<C> {
     fn apply(&mut self, command: DoUndo<'_, C>) -> Result<(), CommandError>;
 }
-
+/*
 #[derive(Clone)]
 pub enum LayerCommand {
     Created(state::StrokeLayerID),
     Stroke(StrokeCommand),
-}
+}*/
 #[derive(Clone)]
 pub enum GraphCommand {
     BlendChanged {
@@ -104,7 +104,7 @@ pub enum MetaCommand {
 #[derive(Clone)]
 pub enum Command {
     Meta(MetaCommand),
-    Layer(LayerCommand),
+    //Layer(LayerCommand),
     Graph(GraphCommand),
     // We need a dummy command to serve as the root of the command tree. :V
     // Invalid anywhere else.
@@ -117,12 +117,13 @@ impl Command {
             _ => None,
         }
     }
+    /*
     pub fn layer(&self) -> Option<&LayerCommand> {
         match self {
             Self::Layer(m) => Some(m),
             _ => None,
         }
-    }
+    }*/
     pub fn graph(&self) -> Option<&GraphCommand> {
         match self {
             Self::Graph(m) => Some(m),
