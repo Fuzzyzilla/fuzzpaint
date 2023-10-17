@@ -5,6 +5,7 @@
 // Strokes own points.
 
 pub mod queue;
+pub use state::graph::commands::GraphCommand;
 
 use crate::state;
 
@@ -24,47 +25,6 @@ pub enum LayerCommand {
     Created(state::StrokeLayerID),
     Stroke(StrokeCommand),
 }*/
-#[derive(Clone)]
-pub enum GraphCommand {
-    BlendChanged {
-        from: crate::blend::Blend,
-        to: crate::blend::Blend,
-        target: state::graph::AnyID,
-    },
-    Reparent {
-        target: state::graph::AnyID,
-        /// New parent, or None if root.
-        new_parent: Option<state::graph::NodeID>,
-        new_child_idx: usize,
-        /// Old parent, or None if root.
-        old_parent: Option<state::graph::NodeID>,
-        old_child_idx: usize,
-    },
-    LeafCreated {
-        target: state::graph::LeafID,
-        ty: state::graph::LeafType,
-        /// New parent, or None if root.
-        destination: Option<state::graph::NodeID>,
-        child_idx: usize,
-    },
-    LeafTyChanged {
-        target: state::graph::LeafID,
-        old_ty: state::graph::LeafType,
-        ty: state::graph::LeafType,
-    },
-    NodeCreated {
-        target: state::graph::NodeID,
-        ty: state::graph::NodeType,
-        /// New parent, or None if root.
-        destination: Option<state::graph::NodeID>,
-        child_idx: usize,
-    },
-    NodeTyChanged {
-        target: state::graph::NodeID,
-        old_ty: state::graph::NodeType,
-        ty: state::graph::NodeType,
-    },
-}
 #[derive(Clone)]
 pub enum StrokeCommand {
     Created {

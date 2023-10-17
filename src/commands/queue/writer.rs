@@ -1,3 +1,18 @@
+use crate::commands::*;
+
+pub trait CommandWrite<Command> {
+    /// Inserts a command.
+    fn write(&mut self, command: Command);
+}
+impl<Write, Command> CommandWrite<Command> for &mut Write
+where
+    Write: CommandWrite<Command>,
+{
+    fn write(&mut self, command: Command) {
+        // This isn't a recurse... right?
+        (**self).write(command)
+    }
+}
 pub struct CommandQueueWriter<'a> {
     pub(super) lock: parking_lot::RwLockWriteGuard<'a, super::DocumentCommandQueueInner>,
     // Optimize for exactly one command (the most common case)
@@ -43,20 +58,8 @@ impl Drop for CommandQueueWriter<'_> {
         self.lock.state.present = new;
     }
 }
-impl<'q> CommandQueueWriter<'q> {
-    pub fn queue<'s>(&'s mut self) -> GraphWriter<'s, 'q>
-    where
-        'q: 's,
-    {
-        GraphWriter { writer: self }
-    }
-}
-
-pub struct GraphWriter<'a, 'q> {
-    writer: &'a mut CommandQueueWriter<'q>,
-}
-impl GraphWriter<'_, '_> {
-    pub fn uwu(&mut self) {
-        todo!()
+impl CommandWrite<super::super::GraphCommand> for CommandQueueWriter<'_> {
+    fn write(&mut self, command: super::super::GraphCommand) {
+        self.commands.push(Command::Graph(command))
     }
 }

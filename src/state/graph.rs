@@ -1,5 +1,7 @@
+pub mod commands;
 pub mod rendering;
 mod stable_id;
+pub mod writer;
 // Re-export the various public ids
 // FuzzNodeID is NOT public!
 pub use stable_id::{AnyID, LeafID, NodeID};
