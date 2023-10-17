@@ -58,8 +58,23 @@ impl Drop for CommandQueueWriter<'_> {
         self.lock.state.present = new;
     }
 }
-impl CommandWrite<super::super::GraphCommand> for CommandQueueWriter<'_> {
+impl CommandQueueWriter<'_> {
+    pub fn graph(
+        &'_ mut self,
+    ) -> crate::state::graph::writer::GraphWriter<
+        '_,
+        &mut smallvec::SmallVec<[crate::commands::Command; 1]>,
+    > {
+        crate::state::graph::writer::GraphWriter::new(
+            &mut self.commands,
+            &mut self.lock.state.graph,
+        )
+    }
+}
+impl<Array: smallvec::Array<Item = crate::commands::Command>>
+    CommandWrite<super::super::GraphCommand> for smallvec::SmallVec<Array>
+{
     fn write(&mut self, command: super::super::GraphCommand) {
-        self.commands.push(Command::Graph(command))
+        self.push(Command::Graph(command))
     }
 }
