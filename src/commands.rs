@@ -82,6 +82,9 @@ pub enum StrokeCommand {
 pub enum ScopeType {
     /// Commands are grouped because they were individual parts in part of a single, larger operation.
     Atoms,
+    /// A command writer panicked mid write. The commands contained may be part of an incomplete operation,
+    /// but are still tracked to ensure integrity of the tree as a whole.
+    WritePanic,
 }
 /// Commands about commands!
 #[derive(Clone)]

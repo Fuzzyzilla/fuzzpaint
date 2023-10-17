@@ -12,6 +12,7 @@
 use std::sync::Arc;
 mod queue_state;
 pub mod state_reader;
+pub mod writer;
 
 // pub struct CommandAtomsWriter {}
 struct DocumentCommandQueueInner {
@@ -45,6 +46,20 @@ impl DocumentCommandQueue {
             ),
             document: Default::default(),
         }
+    }
+    /// Locks the queue for writing commands during the span of the closure, where each modification of the state is tracked
+    /// by the command queue. If multiple commands are written, they will be written in order as a single Atoms scope.
+    pub fn write_with<F, T>(&self, write: F) -> T
+    where
+        F: FnOnce(&mut writer::CommandQueueWriter<'_>) -> T,
+    {
+        let lock = self.inner.write();
+        let mut writer = writer::CommandQueueWriter {
+            lock,
+            commands: Default::default(),
+        };
+        // Panic safe - `writer::CommandQueueWriter`'s Drop impl will do the cleanup ensuring the queue's commands and state are synchronized.
+        write(&mut writer)
     }
     /*/// Write some number of commands in an Atoms scope, such that they are treated as one larger command.
     pub fn write_atoms(&self, _f: impl FnOnce(&mut CommandAtomsWriter)) {
