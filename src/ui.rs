@@ -102,6 +102,7 @@ impl MainUI {
                             let _ = self
                                 .requests_send
                                 .send(requests::UiRequest::NewDocument(interface.document_id()));
+                            self.cur_document = Some(interface.document_id());
                             self.documents.push(interface);
                         };
                         let _ = add_button(ui, "Save", Some("Ctrl+S"));
@@ -576,47 +577,113 @@ impl MainUI {
     }
 }
 
-fn ui_layer_blend(ui: &mut egui::Ui, id: impl std::hash::Hash, blend: &mut crate::blend::Blend) {
-    ui.horizontal(|ui| {
-        ui.toggle_value(
-            &mut blend.alpha_clip,
-            egui::RichText::new("α").monospace().strong(),
-        )
-        .on_hover_text("Alpha clip");
+/// Inline UI component for changing a non-optional blend. Makes a copy of the blend internally,
+/// only returning a new one on change (skipping partial changes like a dragging slider), returning None otherwise.
+fn ui_layer_blend(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash,
+    blend: crate::blend::Blend,
+) -> Option<crate::blend::Blend> {
+    // Any change occured, even one we wouldn't report.
+    let mut changed = false;
+    // A change occured that's considered "final" - report it!
+    let mut finished = false;
 
-        ui.add(
+    let persistance_id = egui::Id::new((&id, "blend-state"));
+    // Get the persisted blend, or use the caller's blend if none.
+    let mut blend = ui
+        .data_mut(|data| data.get_temp(persistance_id))
+        .unwrap_or(blend);
+    ui.horizontal(|ui| {
+        changed |= ui
+            .toggle_value(
+                &mut blend.alpha_clip,
+                egui::RichText::new("α").monospace().strong(),
+            )
+            .on_hover_text("Alpha clip")
+            .clicked();
+        finished |= changed;
+
+        // do NOT report "finished" mid-drag, only when it's complete!
+        let response = ui.add(
             egui::DragValue::new(&mut blend.opacity)
                 .fixed_decimals(2)
                 .speed(0.01)
                 .clamp_range(0.0..=1.0),
         );
+        changed |= response.dragged();
+        // Bug: This reports a release on every frame when dragged and an egui
+        // modal (eg, the combobox below) is open. wh y
+        finished |= response.drag_released();
+
         egui::ComboBox::new(id, "")
             .selected_text(blend.mode.as_ref())
             .show_ui(ui, |ui| {
                 for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
-                    ui.selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref());
+                    changed |= ui
+                        .selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref())
+                        .clicked();
+                    finished |= changed;
                 }
             });
     });
+    match (changed, finished) {
+        //Changed, and will continue in future frames. Persist the value!
+        (true, false) => {
+            ui.data_mut(|data| data.insert_temp(persistance_id, blend));
+            None
+        }
+        // Finished. State to return is in local
+        // var, not in the egui data repo! Still, clear the repo value.
+        (_, true) => {
+            ui.data_mut(|data| data.remove::<crate::blend::Blend>(persistance_id));
+            Some(blend)
+        }
+        // No change. Clear just in case :3
+        (false, false) => {
+            ui.data_mut(|data| data.remove::<crate::blend::Blend>(persistance_id));
+            None
+        }
+    }
 }
+/// Inline UI component for changing an optional (possibly passthrough) blend. Makes a copy of the blend internally,
+/// only returning a new one on change (skipping partial changes like a dragging slider), returning None otherwise.
 fn ui_passthrough_or_blend(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash,
-    blend: &mut Option<crate::blend::Blend>,
-) {
+    blend: Option<crate::blend::Blend>,
+) -> Option<Option<crate::blend::Blend>> {
+    // Any change occured, even one we wouldn't report.
+    let mut changed = false;
+    // A change occured that's considered "final" - report it!
+    let mut finished = false;
+
+    let persistance_id = egui::Id::new((&id, "blend-state"));
+    // Get the persisted blend, or use the caller's blend if none.
+    let mut blend = ui
+        .data_mut(|data| data.get_temp(persistance_id))
+        .unwrap_or(blend);
     ui.horizontal(|ui| {
         if let Some(blend) = blend.as_mut() {
-            ui.toggle_value(
-                &mut blend.alpha_clip,
-                egui::RichText::new("α").monospace().strong(),
-            )
-            .on_hover_text("Alpha clip");
-            ui.add(
+            changed |= ui
+                .toggle_value(
+                    &mut blend.alpha_clip,
+                    egui::RichText::new("α").monospace().strong(),
+                )
+                .on_hover_text("Alpha clip")
+                .changed();
+            finished |= changed;
+            // do NOT report "finished" mid-drag, only when it's complete!
+            let response = ui.add(
                 egui::DragValue::new(&mut blend.opacity)
                     .fixed_decimals(2)
                     .speed(0.01)
                     .clamp_range(0.0..=1.0),
             );
+            changed |= response.dragged();
+            // Bug: This reports a release on every frame when dragged and an egui
+            // modal (eg, the combobox below) is open. wh y
+            finished |= response.drag_released();
         };
 
         egui::ComboBox::new(id, "")
@@ -626,20 +693,43 @@ fn ui_passthrough_or_blend(
                     .unwrap_or("Passthrough".to_string()),
             )
             .show_ui(ui, |ui| {
-                ui.selectable_value(blend, None, "Passthrough");
+                changed |= ui
+                    .selectable_value(&mut blend, None, "Passthrough")
+                    .clicked();
                 ui.separator();
                 for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
-                    ui.selectable_value(
-                        blend,
-                        Some(crate::blend::Blend {
-                            mode: blend_mode,
-                            ..Default::default()
-                        }),
-                        blend_mode.as_ref(),
-                    );
+                    let select_value = Some(crate::blend::Blend {
+                        mode: blend_mode,
+                        // Set the blend to itself with new mode,
+                        // or default fields if blend is None.
+                        ..blend.unwrap_or_default()
+                    });
+                    changed |= ui
+                        .selectable_value(&mut blend, select_value, blend_mode.as_ref())
+                        .clicked();
                 }
+                // All of these changes are considered finishing.
+                finished |= changed;
             });
     });
+    match (changed, finished) {
+        //Changed, and will continue in future frames. Persist the value!
+        (true, false) => {
+            ui.data_mut(|data| data.insert_temp(persistance_id, blend));
+            None
+        }
+        // Finished. State to return is in local
+        // var, not in the egui data repo! Still, clear the repo value.
+        (_, true) => {
+            ui.data_mut(|data| data.remove::<Option<crate::blend::Blend>>(persistance_id));
+            Some(blend)
+        }
+        // No change. Clear just in case :3
+        (false, false) => {
+            ui.data_mut(|data| data.remove::<Option<crate::blend::Blend>>(persistance_id));
+            None
+        }
+    }
 }
 fn graph_edit_recurse<
     // Well that's.... not great...
@@ -696,13 +786,13 @@ fn graph_edit_recurse<
         // Type-specific UI elements
         match (data.leaf(), data.node()) {
             (Some(_), None) => {
-                // Layer blend!
-                let data = graph.get(id).unwrap();
                 // Blend, if any.
-                if let Some(mut blend) = data.blend() {
-                    ui_layer_blend(ui, id, &mut blend);
-                    // Automatically ignores if no change
-                    graph.change_blend(id, blend).unwrap();
+                if let Some(old_blend) = data.blend() {
+                    // Reports new blend if interaction is finished
+                    if let Some(new_blend) = ui_layer_blend(ui, id, old_blend) {
+                        // Automatically ignores if no change
+                        graph.change_blend(id, new_blend).unwrap();
+                    };
                 }
             }
             (None, Some(n)) => {
@@ -717,30 +807,31 @@ fn graph_edit_recurse<
                     }
                 });
                 // Display node type - passthrough or grouped blend
-                let mut blend = n.blend();
-                let original_blend = blend;
-                ui_passthrough_or_blend(ui, id.clone(), &mut blend);
-                match (original_blend, blend) {
-                    (Some(from), Some(to)) if from != to => {
-                        // Simple blend change
-                        graph.change_blend(id, to).unwrap();
+                let old_blend = n.blend();
+                // Reports true if interaction finished
+                if let Some(new_blend) = ui_passthrough_or_blend(ui, id.clone(), old_blend) {
+                    match (old_blend, new_blend) {
+                        (Some(from), Some(to)) if from != to => {
+                            // Simple blend change
+                            graph.change_blend(id, to).unwrap();
+                        }
+                        (None, Some(to)) => {
+                            // Type change - passthrough to grouped.
+                            graph
+                                .set_node(node_id, crate::state::graph::NodeType::GroupedBlend(to))
+                                .unwrap()
+                        }
+                        (Some(_), None) => {
+                            // Type change - grouped to passthrough
+                            graph
+                                .set_node(node_id, crate::state::graph::NodeType::Passthrough)
+                                .unwrap()
+                        }
+                        _ => {
+                            // No change
+                        }
                     }
-                    (None, Some(to)) => {
-                        // Type change - passthrough to grouped.
-                        graph
-                            .set_node(node_id, crate::state::graph::NodeType::GroupedBlend(to))
-                            .unwrap()
-                    }
-                    (Some(_), None) => {
-                        // Type change - grouped to passthrough
-                        graph
-                            .set_node(node_id, crate::state::graph::NodeType::Passthrough)
-                            .unwrap()
-                    }
-                    _ => {
-                        // No change
-                    }
-                }
+                };
 
                 // display children!
                 egui::CollapsingHeader::new(egui::RichText::new("Children").italics().weak())
