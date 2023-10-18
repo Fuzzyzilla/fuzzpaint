@@ -395,6 +395,24 @@ impl BlendGraph {
 
         Ok(LeafID(*self.ids.get_or_insert_tree_id(new_node)))
     }
+    // Get the (parent, idx) of the node. Parent is None if root is the parent.
+    fn location_of(&self, id: impl Into<AnyID>) -> Option<(Option<NodeID>, usize)> {
+        let tree_id = self.ids.tree_id_from_any(&id.into())?;
+        let node = self.tree.get(tree_id).ok()?;
+        // Should never return None - user shouldn't have access to root ID!
+        let parent = node.parent().unwrap();
+        let child_idx = self
+            .tree
+            .children_ids(parent)
+            .unwrap()
+            .position(|child_id| child_id == tree_id)
+            .unwrap();
+
+        // Will be none if parent is root.
+        let parent_id = self.ids.fuzz_id_from(parent);
+
+        Some((parent_id.map(|id| NodeID(*id)), child_idx))
+    }
     /// Reparent the target onto a new parent.
     /// Children are brought along for the ride!
     fn reparent(
