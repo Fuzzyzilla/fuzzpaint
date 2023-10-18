@@ -394,7 +394,7 @@ impl MainUI {
                     .show(ui, |ui| {
                         graph_edit_recurse(
                             ui,
-                            &*graph,
+                            &mut graph,
                             interface.graph_focused_subtree.clone(),
                             &mut interface.graph_selection,
                             &mut interface.graph_focused_subtree,
@@ -641,48 +641,30 @@ fn ui_passthrough_or_blend(
             });
     });
 }
-fn graph_edit_recurse(
+fn graph_edit_recurse<
+    // Well that's.... not great...
+    W: crate::commands::queue::writer::CommandWrite<crate::state::graph::commands::GraphCommand>,
+>(
     ui: &mut egui::Ui,
-    graph: &crate::state::graph::BlendGraph,
+    graph: &mut crate::state::graph::writer::GraphWriter<'_, W>,
     root: Option<crate::state::graph::NodeID>,
     selected_node: &mut Option<crate::state::graph::AnyID>,
     focused_node: &mut Option<crate::state::graph::NodeID>,
 ) {
-    // Weird type for static iterator dispatch for the anonymous iterators exposed by graph.
-    // Certainly there's an API change I should make to remove this weird necessity :P
-    enum EitherIter<I, R, N>
-    where
-        R: Iterator<Item = I>,
-        N: Iterator<Item = I>,
-    {
-        TopLevel(R),
-        Node(N),
-    }
-    impl<I, R, N> Iterator for EitherIter<I, R, N>
-    where
-        R: Iterator<Item = I>,
-        N: Iterator<Item = I>,
-    {
-        type Item = I;
-        fn next(&mut self) -> Option<Self::Item> {
-            match self {
-                EitherIter::Node(n) => n.next(),
-                EitherIter::TopLevel(r) => r.next(),
-            }
-        }
-    }
-    let mut iter = match root {
-        Some(root) => EitherIter::Node(graph.iter_node(&root).unwrap()),
-        None => EitherIter::TopLevel(graph.iter_top_level()),
+    let node_ids: Vec<_> = match root {
+        Some(root) => graph.iter_node(&root).unwrap().map(|(id, _)| id).collect(),
+        None => graph.iter_top_level().map(|(id, _)| id).collect(),
     };
+
     let mut first = true;
     // Iterate!
-    for (id, data) in iter {
+    for id in node_ids.into_iter() {
         if !first {
             ui.separator();
         }
         // Name and selection
         let header_response = ui.horizontal(|ui| {
+            let data = graph.get(id).unwrap();
             // Choose an icon based on the type of the node:
             let icon = if let Some(leaf) = data.leaf() {
                 match leaf {
@@ -695,12 +677,12 @@ fn graph_edit_recurse(
             };
             ui.selectable_value(selected_node, Some(id.clone()), icon);
 
-            let mut name = data.name().to_string();
+            let name = graph.name_mut(id).unwrap();
 
             // Fetch from last frame - are we hovered?
             let name_hovered_key = egui::Id::new((id.clone(), "name-hovered"));
             let hovered: Option<bool> = ui.data(|data| data.get_temp(name_hovered_key));
-            let edit = egui::TextEdit::singleline(&mut name).frame(hovered.unwrap_or(false));
+            let edit = egui::TextEdit::singleline(name).frame(hovered.unwrap_or(false));
             let name_response = ui.add(edit);
 
             // Send data to next frame, to tell that we're hovered or not.
@@ -710,9 +692,19 @@ fn graph_edit_recurse(
             // Forward the response of the header items for right clicks, as it takes up all the click area!
             name_response
         });
+        let data = graph.get(id).unwrap();
         // Type-specific UI elements
         match (data.leaf(), data.node()) {
-            (Some(_), None) => {}
+            (Some(_), None) => {
+                // Layer blend!
+                let data = graph.get(id).unwrap();
+                // Blend, if any.
+                if let Some(mut blend) = data.blend() {
+                    ui_layer_blend(ui, id, &mut blend);
+                    // Automatically ignores if no change
+                    graph.change_blend(id, blend).unwrap();
+                }
+            }
             (None, Some(n)) => {
                 // Unwrap nodeID:
                 let crate::state::graph::AnyID::Node(node_id) = id.clone() else {
@@ -726,7 +718,29 @@ fn graph_edit_recurse(
                 });
                 // Display node type - passthrough or grouped blend
                 let mut blend = n.blend();
+                let original_blend = blend;
                 ui_passthrough_or_blend(ui, id.clone(), &mut blend);
+                match (original_blend, blend) {
+                    (Some(from), Some(to)) if from != to => {
+                        // Simple blend change
+                        graph.change_blend(id, to).unwrap();
+                    }
+                    (None, Some(to)) => {
+                        // Type change - passthrough to grouped.
+                        graph
+                            .set_node(node_id, crate::state::graph::NodeType::GroupedBlend(to))
+                            .unwrap()
+                    }
+                    (Some(_), None) => {
+                        // Type change - grouped to passthrough
+                        graph
+                            .set_node(node_id, crate::state::graph::NodeType::Passthrough)
+                            .unwrap()
+                    }
+                    _ => {
+                        // No change
+                    }
+                }
 
                 // display children!
                 egui::CollapsingHeader::new(egui::RichText::new("Children").italics().weak())
@@ -738,14 +752,10 @@ fn graph_edit_recurse(
             (None, None) => (),
             (Some(_), Some(_)) => panic!("Node is both a leaf and node???"),
         }
-        // Blend, if any.
-        if let Some(mut blend) = data.blend() {
-            ui_layer_blend(ui, id, &mut blend)
-        }
         first = false;
     }
 
-    // (round about way to determine that) it's empty!
+    // (roundabout way to determine that) it's empty!
     if first {
         ui.label(egui::RichText::new("Nothing here...").italics().weak());
     }

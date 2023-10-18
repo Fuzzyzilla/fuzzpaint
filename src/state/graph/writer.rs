@@ -1,7 +1,7 @@
 use super::commands::GraphCommand;
 use crate::commands::queue::writer::CommandWrite;
 
-#[derive(thiserror::Error)]
+#[derive(thiserror::Error, Debug)]
 pub enum CommandError<Err: std::error::Error> {
     #[error("{}", .0)]
     Inner(Err),
@@ -32,6 +32,12 @@ impl<'a, Write: CommandWrite<GraphCommand>> std::ops::Deref for GraphWriter<'a, 
 impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
     pub fn new(writer: Write, graph: &'a mut super::BlendGraph) -> Self {
         Self { writer, graph }
+    }
+    /// Access the name of a node, or None if not found.
+    /// Name changes are NOT tracked by the command queue, however
+    /// this is still the most correct way to access the Graph mutably.
+    pub fn name_mut(&mut self, target: super::AnyID) -> Option<&mut String> {
+        self.graph.get_mut(target).map(super::NodeData::name_mut)
     }
     /// Change the blend of any node or leaf. Does not insert a command
     /// if the blend is identical to what it was before!
