@@ -20,6 +20,10 @@ pub struct CommandQueueWriter<'a> {
 }
 impl Drop for CommandQueueWriter<'_> {
     fn drop(&mut self) {
+        // Skip if nothing to write.
+        if self.commands.is_empty() {
+            return;
+        }
         use crate::commands;
 
         // We always write exactly one command - bundle into one if more!
@@ -43,6 +47,8 @@ impl Drop for CommandQueueWriter<'_> {
 
         // Weird borrow issue :P
         let present = self.lock.state.present;
+
+        log::trace!("Writing new command: {:#?}", command);
 
         // Write the command or scope (as last child, as that corresponds to "latest change")
         // and update cursor.

@@ -398,7 +398,7 @@ mod stroke_renderer {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StrokeBrushSettings {
     brush: brush::BrushID,
     /// `a` is flow, NOT opacity, since the stroke is blended continuously not blended as a group.

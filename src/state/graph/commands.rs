@@ -1,4 +1,4 @@
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum GraphCommand {
     BlendChanged {
         from: crate::blend::Blend,

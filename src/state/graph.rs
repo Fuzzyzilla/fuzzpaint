@@ -6,7 +6,7 @@ pub mod writer;
 // FuzzNodeID is NOT public!
 pub use stable_id::{AnyID, LeafID, NodeID};
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum LeafType {
     StrokeLayer {
         blend: crate::Blend,
@@ -36,7 +36,7 @@ impl LeafType {
         }
     }
 }
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum NodeType {
     /// Leaves are grouped for organization only, and the blend graph
     /// treats it as if it were simply it's children

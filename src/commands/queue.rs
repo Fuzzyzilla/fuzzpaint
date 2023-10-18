@@ -9,7 +9,9 @@
 //!
 //! There exists one command queue per document.
 
-use std::sync::Arc;
+use std::{ops::DerefMut, sync::Arc};
+
+use super::CommandConsumer;
 mod queue_state;
 pub mod state_reader;
 pub mod writer;
@@ -78,40 +80,57 @@ impl DocumentCommandQueue {
         // Linearly walk up the tree num steps. Todo: a more sophisticated approach, allowing for full navigation
         // of the tree!
         let mut lock = self.inner.write();
-        let Some(ancestors) = lock
-            .command_tree
-            .get(lock.state.present)
-            .map(|this| this.ancestors())
-        else {
+        let DocumentCommandQueueInner {
+            command_tree,
+            root,
+            state,
+        } = lock.deref_mut();
+        let start = state.present;
+        let Some(ancestors) = command_tree.get(state.present).map(|this| this.ancestors()) else {
             // Cursor not found - shouldn't be possible, as the tree is never trimmed!
-            log::warn!("Node {:?} not found in document tree!", lock.state.present);
-            lock.state.present = lock.root;
-            return;
+            // This kinda means the command tree is now in an unusable state...
+            panic!(
+                "Current Node {:?} not found in command tree!",
+                state.present
+            );
         };
         let new_cursor = ancestors.take(num).last();
-        lock.state.present = new_cursor.map(|node| node.node_id()).unwrap_or(lock.root);
-        //update state
-        todo!()
+        state.present = new_cursor.map(|node| node.node_id()).unwrap_or(*root);
+        let end = state.present;
+        // Apply state changes from the commands:
+        for command in traverse(&command_tree, start, end).unwrap() {
+            state.apply(command).unwrap();
+        }
     }
     pub fn redo_n(&self, num: usize) {
         // Step down the tree, taking the last (most recent) child every time.
         let mut lock = self.inner.write();
+        let DocumentCommandQueueInner {
+            command_tree,
+            state,
+            ..
+        } = lock.deref_mut();
+        let start = state.present;
         for _ in 0..num {
-            let Some(this) = lock.command_tree.get(lock.state.present) else {
+            let Some(this) = command_tree.get(state.present) else {
                 // Cursor not found - shouldn't be possible, as the tree is never trimmed!
-                // Reset
-                log::warn!("Node {:?} not found in document tree!", lock.state.present);
-                lock.state.present = lock.root;
-                return;
+                // This kinda means the command tree is now in an unusable state...
+                panic!(
+                    "Current Node {:?} not found in command tree!",
+                    state.present
+                );
             };
             let Some(last_child) = this.last_child() else {
                 // We've gone as deep as we can go!
                 return;
             };
-            lock.state.present = last_child.node_id();
+            state.present = last_child.node_id();
         }
-        //update state
-        todo!()
+        let end = state.present;
+        // Apply state changes from the commands:
+        for command in traverse(&command_tree, start, end).unwrap() {
+            state.apply(command).unwrap();
+        }
     }
     /// Create a listener that starts at the beginning of history.
     pub fn listen_from_start(&self) -> DocumentCommandListener {

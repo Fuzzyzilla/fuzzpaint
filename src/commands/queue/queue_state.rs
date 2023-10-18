@@ -48,6 +48,7 @@ impl CommandConsumer<Command> for State {
                 .iter()
                 .rev()
                 .try_for_each(|command| self.apply(DoUndo::Undo(command))),
+            DoUndo::Do(Command::Dummy) | DoUndo::Undo(Command::Dummy) => (Ok(())),
             _ => unimplemented!(),
         }
     }

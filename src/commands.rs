@@ -25,7 +25,7 @@ pub enum LayerCommand {
     Created(state::StrokeLayerID),
     Stroke(StrokeCommand),
 }*/
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum StrokeCommand {
     Created {
         id: crate::FuzzID<crate::Stroke>,
@@ -38,7 +38,7 @@ pub enum StrokeCommand {
         to: crate::repositories::points::PointCollectionID,
     },
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ScopeType {
     /// Commands are grouped because they were individual parts in part of a single, larger operation.
     Atoms,
@@ -47,7 +47,7 @@ pub enum ScopeType {
     WritePanic,
 }
 /// Commands about commands!
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum MetaCommand {
     /// Bundle many commands into one big group. Can be nested many times.
     /// Grouped commands are treated as a single command, as far as the user can tell.
@@ -61,7 +61,7 @@ pub enum MetaCommand {
     Save(std::path::PathBuf),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Command {
     Meta(MetaCommand),
     //Layer(LayerCommand),

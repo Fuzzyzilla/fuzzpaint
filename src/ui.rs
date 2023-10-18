@@ -215,6 +215,7 @@ impl MainUI {
                 if let Some(current_document) = self.cur_document {
                     // RTL - add in reverse :P
                     if ui.add(redo).clicked() {
+                        interface.queue.redo_n(1)
                         /*
                         let _ = self.requests_send.send(requests::UiRequest::Document {
                             target: document,
@@ -226,6 +227,7 @@ impl MainUI {
                         */
                     }
                     if ui.add(undo).clicked() {
+                        interface.queue.undo_n(1)
                         /*
                         let _ = self.requests_send.send(requests::UiRequest::Document {
                             target: document,
@@ -262,144 +264,143 @@ impl MainUI {
                 return;
             };
 
-            ui.horizontal(|ui| {
-                // Copied logic since we can't borrow test_graph_selection throughout this whole
-                // ui section
-                macro_rules! add_location {
-                    () => {
-                        match self.test_graph_selection.as_ref() {
-                            Some(crate::state::graph::AnyID::Node(id)) => {
-                                crate::state::graph::Location::IndexIntoNode(id, 0)
-                            }
-                            Some(any) => crate::state::graph::Location::AboveSelection(any),
-                            // No selection, add into the root of the viewed subree
-                            None => match self.test_graph_focus.as_ref() {
-                                Some(root) => crate::state::graph::Location::IndexIntoNode(root, 0),
-                                None => crate::state::graph::Location::IndexIntoRoot(0),
-                            },
-                        }
-                    };
-                }
+            let writer = interface.queue.write_with(|writer| {
+                let mut graph = writer.graph();
 
-                /*
-                if ui
-                    .button(STROKE_LAYER_ICON)
-                    .on_hover_text("Add Stroke Layer")
-                    .clicked()
-                {
-                    self.test_graph_selection = self
-                        .test_blend_graph
-                        .add_leaf(
-                            add_location!(),
-                            "Stroke Layer".to_string(),
-                            crate::state::graph::LeafType::StrokeLayer {
-                                blend: Default::default(),
-                                source: crate::FuzzID::default(),
-                            },
-                        )
-                        .ok()
-                        .map(Into::into);
-                }
-                if ui
-                    .button(NOTE_LAYER_ICON)
-                    .on_hover_text("Add Note")
-                    .clicked()
-                {
-                    self.test_graph_selection = self
-                        .test_blend_graph
-                        .add_leaf(
-                            add_location!(),
-                            "Note".to_string(),
-                            crate::state::graph::LeafType::Note,
-                        )
-                        .ok()
-                        .map(Into::into);
-                }
-                if ui
-                    .button(FILL_LAYER_ICON)
-                    .on_hover_text("Add Fill Layer")
-                    .clicked()
-                {
-                    self.test_graph_selection = self
-                        .test_blend_graph
-                        .add_leaf(
-                            add_location!(),
-                            "Fill".to_string(),
-                            crate::state::graph::LeafType::SolidColor {
-                                blend: Default::default(),
-                                source: [Default::default(); 4],
-                            },
-                        )
-                        .ok()
-                        .map(Into::into);
-                }
-
-                ui.add(egui::Separator::default().vertical());
-
-                if ui.button(GROUP_ICON).on_hover_text("Add Group").clicked() {
-                    self.test_graph_selection = self
-                        .test_blend_graph
-                        .add_node(
-                            add_location!(),
-                            "Group Layer".to_string(),
-                            crate::state::graph::NodeType::Passthrough,
-                        )
-                        .ok()
-                        .map(Into::into);
-                };*/
-
-                ui.add(egui::Separator::default().vertical());
-
-                let merge_button = egui::Button::new("⤵");
-                ui.add_enabled(false, merge_button);
-
-                if ui.button("✖").on_hover_text("Delete layer").clicked() {
-                    /*
-                    if let Some(id) = self.test_graph_selection.take() {
-                        self.test_blend_graph.reparent(id, destination)
-                    }*/
-                };
-            });
-
-            ui.separator();
-
-            let clone_read = interface.queue.peek_clone_state();
-
-            // Strange visual flicker when this button is clicked,
-            // as the header remains for one frame after the graph switches back.
-            // This could become more problematic if the client doesn't refresh the UI
-            // one frame after, as the header would stay but there's no subtree selected!
-            // Eh, todo. :P
-            if interface.graph_focused_subtree.is_some() {
                 ui.horizontal(|ui| {
-                    if ui.small_button("⬅").clicked() {
-                        interface.graph_focused_subtree = None;
+                    // Copied logic since we can't borrow test_graph_selection throughout this whole
+                    // ui section
+                    macro_rules! add_location {
+                        () => {
+                            match interface.graph_selection.as_ref() {
+                                Some(crate::state::graph::AnyID::Node(id)) => {
+                                    crate::state::graph::Location::IndexIntoNode(id, 0)
+                                }
+                                Some(any) => crate::state::graph::Location::AboveSelection(any),
+                                // No selection, add into the root of the viewed subree
+                                None => match interface.graph_focused_subtree.as_ref() {
+                                    Some(root) => {
+                                        crate::state::graph::Location::IndexIntoNode(root, 0)
+                                    }
+                                    None => crate::state::graph::Location::IndexIntoRoot(0),
+                                },
+                            }
+                        };
                     }
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Subtree of {}",
-                            interface
-                                .graph_focused_subtree
-                                .as_ref()
-                                .and_then(|subtree| clone_read.graph().get(subtree.clone()))
-                                .map(|data| data.name())
-                                .unwrap_or("Unknown")
-                        ))
-                        .italics(),
-                    );
+
+                    if ui
+                        .button(STROKE_LAYER_ICON)
+                        .on_hover_text("Add Stroke Layer")
+                        .clicked()
+                    {
+                        interface.graph_selection = graph
+                            .add_leaf(
+                                crate::state::graph::LeafType::StrokeLayer {
+                                    blend: Default::default(),
+                                    source: crate::FuzzID::default(),
+                                },
+                                add_location!(),
+                                "Stroke Layer".to_string(),
+                            )
+                            .ok()
+                            .map(Into::into);
+                    }
+                    if ui
+                        .button(NOTE_LAYER_ICON)
+                        .on_hover_text("Add Note")
+                        .clicked()
+                    {
+                        interface.graph_selection = graph
+                            .add_leaf(
+                                crate::state::graph::LeafType::Note,
+                                add_location!(),
+                                "Note".to_string(),
+                            )
+                            .ok()
+                            .map(Into::into);
+                    }
+                    if ui
+                        .button(FILL_LAYER_ICON)
+                        .on_hover_text("Add Fill Layer")
+                        .clicked()
+                    {
+                        interface.graph_selection = graph
+                            .add_leaf(
+                                crate::state::graph::LeafType::SolidColor {
+                                    blend: Default::default(),
+                                    source: [Default::default(); 4],
+                                },
+                                add_location!(),
+                                "Fill".to_string(),
+                            )
+                            .ok()
+                            .map(Into::into);
+                    }
+
+                    ui.add(egui::Separator::default().vertical());
+
+                    if ui.button(GROUP_ICON).on_hover_text("Add Group").clicked() {
+                        interface.graph_selection = graph
+                            .add_node(
+                                crate::state::graph::NodeType::Passthrough,
+                                add_location!(),
+                                "Group Layer".to_string(),
+                            )
+                            .ok()
+                            .map(Into::into);
+                    };
+
+                    ui.add(egui::Separator::default().vertical());
+
+                    let merge_button = egui::Button::new("⤵");
+                    ui.add_enabled(false, merge_button);
+
+                    if ui.button("✖").on_hover_text("Delete layer").clicked() {
+                        /*
+                        if let Some(id) = self.test_graph_selection.take() {
+                            self.test_blend_graph.reparent(id, destination)
+                        }*/
+                    };
                 });
-            }
-            egui::ScrollArea::new([false, true])
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    graph_edit_recurse(
-                        ui,
-                        clone_read.graph(),
-                        interface.graph_focused_subtree.clone(),
-                        &mut interface.graph_selection,
-                        &mut interface.graph_focused_subtree,
-                    )
-                });
+
+                ui.separator();
+
+                // Strange visual flicker when this button is clicked,
+                // as the header remains for one frame after the graph switches back.
+                // This could become more problematic if the client doesn't refresh the UI
+                // one frame after, as the header would stay but there's no subtree selected!
+                // Eh, todo. :P
+                if interface.graph_focused_subtree.is_some() {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("⬅").clicked() {
+                            interface.graph_focused_subtree = None;
+                        }
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Subtree of {}",
+                                interface
+                                    .graph_focused_subtree
+                                    .as_ref()
+                                    .and_then(|subtree| graph.get(subtree.clone()))
+                                    .map(|data| data.name())
+                                    .unwrap_or("Unknown")
+                            ))
+                            .italics(),
+                        );
+                    });
+                }
+                egui::ScrollArea::new([false, true])
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        graph_edit_recurse(
+                            ui,
+                            &*graph,
+                            interface.graph_focused_subtree.clone(),
+                            &mut interface.graph_selection,
+                            &mut interface.graph_focused_subtree,
+                        )
+                    });
+            });
         });
 
         egui::SidePanel::left("Color picker").show(&ctx, |ui| {
