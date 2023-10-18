@@ -1,3 +1,5 @@
+use crate::commands::queue::state_reader::CommandQueueStateReader;
+
 pub mod requests;
 
 const STROKE_LAYER_ICON: &'static str = "✏";
@@ -17,10 +19,14 @@ trait UILayer {
     ) -> bool;
 }
 struct PerDocumentData {
-    cur_layer: Option<crate::FuzzID<crate::StrokeLayer>>,
-    // Still dirty... UI should be the ground truth for this! But at the same time, the document should own it's blend graph.
-    // Hmmmm...
-    layers: Vec<crate::FuzzID<crate::StrokeLayer>>,
+    queue: crate::commands::queue::DocumentCommandQueue,
+    graph_selection: Option<crate::state::graph::AnyID>,
+    graph_focused_subtree: Option<crate::state::graph::NodeID>,
+}
+impl PerDocumentData {
+    pub fn document_id(&self) -> crate::FuzzID<crate::Document> {
+        self.queue.id()
+    }
 }
 pub struct MainUI {
     // Could totally be static dispatch, but for simplicity:
@@ -29,16 +35,12 @@ pub struct MainUI {
     /// Displayed as windows on the document viewport.
     inlays: Vec<Box<dyn UILayer>>,
 
-    documents: Vec<(crate::FuzzID<crate::Document>, PerDocumentData)>,
+    documents: Vec<PerDocumentData>,
     cur_document: Option<crate::FuzzID<crate::Document>>,
 
     requests_send: requests::RequestSender,
     // Only some during a drag event on the view rotation slider. Not to be used aside from that! :P
     rotation_drag_value: Option<f32>,
-    // Testinggg
-    test_blend_graph: crate::state::graph::BlendGraph,
-    test_graph_selection: Option<crate::state::graph::AnyID>,
-    test_graph_focus: Option<crate::state::graph::NodeID>,
 }
 impl MainUI {
     pub fn new(requests_send: requests::RequestSender) -> Self {
@@ -49,9 +51,6 @@ impl MainUI {
             cur_document: None,
             rotation_drag_value: None,
             requests_send,
-            test_blend_graph: Default::default(),
-            test_graph_selection: None,
-            test_graph_focus: None,
         }
     }
     /// Main UI and any modals, with the top bar, layers, brushes, color, etc. To be displayed in front of the document and it's gizmos.
@@ -95,22 +94,15 @@ impl MainUI {
                             ui.add(button)
                         };
                         if add_button(ui, "New", Some("Ctrl+N")).clicked() {
-                            let id = crate::FuzzID::<crate::Document>::default();
-                            let document = crate::Document {
-                                id,
-                                layer_top_level: vec![],
-                                name: "Uwu".into(),
-                                path: None,
-                            };
                             let interface = PerDocumentData {
-                                cur_layer: None,
-                                layers: vec![],
+                                queue: crate::commands::queue::DocumentCommandQueue::new(),
+                                graph_focused_subtree: None,
+                                graph_selection: None,
                             };
-                            self.documents.push((id, interface));
-
                             let _ = self
                                 .requests_send
-                                .send(requests::UiRequest::NewDocument(id));
+                                .send(requests::UiRequest::NewDocument(interface.document_id()));
+                            self.documents.push(interface);
                         };
                         let _ = add_button(ui, "Save", Some("Ctrl+S"));
                         let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
@@ -141,7 +133,10 @@ impl MainUI {
                 };
 
                 // Find the document's interface
-                let Some((_, interface)) = self.documents.iter().find(|(doc, _)| *doc == document)
+                let Some(interface) = self
+                    .documents
+                    .iter()
+                    .find(|interface| interface.document_id() == document)
                 else {
                     // Not found! Reset cur_document.
                     self.cur_document = None;
@@ -217,9 +212,10 @@ impl MainUI {
                 let undo = egui::Button::new("⮪");
                 let redo = egui::Button::new("⮫");
 
-                if let Some(current_layer) = interface.cur_layer {
+                if let Some(current_document) = self.cur_document {
                     // RTL - add in reverse :P
                     if ui.add(redo).clicked() {
+                        /*
                         let _ = self.requests_send.send(requests::UiRequest::Document {
                             target: document,
                             request: requests::DocumentRequest::Layer {
@@ -227,15 +223,17 @@ impl MainUI {
                                 request: requests::LayerRequest::Redo,
                             },
                         });
+                        */
                     }
                     if ui.add(undo).clicked() {
+                        /*
                         let _ = self.requests_send.send(requests::UiRequest::Document {
                             target: document,
                             request: requests::DocumentRequest::Layer {
                                 target: current_layer,
                                 request: requests::LayerRequest::Undo,
                             },
-                        });
+                        });*/
                     }
                 } else {
                     // RTL - add in reverse :P
@@ -254,7 +252,10 @@ impl MainUI {
             };
 
             // Find the document's interface
-            let Some((_, interface)) = self.documents.iter_mut().find(|(doc, _)| *doc == document)
+            let Some(interface) = self
+                .documents
+                .iter_mut()
+                .find(|interface| interface.document_id() == document)
             else {
                 // Not found! Reset cur_document.
                 self.cur_document = None;
@@ -362,22 +363,25 @@ impl MainUI {
 
             ui.separator();
 
+            let clone_read = interface.queue.peek_clone_state();
+
             // Strange visual flicker when this button is clicked,
             // as the header remains for one frame after the graph switches back.
             // This could become more problematic if the client doesn't refresh the UI
             // one frame after, as the header would stay but there's no subtree selected!
             // Eh, todo. :P
-            if self.test_graph_focus.is_some() {
+            if interface.graph_focused_subtree.is_some() {
                 ui.horizontal(|ui| {
                     if ui.small_button("⬅").clicked() {
-                        self.test_graph_focus = None;
+                        interface.graph_focused_subtree = None;
                     }
                     ui.label(
                         egui::RichText::new(format!(
                             "Subtree of {}",
-                            self.test_graph_focus
+                            interface
+                                .graph_focused_subtree
                                 .as_ref()
-                                .and_then(|subtree| self.test_blend_graph.get(subtree.clone()))
+                                .and_then(|subtree| clone_read.graph().get(subtree.clone()))
                                 .map(|data| data.name())
                                 .unwrap_or("Unknown")
                         ))
@@ -390,10 +394,10 @@ impl MainUI {
                 .show(ui, |ui| {
                     graph_edit_recurse(
                         ui,
-                        &self.test_blend_graph,
-                        self.test_graph_focus.clone(),
-                        &mut self.test_graph_selection,
-                        &mut self.test_graph_focus,
+                        clone_read.graph(),
+                        interface.graph_focused_subtree.clone(),
+                        &mut interface.graph_selection,
+                        &mut interface.graph_focused_subtree,
                     )
                 });
         });
@@ -519,11 +523,11 @@ impl MainUI {
                 ui.horizontal(|ui| {
                     let mut deleted_ids =
                         smallvec::SmallVec::<[crate::FuzzID<crate::Document>; 1]>::new();
-                    for (document_id, _) in self.documents.iter() {
+                    for document_id in self.documents.iter().map(PerDocumentData::document_id) {
                         egui::containers::Frame::group(ui.style())
                             .outer_margin(egui::Margin::symmetric(0.0, 0.0))
                             .inner_margin(egui::Margin::symmetric(0.0, 0.0))
-                            .multiply_with_opacity(if self.cur_document == Some(*document_id) {
+                            .multiply_with_opacity(if self.cur_document == Some(document_id) {
                                 1.0
                             } else {
                                 0.0
@@ -536,24 +540,24 @@ impl MainUI {
                             .show(ui, |ui| {
                                 ui.selectable_value(
                                     &mut self.cur_document,
-                                    Some(*document_id),
+                                    Some(document_id),
                                     "UwU", //&document.name,
                                 );
                                 if ui.small_button("✖").clicked() {
-                                    deleted_ids.push(*document_id);
+                                    deleted_ids.push(document_id);
                                     //Disselect if deleted.
-                                    if self.cur_document == Some(*document_id) {
+                                    if self.cur_document == Some(document_id) {
                                         self.cur_document = None;
                                     }
                                 }
                             })
                             .response
                             .on_hover_ui(|ui| {
-                                ui.label(format!("{}", *document_id));
+                                ui.label(format!("{}", document_id));
                             });
                     }
                     self.documents
-                        .retain(|(document_id, _)| !deleted_ids.contains(document_id));
+                        .retain(|interface| !deleted_ids.contains(&interface.document_id()));
                 });
             });
         });

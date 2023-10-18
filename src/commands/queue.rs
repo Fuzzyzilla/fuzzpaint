@@ -47,6 +47,9 @@ impl DocumentCommandQueue {
             document: Default::default(),
         }
     }
+    pub fn id(&self) -> crate::FuzzID<crate::Document> {
+        self.document
+    }
     /// Locks the queue for writing commands during the span of the closure, where each modification of the state is tracked
     /// by the command queue. If multiple commands are written, they will be written in order as a single Atoms scope.
     pub fn write_with<F, T>(&self, write: F) -> T
@@ -60,6 +63,12 @@ impl DocumentCommandQueue {
         };
         // Panic safe - `writer::CommandQueueWriter`'s Drop impl will do the cleanup ensuring the queue's commands and state are synchronized.
         write(&mut writer)
+    }
+    /// A helper method to view the state as it is at this moment as a clone.
+    pub fn peek_clone_state(&self) -> state_reader::CommandQueueCloneLock {
+        // Unwrap OK - ref to self means queue is alive valid during this method,
+        // and we don't anticipate a broken command graph ofc...
+        self.listen_from_now().forward_clone_state().unwrap()
     }
     /*/// Write some number of commands in an Atoms scope, such that they are treated as one larger command.
     pub fn write_atoms(&self, _f: impl FnOnce(&mut CommandAtomsWriter)) {
