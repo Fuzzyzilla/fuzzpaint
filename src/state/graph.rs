@@ -660,14 +660,6 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 new_parent: old_parent,
                 new_child_idx: old_child_idx,
             }) => {
-                let result = self.reparent(
-                    *target,
-                    match new_parent {
-                        Some(parent) => Location::IndexIntoNode(parent, *new_child_idx),
-                        None => Location::IndexIntoRoot(*new_child_idx),
-                    },
-                );
-
                 // Get the expected current parent's nodeId, or none if root is parent.
                 let old_parent_tree_id = match old_parent.map(|p| self.ids.tree_id_from_node(&p)) {
                     Some(None) => return Err(CommandError::UnknownResource),
@@ -685,6 +677,8 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                     )
                     .map_err(|_| CommandError::UnknownResource)?
                     .parent()
+                    // Make the root "None"
+                    .filter(|id| Some(*id) != self.tree.root_node_id())
                     != old_parent_tree_id
                 {
                     return Err(CommandError::MismatchedState);
@@ -693,6 +687,14 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 // todo: check old_child_idx.
                 // problem is it won't necessarily still be in that location
                 // because of newly appended nodes!
+
+                let result = self.reparent(
+                    *target,
+                    match new_parent {
+                        Some(parent) => Location::IndexIntoNode(parent, *new_child_idx),
+                        None => Location::IndexIntoRoot(*new_child_idx),
+                    },
+                );
 
                 match result {
                     Err(
