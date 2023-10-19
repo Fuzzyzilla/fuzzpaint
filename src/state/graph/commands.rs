@@ -38,4 +38,7 @@ pub enum GraphCommand {
         old_ty: super::NodeType,
         ty: super::NodeType,
     },
+    AnyDeleted {
+        target: super::AnyID,
+    },
 }

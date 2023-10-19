@@ -707,6 +707,28 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                     Ok(()) => Ok(()),
                 }
             }
+            DoUndo::Do(GraphCommand::AnyDeleted { target }) => {
+                let Some(node) = self.get_mut(*target) else {
+                    return Err(CommandError::UnknownResource);
+                };
+                // Can't delete a deleted node
+                if node.deleted {
+                    return Err(CommandError::MismatchedState);
+                }
+                node.deleted = true;
+                Ok(())
+            }
+            DoUndo::Undo(GraphCommand::AnyDeleted { target }) => {
+                let Some(node) = self.get_mut(*target) else {
+                    return Err(CommandError::UnknownResource);
+                };
+                // Can't un-delete a non deleted node
+                if !node.deleted {
+                    return Err(CommandError::MismatchedState);
+                }
+                node.deleted = false;
+                Ok(())
+            }
         }
     }
 }

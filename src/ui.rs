@@ -360,12 +360,16 @@ impl MainUI {
                     let merge_button = egui::Button::new("⤵");
                     ui.add_enabled(false, merge_button);
 
-                    if ui.button("✖").on_hover_text("Delete layer").clicked() {
-                        /*
-                        if let Some(id) = self.test_graph_selection.take() {
-                            self.test_blend_graph.reparent(id, destination)
-                        }*/
-                    };
+                    let delete_button = egui::Button::new("✖");
+                    if let Some(selection) = interface.graph_selection {
+                        if ui.add_enabled(true, delete_button).clicked() {
+                            // Explicitly ignore error.
+                            let _ = graph.delete(selection);
+                            interface.graph_selection = None;
+                        }
+                    } else {
+                        ui.add_enabled(false, delete_button);
+                    }
                     if let Some(yanked) = interface.yanked_node {
                         // Display an insert button
                         if ui
@@ -804,11 +808,18 @@ fn graph_edit_recurse<
                     GROUP_ICON
                 }
             };
-            ui.selectable_value(
-                selected_node,
-                Some(id.clone()),
-                egui::RichText::new(icon).monospace(),
-            );
+            // Selection radio button + toggle function.
+            let is_selected = *selected_node == Some(id);
+            if ui
+                .selectable_label(is_selected, egui::RichText::new(icon).monospace())
+                .clicked()
+            {
+                if is_selected {
+                    *selected_node = None;
+                } else {
+                    *selected_node = Some(id);
+                }
+            }
 
             // Only show if not in reparent mode.
             ui.set_enabled(yanked_node.is_none());

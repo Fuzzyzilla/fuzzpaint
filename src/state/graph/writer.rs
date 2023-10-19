@@ -1,4 +1,4 @@
-use super::commands::GraphCommand;
+use super::{commands::GraphCommand, TargetError};
 use crate::commands::queue::writer::CommandWrite;
 
 #[derive(thiserror::Error, Debug)]
@@ -46,15 +46,15 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
         &mut self,
         target: super::AnyID,
         to: crate::blend::Blend,
-    ) -> Result<(), super::TargetError> {
+    ) -> Result<(), TargetError> {
         // Get node, check it's not deleted
         let node = self
             .graph
             .get_mut(target)
-            .ok_or(super::TargetError::TargetNotFound)?;
+            .ok_or(TargetError::TargetNotFound)?;
         // Ensure not deleted
         if node.deleted {
-            return Err(super::TargetError::TargetDeleted.into());
+            return Err(TargetError::TargetDeleted.into());
         }
         // No blend attribute on this node = err!
         let Some(blend) = node.blend_mut() else {
@@ -80,14 +80,14 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
             self.graph
                 .location_of(target)
                 .ok_or(super::ReparentError::TargetError(
-                    super::TargetError::TargetNotFound,
+                    TargetError::TargetNotFound,
                 ))?;
         // Ensure not deleted.
         if self
             .graph
             .get(target)
             .ok_or(super::ReparentError::TargetError(
-                super::TargetError::TargetNotFound,
+                TargetError::TargetNotFound,
             ))?
             .deleted
         {
@@ -117,7 +117,7 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
         leaf_ty: super::LeafType,
         location: super::Location<'_>,
         name: impl Into<String>,
-    ) -> Result<super::LeafID, super::TargetError> {
+    ) -> Result<super::LeafID, TargetError> {
         let new_id = self
             .graph
             .add_leaf(location, name.into(), leaf_ty.clone())?;
@@ -138,14 +138,14 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
         &mut self,
         target: super::LeafID,
         to: super::LeafType,
-    ) -> Result<(), super::TargetError> {
+    ) -> Result<(), TargetError> {
         let node = self
             .graph
             .get_mut(target)
-            .ok_or(super::TargetError::TargetNotFound)?;
+            .ok_or(TargetError::TargetNotFound)?;
         // Ensure not deleted
         if node.deleted {
-            return Err(super::TargetError::TargetDeleted.into());
+            return Err(TargetError::TargetDeleted.into());
         };
         // Is this a possible error state?
         let Some(leaf_ty) = node.leaf_mut() else {
@@ -169,7 +169,7 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
         node_ty: super::NodeType,
         location: super::Location<'_>,
         name: impl Into<String>,
-    ) -> Result<super::NodeID, super::TargetError> {
+    ) -> Result<super::NodeID, TargetError> {
         let new_id = self
             .graph
             .add_node(location, name.into(), node_ty.clone())?;
@@ -190,14 +190,14 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
         &mut self,
         target: super::NodeID,
         to: super::NodeType,
-    ) -> Result<(), super::TargetError> {
+    ) -> Result<(), TargetError> {
         let node = self
             .graph
             .get_mut(target)
-            .ok_or(super::TargetError::TargetNotFound)?;
+            .ok_or(TargetError::TargetNotFound)?;
         // Ensure not deleted
         if node.deleted {
-            return Err(super::TargetError::TargetDeleted.into());
+            return Err(TargetError::TargetDeleted.into());
         };
         // Is this a possible error state?
         let Some(node_ty) = node.node_mut() else {
@@ -213,6 +213,20 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
                 ty: to,
             });
         }
+
+        Ok(())
+    }
+    pub fn delete(&mut self, target: super::AnyID) -> Result<(), TargetError> {
+        let node = self
+            .graph
+            .get_mut(target)
+            .ok_or(TargetError::TargetNotFound)?;
+        if node.deleted {
+            return Err(CommandError::MismatchedState);
+        }
+        node.deleted = true;
+
+        self.writer.write(GraphCommand::AnyDeleted { target });
 
         Ok(())
     }
