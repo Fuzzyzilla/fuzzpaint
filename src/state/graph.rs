@@ -428,10 +428,14 @@ impl BlendGraph {
         let (destination_id, idx) = self
             .find_location(destination)
             .map_err(|e| ReparentError::DestinationError(e))?;
-        if self
-            .tree
-            .ancestor_ids(destination_id)
-            .map_err(|_| ReparentError::DestinationError(TargetError::TargetNotFound))?
+        // Are we trying to reparent to one of this node's own children
+        // or itself?
+        if std::iter::once(destination_id)
+            .chain(
+                self.tree
+                    .ancestor_ids(destination_id)
+                    .map_err(|_| ReparentError::DestinationError(TargetError::TargetNotFound))?,
+            )
             .any(|ancestor| ancestor == target_tree_id)
         {
             return Err(ReparentError::WouldCycle);

@@ -6,6 +6,7 @@ const STROKE_LAYER_ICON: &'static str = "✏";
 const NOTE_LAYER_ICON: &'static str = "🖹";
 const FILL_LAYER_ICON: &'static str = "⬛";
 const GROUP_ICON: &'static str = "🗀";
+const SCISSOR_ICON: &'static str = "✂";
 
 trait UILayer {
     /// Perform UI operations. If `is_background`, a layer is open above this layer - display
@@ -22,6 +23,8 @@ struct PerDocumentData {
     queue: crate::commands::queue::DocumentCommandQueue,
     graph_selection: Option<crate::state::graph::AnyID>,
     graph_focused_subtree: Option<crate::state::graph::NodeID>,
+    /// Yanked node during a reparent operation
+    yanked_node: Option<crate::state::graph::AnyID>,
 }
 impl PerDocumentData {
     pub fn document_id(&self) -> crate::FuzzID<crate::Document> {
@@ -98,6 +101,7 @@ impl MainUI {
                                 queue: crate::commands::queue::DocumentCommandQueue::new(),
                                 graph_focused_subtree: None,
                                 graph_selection: None,
+                                yanked_node: None,
                             };
                             let _ = self
                                 .requests_send
@@ -362,6 +366,30 @@ impl MainUI {
                             self.test_blend_graph.reparent(id, destination)
                         }*/
                     };
+                    if let Some(yanked) = interface.yanked_node {
+                        // Display an insert button
+                        if ui
+                            .button(egui::RichText::new("↪").monospace())
+                            .on_hover_text("Insert yanked node here")
+                            .clicked()
+                        {
+                            // Explicitly ignore error. There are many invalid options, in that case do nothing!
+                            let _ = graph.reparent(yanked, add_location!());
+                            interface.yanked_node = None;
+                        }
+                    } else {
+                        // Display a cut button
+                        let button =
+                            egui::Button::new(egui::RichText::new(SCISSOR_ICON).monospace());
+                        // Disable if no selection.
+                        if ui
+                            .add_enabled(interface.graph_selection.is_some(), button)
+                            .on_hover_text("Reparent")
+                            .clicked()
+                        {
+                            interface.yanked_node = interface.graph_selection;
+                        }
+                    }
                 });
 
                 ui.separator();
@@ -399,6 +427,7 @@ impl MainUI {
                             interface.graph_focused_subtree.clone(),
                             &mut interface.graph_selection,
                             &mut interface.graph_focused_subtree,
+                            &mut interface.yanked_node,
                         )
                     });
             });
@@ -583,6 +612,7 @@ fn ui_layer_blend(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash,
     blend: crate::blend::Blend,
+    disable: bool,
 ) -> Option<crate::blend::Blend> {
     // Any change occured, even one we wouldn't report.
     let mut changed = false;
@@ -595,6 +625,7 @@ fn ui_layer_blend(
         .data_mut(|data| data.get_temp(persistance_id))
         .unwrap_or(blend);
     ui.horizontal(|ui| {
+        ui.set_enabled(!disable);
         changed |= ui
             .toggle_value(
                 &mut blend.alpha_clip,
@@ -652,6 +683,7 @@ fn ui_passthrough_or_blend(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash,
     blend: Option<crate::blend::Blend>,
+    disable: bool,
 ) -> Option<Option<crate::blend::Blend>> {
     // Any change occured, even one we wouldn't report.
     let mut changed = false;
@@ -664,6 +696,7 @@ fn ui_passthrough_or_blend(
         .data_mut(|data| data.get_temp(persistance_id))
         .unwrap_or(blend);
     ui.horizontal(|ui| {
+        ui.set_enabled(!disable);
         if let Some(blend) = blend.as_mut() {
             changed |= ui
                 .toggle_value(
@@ -740,6 +773,7 @@ fn graph_edit_recurse<
     root: Option<crate::state::graph::NodeID>,
     selected_node: &mut Option<crate::state::graph::AnyID>,
     focused_node: &mut Option<crate::state::graph::NodeID>,
+    yanked_node: &Option<crate::state::graph::AnyID>,
 ) {
     let node_ids: Vec<_> = match root {
         Some(root) => graph.iter_node(&root).unwrap().map(|(id, _)| id).collect(),
@@ -756,16 +790,28 @@ fn graph_edit_recurse<
         let header_response = ui.horizontal(|ui| {
             let data = graph.get(id).unwrap();
             // Choose an icon based on the type of the node:
-            let icon = if let Some(leaf) = data.leaf() {
-                match leaf {
-                    crate::state::graph::LeafType::Note => NOTE_LAYER_ICON,
-                    crate::state::graph::LeafType::StrokeLayer { .. } => STROKE_LAYER_ICON,
-                    crate::state::graph::LeafType::SolidColor { .. } => FILL_LAYER_ICON,
-                }
+            // Yanked (if any) gets a scissor icon.
+            let icon = if Some(id) == *yanked_node {
+                SCISSOR_ICON
             } else {
-                GROUP_ICON
+                if let Some(leaf) = data.leaf() {
+                    match leaf {
+                        crate::state::graph::LeafType::Note => NOTE_LAYER_ICON,
+                        crate::state::graph::LeafType::StrokeLayer { .. } => STROKE_LAYER_ICON,
+                        crate::state::graph::LeafType::SolidColor { .. } => FILL_LAYER_ICON,
+                    }
+                } else {
+                    GROUP_ICON
+                }
             };
-            ui.selectable_value(selected_node, Some(id.clone()), icon);
+            ui.selectable_value(
+                selected_node,
+                Some(id.clone()),
+                egui::RichText::new(icon).monospace(),
+            );
+
+            // Only show if not in reparent mode.
+            ui.set_enabled(yanked_node.is_none());
 
             let name = graph.name_mut(id).unwrap();
 
@@ -788,8 +834,10 @@ fn graph_edit_recurse<
             (Some(_), None) => {
                 // Blend, if any.
                 if let Some(old_blend) = data.blend() {
-                    // Reports new blend if interaction is finished
-                    if let Some(new_blend) = ui_layer_blend(ui, id, old_blend) {
+                    // Reports new blend when interaction is finished, disabled in yank mode.
+                    if let Some(new_blend) =
+                        ui_layer_blend(ui, (&id, "blend"), old_blend, yanked_node.is_some())
+                    {
                         // Automatically ignores if no change
                         graph.change_blend(id, new_blend).unwrap();
                     };
@@ -808,8 +856,10 @@ fn graph_edit_recurse<
                 });
                 // Display node type - passthrough or grouped blend
                 let old_blend = n.blend();
-                // Reports true if interaction finished
-                if let Some(new_blend) = ui_passthrough_or_blend(ui, id.clone(), old_blend) {
+                // Reports new blend when interaction finished, disabled in yank mode.
+                if let Some(new_blend) =
+                    ui_passthrough_or_blend(ui, (&id, "blend"), old_blend, yanked_node.is_some())
+                {
                     match (old_blend, new_blend) {
                         (Some(from), Some(to)) if from != to => {
                             // Simple blend change
@@ -835,9 +885,17 @@ fn graph_edit_recurse<
 
                 // display children!
                 egui::CollapsingHeader::new(egui::RichText::new("Children").italics().weak())
+                    .id_source(&id)
                     .default_open(true)
                     .show(ui, |ui| {
-                        graph_edit_recurse(ui, graph, Some(node_id), selected_node, focused_node)
+                        graph_edit_recurse(
+                            ui,
+                            graph,
+                            Some(node_id),
+                            selected_node,
+                            focused_node,
+                            yanked_node,
+                        )
                     });
             }
             (None, None) => (),

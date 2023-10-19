@@ -99,13 +99,16 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
         // Cannot return err if this fails, that would result in mismatched state and command tree.
         let (new_parent, new_idx) = self.graph.location_of(target).unwrap();
 
-        self.writer.write(GraphCommand::Reparent {
-            target,
-            new_parent,
-            new_child_idx: new_idx,
-            old_parent,
-            old_child_idx: old_idx,
-        });
+        // Only write if changed
+        if (new_parent, new_idx) != (old_parent, old_idx) {
+            self.writer.write(GraphCommand::Reparent {
+                target,
+                new_parent,
+                new_child_idx: new_idx,
+                old_parent,
+                old_child_idx: old_idx,
+            });
+        }
 
         Ok(())
     }
