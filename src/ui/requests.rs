@@ -2,7 +2,7 @@
 #[derive(Debug)]
 pub enum UiRequest {
     Document {
-        target: crate::WeakID<crate::Document>,
+        target: crate::FuzzID<crate::Document>,
         request: DocumentRequest,
     },
     /// Distinct from a document request, as it gives ownership of the document ID to the listener.
@@ -37,7 +37,7 @@ pub enum DocumentViewRequest {
 pub enum DocumentRequest {
     Layer {
         // Todo: other kinds of layer.
-        target: crate::WeakID<crate::StrokeLayer>,
+        target: crate::FuzzID<crate::StrokeLayer>,
         request: LayerRequest,
     },
     /// Distinct from a layer request, as it gives ownership of the layer ID to the listener.

@@ -41,22 +41,26 @@ pub trait StreamStrokeTessellator<'a> {
     /// Repeated calls to tessellate will continue to make forward progress.
     /// Some overhead is expected for a tessellation pass, so call with a large-ish buffer!
     /// infos are always in order, but there may be any number of infos (including zero) per stroke!
-    fn tessellate(&mut self, vertices: &mut [TessellatedStrokeVertex], infos: &mut [TessellatedStrokeInfo]) -> StreamStatus;
+    fn tessellate(
+        &mut self,
+        vertices: &mut [TessellatedStrokeVertex],
+        infos: &mut [TessellatedStrokeInfo],
+    ) -> StreamStatus;
 }
 
 /// All the data needed to render tessellated output.
 #[derive(Copy, Clone)]
 pub struct TessellatedStrokeInfo {
-    pub source: crate::WeakID<crate::Stroke>,
+    pub source: Option<crate::FuzzID<crate::Stroke>>,
     pub first_vertex: u32,
     pub vertices: u32,
 }
 impl TessellatedStrokeInfo {
     pub fn empty() -> Self {
         Self {
-            source: crate::WeakID::empty(),
+            source: None,
             first_vertex: 0,
-            vertices: 0
+            vertices: 0,
         }
     }
 }

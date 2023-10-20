@@ -1,13 +1,12 @@
 #![feature(portable_simd)]
 #![feature(once_cell_try)]
+#![feature(return_position_impl_trait_in_trait)]
 use std::sync::Arc;
 pub mod commands;
 mod egui_impl;
 pub mod repositories;
 pub mod vulkano_prelude;
 pub mod window;
-use brush::BrushStyle;
-use cgmath::{Matrix4, SquareMatrix};
 use vulkano::command_buffer;
 use vulkano_prelude::*;
 pub mod actions;
@@ -16,17 +15,17 @@ pub mod brush;
 pub mod document_viewport_proxy;
 pub mod gizmos;
 pub mod gpu_tess;
-pub mod graph;
 pub mod id;
 pub mod pen_tools;
 pub mod render_device;
+pub mod state;
 pub mod stylus_events;
 pub mod tess;
 pub mod ui;
 pub mod view_transform;
-use blend::{Blend, BlendMode};
+use blend::Blend;
 
-pub use id::{FuzzID, WeakID};
+pub use id::FuzzID;
 pub use tess::StrokeTessellator;
 
 #[cfg(feature = "dhat_heap")]
@@ -126,7 +125,7 @@ impl GlobalHotkeys {
 }
 
 pub struct StrokeLayer {
-    pub id: WeakID<Self>,
+    pub id: FuzzID<Self>,
     pub name: String,
     pub blend: blend::Blend,
 }
@@ -141,7 +140,7 @@ pub struct Document {
     pub layer_top_level: Vec<StrokeLayer>,
 
     /// ID that is unique within this execution of the program
-    pub id: WeakID<Document>,
+    pub id: FuzzID<Document>,
 }
 mod stroke_renderer {
     /// The data managed by the renderer.
@@ -330,7 +329,7 @@ mod stroke_renderer {
         }
         pub fn draw(
             &self,
-            strokes: &[super::WeakStroke],
+            strokes: &[super::ImmutableStroke],
             renderbuf: &RenderData,
             clear: bool,
         ) -> AnyResult<vk::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>> {
@@ -399,9 +398,9 @@ mod stroke_renderer {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StrokeBrushSettings {
-    brush: brush::WeakBrushID,
+    brush: brush::BrushID,
     /// `a` is flow, NOT opacity, since the stroke is blended continuously not blended as a group.
     color_modulate: [f32; 4],
     spacing_px: f32,
@@ -449,7 +448,7 @@ pub struct StrokeLayerData {
 }
 /// Collection of layer data (stroke contents and render data) mapped from ID
 pub struct StrokeLayerManager {
-    layers: std::collections::HashMap<WeakID<StrokeLayer>, StrokeLayerData>,
+    layers: std::collections::HashMap<FuzzID<StrokeLayer>, StrokeLayerData>,
 }
 impl Default for StrokeLayerManager {
     fn default() -> Self {
@@ -459,6 +458,7 @@ impl Default for StrokeLayerManager {
     }
 }
 
+#[derive(Clone)]
 pub struct ImmutableStroke {
     id: FuzzID<Stroke>,
     brush: StrokeBrushSettings,
@@ -477,27 +477,8 @@ impl From<Stroke> for ImmutableStroke {
     }
 }
 
-#[derive(Clone)]
-pub struct WeakStroke {
-    id: WeakID<Stroke>,
-    brush: StrokeBrushSettings,
-    // Not a weak reference, despite the name. I hadn't thought of this til now x3
-    // to me it makes sense that the existence of this weak reference should keep the
-    // resource alive.
-    point_collection: repositories::points::WeakPointCollectionID,
-}
-impl From<&ImmutableStroke> for WeakStroke {
-    fn from(value: &ImmutableStroke) -> Self {
-        Self {
-            id: value.id.weak(),
-            brush: value.brush.clone(),
-            point_collection: value.point_collection.weak(),
-        }
-    }
-}
-
 struct DocumentSelections {
-    pub cur_layer: Option<WeakID<StrokeLayer>>,
+    pub cur_layer: Option<FuzzID<StrokeLayer>>,
 }
 impl Default for DocumentSelections {
     fn default() -> Self {
@@ -505,9 +486,9 @@ impl Default for DocumentSelections {
     }
 }
 struct Selections {
-    pub cur_document: Option<WeakID<Document>>,
-    pub document_selections: std::collections::HashMap<WeakID<Document>, DocumentSelections>,
-    pub cur_brush: Option<brush::WeakBrushID>,
+    pub cur_document: Option<FuzzID<Document>>,
+    pub document_selections: std::collections::HashMap<FuzzID<Document>, DocumentSelections>,
+    pub cur_brush: Option<brush::BrushID>,
     pub brush_settings: StrokeBrushSettings,
     pub undos: std::sync::atomic::AtomicU32,
 }
@@ -518,7 +499,7 @@ impl Default for Selections {
             document_selections: Default::default(),
             cur_brush: None,
             brush_settings: StrokeBrushSettings {
-                brush: brush::todo_brush().id().weak(),
+                brush: *brush::todo_brush().id(),
                 color_modulate: [0.0, 0.0, 0.0, 1.0],
                 size_mul: 15.0,
                 spacing_px: 0.75,
@@ -556,9 +537,9 @@ impl Globals {
 }
 static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
 pub enum RenderMessage {
-    SwitchDocument(WeakID<Document>),
+    SwitchDocument(FuzzID<Document>),
     StrokeLayer {
-        layer: WeakID<StrokeLayer>,
+        layer: FuzzID<StrokeLayer>,
         kind: StrokeLayerRenderMessageKind,
     },
 }
@@ -567,7 +548,7 @@ pub enum StrokeLayerRenderMessageKind {
     BlendChanged(Blend),
     /// A stroke was appended to the given layer.
     /// Could be sourced from redos or new data entirely.
-    Append(WeakStroke),
+    Append(ImmutableStroke),
     /// This number of strokes were trucated (undone or replaced)
     Truncate(usize),
 }
@@ -582,11 +563,11 @@ async fn render_worker(
     let globals = GLOBALS.get_or_init(Globals::new);
 
     let mut cached_renders =
-        std::collections::HashMap::<WeakID<StrokeLayer>, stroke_renderer::RenderData>::new();
+        std::collections::HashMap::<FuzzID<StrokeLayer>, stroke_renderer::RenderData>::new();
     // Keep track of layer states locally, as globals can be mutated out-of-step with render commands
     // We expect eventual consistency though!
     let mut weak_layer_strokes =
-        std::collections::HashMap::<WeakID<StrokeLayer>, Vec<WeakStroke>>::new();
+        std::collections::HashMap::<FuzzID<StrokeLayer>, Vec<ImmutableStroke>>::new();
 
     // An event that was peeked and rejected during aggregation.
     // Take it the next time around.
@@ -659,7 +640,7 @@ async fn render_worker(
                 let mut clear = false;
                 // keep track of rendering work to do. May include old strokes too,
                 // if the truncate commands put us back in time before the cached image.
-                let mut strokes_to_render = Vec::<WeakStroke>::new();
+                let mut strokes_to_render = Vec::<ImmutableStroke>::new();
                 let layer_strokes = weak_layer_strokes.entry(target.clone()).or_default();
 
                 // Keep track of the blend changes. Only the last will apply.

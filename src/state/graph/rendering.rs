@@ -25,30 +25,35 @@ pub fn dirtied_by(
     changes: &[Changes],
 ) -> hashbrown::HashSet<super::AnyID> {
     let mut dirtied = hashbrown::HashSet::<super::AnyID>::default();
-    for change in changes {
+    'next_change: for change in changes {
         let change_any_id = change.any_id();
-        let change_id = change_any_id.clone().into_raw();
+        let Some(change_tree_id) = graph.ids.tree_id_from_any(&change_any_id) else {
+            continue 'next_change;
+        };
         // Get ancestors if any, skipping if not found.
-        if let Ok(ancestors) = graph.tree.ancestor_ids(&change_id) {
+        if let Ok(ancestors) = graph.tree.ancestor_ids(change_tree_id) {
             // Found! insert self into dirtied list.
             dirtied.insert(change_any_id);
             // Insert all ancestors (except root) with appropriate ID type:
-            for ancestor in ancestors {
+            'next_ancestor: for ancestor in ancestors {
                 let Ok(ancestor_node) = graph.tree.get(ancestor) else {
-                    continue;
+                    continue 'next_ancestor;
+                };
+                let Some(ancestor_fuzz_id) = graph.ids.fuzz_id_from(ancestor).cloned() else {
+                    continue 'next_ancestor;
                 };
                 match ancestor_node.data() {
                     super::NodeData {
                         ty: super::NodeDataTy::Leaf(..),
                         ..
                     } => {
-                        dirtied.insert(super::AnyID::Leaf(super::LeafID(ancestor.clone())));
+                        dirtied.insert(super::AnyID::Leaf(super::LeafID(ancestor_fuzz_id)));
                     }
                     super::NodeData {
                         ty: super::NodeDataTy::Node(..),
                         ..
                     } => {
-                        dirtied.insert(super::AnyID::Node(super::NodeID(ancestor.clone())));
+                        dirtied.insert(super::AnyID::Node(super::NodeID(ancestor_fuzz_id)));
                     }
                     super::NodeData {
                         ty: super::NodeDataTy::Root,

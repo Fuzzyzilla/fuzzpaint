@@ -9,16 +9,21 @@
 //!
 //! There exists one command queue per document.
 
-use std::sync::Arc;
+use std::{ops::DerefMut, sync::Arc};
 
-pub struct CommandAtomsWriter {}
+use super::CommandConsumer;
+mod queue_state;
+pub mod state_reader;
+pub mod writer;
+
+// pub struct CommandAtomsWriter {}
 struct DocumentCommandQueueInner {
     /// Tree structure of commands, where undos create branches.
     /// "First child" represents earlier series of commands that were undone, "last" is the most recent.
     /// More than two branches are allowed, of course!
     command_tree: slab_tree::Tree<super::Command>,
+    state: queue_state::State,
     // "Pointer" into the tree where the most recent command took place.
-    cursor: slab_tree::NodeId,
     root: slab_tree::NodeId,
 }
 pub struct DocumentCommandQueue {
@@ -35,7 +40,7 @@ impl DocumentCommandQueue {
         Self {
             inner: Arc::new(
                 DocumentCommandQueueInner {
-                    cursor: root,
+                    state: queue_state::State::new(root),
                     command_tree,
                     root,
                 }
@@ -44,59 +49,103 @@ impl DocumentCommandQueue {
             document: Default::default(),
         }
     }
-    /// Write some number of commands in an Atoms scope, such that they are treated as one larger command.
+    pub fn id(&self) -> crate::FuzzID<crate::Document> {
+        self.document
+    }
+    /// Locks the queue for writing commands during the span of the closure, where each modification of the state is tracked
+    /// by the command queue. If multiple commands are written, they will be written in order as a single Atoms scope.
+    pub fn write_with<F, T>(&self, write: F) -> T
+    where
+        F: FnOnce(&mut writer::CommandQueueWriter<'_>) -> T,
+    {
+        let lock = self.inner.write();
+        let mut writer = writer::CommandQueueWriter {
+            lock,
+            commands: Default::default(),
+        };
+        // Panic safe - `writer::CommandQueueWriter`'s Drop impl will do the cleanup ensuring the queue's commands and state are synchronized.
+        write(&mut writer)
+    }
+    /// A helper method to view the state as it is at this moment as a clone.
+    pub fn peek_clone_state(&self) -> state_reader::CommandQueueCloneLock {
+        // Unwrap OK - ref to self means queue is alive valid during this method,
+        // and we don't anticipate a broken command graph ofc...
+        self.listen_from_now().forward_clone_state().unwrap()
+    }
+    /*/// Write some number of commands in an Atoms scope, such that they are treated as one larger command.
     pub fn write_atoms(&self, _f: impl FnOnce(&mut CommandAtomsWriter)) {
         todo!()
-    }
+    }*/
     pub fn undo_n(&self, num: usize) {
         // Linearly walk up the tree num steps. Todo: a more sophisticated approach, allowing for full navigation
         // of the tree!
         let mut lock = self.inner.write();
-        let Some(ancestors) = lock
-            .command_tree
-            .get(lock.cursor)
-            .map(|this| this.ancestors())
-        else {
+        let DocumentCommandQueueInner {
+            command_tree,
+            root,
+            state,
+        } = lock.deref_mut();
+        let start = state.present;
+        let Some(ancestors) = command_tree.get(state.present).map(|this| this.ancestors()) else {
             // Cursor not found - shouldn't be possible, as the tree is never trimmed!
-            log::warn!("Node {:?} not found in document tree!", lock.cursor);
-            lock.cursor = lock.root;
-            return;
+            // This kinda means the command tree is now in an unusable state...
+            panic!(
+                "Current Node {:?} not found in command tree!",
+                state.present
+            );
         };
         let new_cursor = ancestors.take(num).last();
-        lock.cursor = new_cursor.map(|node| node.node_id()).unwrap_or(lock.root)
+        state.present = new_cursor.map(|node| node.node_id()).unwrap_or(*root);
+        let end = state.present;
+        // Apply state changes from the commands:
+        for command in traverse(&command_tree, start, end).unwrap() {
+            state.apply(command).unwrap();
+        }
     }
     pub fn redo_n(&self, num: usize) {
         // Step down the tree, taking the last (most recent) child every time.
         let mut lock = self.inner.write();
+        let DocumentCommandQueueInner {
+            command_tree,
+            state,
+            ..
+        } = lock.deref_mut();
+        let start = state.present;
         for _ in 0..num {
-            let Some(this) = lock.command_tree.get(lock.cursor) else {
+            let Some(this) = command_tree.get(state.present) else {
                 // Cursor not found - shouldn't be possible, as the tree is never trimmed!
-                // Reset
-                log::warn!("Node {:?} not found in document tree!", lock.cursor);
-                lock.cursor = lock.root;
-                return;
+                // This kinda means the command tree is now in an unusable state...
+                panic!(
+                    "Current Node {:?} not found in command tree!",
+                    state.present
+                );
             };
             let Some(last_child) = this.last_child() else {
                 // We've gone as deep as we can go!
                 return;
             };
-            lock.cursor = last_child.node_id();
+            state.present = last_child.node_id();
+        }
+        let end = state.present;
+        // Apply state changes from the commands:
+        for command in traverse(&command_tree, start, end).unwrap() {
+            state.apply(command).unwrap();
         }
     }
     /// Create a listener that starts at the beginning of history.
     pub fn listen_from_start(&self) -> DocumentCommandListener {
         let start = self.inner.read().root;
         DocumentCommandListener {
-            _document: self.document.weak(),
+            _document: self.document,
             cursor: start,
             inner: std::sync::Arc::downgrade(&self.inner),
         }
     }
     /// Create a listener that will only see new activity
     pub fn listen_from_now(&self) -> DocumentCommandListener {
-        let start = self.inner.read().cursor;
+        let start = self.inner.read().state.present;
         DocumentCommandListener {
-            _document: self.document.weak(),
+            _document: self.document,
             cursor: start,
             inner: std::sync::Arc::downgrade(&self.inner),
         }
@@ -111,30 +160,60 @@ pub enum ListenerError {
     TreeMalformed(TraverseError),
 }
 pub struct DocumentCommandListener {
-    _document: crate::WeakID<crate::Document>,
+    _document: crate::FuzzID<crate::Document>,
     // Cursor into the tree that this listener has last seen,
     // When more events are requested, the path to the "true" cursor is found and traversed.
     cursor: slab_tree::NodeId,
     inner: std::sync::Weak<parking_lot::RwLock<DocumentCommandQueueInner>>,
 }
 impl DocumentCommandListener {
-    /// Forwards the state of this listener to match the global queue, calling the closure with every command
-    /// done and undone on the way.
-    ///
-    /// The closure must not write to the parent queue - it will cause a deadlock!
-    pub fn update<T>(
+    /// Locks the shared state, without forwarding this listener's point in time.
+    /// See [state_reader::CommandQueueLock]
+    pub fn peek_lock_state(&self) -> Result<state_reader::CommandQueueReadLock, ListenerError> {
+        todo!()
+    }
+    /// Locks the shared state, bringing this listener up-to-date in the process.
+    /// See [state_reader::CommandQueueLock]
+    pub fn forward_lock_state(
         &mut self,
-        f: impl FnMut(super::DoUndo<'_, super::Command>),
-    ) -> Result<(), ListenerError> {
+    ) -> Result<state_reader::CommandQueueReadLock, ListenerError> {
+        let state = self.peek_lock_state()?;
+        // update foward cursor
+        todo!();
+        Ok(state)
+    }
+    /// Locks or clones the shared state, without forwarding this listener's point in time.
+    /// See [state_reader::CommandQueueCloneLock]
+    pub fn peek_clone_state(
+        &'_ self,
+    ) -> Result<state_reader::CommandQueueCloneLock, ListenerError> {
         let inner = self.inner.upgrade().ok_or(ListenerError::DocumentClosed)?;
         let lock = inner.read();
-        let traverse = traverse(&lock.command_tree, self.cursor, lock.cursor)
-            .map_err(|traverse| ListenerError::TreeMalformed(traverse))?;
-        self.cursor = lock.cursor;
+        // Eagerly collect command traversal.
+        let commands: Vec<state_reader::OwnedDoUndo<_>> =
+            traverse(&lock.command_tree, self.cursor, lock.state.present)
+                .map_err(|traverse| ListenerError::TreeMalformed(traverse))?
+                .map(Into::into)
+                .collect();
 
-        traverse.for_each(f);
-
-        Ok(())
+        Ok(state_reader::CommandQueueCloneLock {
+            inner: self.inner.clone(),
+            commands,
+            // OOOF!! unconditional big expensive clone, todo here :3
+            // Could instead share the state until the moment it's changed, also sharing
+            // this Arc'd state between different listeners reading the same point in time. (a highly likely scenario)
+            shared_state: Arc::new(lock.state.fork()),
+        })
+    }
+    /// Locks or clones the shared state, bringing this listener up-to-date in the process.
+    /// See [state_reader::CommandQueueCloneLock]
+    pub fn forward_clone_state(
+        &'_ mut self,
+    ) -> Result<state_reader::CommandQueueCloneLock, ListenerError> {
+        let state = self.peek_clone_state()?;
+        // Advance cursor to the present state of the lock.
+        self.cursor = state.shared_state.present;
+        Ok(state)
     }
 }
 

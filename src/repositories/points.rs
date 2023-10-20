@@ -14,7 +14,6 @@ pub fn global() -> &'static PointRepository {
 
 pub struct PointCollectionIDMarker;
 pub type PointCollectionID = crate::FuzzID<PointCollectionIDMarker>;
-pub type WeakPointCollectionID = crate::WeakID<PointCollectionIDMarker>;
 
 /// A handle for reading a collection of points. Can be cloned and shared between threads,
 /// however take care not to allow it to become leaked - it will not allow the resources
@@ -49,8 +48,7 @@ struct PointCollectionAllocInfo {
 }
 pub struct PointRepository {
     slabs: parking_lot::RwLock<Vec<PointSlab>>,
-    allocs:
-        parking_lot::RwLock<hashbrown::HashMap<WeakPointCollectionID, PointCollectionAllocInfo>>,
+    allocs: parking_lot::RwLock<hashbrown::HashMap<PointCollectionID, PointCollectionAllocInfo>>,
 }
 impl PointRepository {
     fn new() -> Self {
@@ -96,7 +94,7 @@ impl PointRepository {
                 };
                 // generate a new id and write metadata
                 let id = PointCollectionID::default();
-                self.allocs.write().insert(id.weak(), info);
+                self.allocs.write().insert(id, info);
                 Some(id)
             } else {
                 // No slabs were found with space to bump. Make a new one
@@ -117,7 +115,7 @@ impl PointRepository {
                 };
                 // generate a new id and write metadata
                 let id = PointCollectionID::default();
-                self.allocs.write().insert(id.weak(), info);
+                self.allocs.write().insert(id, info);
                 Some(id)
             }
         } else {
@@ -129,14 +127,13 @@ impl PointRepository {
     ///
     /// Provides the ability to fetch the number of points in a collection even if the data is not resident.
     /// If you need the data afterwards, prefer try_get() followed by PointCollectionReadLock::len()
-    pub fn len_of(&self, id: impl Into<WeakPointCollectionID>) -> Option<usize> {
-        self.allocs.read().get(&id.into()).map(|info| info.len)
+    pub fn len_of(&self, id: PointCollectionID) -> Option<usize> {
+        self.allocs.read().get(&id).map(|info| info.len)
     }
     pub fn try_get(
         &self,
-        id: impl Into<WeakPointCollectionID>,
+        id: PointCollectionID,
     ) -> Result<PointCollectionReadLock, super::TryRepositoryError> {
-        let id = id.into();
         let alloc = self
             .allocs
             .read()

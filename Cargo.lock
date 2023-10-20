@@ -870,6 +870,7 @@ dependencies = [
  "dirs",
  "egui",
  "egui-winit",
+ "either",
  "env_logger",
  "hashbrown 0.14.0",
  "human_bytes",
