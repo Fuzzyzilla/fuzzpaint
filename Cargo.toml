@@ -44,7 +44,10 @@ uuid = { version = "1.4.0", features = ["v4"] }
 vulkano = { version = "0.33.0", git = "https://github.com/Fuzzyzilla/vulkano.git", branch = "dual-src-fix" }
 vulkano-shaders = { version = "0.33.0", git = "https://github.com/Fuzzyzilla/vulkano.git", branch = "dual-src-fix" }
 vulkano-win = { version = "0.33.0", git = "https://github.com/Fuzzyzilla/vulkano.git", branch = "dual-src-fix" }
-winit = { version = "0.28.6", features = ["serde"] }
+winit = { version = "0.28.6", default-features = false, features = [
+    "x11",
+    "serde",
+] }
 
 [profile.profiling]
 inherits = "release"
