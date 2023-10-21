@@ -1,24 +1,8 @@
-pub mod borrowed;
 pub mod graph;
+pub mod stroke_collection;
 
 pub type DocumentID = crate::FuzzID<Document>;
-pub type StrokeLayerID = crate::FuzzID<StrokeLayer>;
 
-use crate::FuzzID;
-
-#[derive(Clone)]
-pub struct StrokeLayer {
-    pub id: StrokeLayerID,
-    pub strokes: Vec<ImmutableStroke>,
-}
-impl<'s> From<&'s StrokeLayer> for borrowed::StrokeLayer<'s> {
-    fn from(value: &'s StrokeLayer) -> Self {
-        Self {
-            id: value.id,
-            strokes: &value.strokes,
-        }
-    }
-}
 pub struct Document {
     /// The path from which the file was loaded or saved, or None if opened as new.
     pub path: Option<std::path::PathBuf>,
@@ -38,16 +22,7 @@ impl Default for Document {
         }
     }
 }
-
-#[derive(Clone)]
-pub struct ImmutableStroke {
-    pub id: FuzzID<Self>,
-    pub brush: StrokeBrushSettings,
-    /// Points are managed and owned by the (point repository)[crate::repositories::points::PointRepository], not the stroke nor the queue.
-    pub point_collection: crate::repositories::points::PointCollectionID,
-}
-
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 /// Per-stroke settings, i.e. ones we expect the user to change frequently without counting it as a "new brush."
 pub struct StrokeBrushSettings {
     /// Brushes are managed and owned by an external entity (todo), not the stroke nor the queue.

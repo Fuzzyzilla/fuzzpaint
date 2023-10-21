@@ -252,7 +252,7 @@ impl ProxySurfaceData {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             self.context.allocators().command_buffer(),
             self.context.queues().graphics().idx(),
-            command_buffer::CommandBufferUsage::MultipleSubmit,
+            vulkano::command_buffer::CommandBufferUsage::MultipleSubmit,
         )?;
 
         let matrix = self
@@ -300,7 +300,7 @@ impl ProxySurfaceData {
                     clear_values: vec![Some([0.05, 0.05, 0.05, 1.0].into())],
                     ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
                 },
-                command_buffer::SubpassContents::Inline,
+                vulkano::command_buffer::SubpassContents::Inline,
             )?
             .bind_pipeline_graphics(self.pipeline.clone())
             .bind_descriptor_sets(
@@ -429,10 +429,10 @@ impl DocumentViewportPreviewProxy {
             let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
                 context.allocators().command_buffer(),
                 context.queues().compute().idx(),
-                command_buffer::CommandBufferUsage::OneTimeSubmit,
+                vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
             )?;
 
-            command_buffer.clear_color_image(command_buffer::ClearColorImageInfo {
+            command_buffer.clear_color_image(vulkano::command_buffer::ClearColorImageInfo {
                 image_layout: vulkano::image::ImageLayout::General,
                 clear_value: [0.0; 4].into(),
                 regions: smallvec::smallvec![vk::ImageSubresourceRange {
@@ -440,7 +440,7 @@ impl DocumentViewportPreviewProxy {
                     aspects: vk::ImageAspects::COLOR,
                     mip_levels: 0..1,
                 },],
-                ..command_buffer::ClearColorImageInfo::image(document_image_array.clone())
+                ..vulkano::command_buffer::ClearColorImageInfo::image(document_image_array.clone())
             })?;
 
             let command_buffer = command_buffer.build()?;

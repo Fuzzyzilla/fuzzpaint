@@ -6,6 +6,7 @@
 
 pub mod queue;
 pub use state::graph::commands::GraphCommand;
+pub use state::stroke_collection::commands::StrokeCollectionCommand;
 
 use crate::state;
 
@@ -18,25 +19,6 @@ pub enum CommandError {
 }
 pub trait CommandConsumer<C> {
     fn apply(&mut self, command: DoUndo<'_, C>) -> Result<(), CommandError>;
-}
-/*
-#[derive(Clone)]
-pub enum LayerCommand {
-    Created(state::StrokeLayerID),
-    Stroke(StrokeCommand),
-}*/
-#[derive(Clone, Debug)]
-pub enum StrokeCommand {
-    Created {
-        id: crate::FuzzID<crate::Stroke>,
-        brush: crate::StrokeBrushSettings,
-        points: crate::repositories::points::PointCollectionID,
-    },
-    ReassignPoints {
-        id: crate::FuzzID<crate::Stroke>,
-        from: crate::repositories::points::PointCollectionID,
-        to: crate::repositories::points::PointCollectionID,
-    },
 }
 #[derive(Clone, Debug)]
 pub enum ScopeType {
@@ -64,11 +46,26 @@ pub enum MetaCommand {
 #[derive(Clone, Debug)]
 pub enum Command {
     Meta(MetaCommand),
-    //Layer(LayerCommand),
     Graph(GraphCommand),
+    StrokeCollection(StrokeCollectionCommand),
     // We need a dummy command to serve as the root of the command tree. :V
     // Invalid anywhere else.
     Dummy,
+}
+impl From<MetaCommand> for Command {
+    fn from(value: MetaCommand) -> Self {
+        Self::Meta(value)
+    }
+}
+impl From<GraphCommand> for Command {
+    fn from(value: GraphCommand) -> Self {
+        Self::Graph(value)
+    }
+}
+impl From<StrokeCollectionCommand> for Command {
+    fn from(value: StrokeCollectionCommand) -> Self {
+        Self::StrokeCollection(value)
+    }
 }
 impl Command {
     pub fn meta(&self) -> Option<&MetaCommand> {
@@ -77,13 +74,12 @@ impl Command {
             _ => None,
         }
     }
-    /*
-    pub fn layer(&self) -> Option<&LayerCommand> {
+    pub fn stroke_collection(&self) -> Option<&StrokeCollectionCommand> {
         match self {
-            Self::Layer(m) => Some(m),
+            Self::StrokeCollection(m) => Some(m),
             _ => None,
         }
-    }*/
+    }
     pub fn graph(&self) -> Option<&GraphCommand> {
         match self {
             Self::Graph(m) => Some(m),

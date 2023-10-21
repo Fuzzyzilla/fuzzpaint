@@ -76,11 +76,28 @@ impl CommandQueueWriter<'_> {
             &mut self.lock.state.graph,
         )
     }
+    pub fn stroke_collections(
+        &'_ mut self,
+    ) -> crate::state::stroke_collection::writer::StrokeCollectionStateWriter<
+        '_,
+        &mut smallvec::SmallVec<[crate::commands::Command; 1]>,
+    > {
+        crate::state::stroke_collection::writer::StrokeCollectionStateWriter::new(
+            &mut self.commands,
+            &mut self.lock.state.stroke_state,
+        )
+    }
 }
-impl<Array: smallvec::Array<Item = crate::commands::Command>>
-    CommandWrite<super::super::GraphCommand> for smallvec::SmallVec<Array>
+
+// Any subcommand that can be wrapped in Command can be written into any
+// smallvec of Command.
+// This could be even more generic: Any subcommand can be written into any CommandWrite<Command>
+impl<Subcommand, Array> CommandWrite<Subcommand> for smallvec::SmallVec<Array>
+where
+    Subcommand: Into<crate::commands::Command>,
+    Array: smallvec::Array<Item = super::super::Command>,
 {
-    fn write(&mut self, command: super::super::GraphCommand) {
-        self.push(Command::Graph(command))
+    fn write(&mut self, command: Subcommand) {
+        self.push(command.into())
     }
 }
