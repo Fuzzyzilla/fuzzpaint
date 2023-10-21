@@ -1,6 +1,6 @@
 pub struct Brush {
     in_progress_stroke: Option<crate::Stroke>,
-    last_document: Option<crate::FuzzID<crate::Document>>,
+    last_document: Option<crate::state::DocumentID>,
 }
 
 impl super::MakePenTool for Brush {
@@ -27,6 +27,7 @@ impl super::PenTool for Brush {
         tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
+        /*
         let Some(globals) = crate::GLOBALS.get() else {
             return;
         };
@@ -149,11 +150,10 @@ impl super::PenTool for Brush {
                 let this_stroke = self
                     .in_progress_stroke
                     .get_or_insert_with(|| crate::Stroke {
-                        brush: crate::StrokeBrushSettings {
+                        brush: crate::state::StrokeBrushSettings {
                             is_eraser: actions.is_action_held(crate::actions::Action::Erase),
                             ..cur_brush.clone()
                         },
-                        id: Default::default(),
                         points: Vec::new(),
                     });
                 let Ok(pos) = view_info
@@ -244,5 +244,6 @@ impl super::PenTool for Brush {
             ));
             super::RenderAs::None
         }
+        */
     }
 }

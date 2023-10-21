@@ -14,6 +14,22 @@ pub struct ImmutableStroke {
     pub point_collection: crate::repositories::points::PointCollectionID,
 }
 
+impl TryFrom<crate::Stroke> for ImmutableStroke {
+    type Error = ();
+    /// Fails if the Stroke has too much data to fit in the repository.
+    /// See [crate::repositories::points::PointRepository::insert]
+    fn try_from(value: crate::Stroke) -> Result<Self, Self::Error> {
+        let point_collection = crate::repositories::points::global()
+            .insert(&value.points)
+            .ok_or(())?;
+        Ok(Self {
+            id: Default::default(),
+            brush: value.brush,
+            point_collection,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct StrokeCollection {
     pub strokes: Vec<ImmutableStroke>,

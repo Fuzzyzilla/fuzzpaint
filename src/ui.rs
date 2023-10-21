@@ -27,7 +27,7 @@ struct PerDocumentData {
     yanked_node: Option<crate::state::graph::AnyID>,
 }
 impl PerDocumentData {
-    pub fn document_id(&self) -> crate::FuzzID<crate::Document> {
+    pub fn document_id(&self) -> crate::state::DocumentID {
         self.queue.id()
     }
 }
@@ -39,7 +39,7 @@ pub struct MainUI {
     inlays: Vec<Box<dyn UILayer>>,
 
     documents: Vec<PerDocumentData>,
-    cur_document: Option<crate::FuzzID<crate::Document>>,
+    cur_document: Option<crate::state::DocumentID>,
 
     requests_send: requests::RequestSender,
     // Only some during a drag event on the view rotation slider. Not to be used aside from that! :P
@@ -103,9 +103,10 @@ impl MainUI {
                                 graph_selection: None,
                                 yanked_node: None,
                             };
-                            let _ = self
-                                .requests_send
-                                .send(requests::UiRequest::NewDocument(interface.document_id()));
+                            let _ = self.requests_send.send(requests::UiRequest::Document {
+                                target: interface.document_id(),
+                                request: requests::DocumentRequest::Opened,
+                            });
                             self.cur_document = Some(interface.document_id());
                             self.documents.push(interface);
                         };
@@ -543,7 +544,7 @@ impl MainUI {
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let mut deleted_ids =
-                        smallvec::SmallVec::<[crate::FuzzID<crate::Document>; 1]>::new();
+                        smallvec::SmallVec::<[crate::state::DocumentID; 1]>::new();
                     for document_id in self.documents.iter().map(PerDocumentData::document_id) {
                         egui::containers::Frame::group(ui.style())
                             .outer_margin(egui::Margin::symmetric(0.0, 0.0))

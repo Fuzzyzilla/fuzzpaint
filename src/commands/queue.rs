@@ -29,7 +29,7 @@ struct DocumentCommandQueueInner {
 pub struct DocumentCommandQueue {
     /// Mutable inner bits.
     inner: std::sync::Arc<parking_lot::RwLock<DocumentCommandQueueInner>>,
-    document: crate::FuzzID<crate::Document>,
+    document: crate::state::DocumentID,
 }
 impl DocumentCommandQueue {
     pub fn new() -> Self {
@@ -49,7 +49,7 @@ impl DocumentCommandQueue {
             document: Default::default(),
         }
     }
-    pub fn id(&self) -> crate::FuzzID<crate::Document> {
+    pub fn id(&self) -> crate::state::DocumentID {
         self.document
     }
     /// Locks the queue for writing commands during the span of the closure, where each modification of the state is tracked
@@ -160,7 +160,7 @@ pub enum ListenerError {
     TreeMalformed(TraverseError),
 }
 pub struct DocumentCommandListener {
-    _document: crate::FuzzID<crate::Document>,
+    _document: crate::state::DocumentID,
     // Cursor into the tree that this listener has last seen,
     // When more events are requested, the path to the "true" cursor is found and traversed.
     cursor: slab_tree::NodeId,

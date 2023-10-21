@@ -30,7 +30,7 @@ impl<'data> StreamStrokeTessellator<'data> for RayonStreamTessellator<'data> {
 use super::{
     StreamStrokeTessellator, TessellatedStrokeInfo, TessellatedStrokeVertex, TessellationError,
 };
-use crate::{StrokeBrushSettings, StrokePoint};
+use crate::{state::StrokeBrushSettings, StrokePoint};
 
 impl RayonTessellator {
     fn do_stamp(point: &StrokePoint, brush: &StrokeBrushSettings) -> [TessellatedStrokeVertex; 6] {

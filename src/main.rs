@@ -122,24 +122,6 @@ impl GlobalHotkeys {
     }
 }
 
-pub struct StrokeLayer {
-    pub id: FuzzID<Self>,
-    pub name: String,
-    pub blend: blend::Blend,
-}
-pub struct Document {
-    /// The path from which the file was loaded, or None if opened as new.
-    pub path: Option<std::path::PathBuf>,
-    /// Name of the document, from its path or generated.
-    pub name: String,
-
-    // In structure, a document is rather similar to a GroupLayer :O
-    /// Layers that make up this document
-    pub layer_top_level: Vec<StrokeLayer>,
-
-    /// ID that is unique within this execution of the program
-    pub id: FuzzID<Document>,
-}
 mod stroke_renderer {
     /// The data managed by the renderer.
     /// For now, in persuit of actually getting a working product one day,
@@ -327,7 +309,7 @@ mod stroke_renderer {
         }
         pub fn draw(
             &self,
-            strokes: &[super::ImmutableStroke],
+            strokes: &[crate::state::stroke_collection::ImmutableStroke],
             renderbuf: &RenderData,
             clear: bool,
         ) -> AnyResult<vk::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>> {
@@ -396,16 +378,6 @@ mod stroke_renderer {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct StrokeBrushSettings {
-    brush: brush::BrushID,
-    /// `a` is flow, NOT opacity, since the stroke is blended continuously not blended as a group.
-    color_modulate: [f32; 4],
-    spacing_px: f32,
-    size_mul: f32,
-    /// If true, the blend constants must be set to generate an erasing effect.
-    is_eraser: bool,
-}
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
 pub struct StrokePoint {
@@ -432,129 +404,15 @@ impl StrokePoint {
     }
 }
 pub struct Stroke {
-    /// Unique id during this execution of the program.
-    /// We have 64 bits, this won't get exhausted anytime soon! :P
-    id: FuzzID<Stroke>,
-    brush: StrokeBrushSettings,
+    brush: state::StrokeBrushSettings,
     points: Vec<StrokePoint>,
-}
-/// Decoupled data from header, stored in separate manager. Header managed by UI.
-/// Stores the strokes generated from pen input, with optional render data inserted by renderer.
-pub struct StrokeLayerData {
-    strokes: Vec<ImmutableStroke>,
-    undo_cursor_position: Option<usize>,
-}
-/// Collection of layer data (stroke contents and render data) mapped from ID
-pub struct StrokeLayerManager {
-    layers: std::collections::HashMap<FuzzID<StrokeLayer>, StrokeLayerData>,
-}
-impl Default for StrokeLayerManager {
-    fn default() -> Self {
-        Self {
-            layers: Default::default(),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct ImmutableStroke {
-    id: FuzzID<Stroke>,
-    brush: StrokeBrushSettings,
-    point_collection: repositories::points::PointCollectionID,
-}
-impl From<Stroke> for ImmutableStroke {
-    fn from(value: Stroke) -> Self {
-        let point_collection = repositories::points::global()
-            .insert(&value.points)
-            .unwrap();
-        Self {
-            id: value.id,
-            brush: value.brush,
-            point_collection,
-        }
-    }
-}
-
-struct DocumentSelections {
-    pub cur_layer: Option<FuzzID<StrokeLayer>>,
-}
-impl Default for DocumentSelections {
-    fn default() -> Self {
-        Self { cur_layer: None }
-    }
-}
-struct Selections {
-    pub cur_document: Option<FuzzID<Document>>,
-    pub document_selections: std::collections::HashMap<FuzzID<Document>, DocumentSelections>,
-    pub cur_brush: Option<brush::BrushID>,
-    pub brush_settings: StrokeBrushSettings,
-    pub undos: std::sync::atomic::AtomicU32,
-}
-impl Default for Selections {
-    fn default() -> Self {
-        Self {
-            cur_document: None,
-            document_selections: Default::default(),
-            cur_brush: None,
-            brush_settings: StrokeBrushSettings {
-                brush: *brush::todo_brush().id(),
-                color_modulate: [0.0, 0.0, 0.0, 1.0],
-                size_mul: 15.0,
-                spacing_px: 0.75,
-                is_eraser: false,
-            },
-            undos: 0.into(),
-        }
-    }
-}
-
-// Icky. with a planned client-server architecture, we won't have as many globals -w-;;
-// (well, a server is still a global, but the interface will be much less hacked-)
-struct Globals {
-    stroke_layers: tokio::sync::RwLock<StrokeLayerManager>,
-    documents: tokio::sync::RwLock<Vec<Document>>,
-    selections: tokio::sync::RwLock<Selections>,
-}
-impl Globals {
-    fn new() -> Self {
-        Self {
-            stroke_layers: tokio::sync::RwLock::new(Default::default()),
-            documents: tokio::sync::RwLock::new(Vec::new()),
-            selections: Default::default(),
-        }
-    }
-    fn strokes(&'_ self) -> &'_ tokio::sync::RwLock<StrokeLayerManager> {
-        &self.stroke_layers
-    }
-    fn documents(&'_ self) -> &'_ tokio::sync::RwLock<Vec<Document>> {
-        &self.documents
-    }
-    fn selections(&'_ self) -> &'_ tokio::sync::RwLock<Selections> {
-        &self.selections
-    }
-}
-static GLOBALS: std::sync::OnceLock<Globals> = std::sync::OnceLock::new();
-pub enum RenderMessage {
-    SwitchDocument(FuzzID<Document>),
-    StrokeLayer {
-        layer: FuzzID<StrokeLayer>,
-        kind: StrokeLayerRenderMessageKind,
-    },
-}
-pub enum StrokeLayerRenderMessageKind {
-    /// The blend settings (opacity, clip, mode) for the layer were modified.
-    BlendChanged(Blend),
-    /// A stroke was appended to the given layer.
-    /// Could be sourced from redos or new data entirely.
-    Append(ImmutableStroke),
-    /// This number of strokes were trucated (undone or replaced)
-    Truncate(usize),
 }
 async fn render_worker(
     renderer: Arc<render_device::RenderContext>,
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
-    mut render_recv: tokio::sync::mpsc::UnboundedReceiver<RenderMessage>,
+    mut render_recv: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> AnyResult<()> {
+    /*
     let layer_render = stroke_renderer::StrokeLayerRenderer::new(renderer.clone())?;
     let blend_engine = blend::BlendEngine::new(renderer.device().clone())?;
 
@@ -819,7 +677,8 @@ async fn render_worker(
                 proxy.submit_with_fence(fence);
             }
         }
-    }
+    }*/
+    while render_recv.recv().await.is_some() {}
     Ok(())
 }
 async fn stylus_event_collector(
@@ -827,7 +686,7 @@ async fn stylus_event_collector(
     mut action_listener: actions::ActionListener,
     mut tools: pen_tools::ToolState,
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
-    render_send: tokio::sync::mpsc::UnboundedSender<RenderMessage>,
+    render_send: tokio::sync::mpsc::UnboundedSender<()>,
 ) -> AnyResult<()> {
     // Create a document and a few layers and select them, to speed up testing iterations :P
     /*
@@ -911,8 +770,6 @@ fn main() -> AnyResult<std::convert::Infallible> {
         log::warn!("Failed to save hotkey config:\n{e:?}");
     };
 
-    GLOBALS.get_or_init(Globals::new);
-
     let (send, recv) = std::sync::mpsc::channel();
     let ui = ui::MainUI::new(send);
     std::thread::spawn(move || {
@@ -953,8 +810,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
             // We don't expect this channel to get very large, but it's important
             // that messages don't get lost under any circumstance, lest an expensive
             // document rebuild be needed :P
-            let (render_sender, render_reciever) =
-                tokio::sync::mpsc::unbounded_channel::<RenderMessage>();
+            let (render_sender, render_reciever) = tokio::sync::mpsc::unbounded_channel::<()>();
 
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
