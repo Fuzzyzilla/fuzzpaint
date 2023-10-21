@@ -1,6 +1,18 @@
 #[derive(Clone, Debug)]
 pub enum StrokeCollectionCommand {
-    Stroke(StrokeCommand),
+    Created(super::StrokeCollectionID),
+    Stroke {
+        target: super::StrokeCollectionID,
+        command: StrokeCommand,
+    },
+}
+impl StrokeCollectionCommand {
+    pub(super) fn stroke(&self) -> Option<&StrokeCommand> {
+        match self {
+            Self::Stroke { command, .. } => Some(command),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub enum StrokeCommand {
