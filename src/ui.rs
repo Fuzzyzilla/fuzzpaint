@@ -221,26 +221,9 @@ impl MainUI {
                     // RTL - add in reverse :P
                     if ui.add(redo).clicked() {
                         interface.queue.redo_n(1)
-                        /*
-                        let _ = self.requests_send.send(requests::UiRequest::Document {
-                            target: document,
-                            request: requests::DocumentRequest::Layer {
-                                target: current_layer,
-                                request: requests::LayerRequest::Redo,
-                            },
-                        });
-                        */
                     }
                     if ui.add(undo).clicked() {
                         interface.queue.undo_n(1)
-                        /*
-                        let _ = self.requests_send.send(requests::UiRequest::Document {
-                            target: document,
-                            request: requests::DocumentRequest::Layer {
-                                target: current_layer,
-                                request: requests::LayerRequest::Undo,
-                            },
-                        });*/
                     }
                 } else {
                     // RTL - add in reverse :P
@@ -270,8 +253,6 @@ impl MainUI {
             };
 
             let writer = interface.queue.write_with(|writer| {
-                let mut graph = writer.graph();
-
                 ui.horizontal(|ui| {
                     // Copied logic since we can't borrow test_graph_selection throughout this whole
                     // ui section
@@ -298,11 +279,13 @@ impl MainUI {
                         .on_hover_text("Add Stroke Layer")
                         .clicked()
                     {
-                        interface.graph_selection = graph
+                        let new_stroke_collection = writer.stroke_collections().insert();
+                        interface.graph_selection = writer
+                            .graph()
                             .add_leaf(
                                 crate::state::graph::LeafType::StrokeLayer {
                                     blend: Default::default(),
-                                    source: crate::FuzzID::default(),
+                                    collection: new_stroke_collection,
                                 },
                                 add_location!(),
                                 "Stroke Layer".to_string(),
@@ -310,6 +293,8 @@ impl MainUI {
                             .ok()
                             .map(Into::into);
                     }
+                    // Borrow graph for the rest of the time.
+                    let mut graph = writer.graph();
                     if ui
                         .button(NOTE_LAYER_ICON)
                         .on_hover_text("Add Note")
@@ -397,6 +382,7 @@ impl MainUI {
                 });
 
                 ui.separator();
+                let mut graph = writer.graph();
 
                 // Strange visual flicker when this button is clicked,
                 // as the header remains for one frame after the graph switches back.

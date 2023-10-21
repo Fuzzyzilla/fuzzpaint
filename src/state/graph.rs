@@ -10,7 +10,7 @@ pub use stable_id::{AnyID, LeafID, NodeID};
 pub enum LeafType {
     StrokeLayer {
         blend: crate::Blend,
-        source: crate::FuzzID<crate::StrokeLayer>,
+        collection: crate::state::stroke_collection::StrokeCollectionID,
     },
     SolidColor {
         blend: crate::Blend,

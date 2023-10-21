@@ -91,6 +91,7 @@ impl CommandQueueWriter<'_> {
 
 // Any subcommand that can be wrapped in Command can be written into any
 // smallvec of Command.
+// This could be even more generic: Any subcommand can be written into any CommandWrite<Command>
 impl<Subcommand, Array> CommandWrite<Subcommand> for smallvec::SmallVec<Array>
 where
     Subcommand: Into<crate::commands::Command>,
