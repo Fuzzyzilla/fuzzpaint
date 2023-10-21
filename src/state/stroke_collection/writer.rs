@@ -1,20 +1,22 @@
 use super::*;
 use crate::commands::queue::writer::*;
 
-pub struct StrokeCollectionWriter<'s, W: CommandWrite<commands::StrokeCollectionCommand>> {
+pub struct StrokeCollectionWriter<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>> {
     id: StrokeCollectionID,
     collection: &'s mut StrokeCollection,
-    writer: W,
+    writer: Writer,
 }
-impl<'s, W: CommandWrite<commands::StrokeCollectionCommand>> std::ops::Deref
-    for StrokeCollectionWriter<'s, W>
+impl<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>> std::ops::Deref
+    for StrokeCollectionWriter<'s, Writer>
 {
     type Target = StrokeCollection;
     fn deref(&self) -> &Self::Target {
         &*self.collection
     }
 }
-impl<'s, W: CommandWrite<commands::StrokeCollectionCommand>> StrokeCollectionWriter<'s, W> {
+impl<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>>
+    StrokeCollectionWriter<'s, Writer>
+{
     pub fn id(&self) -> StrokeCollectionID {
         self.id
     }
@@ -44,27 +46,29 @@ impl<'s, W: CommandWrite<commands::StrokeCollectionCommand>> StrokeCollectionWri
     }
 }
 
-pub struct StrokeCollectionStateWriter<'s, W: CommandWrite<commands::StrokeCollectionCommand>> {
-    id: StrokeCollectionID,
+pub struct StrokeCollectionStateWriter<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>>
+{
     state: &'s mut StrokeCollectionState,
-    writer: W,
+    writer: Writer,
 }
-impl<'s, W: CommandWrite<commands::StrokeCollectionCommand>> std::ops::Deref
-    for StrokeCollectionStateWriter<'s, W>
+impl<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>> std::ops::Deref
+    for StrokeCollectionStateWriter<'s, Writer>
 {
     type Target = StrokeCollectionState;
     fn deref(&self) -> &Self::Target {
         &*self.state
     }
 }
-impl<'s, W: CommandWrite<commands::StrokeCollectionCommand>> StrokeCollectionStateWriter<'s, W> {
+impl<'s, Write: CommandWrite<commands::StrokeCollectionCommand>>
+    StrokeCollectionStateWriter<'s, Write>
+{
+    pub fn new(writer: Write, state: &'s mut StrokeCollectionState) -> Self {
+        Self { state, writer }
+    }
     pub fn get_mut<'this>(
         &'this mut self,
         id: StrokeCollectionID,
-    ) -> Option<StrokeCollectionWriter<'this, &mut W>>
-    where
-        's: 'this,
-    {
+    ) -> Option<StrokeCollectionWriter<'this, &mut Write>> {
         let collection = self.state.get_mut(id)?;
 
         Some(StrokeCollectionWriter {

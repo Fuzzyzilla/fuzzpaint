@@ -12,6 +12,7 @@ use super::super::*;
 use crate::state;
 pub trait CommandQueueStateReader {
     fn graph(&self) -> &state::graph::BlendGraph;
+    fn stroke_collections(&self) -> &state::stroke_collection::StrokeCollectionState;
     /*fn stroke_layers(&self) -> &[state::StrokeLayer];
     fn stroke_layer(&self, id: state::StrokeLayerID) -> Option<&state::StrokeLayer> {
         self.stroke_layers().iter().find(|layer| layer.id == id)
@@ -98,6 +99,9 @@ impl CommandQueueStateReader for CommandQueueCloneLock {
     }
     fn graph(&self) -> &state::graph::BlendGraph {
         &self.shared_state.graph
+    }
+    fn stroke_collections(&self) -> &state::stroke_collection::StrokeCollectionState {
+        &self.shared_state.stroke_state
     }
     /*fn stroke_layers(&self) -> &[state::StrokeLayer] {
         &self.shared_state.stroke_layers

@@ -52,6 +52,21 @@ pub enum Command {
     // Invalid anywhere else.
     Dummy,
 }
+impl From<MetaCommand> for Command {
+    fn from(value: MetaCommand) -> Self {
+        Self::Meta(value)
+    }
+}
+impl From<GraphCommand> for Command {
+    fn from(value: GraphCommand) -> Self {
+        Self::Graph(value)
+    }
+}
+impl From<StrokeCollectionCommand> for Command {
+    fn from(value: StrokeCollectionCommand) -> Self {
+        Self::StrokeCollection(value)
+    }
+}
 impl Command {
     pub fn meta(&self) -> Option<&MetaCommand> {
         match self {
