@@ -26,6 +26,8 @@ use blend::Blend;
 pub use id::FuzzID;
 pub use tess::StrokeTessellator;
 
+pub use commands::queue::provider::provider as default_provider;
+
 #[cfg(feature = "dhat_heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
