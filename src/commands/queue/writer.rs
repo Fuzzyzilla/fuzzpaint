@@ -18,6 +18,10 @@ pub struct CommandQueueWriter<'a> {
     // Optimize for exactly one command (the most common case)
     pub(super) commands: smallvec::SmallVec<[crate::commands::Command; 1]>,
 }
+// This is weirdly leak-safe, as even though the state will be corrupted if this is not destructed,
+// as the state will no longer match the commands in the queue,
+// the lock will be mutably held for all of time thus not allowing anyone one else to observe it.
+// Obviously not great, but sound at least.
 impl Drop for CommandQueueWriter<'_> {
     fn drop(&mut self) {
         // Skip if nothing to write.
