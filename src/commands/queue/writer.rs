@@ -69,6 +69,9 @@ impl Drop for CommandQueueWriter<'_> {
     }
 }
 impl CommandQueueWriter<'_> {
+    pub fn changed(&self) -> bool {
+        !self.commands.is_empty()
+    }
     pub fn graph(
         &'_ mut self,
     ) -> crate::state::graph::writer::GraphWriter<

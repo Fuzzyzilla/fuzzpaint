@@ -31,9 +31,14 @@ pub struct DocumentCommandQueue {
     /// Mutable inner bits.
     inner: std::sync::Arc<parking_lot::RwLock<DocumentCommandQueueInner>>,
     document: crate::state::DocumentID,
+    /// Bad bad bad bad this shouldn't be in here :V
+    /// Can't think of a better way rn.
+    on_change_channel: tokio::sync::broadcast::Sender<provider::ProviderMessage>,
 }
 impl DocumentCommandQueue {
-    pub fn new() -> Self {
+    pub fn new(
+        on_change_channel: tokio::sync::broadcast::Sender<provider::ProviderMessage>,
+    ) -> Self {
         let command_tree = slab_tree::TreeBuilder::new()
             .with_root(super::Command::Dummy)
             .build();
@@ -48,6 +53,7 @@ impl DocumentCommandQueue {
                 .into(),
             ),
             document: Default::default(),
+            on_change_channel,
         }
     }
     pub fn id(&self) -> crate::state::DocumentID {
@@ -59,13 +65,24 @@ impl DocumentCommandQueue {
     where
         F: FnOnce(&mut writer::CommandQueueWriter<'_>) -> T,
     {
-        let lock = self.inner.write();
-        let mut writer = writer::CommandQueueWriter {
-            lock,
-            commands: Default::default(),
+        let (result, changed) = {
+            let lock = self.inner.write();
+            let mut writer = writer::CommandQueueWriter {
+                lock,
+                commands: Default::default(),
+            };
+            // Panic safe - `writer::CommandQueueWriter`'s Drop impl will do the cleanup ensuring the queue's commands and state are synchronized.
+            // However, changes will not be notified.
+            let result = write(&mut writer);
+            (result, writer.changed())
         };
-        // Panic safe - `writer::CommandQueueWriter`'s Drop impl will do the cleanup ensuring the queue's commands and state are synchronized.
-        write(&mut writer)
+        if changed {
+            // Send notify *after* the write has flushed, hence the scope above.
+            let _ = self
+                .on_change_channel
+                .send(provider::ProviderMessage::Modified(self.id()));
+        }
+        result
     }
     /// A helper method to view the state as it is at this moment as a clone.
     pub fn peek_clone_state(&self) -> state_reader::CommandQueueCloneLock {
