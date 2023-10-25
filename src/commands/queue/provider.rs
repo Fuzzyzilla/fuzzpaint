@@ -63,6 +63,14 @@ pub enum ProviderMessage {
     /// A document is no longer available.
     Closed(crate::state::DocumentID),
 }
+impl ProviderMessage {
+    /// Gets the document this message refers to.
+    pub fn id(&self) -> crate::state::DocumentID {
+        match self {
+            Self::Closed(id) | Self::Modified(id) | Self::Opened(id) => *id,
+        }
+    }
+}
 
 pub fn provider() -> &'static InMemoryDocumentProvider {
     static ONCE: std::sync::OnceLock<InMemoryDocumentProvider> = std::sync::OnceLock::new();
