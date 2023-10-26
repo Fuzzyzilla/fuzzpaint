@@ -214,6 +214,33 @@ impl BlendGraph {
     ) -> Option<impl Iterator<Item = (AnyID, &'s NodeData)> + 's> {
         self.iter_children_of_raw(self.ids.tree_id_from_node(node)?)
     }
+    /// Iterate all nodes, in arbitrary order.
+    pub fn iter<'s>(&'s self) -> impl Iterator<Item = (AnyID, &'s NodeData)> + 's {
+        self.tree
+            .traverse_post_order_ids(self.tree.root_node_id().unwrap())
+            .unwrap()
+            .filter_map(|node_id| {
+                let node = self.tree.get(&node_id).unwrap().data();
+                // Skip children marked as deleted
+                if node.deleted {
+                    None
+                } else {
+                    let fuz_id = self
+                        .ids
+                        .fuzz_id_from(&node_id)
+                        // Stinky! Nothing we can do here (except filter it out?)
+                        // This would be a bug, so report it with expect.
+                        .expect("Unknown node encountered in iteration");
+                    let id = match node.ty {
+                        NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(*fuz_id)),
+                        NodeDataTy::Node(_) => AnyID::Node(NodeID(*fuz_id)),
+                        // Ignore root
+                        NodeDataTy::Root => return None,
+                    };
+                    Some((id, node))
+                }
+            })
+    }
     /// Iterate the children of this raw ID. A helper method for all various iters!
     fn iter_children_of_raw(
         &'_ self,

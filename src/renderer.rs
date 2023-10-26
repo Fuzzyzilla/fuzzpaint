@@ -1,12 +1,28 @@
+use crate::commands::queue::state_reader::CommandQueueStateReader;
 struct PerDocumentData {
     listener: crate::commands::queue::DocumentCommandListener,
+    /// Cached images of each of the nodes of the graph.
+    graph_render_data: hashbrown::HashMap<crate::state::graph::AnyID, stroke_renderer::RenderData>,
+    /// Cached image of the document
+    root_image: stroke_renderer::RenderData,
+}
+#[derive(thiserror::Error, Debug)]
+enum IncrementalDrawErr {
+    #[error("{0}")]
+    Anyhow(anyhow::Error),
+    /// State was not usable for incremental draw.
+    /// Draw from scratch instead!
+    #[error("State mismatch")]
+    StateMismatch,
 }
 struct Renderer {
+    stroke_renderer: stroke_renderer::StrokeLayerRenderer,
     data: hashbrown::HashMap<crate::state::DocumentID, PerDocumentData>,
 }
 impl Renderer {
     fn new(renderer: std::sync::Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
         Ok(Self {
+            stroke_renderer: stroke_renderer::StrokeLayerRenderer::new(renderer)?,
             data: Default::default(),
         })
     }
@@ -16,34 +32,142 @@ impl Renderer {
         self.render(retain)
     }
     /// Checks the given document IDs for changes, rendering those changes.
+    /// Will try all changes, ignoring errors. Returns the first error that occured,
+    /// if any.
     fn render(&mut self, changes: &[crate::state::DocumentID]) -> anyhow::Result<()> {
+        let mut err = None;
         for change in changes {
-            self.render_one(*change)?;
+            err = err.or(self.render_one(*change).err());
         }
-        Ok(())
+        match err {
+            None => Ok(()),
+            Some(err) => Err(err),
+        }
     }
     fn render_one(&mut self, id: crate::state::DocumentID) -> anyhow::Result<()> {
         let data = self.data.entry(id);
-        let data = match data {
-            hashbrown::hash_map::Entry::Occupied(o) => o.into_mut(),
+        // Get the document data, and a flag for if we need to initialize that data.
+        let (is_new, data) = match data {
+            hashbrown::hash_map::Entry::Occupied(o) => (false, o.into_mut()),
             hashbrown::hash_map::Entry::Vacant(v) => {
                 let Some(listener) =
                     crate::default_provider().inspect(id, |queue| queue.listen_from_now())
                 else {
-                    // Deleted before we could do anything. Not an error!
-                    return Ok(());
+                    // Deleted before we could do anything.
+                    anyhow::bail!("Document deleted before render worker reached it");
                 };
-                v.insert(PerDocumentData { listener })
+                (
+                    true,
+                    v.insert(PerDocumentData {
+                        listener,
+                        graph_render_data: Default::default(),
+                        root_image: self.stroke_renderer.uninit_render_data()?,
+                    }),
+                )
             }
         };
-        let Ok(changes) = data.listener.forward_clone_state() else {
-            // Failed to read the state. Closed or broke!
-            // Cleanup and bail.
-            self.data.remove(&id);
-            return Ok(());
+        // Forward the listener state.
+        let changes = match data.listener.forward_clone_state() {
+            Ok(changes) => changes,
+            Err(e) => {
+                // Destroy the render data, report the error.
+                // Could be closed, or a thrashed document state D:
+                self.data.remove(&id);
+                return Err(e.into());
+            }
         };
-
+        // Render from scratch if we just created the data,
+        // otherwise update from previous state.
+        if is_new {
+            Self::draw_from_scratch(&self.stroke_renderer, data, &changes)
+        } else {
+            // Try to draw incrementally. If that reports it's impossible, try
+            // to draw from scratch.
+            match Self::draw_incremental(&self.stroke_renderer, data, &changes) {
+                Err(IncrementalDrawErr::StateMismatch) => {
+                    log::info!("Incremental draw failed! Retrying from scratch...");
+                    Self::draw_from_scratch(&self.stroke_renderer, data, &changes)
+                }
+                Err(IncrementalDrawErr::Anyhow(anyhow)) => Err(anyhow),
+                Ok(()) => Ok(()),
+            }
+        }
+    }
+    /// Draws the entire state from the beginning, ignoring the diff.
+    /// Reuses allocated images, but ignores their contents!
+    fn draw_from_scratch(
+        renderer: &stroke_renderer::StrokeLayerRenderer,
+        document_data: &mut PerDocumentData,
+        state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
+    ) -> anyhow::Result<()> {
+        // Create/discard images
+        Self::allocate_prune_graph(
+            &renderer,
+            &mut document_data.graph_render_data,
+            state.graph(),
+        )?;
+        // Render stroke layers
+        // Render color layers
+        // Blend
         todo!()
+    }
+    /// Assumes the existence of a previous draw_from_scratch, applying only the diff.
+    fn draw_incremental(
+        renderer: &stroke_renderer::StrokeLayerRenderer,
+        document_data: &mut PerDocumentData,
+        state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
+    ) -> Result<(), IncrementalDrawErr> {
+        // Lol, just defer to draw_from_scratch until that works.
+        Self::draw_from_scratch(renderer, document_data, state)
+            .map_err(|err| IncrementalDrawErr::Anyhow(err))
+    }
+    /// Creates images for all nodes which require rendering, drops node images that are deleted, etc.
+    /// Only fails when graphics device is out-of-memory
+    fn allocate_prune_graph(
+        renderer: &stroke_renderer::StrokeLayerRenderer,
+        graph_render_data: &mut hashbrown::HashMap<
+            crate::state::graph::AnyID,
+            stroke_renderer::RenderData,
+        >,
+        graph: &crate::state::graph::BlendGraph,
+    ) -> anyhow::Result<()> {
+        let mut retain_data = hashbrown::HashSet::new();
+        for (id, node) in graph.iter() {
+            let has_graphics = match (node.leaf(), node.node()) {
+                // We expect it to be a node xor leaf!
+                // This is an api issue ;w;
+                (Some(..), Some(..)) | (None, None) => unreachable!(),
+                // Color and Stroke have images.
+                // Color needing a whole image is a big ol inefficiency but that's todo :P
+                (
+                    Some(
+                        crate::state::graph::LeafType::SolidColor { .. }
+                        | crate::state::graph::LeafType::StrokeLayer { .. },
+                    ),
+                    None,
+                ) => true,
+                // Blend groups need an image.
+                (None, Some(crate::state::graph::NodeType::GroupedBlend(..))) => true,
+                // Every other type has no graphic.
+                _ => false,
+            };
+            if has_graphics {
+                // Mark this data as needed
+                retain_data.insert(id);
+                // Allocate new image, if none allocated already.
+                match graph_render_data.entry(id) {
+                    hashbrown::hash_map::Entry::Vacant(v) => {
+                        v.insert(renderer.uninit_render_data()?);
+                    }
+                    _ => (),
+                }
+            }
+        }
+
+        // Drop all images that are no longer needed
+        graph_render_data.retain(|id, _| retain_data.contains(id));
+
+        Ok(())
     }
 }
 pub async fn render_worker(
@@ -52,8 +176,10 @@ pub async fn render_worker(
     _: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> anyhow::Result<()> {
     let mut change_notifier = crate::default_provider().change_notifier();
-    let mut changed = vec![];
+    let mut changed: Vec<_> = crate::default_provider().document_iter().collect();
     let mut renderer = Renderer::new(renderer)?;
+    // Initialize renderer with all documents.
+    let _ = renderer.render(&changed);
     loop {
         use tokio::sync::broadcast::error::RecvError;
         match change_notifier.recv().await {
