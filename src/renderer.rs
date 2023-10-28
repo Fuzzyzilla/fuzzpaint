@@ -1,10 +1,13 @@
-use crate::commands::queue::state_reader::CommandQueueStateReader;
+use crate::vulkano_prelude::*;
+
+type AnySemaphoreFuture = vk::sync::future::SemaphoreSignalFuture<Box<dyn GpuFuture>>;
+
 struct PerDocumentData {
     listener: crate::commands::queue::DocumentCommandListener,
     /// Cached images of each of the nodes of the graph.
-    graph_render_data: hashbrown::HashMap<crate::state::graph::AnyID, stroke_renderer::RenderData>,
+    graph_render_data: hashbrown::HashMap<crate::state::graph::AnyID, RenderData>,
     /// Cached image of the document
-    root_image: stroke_renderer::RenderData,
+    root_image: RenderData,
 }
 #[derive(thiserror::Error, Debug)]
 enum IncrementalDrawErr {
@@ -15,16 +18,34 @@ enum IncrementalDrawErr {
     #[error("State mismatch")]
     StateMismatch,
 }
+enum CachedImage<'data> {
+    /// The data is ready for use immediately.
+    Ready(&'data RenderData),
+    /// The data is currently in-flight on the graphics device, and will become ready once the provided
+    /// `fence` becomes signalled.
+    ReadyAfter {
+        image: &'data RenderData,
+        fence: &'data vk::sync::future::FenceSignalFuture<Box<dyn vk::sync::GpuFuture>>,
+    },
+}
 struct Renderer {
+    context: std::sync::Arc<crate::render_device::RenderContext>,
     stroke_renderer: stroke_renderer::StrokeLayerRenderer,
     data: hashbrown::HashMap<crate::state::DocumentID, PerDocumentData>,
 }
 impl Renderer {
-    fn new(renderer: std::sync::Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
+    fn new(context: std::sync::Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
         Ok(Self {
-            stroke_renderer: stroke_renderer::StrokeLayerRenderer::new(renderer)?,
+            context: context.clone(),
+            stroke_renderer: stroke_renderer::StrokeLayerRenderer::new(context)?,
             data: Default::default(),
         })
+    }
+    /// Get the cached document image for the given ID, if found.
+    fn get_cached(&self, id: crate::state::DocumentID) -> Option<CachedImage> {
+        self.data
+            .get(&id)
+            .map(|data| CachedImage::Ready(&data.root_image))
     }
     /// Same as `render`, but drops any associated data not included in `retain` before rendering the included ids.
     fn render_retain(&mut self, retain: &[crate::state::DocumentID]) -> anyhow::Result<()> {
@@ -79,14 +100,14 @@ impl Renderer {
         // Render from scratch if we just created the data,
         // otherwise update from previous state.
         if is_new {
-            Self::draw_from_scratch(&self.stroke_renderer, data, &changes)
+            Self::draw_from_scratch(&self.context, &self.stroke_renderer, data, &changes)
         } else {
             // Try to draw incrementally. If that reports it's impossible, try
             // to draw from scratch.
-            match Self::draw_incremental(&self.stroke_renderer, data, &changes) {
+            match Self::draw_incremental(&self.context, &self.stroke_renderer, data, &changes) {
                 Err(IncrementalDrawErr::StateMismatch) => {
                     log::info!("Incremental draw failed! Retrying from scratch...");
-                    Self::draw_from_scratch(&self.stroke_renderer, data, &changes)
+                    Self::draw_from_scratch(&self.context, &self.stroke_renderer, data, &changes)
                 }
                 Err(IncrementalDrawErr::Anyhow(anyhow)) => Err(anyhow),
                 Ok(()) => Ok(()),
@@ -96,6 +117,7 @@ impl Renderer {
     /// Draws the entire state from the beginning, ignoring the diff.
     /// Reuses allocated images, but ignores their contents!
     fn draw_from_scratch(
+        context: &std::sync::Arc<crate::render_device::RenderContext>,
         renderer: &stroke_renderer::StrokeLayerRenderer,
         document_data: &mut PerDocumentData,
         state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
@@ -106,29 +128,105 @@ impl Renderer {
             &mut document_data.graph_render_data,
             state.graph(),
         )?;
-        // Render stroke layers
-        // Render color layers
+        // Collect nodes renders
+        let mut semaphores =
+            Vec::<vk::sync::future::SemaphoreSignalFuture<Box<dyn GpuFuture>>>::new();
+
+        for (node_id, node_data) in state.graph().iter() {
+            match (node_data.leaf(), node_data.node()) {
+                // Render solid color image:
+                (Some(crate::state::graph::LeafType::SolidColor { source, .. }), None) => {
+                    let image = document_data.graph_render_data
+                        .get(&node_id)
+                        .ok_or_else(|| anyhow::anyhow!("Expected image to be created by allocate_prune_graph for {node_id:?}"))?;
+                    // Fill image, store semaphore.
+                    semaphores.push(Self::render_color(context.as_ref(), image, *source)?);
+                }
+                // Render stroke image
+                (Some(crate::state::graph::LeafType::StrokeLayer { collection, .. }), None) => {
+                    let image = document_data.graph_render_data
+                        .get(&node_id)
+                        .ok_or_else(|| anyhow::anyhow!("Expected image to be created by allocate_prune_graph for {node_id:?}"))?;
+                    let strokes = state.stroke_collections().get(*collection).ok_or_else(|| {
+                        anyhow::anyhow!("Missing stroke collection {collection:?}")
+                    })?;
+                    // Todo: strokes.strokes shouldn't be public x3
+                    // and the renderer should respect stroke deletion state.
+                    semaphores.push(renderer.draw(&strokes.strokes, image, true)?);
+                }
+                // impossible states :V
+                (None, None) | (Some(..), Some(..)) => unreachable!(),
+                // No other types have render work to do
+                _ => (),
+            }
+        }
+        // At this point, every layer with render data is rendering in the background, signaling the items in `semaphores`
+        // Fold them all into a single semaphore future, or None if there is no rendering happenening.
+        let composite = if let Some(front) = semaphores.pop() {
+            // So many boxes Q^Q
+            // Could group these into chunks of static size, but that's a detail uwu
+            Some(
+                semaphores
+                    .into_iter()
+                    .fold(front.boxed(), |prev, next| prev.join(next).boxed()),
+            )
+        } else {
+            // No work to be done, no future to await!
+            None
+        };
         // Blend
         todo!()
     }
     /// Assumes the existence of a previous draw_from_scratch, applying only the diff.
     fn draw_incremental(
+        context: &std::sync::Arc<crate::render_device::RenderContext>,
         renderer: &stroke_renderer::StrokeLayerRenderer,
         document_data: &mut PerDocumentData,
         state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
     ) -> Result<(), IncrementalDrawErr> {
-        // Lol, just defer to draw_from_scratch until that works.
-        Self::draw_from_scratch(renderer, document_data, state)
-            .map_err(|err| IncrementalDrawErr::Anyhow(err))
+        if state.has_changes() {
+            // State is dirty!
+            // Lol, just defer to draw_from_scratch until that works.
+            Self::draw_from_scratch(context, renderer, document_data, state)
+                .map_err(|err| IncrementalDrawErr::Anyhow(err))
+        } else {
+            // Nothing to do
+            Ok(())
+        }
+    }
+    fn render_color(
+        context: &crate::render_device::RenderContext,
+        image: &RenderData,
+        color: [f32; 4],
+    ) -> anyhow::Result<AnySemaphoreFuture> {
+        use vulkano::image::ImageViewAbstract;
+        let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
+            context.allocators().command_buffer(),
+            // Unfortunately transfer queue cannot clear images TwT
+            // Here, graphics is more likely to be idle than compute.
+            context.queues().graphics().idx(),
+            vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+        )?;
+        command_buffer.clear_color_image(vulkano::command_buffer::ClearColorImageInfo {
+            clear_value: color.into(),
+            regions: smallvec::smallvec![image.view.subresource_range().clone()],
+            image_layout: vulkano::image::ImageLayout::General,
+            ..vulkano::command_buffer::ClearColorImageInfo::image(image.image.clone())
+        })?;
+
+        let command_buffer = command_buffer.build()?;
+
+        // Lots of tiny smol submissions, hmmm...
+        Ok(vk::sync::now(context.device().clone())
+            .then_execute(context.queues().graphics().queue().clone(), command_buffer)?
+            .boxed()
+            .then_signal_semaphore_and_flush()?)
     }
     /// Creates images for all nodes which require rendering, drops node images that are deleted, etc.
     /// Only fails when graphics device is out-of-memory
     fn allocate_prune_graph(
         renderer: &stroke_renderer::StrokeLayerRenderer,
-        graph_render_data: &mut hashbrown::HashMap<
-            crate::state::graph::AnyID,
-            stroke_renderer::RenderData,
-        >,
+        graph_render_data: &mut hashbrown::HashMap<crate::state::graph::AnyID, RenderData>,
         graph: &crate::state::graph::BlendGraph,
     ) -> anyhow::Result<()> {
         let mut retain_data = hashbrown::HashSet::new();
@@ -172,7 +270,7 @@ impl Renderer {
 }
 pub async fn render_worker(
     renderer: std::sync::Arc<crate::render_device::RenderContext>,
-    _document_preview: std::sync::Arc<crate::document_viewport_proxy::DocumentViewportPreviewProxy>,
+    document_preview: std::sync::Arc<crate::document_viewport_proxy::DocumentViewportPreviewProxy>,
     _: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> anyhow::Result<()> {
     let mut change_notifier = crate::default_provider().change_notifier();
@@ -215,17 +313,17 @@ pub async fn render_worker(
     }
 }
 
+/// The data managed by the renderer.
+/// For now, in persuit of actually getting a working product one day,
+/// this is a very coarse caching sceme. In the future, perhaps a bit more granular
+/// control can occur, should performance become an issue:
+///  * Caching images of incrementally older states, reducing work to get to any given state (performant undo)
+///  * Caching tesselation output
+pub struct RenderData {
+    image: std::sync::Arc<vk::StorageImage>,
+    pub view: std::sync::Arc<vk::ImageView<vk::StorageImage>>,
+}
 mod stroke_renderer {
-    /// The data managed by the renderer.
-    /// For now, in persuit of actually getting a working product one day,
-    /// this is a very coarse caching sceme. In the future, perhaps a bit more granular
-    /// control can occur, should performance become an issue:
-    ///  * Caching images of incrementally older states, reducing work to get to any given state (performant undo)
-    ///  * Caching tesselation output
-    pub struct RenderData {
-        image: Arc<vk::StorageImage>,
-        pub view: Arc<vk::ImageView<vk::StorageImage>>,
-    }
 
     use crate::vk;
     use anyhow::Result as AnyResult;
@@ -375,7 +473,7 @@ mod stroke_renderer {
             })
         }
         /// Allocate a new RenderData object. Initial contents are undefined!
-        pub fn uninit_render_data(&self) -> anyhow::Result<RenderData> {
+        pub fn uninit_render_data(&self) -> anyhow::Result<super::RenderData> {
             let image = vk::StorageImage::with_usage(
                 self.context.allocators().memory(),
                 vulkano::image::ImageDimensions::Dim2d {
@@ -398,14 +496,15 @@ mod stroke_renderer {
             use vulkano::VulkanObject;
             log::info!("Made render data at id{:?}", view.handle());
 
-            Ok(RenderData { image, view })
+            Ok(super::RenderData { image, view })
         }
         pub fn draw(
             &self,
             strokes: &[crate::state::stroke_collection::ImmutableStroke],
-            renderbuf: &RenderData,
+            renderbuf: &super::RenderData,
             clear: bool,
-        ) -> AnyResult<vk::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>> {
+        ) -> AnyResult<vk::sync::future::SemaphoreSignalFuture<Box<dyn vk::sync::GpuFuture>>>
+        {
             let (future, vertices, indirects) = self.gpu_tess.tess(strokes)?;
             let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
                 self.context.allocators().command_buffer(),
@@ -466,6 +565,7 @@ mod stroke_renderer {
                     self.context.queues().graphics().queue().clone(),
                     command_buffer,
                 )?
+                .boxed()
                 .then_signal_semaphore_and_flush()?)
         }
     }

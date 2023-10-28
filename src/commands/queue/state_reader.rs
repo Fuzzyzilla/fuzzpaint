@@ -18,6 +18,7 @@ pub trait CommandQueueStateReader {
         self.stroke_layers().iter().find(|layer| layer.id == id)
     }*/
     fn changes<'s>(&'s self) -> impl Iterator<Item = DoUndo<'s, Command>> + 's;
+    fn has_changes(&self) -> bool;
 }
 
 pub struct CommandQueueReadLock {}
@@ -102,6 +103,9 @@ impl CommandQueueStateReader for CommandQueueCloneLock {
     }
     fn stroke_collections(&self) -> &state::stroke_collection::StrokeCollectionState {
         &self.shared_state.stroke_state
+    }
+    fn has_changes(&self) -> bool {
+        !self.commands.is_empty()
     }
     /*fn stroke_layers(&self) -> &[state::StrokeLayer] {
         &self.shared_state.stroke_layers
