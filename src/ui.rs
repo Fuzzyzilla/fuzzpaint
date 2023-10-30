@@ -248,6 +248,7 @@ impl MainUI {
             else {
                 // Not found! Reset cur_document.
                 self.cur_document = None;
+                *crate::Selections::get().write() = None;
                 return;
             };
 
@@ -318,7 +319,7 @@ impl MainUI {
                                 .add_leaf(
                                     crate::state::graph::LeafType::SolidColor {
                                         blend: Default::default(),
-                                        source: [Default::default(); 4],
+                                        source: [0.5, 0.0, 0.0, 0.5],
                                     },
                                     add_location!(),
                                     "Fill".to_string(),
@@ -421,6 +422,12 @@ impl MainUI {
                             )
                         });
                 })
+            });
+
+            // Update selections.
+            *crate::Selections::get().write() = Some(crate::Selections {
+                document,
+                node: interface.graph_selection,
             });
         });
 

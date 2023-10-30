@@ -217,7 +217,16 @@ impl Renderer {
                     })?;
                     // Todo: strokes.strokes shouldn't be public x3
                     // and the renderer should respect stroke deletion state.
-                    semaphores.push(renderer.draw(&strokes.strokes, image, true)?);
+                    if strokes.strokes.is_empty() {
+                        //FIXME: Renderer doesn't know how to handle zero strokes.
+                        semaphores.push(Self::render_color(
+                            context.as_ref(),
+                            image,
+                            [0.0, 0.0, 0.0, 0.0],
+                        )?);
+                    } else {
+                        semaphores.push(renderer.draw(&strokes.strokes[..], image, true)?);
+                    }
                     blend_infos.push((*blend, image.view.clone()));
                 }
                 // Groups todo lol
@@ -244,6 +253,7 @@ impl Renderer {
         };
 
         // Build blend commands
+        blend_infos.reverse();
         let blend_commands =
             blend_engine.blend(&context, into, true, &blend_infos[..], [0; 2], [0; 2])?;
 
@@ -257,6 +267,7 @@ impl Renderer {
         .then_execute(context.queues().compute().queue().clone(), blend_commands)?
         .then_signal_fence_and_flush()?;
 
+        // Oof
         fence.wait(None)?;
 
         Ok(())
@@ -362,7 +373,7 @@ pub async fn render_worker(
     let mut changed: Vec<_> = crate::default_provider().document_iter().collect();
     let mut renderer = Renderer::new(renderer)?;
     // Initialize renderer with all documents.
-    let _ = renderer.render(&changed);
+    // let _ = renderer.render(&changed);
     loop {
         use tokio::sync::broadcast::error::RecvError;
         let first_msg = change_notifier.recv().await;
@@ -377,8 +388,18 @@ pub async fn render_worker(
                 }
                 // Implicitly handles deletion - when the renderer goes to fetch changes,
                 // it will see that the document has closed.
-                tokio::task::yield_now().await;
-                renderer.render(&changed)?;
+                //renderer.render(&changed)?;
+                // No current doc, skip rendering.
+                let Some(selections) = crate::Selections::read_copy() else {
+                    continue;
+                };
+                // Rerender, if requested
+                if changed.contains(&selections.document) {
+                    let write = document_preview.write().await;
+                    renderer.render_one(selections.document, (*write).clone())?;
+                    // We sync with renderer, oofs :V
+                    write.submit_now();
+                }
             }
             // Messages lost. Resubscrive and check all documents for changes, to be safe.
             Err(RecvError::Lagged(..)) => {
@@ -391,7 +412,7 @@ pub async fn render_worker(
                 // Retain here. This is a list of all docs, so any not listed
                 // are therefore deleted.
                 tokio::task::yield_now().await;
-                renderer.render_retain(&changed)?;
+                //renderer.render_retain(&changed)?;
             }
             // Work here is done!
             Err(RecvError::Closed) => return Ok(()),
