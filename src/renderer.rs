@@ -284,8 +284,7 @@ impl Renderer {
         if state.has_changes() {
             // State is dirty!
             // Lol, just defer to draw_from_scratch until that works.
-            Self::draw_from_scratch(context, blend_engine, renderer, document_data, state, into)
-                .map_err(|err| IncrementalDrawErr::Anyhow(err))
+            Err(IncrementalDrawErr::StateMismatch)
         } else {
             // Nothing to do
             Ok(())

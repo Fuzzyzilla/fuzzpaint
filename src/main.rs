@@ -225,9 +225,14 @@ fn main() -> AnyResult<std::convert::Infallible> {
         log::trace!("Installed dhat");
         dhat::Profiler::new_heap()
     };
-    env_logger::builder()
-        .filter_level(log::LevelFilter::max())
-        .init();
+    // Log to a terminal, if available. Else, log to "log.out" in the working directory.
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        env_logger::builder()
+            .filter_level(log::LevelFilter::max())
+            .init();
+    } else {
+        let _ = simple_logging::log_to_file("log.out", log::LevelFilter::max());
+    }
 
     let window_surface = window::WindowSurface::new()?;
     let (render_context, render_surface) =

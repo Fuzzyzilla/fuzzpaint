@@ -404,7 +404,7 @@ impl GpuStampTess {
                 self.context.queues().compute().queue().clone(),
                 command_buffer,
             )?
-            .then_signal_semaphore_and_flush()?;
+            .then_signal_semaphore();
 
         Ok((future, output_verts, output_infos))
     }
