@@ -225,6 +225,10 @@ impl BlendGraph {
                 if node.deleted {
                     None
                 } else {
+                    // Ignore root
+                    if matches!(node.ty, NodeDataTy::Root) {
+                        return None;
+                    }
                     let fuz_id = self
                         .ids
                         .fuzz_id_from(&node_id)
@@ -234,8 +238,8 @@ impl BlendGraph {
                     let id = match node.ty {
                         NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(*fuz_id)),
                         NodeDataTy::Node(_) => AnyID::Node(NodeID(*fuz_id)),
-                        // Ignore root
-                        NodeDataTy::Root => return None,
+                        // Already handled above
+                        NodeDataTy::Root => unreachable!(),
                     };
                     Some((id, node))
                 }

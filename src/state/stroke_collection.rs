@@ -14,14 +14,19 @@ pub struct ImmutableStroke {
     pub point_collection: crate::repositories::points::PointCollectionID,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum ImmutableStrokeError {
+    #[error("The source stroke contains too many points to upload")]
+    TooLarge,
+}
 impl TryFrom<crate::Stroke> for ImmutableStroke {
-    type Error = ();
+    type Error = ImmutableStrokeError;
     /// Fails if the Stroke has too much data to fit in the repository.
     /// See [crate::repositories::points::PointRepository::insert]
     fn try_from(value: crate::Stroke) -> Result<Self, Self::Error> {
         let point_collection = crate::repositories::points::global()
             .insert(&value.points)
-            .ok_or(())?;
+            .ok_or(ImmutableStrokeError::TooLarge)?;
         Ok(Self {
             id: Default::default(),
             brush: value.brush,

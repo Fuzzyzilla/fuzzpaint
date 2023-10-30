@@ -27,123 +27,16 @@ impl super::PenTool for Brush {
         tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
-        /*
-        let Some(globals) = crate::GLOBALS.get() else {
+        // destructure the selections. Otherwise, bail.
+        let Some(crate::Selections {
+            document,
+            node: Some(node),
+        }) = crate::Selections::read_copy()
+        else {
+            // Clear and bail.
+            self.in_progress_stroke = None;
             return;
         };
-        let (cur_document, cur_layer, cur_brush, ui_undos) = {
-            let read = globals.selections().read().await;
-            let Some(cur_document) = read.cur_document else {
-                return;
-            };
-            let Some(cur_layer) = read
-                .document_selections
-                .get(&cur_document)
-                .and_then(|selections| selections.cur_layer)
-            else {
-                return;
-            };
-            let brush = read.brush_settings.clone();
-
-            let undos = read.undos.swap(0, std::sync::atomic::Ordering::Relaxed) as usize;
-
-            (cur_document, cur_layer, brush, undos)
-        };
-        // This shouldn't be the responsibility of brush, but im just porting old code
-        // as-is right now
-        if Some(cur_document) != self.last_document {
-            self.last_document = Some(cur_document.clone());
-            // Notify renderer of the change
-            let _ = render_output
-                .render_task_messages
-                .send(crate::RenderMessage::SwitchDocument(cur_document.clone()));
-        }
-
-        let key_undos = actions.action_trigger_count(crate::actions::Action::Undo);
-        let key_redos = actions.action_trigger_count(crate::actions::Action::Redo);
-
-        // Assume redos cancel undos.
-        let net_undos = (key_undos + ui_undos) as isize - (key_redos as isize);
-
-        if net_undos != 0 {
-            let mut stroke_manager = globals.strokes().write().await;
-
-            let layer_data =
-                stroke_manager
-                    .layers
-                    .entry(cur_layer)
-                    .or_insert_with(|| crate::StrokeLayerData {
-                        strokes: vec![],
-                        undo_cursor_position: None,
-                    });
-
-            match (layer_data.undo_cursor_position, net_undos) {
-                // Redone when nothing undone - do nothin!
-                (None, ..=0) => (),
-                // New undos!
-                (None, undos @ 1..) => {
-                    // `as` cast ok - we checked that it's positive.
-                    // clamp undos to the size of the data.
-                    let undos = layer_data.strokes.len().min(undos as usize);
-                    // Subtract won't overflow
-                    layer_data.undo_cursor_position = Some(layer_data.strokes.len() - undos);
-                    // broadcast the truncation request
-                    let _ = render_output.render_task_messages.send(
-                        crate::RenderMessage::StrokeLayer {
-                            layer: cur_layer,
-                            kind: crate::StrokeLayerRenderMessageKind::Truncate(undos),
-                        },
-                    );
-                }
-                // Redos when there were outstanding undos
-                (Some(old_cursor), negative_redos @ ..=0) => {
-                    // weird conventions I invented here :V
-                    // `as` cast ok - we checked that it's negative, and inverted it.
-                    let redos = (-negative_redos) as usize;
-                    let new_cursor = old_cursor.saturating_add(redos);
-
-                    // This many redos will move cursor past the end
-                    let bounds = if new_cursor >= layer_data.strokes.len() {
-                        layer_data.undo_cursor_position = None;
-                        // append all strokes from the cursor onward
-                        old_cursor..layer_data.strokes.len()
-                    } else {
-                        layer_data.undo_cursor_position = Some(new_cursor);
-
-                        // append all strokes from the old cursor until the new
-                        old_cursor..new_cursor
-                    };
-
-                    // Tell the renderer to append these strokes once more
-                    for stroke in &layer_data.strokes[bounds] {
-                        let _ = render_output.render_task_messages.send(
-                            crate::RenderMessage::StrokeLayer {
-                                layer: cur_layer,
-                                kind: crate::StrokeLayerRenderMessageKind::Append(stroke.clone()),
-                            },
-                        );
-                    }
-                }
-                // There were outstanding undos, and we're adding to them.
-                (Some(old_cursor), undos @ 1..) => {
-                    // Prevent undos from taking index below 0
-                    // `as` cast ok - we checked that it's positive
-                    let undos = old_cursor.min(undos as usize);
-
-                    // Won't overflow
-                    layer_data.undo_cursor_position = Some(old_cursor - undos);
-
-                    let _ = render_output.render_task_messages.send(
-                        crate::RenderMessage::StrokeLayer {
-                            layer: cur_layer,
-                            kind: crate::StrokeLayerRenderMessageKind::Truncate(undos),
-                        },
-                    );
-                }
-                // All cases are handled.
-                _ => unreachable!(),
-            }
-        }
         for event in stylus_input.iter() {
             if event.pressed {
                 // Get stroke-in-progress or start anew.
@@ -152,7 +45,10 @@ impl super::PenTool for Brush {
                     .get_or_insert_with(|| crate::Stroke {
                         brush: crate::state::StrokeBrushSettings {
                             is_eraser: actions.is_action_held(crate::actions::Action::Erase),
-                            ..cur_brush.clone()
+                            brush: crate::brush::todo_brush().id(),
+                            color_modulate: [0.0, 0.0, 0.0, 1.0],
+                            size_mul: 10.0,
+                            spacing_px: 0.5,
                         },
                         points: Vec::new(),
                     });
@@ -181,31 +77,47 @@ impl super::PenTool for Brush {
                 })
             } else {
                 if let Some(stroke) = self.in_progress_stroke.take() {
-                    // Not pressed and a stroke exists - take it, freeze it, and put it on current layer!
-                    let immutable: crate::ImmutableStroke = stroke.into();
+                    // Insert the stroke into the document.
+                    if let Some(Err(e)) = crate::default_provider().inspect(document, |queue| {
+                        queue.write_with(|write| {
+                            // Find the collection to insert into.
+                            let collection_id = {
+                                let graph = write.graph();
+                                let node = graph.get(node).and_then(|node| node.leaf());
+                                if let Some(crate::state::graph::LeafType::StrokeLayer {
+                                    collection,
+                                    ..
+                                }) = node
+                                {
+                                    *collection
+                                } else {
+                                    anyhow::bail!("Current layer is not a valid stroke layer.")
+                                }
+                            };
 
-                    let mut stroke_manager = globals.strokes().write().await;
+                            // Get the collection
+                            let mut collections = write.stroke_collections();
+                            let Some(mut collection_writer) = collections.get_mut(collection_id)
+                            else {
+                                anyhow::bail!(
+                                    "Current layer references nonexistant stroke collection"
+                                )
+                            };
+                            // Huzzah, all is good! Upload stroke, and push it.
+                            let immutable = TryInto::<
+                                crate::state::stroke_collection::ImmutableStroke,
+                            >::try_into(stroke)?;
 
-                    let layer_data = stroke_manager.layers.entry(cur_layer).or_insert_with(|| {
-                        crate::StrokeLayerData {
-                            strokes: vec![],
-                            undo_cursor_position: None,
-                        }
-                    });
+                            // Destructure immutable stroke and push it.
+                            // Invokes an extra ID allocation, weh
+                            collection_writer
+                                .push_back(immutable.brush, immutable.point_collection);
 
-                    // If there was an undo cursor, truncate everything after
-                    // and replace with new data.
-                    if let Some(cursor) = layer_data.undo_cursor_position.take() {
-                        layer_data.strokes.drain(cursor..);
+                            Ok(())
+                        })
+                    }) {
+                        log::warn!("Failed to insert stroke: {e:?}");
                     }
-                    layer_data.strokes.push(immutable.clone());
-
-                    let _ = render_output.render_task_messages.send(
-                        crate::RenderMessage::StrokeLayer {
-                            layer: cur_layer,
-                            kind: crate::StrokeLayerRenderMessageKind::Append(immutable),
-                        },
-                    );
                 }
             }
         }
@@ -244,6 +156,5 @@ impl super::PenTool for Brush {
             ));
             super::RenderAs::None
         }
-        */
     }
 }

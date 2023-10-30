@@ -125,6 +125,25 @@ impl GlobalHotkeys {
     }
 }
 
+/// FIXME! This is temp until I can see that everything is working :3
+/// There still needs to be a way to intercommunicate between UI selections, Pen actions, and renderer preview.
+#[derive(Clone, Copy)]
+pub struct Selections {
+    pub document: state::DocumentID,
+    pub node: Option<state::graph::AnyID>,
+}
+impl Selections {
+    pub fn get() -> &'static parking_lot::RwLock<Option<Selections>> {
+        static ONCE: std::sync::OnceLock<parking_lot::RwLock<Option<Selections>>> =
+            std::sync::OnceLock::new();
+
+        ONCE.get_or_init(|| Default::default())
+    }
+    pub fn read_copy() -> Option<Self> {
+        *Self::get().read()
+    }
+}
+
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
 pub struct StrokePoint {

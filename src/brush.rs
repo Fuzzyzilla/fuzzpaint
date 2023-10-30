@@ -47,8 +47,8 @@ impl Brush {
     pub fn style_mut(&mut self) -> &mut BrushStyle {
         &mut self.style
     }
-    pub fn id(&self) -> &BrushID {
-        &self.id
+    pub fn id(&self) -> BrushID {
+        self.id
     }
     pub fn universal_id(&self) -> &uuid::Uuid {
         &self.universal_id
