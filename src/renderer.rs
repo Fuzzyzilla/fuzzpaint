@@ -51,57 +51,6 @@ impl Renderer {
             data: Default::default(),
         })
     }
-    /// Get the cached document image for the given ID, if found.
-    fn get_cached(&self, id: crate::state::DocumentID) -> Option<CachedImage> {
-        None
-        /*self.data
-        .get(&id)
-        .map(|data| CachedImage::Ready(&data.root_image))*/
-    }
-    /*
-    fn display(
-        &self,
-        id: crate::state::DocumentID,
-        into: Arc<vk::StorageImage>,
-    ) -> anyhow::Result<vk::sync::future::FenceSignalFuture<Box<dyn GpuFuture + Send>>> {
-        let image = self
-            .get_cached(id)
-            .ok_or_else(|| anyhow::anyhow!("No image available for {id:?}"))?;
-
-        let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
-            self.context.allocators().command_buffer(),
-            self.context.queues().compute().idx(),
-            vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
-        )?;
-
-        command_buffer.copy_image(vulkano::command_buffer::CopyImageInfo::images(
-            image.data().image.clone(),
-            into,
-        ))?;
-        vk::sync::now(self.context.device().clone()).then_execute(queue, command_buffer);
-
-        todo!()
-    }*/
-    /// Same as `render`, but drops any associated data not included in `retain` before rendering the included ids.
-    fn render_retain(&mut self, retain: &[crate::state::DocumentID]) -> anyhow::Result<()> {
-        self.data.retain(|k, _| retain.contains(k));
-        self.render(retain)
-    }
-    /// Checks the given document IDs for changes, rendering those changes.
-    /// Will try all changes, ignoring errors. Returns the first error that occured,
-    /// if any.
-    fn render(&mut self, changes: &[crate::state::DocumentID]) -> anyhow::Result<()> {
-        /*
-        let mut err = None;
-        for change in changes {
-            err = err.or(self.render_one(*change).err());
-        }
-        match err {
-            None => Ok(()),
-            Some(err) => Err(err),
-        }*/
-        todo!()
-    }
     fn render_one(
         &mut self,
         id: crate::state::DocumentID,
@@ -215,9 +164,10 @@ impl Renderer {
                     let strokes = state.stroke_collections().get(*collection).ok_or_else(|| {
                         anyhow::anyhow!("Missing stroke collection {collection:?}")
                     })?;
+                    let strokes: Vec<_> = strokes.iter_active().collect();
                     // Todo: strokes.strokes shouldn't be public x3
                     // and the renderer should respect stroke deletion state.
-                    if strokes.strokes.is_empty() {
+                    if strokes.is_empty() {
                         //FIXME: Renderer doesn't know how to handle zero strokes.
                         semaphores.push(Self::render_color(
                             context.as_ref(),
@@ -225,7 +175,7 @@ impl Renderer {
                             [0.0, 0.0, 0.0, 0.0],
                         )?);
                     } else {
-                        semaphores.push(renderer.draw(&strokes.strokes[..], image, true)?);
+                        semaphores.push(renderer.draw(strokes.as_ref(), image, true)?);
                     }
                     blend_infos.push((*blend, image.view.clone()));
                 }
@@ -274,12 +224,12 @@ impl Renderer {
     }
     /// Assumes the existence of a previous draw_from_scratch, applying only the diff.
     fn draw_incremental(
-        context: &Arc<crate::render_device::RenderContext>,
-        blend_engine: &crate::blend::BlendEngine,
-        renderer: &stroke_renderer::StrokeLayerRenderer,
-        document_data: &mut PerDocumentData,
+        _context: &Arc<crate::render_device::RenderContext>,
+        _blend_engine: &crate::blend::BlendEngine,
+        _renderer: &stroke_renderer::StrokeLayerRenderer,
+        _document_data: &mut PerDocumentData,
         state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
-        into: Arc<vk::ImageView<vk::StorageImage>>,
+        _into: Arc<vk::ImageView<vk::StorageImage>>,
     ) -> Result<(), IncrementalDrawErr> {
         if state.has_changes() {
             // State is dirty!
@@ -613,7 +563,7 @@ mod stroke_renderer {
         }
         pub fn draw(
             &self,
-            strokes: &[crate::state::stroke_collection::ImmutableStroke],
+            strokes: &[&crate::state::stroke_collection::ImmutableStroke],
             renderbuf: &super::RenderData,
             clear: bool,
         ) -> AnyResult<vk::sync::future::SemaphoreSignalFuture<Box<dyn vk::sync::GpuFuture>>>
