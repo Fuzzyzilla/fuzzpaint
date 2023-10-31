@@ -1,3 +1,11 @@
+//! # Providers
+//!
+//! Providers give access to some number of document queues, as well as notifications when new ones are added,
+//! old ones removed, and current ones modified. It is the source of ownership for the document data!
+//! Although only one is currently implemented, this interface will allow for placing the document data in a daemon,
+//! on a server, ect.
+
+/// A provider that keeps documents in-memory.
 pub struct InMemoryDocumentProvider {
     // We don't expect high contention - will only be locked for writing when a new queue is inserted.
     documents: parking_lot::RwLock<

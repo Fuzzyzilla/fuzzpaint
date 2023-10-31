@@ -1,5 +1,6 @@
 use crate::commands::*;
 
+/// Any type which can sink commands.
 pub trait CommandWrite<Command> {
     /// Inserts a command.
     fn write(&mut self, command: Command);

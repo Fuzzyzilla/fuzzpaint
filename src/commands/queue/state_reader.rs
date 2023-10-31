@@ -1,12 +1,5 @@
 //! Views into the document state represented by a command queue.
 
-/// Represents a lock on the global queue state.
-/// Guarunteed to be the most up-to-date view, as the queue can not be modified
-/// while this is held. Should only be used for short operations, so that other threads
-/// trying to write commands do not get starved.
-///
-/// It is an error for the task that owns this lock to attempt to mutatably access the queue! Doing so
-/// will result in a deadlock.
 use super::super::*;
 
 use crate::state;
@@ -21,8 +14,15 @@ pub trait CommandQueueStateReader {
     fn has_changes(&self) -> bool;
 }
 
+/// Represents a lock on the global queue state.
+/// Guarunteed to be the most up-to-date view, as the queue can not be modified
+/// while this is held. Should only be used for short operations, so that other threads
+/// trying to write commands do not get starved.
+///
+/// It is an error for the task that owns this lock to attempt to mutatably access the queue! Doing so
+/// will result in a deadlock.
 pub struct CommandQueueReadLock {}
-pub enum OwnedDoUndo<C> {
+pub(super) enum OwnedDoUndo<C> {
     Do(C),
     Undo(C),
 }
@@ -107,7 +107,4 @@ impl CommandQueueStateReader for CommandQueueCloneLock {
     fn has_changes(&self) -> bool {
         !self.commands.is_empty()
     }
-    /*fn stroke_layers(&self) -> &[state::StrokeLayer] {
-        &self.shared_state.stroke_layers
-    }*/
 }

@@ -1,3 +1,7 @@
+//! # Queue state
+//!
+//! Maintains the structure of the document as a whole. These are the structures commands act upon, writen to via
+//! `DocumentCommandQueue::write_with` and read via `CommandQueueStateReader` implementors.
 use crate::commands::*;
 use crate::state;
 
@@ -12,8 +16,6 @@ pub struct State {
 impl State {
     pub fn new(root: slab_tree::NodeId) -> Self {
         Self {
-            //stroke_layers: Default::default(),
-            //document: Default::default(),
             graph: Default::default(),
             stroke_state: Default::default(),
             present: root,
@@ -24,12 +26,6 @@ impl State {
     pub fn fork(&self) -> Self {
         // For now, this is just clone.
         Self {
-            //stroke_layers: self.stroke_layers.clone(),
-            /*document: state::Document {
-                id: self.document.id,
-                path: self.document.path.clone(),
-                name: self.document.name.clone(),
-            },*/
             graph: self.graph.clone(),
             stroke_state: self.stroke_state.clone(),
             present: self.present.clone(),
@@ -64,17 +60,3 @@ impl CommandConsumer<Command> for State {
         }
     }
 }
-/*
-// BONK no premature optimization!
-struct BorrowedState<'s> {
-    stroke_layers: &'s [state::StrokeLayer],
-    document: borrowed::Document<'s>,
-    graph: &'s state::graph::BlendGraph,
-    /// The node in the command tree that this state corresponds to
-    present: &'s slab_tree::NodeId,
-}
-/// State where some fields have been overwritten, but the rest are inherited from an older state.
-/// Can be flattened back into a State without incurring extra clones when the Arcs are only owned by this object!
-struct PartialState {
-    base: either::Either<std::sync::Arc<State>, std::sync::Arc<PartialState>>,
-}*/

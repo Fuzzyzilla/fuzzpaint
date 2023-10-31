@@ -1,3 +1,8 @@
+//! # Graph
+//!
+//! The layers of the document form a graph, with leaves on the lowest level (like stroke layers, fill layers, ect)
+//! and groups forming upper levels. Leaves are not allowed to have children.
+
 pub mod commands;
 pub mod rendering;
 mod stable_id;

@@ -1,3 +1,7 @@
+//! # State
+//!
+//! Objects that are owned by the document, representing it's internal state.
+
 pub mod graph;
 pub mod stroke_collection;
 

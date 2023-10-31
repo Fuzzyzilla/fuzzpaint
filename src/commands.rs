@@ -1,8 +1,7 @@
-// These commands imply an ownership hierarchy:
-// Document owns (is?) the blend graph.
-// The blend graph owns layers.
-// Layers own strokes.
-// Strokes own points.
+//! # Commands
+//!
+//! Commands are the way the shared state of the document are modified. Every (nontrivial, like renaming a layer) change
+//! is recorded automatically as a command by a [queue::writer].
 
 pub mod queue;
 pub use state::graph::commands::GraphCommand;

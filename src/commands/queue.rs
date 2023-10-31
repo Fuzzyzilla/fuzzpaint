@@ -7,7 +7,7 @@
 //! If a listener is greatly out-of-date, the order of commands it sees may not match the exact order of events, but the outcome
 //! will be the same. (For example, an unobserved undo followed by a redo will result in neither being reported).
 //!
-//! There exists one command queue per document.
+//! There exists one command queue per document, accessed through [provider]s
 
 use std::{ops::DerefMut, sync::Arc};
 
@@ -90,10 +90,6 @@ impl DocumentCommandQueue {
         // and we don't anticipate a broken command graph ofc...
         self.listen_from_now().forward_clone_state().unwrap()
     }
-    /*/// Write some number of commands in an Atoms scope, such that they are treated as one larger command.
-    pub fn write_atoms(&self, _f: impl FnOnce(&mut CommandAtomsWriter)) {
-        todo!()
-    }*/
     pub fn undo_n(&self, num: usize) {
         let changed = {
             // Linearly walk up the tree num steps. Todo: a more sophisticated approach, allowing for full navigation

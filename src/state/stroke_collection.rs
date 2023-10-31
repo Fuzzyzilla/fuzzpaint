@@ -1,4 +1,6 @@
-//! Impl for Strokes and collections of strokes.
+//! # Strokes
+//!
+//! States which hold many strokes and their settings, as well as their deletion state.
 
 pub mod commands;
 pub mod writer;
