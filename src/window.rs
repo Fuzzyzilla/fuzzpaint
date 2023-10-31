@@ -33,6 +33,7 @@ impl WindowSurface {
         render_surface: render_device::RenderSurface,
         render_context: Arc<render_device::RenderContext>,
         preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
+        ui: crate::ui::MainUI,
     ) -> anyhow::Result<WindowRenderer> {
         let egui_ctx = egui_impl::EguiCtx::new(self.win.as_ref(), &render_surface)?;
 
@@ -46,6 +47,7 @@ impl WindowSurface {
             event_loop: Some(self.event_loop),
             last_frame_fence: None,
             egui_ctx,
+            ui,
             preview_renderer,
             action_collector:
                 crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
@@ -63,6 +65,7 @@ pub struct WindowRenderer {
     render_surface: Option<render_device::RenderSurface>,
     render_context: Arc<render_device::RenderContext>,
     egui_ctx: egui_impl::EguiCtx,
+    ui: crate::ui::MainUI,
 
     action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector,
     action_stream: crate::actions::ActionStream,
@@ -222,35 +225,13 @@ impl WindowRenderer {
         });
     }
     fn do_ui(&mut self) {
-        static mut DOCUMENT_INTERFACE: std::sync::OnceLock<crate::DocumentUserInterface> =
-            std::sync::OnceLock::new();
-        static mut LAST_VIEWPORT: Option<egui::Rect> = None;
+        let mut viewport = Default::default();
+        self.egui_ctx
+            .update(self.win.as_ref(), |ctx| viewport = self.ui.ui(ctx));
 
-        //Safety - Not running the ui concurrently, this cannot be accessed similtaneously.
-        // very yucky. fixme soon.
-        let document_interface = unsafe {
-            DOCUMENT_INTERFACE.get_or_init(Default::default);
-            DOCUMENT_INTERFACE.get_mut().unwrap()
-        };
-        self.egui_ctx.update(self.win.as_ref(), |ctx| {
-            document_interface.ui(&ctx);
-        });
-        let last_viewport = unsafe { &mut LAST_VIEWPORT };
-        let new_viewport = document_interface.get_document_viewport();
-        if *last_viewport != new_viewport {
-            *last_viewport = new_viewport;
-            if let Some(new_viewport) = new_viewport {
-                let pos = new_viewport.left_top();
-                let size = new_viewport.size();
-                self.preview_renderer.viewport_changed(
-                    ultraviolet::Vec2 { x: pos.x, y: pos.y },
-                    ultraviolet::Vec2 {
-                        x: size.x,
-                        y: size.y,
-                    },
-                );
-            }
-        };
+        // Todo: only change if... actually changed :P
+        self.preview_renderer
+            .viewport_changed(viewport.0, viewport.1);
     }
     fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =

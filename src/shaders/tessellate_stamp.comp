@@ -23,7 +23,6 @@ struct InputStrokeInfo {
     // Color and eraser settings
     vec4 modulate;
     float is_eraser;
-    vec3 pad;
 };
 struct InputStrokeVertex {
     vec2 pos;
@@ -122,7 +121,7 @@ void main() {
     const uint workgroup_idx = gl_WorkGroupID.x;
     if (workgroup_idx >= in_assignments.length()) return;
     const uint stroke_idx = in_assignments[workgroup_idx];
-    if (stroke_idx > in_info.length()) return;
+    if (stroke_idx >= in_info.length()) return;
     const InputStrokeInfo info = in_info[stroke_idx];
     if (info.num_points <= 2) return;
 
@@ -133,7 +132,7 @@ void main() {
     const uint local_output_idx = stroke_local_id * VERTICES_PER_WORKER;
     const uint output_into_idx = local_output_idx + info.out_vert_offset;
     // Make sure we don't overwrite our local buffer nor overwrite the buffer as a whole.
-    if (local_output_idx >= info.out_vert_limit || output_into_idx >= out_vertices.length()) return;
+    if (local_output_idx + VERTICES_PER_WORKER > info.out_vert_limit || output_into_idx >= out_vertices.length()) return;
     // Make sure we don't overwrite the output infos buffer
     if (stroke_idx * OUTPUT_INFO_SIZE > out_info_fields.length()) return;
 

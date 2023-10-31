@@ -18,7 +18,11 @@ impl<'data> RayonStreamTessellator<'data> {
     }
 }
 impl<'data> StreamStrokeTessellator<'data> for RayonStreamTessellator<'data> {
-    fn tessellate(&mut self, vertices: &mut [TessellatedStrokeVertex], infos: &mut [super::TessellatedStrokeInfo]) -> super::StreamStatus {
+    fn tessellate(
+        &mut self,
+        vertices: &mut [TessellatedStrokeVertex],
+        infos: &mut [super::TessellatedStrokeInfo],
+    ) -> super::StreamStatus {
         todo!()
     }
 }
@@ -26,7 +30,7 @@ impl<'data> StreamStrokeTessellator<'data> for RayonStreamTessellator<'data> {
 use super::{
     StreamStrokeTessellator, TessellatedStrokeInfo, TessellatedStrokeVertex, TessellationError,
 };
-use crate::{StrokeBrushSettings, StrokePoint};
+use crate::{state::StrokeBrushSettings, StrokePoint};
 
 impl RayonTessellator {
     fn do_stamp(point: &StrokePoint, brush: &StrokeBrushSettings) -> [TessellatedStrokeVertex; 6] {

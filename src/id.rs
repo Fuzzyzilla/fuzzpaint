@@ -6,102 +6,45 @@
 
 // Collection of pending IDs by type.
 static ID_SERVER: std::sync::OnceLock<
-    parking_lot::RwLock<std::collections::HashMap<std::any::TypeId, std::sync::atomic::AtomicU64>>,
+    parking_lot::RwLock<hashbrown::HashMap<std::any::TypeId, std::sync::atomic::AtomicU64>>,
 > = std::sync::OnceLock::new();
 
 /// ID that is guarunteed unique within this execution of the program.
 /// IDs with different types may share a value but should not be considered equal.
 pub struct FuzzID<T: std::any::Any> {
-    id: u64,
+    id: std::num::NonZeroU64,
     // Namespace marker
     _phantom: std::marker::PhantomData<T>,
 }
+impl<T: std::any::Any> Clone for FuzzID<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T: std::any::Any> Copy for FuzzID<T> {}
 impl<T: std::any::Any> std::cmp::PartialEq<FuzzID<T>> for FuzzID<T> {
     fn eq(&self, other: &FuzzID<T>) -> bool {
-        self.weak() == other.weak()
+        // Namespace already checked at compile time - Self::T == Other::T of course!
+        self.id == other.id
     }
 }
-impl<T: std::any::Any> std::cmp::Eq for FuzzID<T>{}
-impl<T: std::any::Any> std::cmp::PartialEq<WeakID<T>> for &FuzzID<T> {
-    fn eq(&self, other: &WeakID<T>) -> bool {
-        self.weak() == *other
-    }
-}
-impl<T: std::any::Any> std::cmp::PartialEq<FuzzID<T>> for WeakID<T> {
-    fn eq(&self, other: &FuzzID<T>) -> bool {
-        *self == other.weak()
-    }
-}
+impl<T: std::any::Any> std::cmp::Eq for FuzzID<T> {}
+
 impl<T: std::any::Any> std::hash::Hash for FuzzID<T> {
     /// A note on hashes - this relies on the internal representation of TypeID,
     /// which is unstable between compilations. Do NOT serialize or otherwise rely on
     /// comparisons between hashes from different executions of the program.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.weak().hash(state);
-    }
-}
-
-/// Result of a cloned ID. Cannot be used to make an object with a duplicated ID.
-pub struct WeakID<T: std::any::Any> {
-    id: u64,
-    // Namespace marker
-    _phantom: std::marker::PhantomData<T>,
-}
-impl<T: std::any::Any> WeakID<T> {
-    pub fn empty() -> Self {
-        Self {
-            id : 0,
-            _phantom: Default::default(),
-        }
-    }
-}
-impl<T: std::any::Any> Clone for WeakID<T> {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id,
-            _phantom: self._phantom,
-        }
-    }
-}
-impl<T: std::any::Any> Copy for WeakID<T> {}
-impl<T: std::any::Any> std::cmp::PartialEq for WeakID<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-impl<T: std::any::Any> std::cmp::Eq for WeakID<T> {}
-impl<T: std::any::Any> std::hash::Hash for WeakID<T> {
-    /// A note on hashes - this relies on the internal representation of TypeID,
-    /// which is unstable between compilations. Do NOT serialize or otherwise rely on
-    /// comparisons between hashes from different executions of the program.
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::any::TypeId::of::<T>().hash(state);
-        state.write_u64(self.id);
+        self.id.hash(state)
     }
 }
 
 impl<T: std::any::Any> FuzzID<T> {
+    /// Get the raw numeric value of this ID.
+    /// IDs from differing namespaces may share the same numeric ID!
     pub fn id(&self) -> u64 {
-        self.id
-    }
-    /// Construct a weak clone of this ID.
-    pub fn weak(&self) -> WeakID<T> {
-        WeakID {
-            id: self.id,
-            _phantom: self._phantom,
-        }
-    }
-    /// Get a dummy ID. Useful for testing, but can be used for evil.
-    pub unsafe fn dummy() -> Self {
-        FuzzID {
-            id: 0,
-            _phantom: Default::default(),
-        }
-    }
-}
-impl<T: std::any::Any> Into<WeakID<T>> for &FuzzID<T> {
-    fn into(self) -> WeakID<T> {
-        self.weak()
+        self.id.get()
     }
 }
 impl<T: std::any::Any> Default for FuzzID<T> {
@@ -124,10 +67,17 @@ impl<T: std::any::Any> Default for FuzzID<T> {
             }
         };
 
-        // Incredibly unrealistic - At one brush stroke per second, 24/7/365, it will take
-        // half a trillion years to overflow. This assert is debug-only, to catch exhaustion from some
-        // programming error.
-        debug_assert!(id != 0, "{} ID overflow!", std::any::type_name::<T>());
+        // Incredibly unrealistic for this to fail - At one brush stroke per second, 24/7/365, it will take
+        // half a trillion years to overflow!
+        let Some(id) = std::num::NonZeroU64::new(id) else {
+            log::error!("{} ID overflow! Aborting!", std::any::type_name::<T>());
+            log::logger().flush();
+            // Panic is not enough - we cannot allow any threads to continue, global state is unfixably borked!
+            // We could instead return an option type, allowing threads to clean up properly but still preventing
+            // future ID allocations. However, this failure case is so absurd I don't think it's worth degrading the usability
+            // of this API.
+            std::process::abort();
+        };
 
         Self {
             id,
@@ -146,14 +96,9 @@ impl<T: std::any::Any> std::fmt::Display for FuzzID<T> {
         )
     }
 }
-impl<T: std::any::Any> std::fmt::Display for WeakID<T> {
+
+impl<T: std::any::Any> std::fmt::Debug for FuzzID<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        //Unwrap here is safe - the rsplit will always return at least one element, even for empty strings.
-        write!(
-            f,
-            "{}#{}",
-            std::any::type_name::<T>().rsplit("::").next().unwrap(),
-            self.id
-        )
+        <FuzzID<T> as std::fmt::Display>::fmt(self, f)
     }
 }

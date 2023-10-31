@@ -16,63 +16,6 @@ pub mod interface {
         #[format(R32G32B32_SFLOAT)]
         pub pad: [f32; 3],
     }
-    #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone)]
-    // Match align with GLSL std430.
-    #[repr(C, align(16))]
-    pub struct InputStrokeInfo {
-        // Indices into inputStrokeVertices buffer
-        #[format(R32_UINT)]
-        pub start_point_idx: u32,
-        #[format(R32_UINT)]
-        pub num_points: u32,
-
-        // Indices into outputStrokeVertices
-        #[format(R32_UINT)]
-        pub out_vert_offset: u32,
-        #[format(R32_UINT)]
-        pub out_vert_limit: u32,
-
-        // Number of pixels between each stamp
-        #[format(R32_SFLOAT)]
-        pub density: f32,
-        // The CPU will dictate how many groups to allocate to this work.
-        // Mesh shaders would make this all nicer ;)
-        #[format(R32_UINT)]
-        pub start_group: u32,
-        #[format(R32_UINT)]
-        pub num_groups: u32,
-
-        #[format(R32_UINT)]
-        pub size_mul: f32,
-        // Color and eraser settings
-        #[format(R32G32B32A32_SFLOAT)]
-        pub modulate: [f32; 4],
-        /// 1.0 for eraser, 0.0 otherwise.
-        #[format(R32_SFLOAT)]
-        pub is_eraser: f32,
-        #[format(R32G32B32_SFLOAT)]
-        pub pad: [f32; 3],
-    }
-    #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone)]
-    // Match align with GLSL std430.
-    #[repr(C, align(8))]
-    pub struct InputStrokeVertex {
-        #[format(R32G32_SFLOAT)]
-        pub pos: [f32; 2],
-        #[format(R32_SFLOAT)]
-        pub pressure: f32,
-        #[format(R32_SFLOAT)]
-        pub dist: f32,
-    }
-    impl From<crate::StrokePoint> for InputStrokeVertex {
-        fn from(value: crate::StrokePoint) -> Self {
-            Self {
-                dist: value.dist,
-                pos: value.pos,
-                pressure: value.pressure,
-            }
-        }
-    }
     pub type OutputStrokeInfo = vulkano::command_buffer::DrawIndirectCommand;
 }
 
@@ -81,6 +24,16 @@ mod shaders {
         vulkano_shaders::shader! {
             ty: "compute",
             path: "./src/shaders/tessellate_stamp.comp",
+        }
+
+        impl From<crate::StrokePoint> for InputStrokeVertex {
+            fn from(value: crate::StrokePoint) -> Self {
+                Self {
+                    dist: value.dist,
+                    pos: value.pos,
+                    pressure: value.pressure,
+                }
+            }
         }
     }
 }
@@ -160,35 +113,47 @@ impl GpuStampTess {
             None,
         )?;
 
+        let properties = context.physical_device().properties();
+        // Highest number of workers we're allowed to dispatch with [X, 1, 1] shape.
+        let work_size = properties
+            .max_compute_work_group_invocations
+            .min(properties.max_compute_work_group_size[0]);
         Ok(Self {
             context,
             layout,
             pipeline,
             input_descriptor,
             output_descriptor,
-            work_size: 1024,
+            work_size,
         })
     }
     /// Tessellate some strokes
     /// Will automatically load stroke points into a buffer.
     pub fn tess(
         &self,
-        strokes: &[crate::WeakStroke],
+        strokes: &[&crate::state::stroke_collection::ImmutableStroke],
     ) -> anyhow::Result<(
         vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
+        let point_repo = crate::repositories::points::global();
         let count = strokes
             .iter()
-            .map(|stroke| stroke.points.len() as u64)
-            .try_fold(0, u64::checked_add);
-        let count = count.ok_or_else(|| anyhow::anyhow!("Packed point buffer too long!"))?;
+            .map(|stroke| point_repo.len_of(stroke.point_collection))
+            .try_fold(0, |fold, optional_length| {
+                optional_length.and_then(|length| u64::checked_add(length as u64, fold))
+            });
+        // Would be nice to differentiate these errors, but currently we don't handle many errors
+        // anyway...
+        let count = count.ok_or_else(|| {
+            anyhow::anyhow!("Packed point buffer too long, or contains invalid point collections!")
+        })?;
 
         if count == 0 {
             anyhow::bail!("Tess invoked on zero points!")
         }
-        let packed_points = vk::Buffer::new_slice::<interface::InputStrokeVertex>(
+        let packed_points = vk::Buffer::new_slice::<shaders::tessellate::InputStrokeVertex>(
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::STORAGE_BUFFER,
@@ -200,13 +165,18 @@ impl GpuStampTess {
             },
             count,
         )?;
-        // Copy every vertex in order (in a block so that the write guard is dropped asap)
+        // Copy every vertex in order
         {
-            packed_points
-                .write()?
-                .iter_mut()
-                .zip(strokes.iter().flat_map(|stroke| stroke.points.iter()))
-                .for_each(|(output, input)| *output = (*input).into());
+            let mut write = packed_points.write()?;
+            let mut cursor = 0;
+            for stroke in strokes.iter() {
+                let points = point_repo.try_get(stroke.point_collection)?;
+                write[cursor..(cursor + points.len())]
+                    .iter_mut()
+                    .zip(points.iter())
+                    .for_each(|(into, from)| *into = (*from).into());
+                cursor += points.len();
+            }
         }
 
         self.tess_buffer(strokes, packed_points)
@@ -216,8 +186,10 @@ impl GpuStampTess {
     /// Returns a semaphore for when the compute completes, the vertex buffer, and the draw indirection buffer.
     pub fn tess_buffer(
         &self,
-        strokes: &[crate::WeakStroke],
-        packed_points: vulkano::buffer::subbuffer::Subbuffer<[interface::InputStrokeVertex]>,
+        strokes: &[&crate::state::stroke_collection::ImmutableStroke],
+        packed_points: vulkano::buffer::subbuffer::Subbuffer<
+            [shaders::tessellate::InputStrokeVertex],
+        >,
     ) -> anyhow::Result<(
         vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
@@ -232,6 +204,8 @@ impl GpuStampTess {
 
         let mut num_groups_per_info = Vec::new();
 
+        let point_repo = crate::repositories::points::global();
+
         let input_infos = vk::Buffer::from_iter(
             self.context.allocators().memory(),
             vk::BufferCreateInfo {
@@ -244,18 +218,26 @@ impl GpuStampTess {
             },
             strokes.iter().map(|stroke| {
                 let density = stroke.brush.spacing_px;
+                let (num_expected_stamps, num_points) = {
+                    // If not found, ignore by claiming 0 stamps.
+                    if let Ok(points) = point_repo.try_get(stroke.point_collection) {
+                        let dist = points
+                            .last()
+                            .map(|last| (last.dist / density).ceil() as u32)
+                            .unwrap_or(0);
+                        let num_points = points.len() as u32;
 
-                let num_expected_stamps = stroke
-                    .points
-                    .last()
-                    .map(|last| (last.dist / density).ceil() as u32)
-                    .unwrap_or(0);
+                        (dist, num_points)
+                    } else {
+                        (0, 0)
+                    }
+                };
                 let num_expected_verts = num_expected_stamps * 6;
                 let num_groups = num_expected_stamps.div_ceil(self.work_size);
 
-                let info = interface::InputStrokeInfo {
+                let info = shaders::tessellate::InputStrokeInfo {
                     start_point_idx: point_index_counter,
-                    num_points: stroke.points.len() as u32,
+                    num_points,
                     out_vert_offset: vertex_output_index_counter,
                     out_vert_limit: num_expected_verts,
                     start_group: group_index_counter,
@@ -264,15 +246,17 @@ impl GpuStampTess {
                     density,
                     size_mul: stroke.brush.size_mul,
                     is_eraser: if stroke.brush.is_eraser { 1.0 } else { 0.0 },
-                    pad: [0.0; 3],
                 };
 
                 num_groups_per_info.push(num_groups);
-                point_index_counter += stroke.points.len() as u32;
+                point_index_counter += num_points;
                 group_index_counter += num_groups;
                 vertex_output_index_counter += num_expected_verts;
 
-                info
+                // Returning just info here results in misaligned structures.
+                // This bug took SO long to find, thank you Marc I owe you my life.
+                // the `12` magic comes from expansion of `inputStrokeInfo`
+                vulkano::padded::Padded::<_, 12>::from(info)
             }),
         )?;
 
@@ -382,7 +366,7 @@ impl GpuStampTess {
                 self.context.queues().compute().queue().clone(),
                 command_buffer,
             )?
-            .then_signal_semaphore_and_flush()?;
+            .then_signal_semaphore();
 
         Ok((future, output_verts, output_infos))
     }

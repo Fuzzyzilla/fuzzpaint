@@ -7,14 +7,14 @@ In heavy development, many features are in-progress. But you can doodle to your 
 ## Building
 Requires the [most recent Rust nightly toolchain](https://www.rust-lang.org/tools/install). Clone this repo and execute `cargo run --release` from within the root directory of this repo!
 
-**Note the platform support below.** The app is fully cross platform and should run on any device (if not, please report) but tablet input is very much unfinished.
+**Note the platform support below.** The app is cross platform and should run on any device (if not, please report) but tablet input is very much unfinished.
 
-| **Platform**      | Pen input   | Pad input   | Notes                              |
-|-------------------|-------------|-------------|------------------------------------|
-| Windows (Ink)     |None         |None         |                                    |
-| Unix (Xorg)       |Pressure only|None         |On wayland: `WINIT_UNIX_BACKEND=x11`|
-| Unix (Wayland)    |None         |None         |No universally supported tablet API |
-| Windows (wintab)  |None         |None         |Documentation tough to come accross |
+| **Platform**      | Pen input   | Pad input   | Notes                                                   |
+|-------------------|-------------|-------------|---------------------------------------------------------|
+| Windows (Ink)     |None         |None         |                                                         |
+| Unix (Xorg)       |Pressure only|None         |                                                         |
+| ~~Unix (Wayland)~~|None         |None         |No universally supported tablet API. [Currently disabled!](https://github.com/Fuzzyzilla/fuzzpaint-vk/issues/21#issue-1953431137)|
+| Windows (wintab)  |None         |None         |Documentation tough to come accross                      |
 
 # Road to **0.2.0**
 To declare **0.2.0**, I would like to be able to freely doodle a thing and save it to disk. We're getting dangerously close!
@@ -38,7 +38,7 @@ To declare **0.2.0**, I would like to be able to freely doodle a thing and save 
      - In the future, compile a document-specific compute shader to do the blending in a more optimizer-friendly manner.
      - Also, take advantage of associativity and commutativity of blend modes to reduce number of distinct dispatches
      - fall forward on `EXT_blend_operation_advanced` or `EXT_fragment_shader_interlock`?
-   - Groups + FX + self-populating layers (clone, fill, gradients) come later
+   - Groups + FX + self-populating layers (clone, fill, gradients) come ~~later~~ **SOON >:3**
  - [ ] UI
    - [X] Initial layout
    - [X] A ~~simple~~ **✨robust and rebindable✨** hotkey system, with support for

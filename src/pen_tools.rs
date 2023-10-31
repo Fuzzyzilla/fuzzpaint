@@ -82,7 +82,7 @@ impl ToolStateOutput {
 pub struct ToolRenderOutput<'a> {
     // A reference, to avoid the potentially expensive cost of cloning 500 times per second when the tool
     // doesn't end up caring :P
-    pub render_task_messages: &'a tokio::sync::mpsc::UnboundedSender<crate::RenderMessage>,
+    pub render_task_messages: &'a tokio::sync::mpsc::UnboundedSender<()>,
     pub render_as: RenderAs,
     pub set_view: Option<crate::view_transform::DocumentTransform>,
     /// Set the cursor icon to this if Some, or default if None.
@@ -99,7 +99,7 @@ pub enum RenderAs {
     /// Nothing to render.
     None,
 }
-#[derive(Copy, Clone, strum::EnumIter, Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, strum::EnumIter, Hash, PartialEq, Eq, Debug)]
 pub enum StateLayer {
     Brush,
     ViewportPan,
@@ -146,7 +146,7 @@ impl ToolState {
         view_info: &ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
-        render_task_messages: &'r tokio::sync::mpsc::UnboundedSender<crate::RenderMessage>,
+        render_task_messages: &'r tokio::sync::mpsc::UnboundedSender<()>,
     ) -> ToolRenderOutput<'r> {
         // Prepare output structs
         let mut tool_output = ToolStateOutput { transition: None };

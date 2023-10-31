@@ -15,7 +15,7 @@ impl Default for BlendMode {
 }
 
 /// Blend mode for an object, including a mode, opacity modulate, and alpha clip
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Blend {
     pub mode: BlendMode,
     pub opacity: f32,
@@ -379,6 +379,7 @@ impl BlendEngine {
             let constants = shaders::BlendConstants::new(*opacity, *alpha_clip);
             if Some(constants) != last_blend_settings {
                 commands.push_constants(self.shader_layout.clone(), 0, constants);
+                last_blend_settings = Some(constants);
             }
 
             let input_set = vk::PersistentDescriptorSet::new(
