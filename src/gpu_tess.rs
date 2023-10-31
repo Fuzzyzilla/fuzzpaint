@@ -245,7 +245,7 @@ impl GpuStampTess {
                     modulate: stroke.brush.color_modulate,
                     density,
                     size_mul: stroke.brush.size_mul,
-                    is_eraser: if stroke.brush.is_eraser { 1.0 } else { 0.0 }.into(),
+                    is_eraser: if stroke.brush.is_eraser { 1.0 } else { 0.0 },
                 };
 
                 num_groups_per_info.push(num_groups);

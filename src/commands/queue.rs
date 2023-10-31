@@ -95,42 +95,18 @@ impl DocumentCommandQueue {
         todo!()
     }*/
     pub fn undo_n(&self, num: usize) {
-        // Linearly walk up the tree num steps. Todo: a more sophisticated approach, allowing for full navigation
-        // of the tree!
-        let mut lock = self.inner.write();
-        let DocumentCommandQueueInner {
-            command_tree,
-            root,
-            state,
-        } = lock.deref_mut();
-        let start = state.present;
-        let Some(ancestors) = command_tree.get(state.present).map(|this| this.ancestors()) else {
-            // Cursor not found - shouldn't be possible, as the tree is never trimmed!
-            // This kinda means the command tree is now in an unusable state...
-            panic!(
-                "Current Node {:?} not found in command tree!",
-                state.present
-            );
-        };
-        let new_cursor = ancestors.take(num).last();
-        state.present = new_cursor.map(|node| node.node_id()).unwrap_or(*root);
-        let end = state.present;
-        // Apply state changes from the commands:
-        for command in traverse(&command_tree, start, end).unwrap() {
-            state.apply(command).unwrap();
-        }
-    }
-    pub fn redo_n(&self, num: usize) {
-        // Step down the tree, taking the last (most recent) child every time.
-        let mut lock = self.inner.write();
-        let DocumentCommandQueueInner {
-            command_tree,
-            state,
-            ..
-        } = lock.deref_mut();
-        let start = state.present;
-        for _ in 0..num {
-            let Some(this) = command_tree.get(state.present) else {
+        let changed = {
+            // Linearly walk up the tree num steps. Todo: a more sophisticated approach, allowing for full navigation
+            // of the tree!
+            let mut lock = self.inner.write();
+            let DocumentCommandQueueInner {
+                command_tree,
+                root,
+                state,
+            } = lock.deref_mut();
+            let start = state.present;
+            let Some(ancestors) = command_tree.get(state.present).map(|this| this.ancestors())
+            else {
                 // Cursor not found - shouldn't be possible, as the tree is never trimmed!
                 // This kinda means the command tree is now in an unusable state...
                 panic!(
@@ -138,16 +114,63 @@ impl DocumentCommandQueue {
                     state.present
                 );
             };
-            let Some(last_child) = this.last_child() else {
-                // We've gone as deep as we can go!
-                return;
-            };
-            state.present = last_child.node_id();
+            let new_cursor = ancestors.take(num).last();
+            state.present = new_cursor.map(|node| node.node_id()).unwrap_or(*root);
+            let end = state.present;
+            // Apply state changes from the commands:
+            for command in traverse(&command_tree, start, end).unwrap() {
+                state.apply(command).unwrap();
+            }
+
+            // Changed if we ended up in a different spot!
+            start != end
+        };
+
+        // Report change (if any) only after the write lock is dropped.
+        if changed {
+            let _ = self
+                .on_change_channel
+                .send(provider::ProviderMessage::Modified(self.id()));
         }
-        let end = state.present;
-        // Apply state changes from the commands:
-        for command in traverse(&command_tree, start, end).unwrap() {
-            state.apply(command).unwrap();
+    }
+    pub fn redo_n(&self, num: usize) {
+        let changed = {
+            // Step down the tree, taking the last (most recent) child every time.
+            let mut lock = self.inner.write();
+            let DocumentCommandQueueInner {
+                command_tree,
+                state,
+                ..
+            } = lock.deref_mut();
+            let start = state.present;
+            for _ in 0..num {
+                let Some(this) = command_tree.get(state.present) else {
+                    // Cursor not found - shouldn't be possible, as the tree is never trimmed!
+                    // This kinda means the command tree is now in an unusable state...
+                    panic!(
+                        "Current Node {:?} not found in command tree!",
+                        state.present
+                    );
+                };
+                let Some(last_child) = this.last_child() else {
+                    // We've gone as deep as we can go!
+                    return;
+                };
+                state.present = last_child.node_id();
+            }
+            let end = state.present;
+            // Apply state changes from the commands:
+            for command in traverse(&command_tree, start, end).unwrap() {
+                state.apply(command).unwrap();
+            }
+            // Changed if we ended up in a different spot!
+            start != end
+        };
+        // Report change (if any) only after the write lock is dropped.
+        if changed {
+            let _ = self
+                .on_change_channel
+                .send(provider::ProviderMessage::Modified(self.id()));
         }
     }
     /// Create a listener that starts at the beginning of history.
