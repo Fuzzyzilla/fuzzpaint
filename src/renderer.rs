@@ -468,7 +468,7 @@ mod stroke_renderer {
                 context.queues().transfer().idx(),
                 vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
             )?;
-            let (image, sampler) = {
+            let (image, sampler, _defer) = {
                 let image = vk::ImmutableImage::from_iter(
                     context.allocators().memory(),
                     image_grey,
@@ -481,11 +481,10 @@ mod stroke_renderer {
                     vk::Format::R8_UNORM,
                     &mut cb,
                 )?;
-                context
+                let fence = context
                     .now()
                     .then_execute(context.queues().transfer().queue().clone(), cb.build()?)?
-                    .then_signal_fence_and_flush()?
-                    .wait(None)?;
+                    .then_signal_fence_and_flush()?;
 
                 let view = vk::ImageView::new(
                     image.clone(),
@@ -510,7 +509,12 @@ mod stroke_renderer {
                     },
                 )?;
 
-                (view, sampler)
+                (
+                    view,
+                    sampler,
+                    // synchronizing at the end of init so other setup can happen in parallel.
+                    defer::defer(move || fence.wait(None).unwrap()),
+                )
             };
 
             let frag = frag::load(context.device().clone())?;
@@ -615,6 +619,7 @@ mod stroke_renderer {
         ) -> AnyResult<vk::sync::future::SemaphoreSignalFuture<Box<dyn vk::sync::GpuFuture>>>
         {
             let (future, vertices, indirects) = self.gpu_tess.tess(strokes)?;
+
             let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
                 self.context.allocators().command_buffer(),
                 self.context.queues().graphics().idx(),
@@ -625,6 +630,12 @@ mod stroke_renderer {
             matrix.y *= -1.0;
             matrix.w.x -= 1.0;
             matrix.w.y += 1.0;
+
+            log::trace!(
+                "Drawing {} vertices from {} indirects",
+                vertices.len(),
+                indirects.len()
+            );
 
             command_buffer
                 .begin_rendering(vulkano::command_buffer::RenderingInfo {

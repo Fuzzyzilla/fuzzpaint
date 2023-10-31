@@ -379,6 +379,7 @@ impl BlendEngine {
             let constants = shaders::BlendConstants::new(*opacity, *alpha_clip);
             if Some(constants) != last_blend_settings {
                 commands.push_constants(self.shader_layout.clone(), 0, constants);
+                last_blend_settings = Some(constants);
             }
 
             let input_set = vk::PersistentDescriptorSet::new(

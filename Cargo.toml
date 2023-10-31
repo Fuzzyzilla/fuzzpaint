@@ -14,6 +14,7 @@ bitvec = { version = "1.0.1", default-features = false, features = [
 ] }
 bytemuck = "1.13.1"
 cgmath = "0.18.0"
+defer = "0.1.0"
 dhat = { version = "0.3.2", optional = true }
 dirs = "5.0.1"
 egui = { version = "0.22.0", features = ["bytemuck"] }
