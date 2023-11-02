@@ -20,7 +20,7 @@ pub struct KeyboardHotkey {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
-    pub key: winit::keyboard::KeyCode,
+    pub key: winit::event::VirtualKeyCode,
 }
 impl KeyboardHotkey {
     /// Get an arbitrary score of how specific this key is -
@@ -140,7 +140,7 @@ impl From<PenHotkey> for AnyHotkey {
 pub struct ActionsToKeys(std::collections::HashMap<super::Action, HotkeyCollection>);
 impl Default for ActionsToKeys {
     fn default() -> Self {
-        use winit::keyboard::KeyCode;
+        use winit::event::VirtualKeyCode;
         let mut keys = std::collections::HashMap::new();
         keys.insert(
             super::Action::Undo,
@@ -149,7 +149,7 @@ impl Default for ActionsToKeys {
                     alt: false,
                     ctrl: true,
                     shift: false,
-                    key: KeyCode::KeyZ,
+                    key: VirtualKeyCode::Z,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
@@ -163,13 +163,13 @@ impl Default for ActionsToKeys {
                         alt: false,
                         ctrl: true,
                         shift: false,
-                        key: KeyCode::KeyY,
+                        key: VirtualKeyCode::Y,
                     },
                     KeyboardHotkey {
                         alt: false,
                         ctrl: true,
                         shift: true,
-                        key: KeyCode::KeyZ,
+                        key: VirtualKeyCode::Z,
                     },
                 ])),
                 pad_hotkeys: None,
@@ -183,7 +183,7 @@ impl Default for ActionsToKeys {
                     alt: false,
                     ctrl: false,
                     shift: false,
-                    key: KeyCode::Space,
+                    key: VirtualKeyCode::Space,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
@@ -196,7 +196,7 @@ impl Default for ActionsToKeys {
                     alt: false,
                     ctrl: false,
                     shift: false,
-                    key: KeyCode::KeyS,
+                    key: VirtualKeyCode::S,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
@@ -209,7 +209,7 @@ impl Default for ActionsToKeys {
                     alt: false,
                     ctrl: false,
                     shift: false,
-                    key: KeyCode::KeyM,
+                    key: VirtualKeyCode::M,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
@@ -222,7 +222,7 @@ impl Default for ActionsToKeys {
                     alt: false,
                     ctrl: false,
                     shift: false,
-                    key: KeyCode::KeyR,
+                    key: VirtualKeyCode::R,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
@@ -235,7 +235,7 @@ impl Default for ActionsToKeys {
                     alt: false,
                     ctrl: false,
                     shift: false,
-                    key: KeyCode::KeyE,
+                    key: VirtualKeyCode::E,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
@@ -248,7 +248,7 @@ impl Default for ActionsToKeys {
                     alt: false,
                     ctrl: false,
                     shift: false,
-                    key: KeyCode::KeyG, // Should be just ctrl, but not possible yet.
+                    key: VirtualKeyCode::G, // Should be just ctrl, but not possible yet.
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
@@ -261,7 +261,7 @@ impl Default for ActionsToKeys {
                     alt: false,
                     ctrl: true,
                     shift: false,
-                    key: KeyCode::KeyT,
+                    key: VirtualKeyCode::T,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
@@ -274,7 +274,7 @@ impl Default for ActionsToKeys {
                     alt: false,
                     ctrl: false,
                     shift: false,
-                    key: KeyCode::Delete,
+                    key: VirtualKeyCode::Delete,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
@@ -287,7 +287,7 @@ impl Default for ActionsToKeys {
                     alt: false,
                     ctrl: true,
                     shift: false,
-                    key: KeyCode::ArrowUp,
+                    key: VirtualKeyCode::Up,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,
@@ -300,7 +300,7 @@ impl Default for ActionsToKeys {
                     alt: false,
                     ctrl: true,
                     shift: false,
-                    key: KeyCode::ArrowDown,
+                    key: VirtualKeyCode::Down,
                 }])),
                 pad_hotkeys: None,
                 pen_hotkeys: None,

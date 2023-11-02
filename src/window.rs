@@ -13,7 +13,7 @@ impl WindowSurface {
     pub fn new() -> AnyResult<Self> {
         const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
-        let event_loop = winit::event_loop::EventLoopBuilder::default().build()?;
+        let event_loop = winit::event_loop::EventLoopBuilder::default().build();
         let win = winit::window::WindowBuilder::default()
             .with_title(format!("Fuzzpaint v{}", VERSION.unwrap_or("[unknown]")))
             .with_min_inner_size(winit::dpi::LogicalSize::new(500u32, 500u32))
@@ -142,12 +142,12 @@ impl WindowRenderer {
             }
         }
     }
-    pub fn run(mut self) -> Result<(), winit::error::EventLoopError> {
+    pub fn run(mut self) -> ! {
         //There WILL be an event loop if we got here
         let event_loop = self.event_loop.take().unwrap();
         self.window().request_redraw();
 
-        event_loop.run(move |event, target| {
+        event_loop.run(move |event, target, control_flow| {
             use winit::event::{Event, WindowEvent};
             match event {
                 Event::WindowEvent { event, .. } => {
@@ -157,7 +157,7 @@ impl WindowRenderer {
                     }
                     match event {
                         WindowEvent::CloseRequested => {
-                            target.exit();
+                            *control_flow = winit::event_loop::ControlFlow::Exit;
                             return;
                         }
                         WindowEvent::Resized(..) => {
@@ -184,11 +184,6 @@ impl WindowRenderer {
                                 self.stylus_events.set_mouse_pressed(false)
                             }
                         }
-                        WindowEvent::RedrawRequested => {
-                            if let Err(e) = self.paint() {
-                                log::error!("{e:?}")
-                            };
-                        }
                         _ => (),
                     }
                 }
@@ -207,7 +202,12 @@ impl WindowRenderer {
                     // 4 -> Tilt Y, degrees from vertical, + towards user
                     // 5 -> unknown, always zero (rotation?)
                 }
-                Event::AboutToWait => {
+                Event::RedrawRequested(..) => {
+                    if let Err(e) = self.paint() {
+                        log::error!("{e:?}")
+                    };
+                }
+                Event::MainEventsCleared => {
                     // run UI logics
                     self.do_ui();
                     self.apply_document_cursor();

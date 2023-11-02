@@ -3,7 +3,7 @@ use super::hotkeys::HotkeyShadow;
 pub struct WinitKeyboardActionCollector {
     /// Maps keys to the number of times they are shadowed.
     current_hotkeys: std::collections::HashMap<super::hotkeys::KeyboardHotkey, usize>,
-    currently_pressed: std::collections::HashSet<winit::keyboard::KeyCode>,
+    currently_pressed: std::collections::HashSet<winit::event::VirtualKeyCode>,
     ctrl: bool,
     shift: bool,
     alt: bool,
@@ -27,13 +27,13 @@ impl WinitKeyboardActionCollector {
 
         use winit::event::WindowEvent;
         match event {
-            WindowEvent::KeyboardInput { event, .. } => {
-                let winit::keyboard::PhysicalKey::Code(code) = event.physical_key else {
+            WindowEvent::KeyboardInput { input, .. } => {
+                let Some(code) = input.virtual_keycode else {
                     return;
                 };
 
                 let was_pressed = self.currently_pressed.contains(&code);
-                let is_pressed = event.state.is_pressed();
+                let is_pressed = winit::event::ElementState::Pressed == input.state;
 
                 // Update currently_pressed set accordingly:
                 if is_pressed && !was_pressed {
@@ -94,10 +94,9 @@ impl WinitKeyboardActionCollector {
                 self.cull();
             }
             WindowEvent::ModifiersChanged(m) => {
-                let state = m.state();
-                self.alt = state.alt_key();
-                self.ctrl = state.control_key();
-                self.shift = state.shift_key();
+                self.alt = m.alt();
+                self.ctrl = m.ctrl();
+                self.shift = m.shift();
                 // Original plan:
                 // For every held key, re-evaluate their meaning w.r.t new
                 // modifiers.
