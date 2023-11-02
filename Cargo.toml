@@ -18,7 +18,7 @@ cgmath = "0.18.0"
 defer = "0.1.0"
 dhat = { version = "0.3.2", optional = true }
 dirs = "5.0.1"
-egui = { version = "0.22.0", features = ["bytemuck"] }
+egui = { version = "0.23.0", features = ["bytemuck"] }
 egui-winit = "0.23.0"
 either = "1.9.0"
 env_logger = "0.10.0"

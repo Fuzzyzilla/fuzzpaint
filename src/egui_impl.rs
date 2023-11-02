@@ -35,7 +35,7 @@ impl EguiCtx {
         renderer.gen_framebuffers(&render_surface)?;
 
         let mut state = egui_winit::State::new(&window);
-        //state.set_pixels_per_point(egui_winit::native_pixels_per_point(window));
+        state.set_pixels_per_point(egui_winit::native_pixels_per_point(window));
         let properties = render_surface.context().physical_device().properties();
         let max_size = properties.max_image_dimension2_d;
         state.set_max_texture_side(max_size as usize);
@@ -58,20 +58,17 @@ impl EguiCtx {
         &mut self,
         winit_event: &winit::event::WindowEvent,
     ) -> egui_winit::EventResponse {
-        /*
         let response = self.state.on_event(&self.ctx, winit_event);
         if response.repaint {
             self.redraw_requested = true;
         }
-        response*/
-        todo!()
+        response
     }
     pub fn update(
         &'_ mut self,
         window: &winit::window::Window,
         f: impl FnOnce(&'_ egui::Context) -> (),
     ) {
-        /*
         //Call into user code to draw
         self.ctx.begin_frame(self.state.take_egui_input(window));
         f(&self.ctx);
@@ -94,8 +91,7 @@ impl EguiCtx {
         self.state
             .handle_platform_output(window, &self.ctx, output.platform_output.clone());
         //return platform outputs
-        self.full_output = Some(output);*/
-        todo!()
+        self.full_output = Some(output);
     }
     pub fn needs_redraw(&self) -> bool {
         self.redraw_requested
