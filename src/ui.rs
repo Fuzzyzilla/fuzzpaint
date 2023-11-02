@@ -290,7 +290,7 @@ impl MainUI {
                                         ui.horizontal(|ui| {
                                             ui.label("Fill color:");
                                             let mut rgba =
-                                                egui::Rgba::from_rgba_unmultiplied(*r, *g, *b, *a);
+                                                egui::Rgba::from_rgba_premultiplied(*r, *g, *b, *a);
                                             let changed =
                                                 egui::color_picker::color_edit_button_rgba(
                                                     ui,
@@ -298,7 +298,7 @@ impl MainUI {
                                                     // If the user wants Add they should use the blend modes mwuahaha
                                                     egui::color_picker::Alpha::OnlyBlend,
                                                 )
-                                                .changed();
+                                                .drag_released();
                                             *r = rgba.r();
                                             *b = rgba.b();
                                             *g = rgba.g();
@@ -618,6 +618,86 @@ fn icon_of_node(node: &crate::state::graph::NodeData) -> &'static str {
         (None, Some(NodeType::Passthrough | NodeType::GroupedBlend(..))) => GROUP_ICON,
         // Invalid states
         (Some(..), Some(..)) | (None, None) => UNKNOWN,
+    }
+}
+mod latch {
+    pub enum Latch {
+        /// The interaction is finished. State will be returned and deleted from persistant memory.
+        Finish,
+        /// The interaction is ongoing. State will not be reported, but will be persisted.
+        Continue,
+        /// The interaction is cancelled or hasn't started. State will not be reported nor persisted.
+        None,
+    }
+    pub struct LatchResponse<'ui, State> {
+        // Needed for cancellation functionality
+        ui: &'ui mut egui::Ui,
+        persisted_id: egui::Id,
+        output: Option<State>,
+    }
+    impl<State: 'static> LatchResponse<'_, State> {
+        /// Stop the interaction, preventing it from reporting Finished in the future.
+        pub fn cancel(self) {
+            // Delete egui's persisted state
+            self.ui
+                .data_mut(|data| data.remove::<State>(self.persisted_id))
+        }
+        /// Get the output. Returns Some only once when the operation has finished.
+        pub fn result(self) -> Option<State> {
+            self.output
+        }
+    }
+    /// Interactible UI component where changes in-progress should be ignored,
+    /// only producing output when the interaction is fully finished.
+    ///
+    /// Takes a closure which inspects the mutable State, modifying it and reporting changes via
+    /// the [Latch] enum. By default, when no interaction is occuring, it should report [Latch::None]
+    pub fn latch<'ui, State, F>(
+        ui: &'ui mut egui::Ui,
+        id_src: impl std::hash::Hash,
+        state: State,
+        f: F,
+    ) -> LatchResponse<'ui, State>
+    where
+        F: FnOnce(&mut egui::Ui, &mut State) -> Latch,
+        // bounds implied by insert_temp
+        State: 'static + Clone + std::any::Any + Send + Sync,
+    {
+        let persisted_id = egui::Id::new(id_src);
+        let mut mutable_state = ui
+            .data(|data| data.get_temp::<State>(persisted_id))
+            .unwrap_or(state);
+        let fn_response = f(ui, &mut mutable_state);
+
+        match fn_response {
+            // Intern the state.
+            Latch::Continue => {
+                ui.data_mut(|data| data.insert_temp::<State>(persisted_id, mutable_state));
+                LatchResponse {
+                    ui,
+                    persisted_id,
+                    output: None,
+                }
+            }
+            // Return the state and clear it
+            Latch::Finish => {
+                ui.data_mut(|data| data.remove::<State>(persisted_id));
+                LatchResponse {
+                    ui,
+                    persisted_id,
+                    output: Some(mutable_state),
+                }
+            }
+            // Nothing to do, clear it if it exists.
+            Latch::None => {
+                ui.data_mut(|data| data.remove::<State>(persisted_id));
+                LatchResponse {
+                    ui,
+                    persisted_id,
+                    output: None,
+                }
+            }
+        }
     }
 }
 
