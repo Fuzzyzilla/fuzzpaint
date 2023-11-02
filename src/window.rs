@@ -36,10 +36,10 @@ impl WindowSurface {
         render_surface: render_device::RenderSurface,
         render_context: Arc<render_device::RenderContext>,
         preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
-        ui: crate::ui::MainUI,
     ) -> anyhow::Result<WindowRenderer> {
         let egui_ctx = egui_impl::EguiCtx::new(self.win.as_ref(), &render_surface)?;
 
+        let (ui_send, _) = std::sync::mpsc::channel();
         let (send, stream) = crate::actions::create_action_stream();
 
         Ok(WindowRenderer {
@@ -50,7 +50,7 @@ impl WindowSurface {
             event_loop: Some(self.event_loop),
             last_frame_fence: None,
             egui_ctx,
-            ui,
+            ui: crate::ui::MainUI::new(ui_send, stream.listen()),
             preview_renderer,
             action_collector:
                 crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),

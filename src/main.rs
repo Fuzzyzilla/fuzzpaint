@@ -243,14 +243,6 @@ fn main() -> AnyResult<std::convert::Infallible> {
         log::warn!("Failed to save hotkey config:\n{e:?}");
     };
 
-    let (send, recv) = std::sync::mpsc::channel();
-    let ui = ui::MainUI::new(send);
-    std::thread::spawn(move || {
-        while let Ok(recv) = recv.recv() {
-            log::trace!("UI Message: {recv:?}");
-        }
-    });
-
     // Test image generators.
     //let (image, future) = make_test_image(render_context.clone())?;
     //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("/home/aspen/Pictures/thesharc.png"))?;
@@ -263,7 +255,6 @@ fn main() -> AnyResult<std::convert::Infallible> {
         render_surface,
         render_context.clone(),
         document_view.clone(),
-        ui,
     )?;
 
     let event_stream = window_renderer.stylus_events();

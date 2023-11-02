@@ -37,15 +37,20 @@ pub struct MainUI {
     cur_document: Option<crate::state::DocumentID>,
 
     requests_send: requests::RequestSender,
+    action_listener: crate::actions::ActionListener,
 }
 impl MainUI {
-    pub fn new(requests_send: requests::RequestSender) -> Self {
+    pub fn new(
+        requests_send: requests::RequestSender,
+        action_listener: crate::actions::ActionListener,
+    ) -> Self {
         Self {
             modals: vec![],
             inlays: vec![],
             documents: vec![],
             cur_document: None,
             requests_send,
+            action_listener,
         }
     }
     /// Main UI and any modals, with the top bar, layers, brushes, color, etc. To be displayed in front of the document and it's gizmos.
@@ -213,14 +218,32 @@ impl MainUI {
                 let redo = egui::Button::new("⮫");
 
                 if let Some(current_document) = self.cur_document {
+                    // Accept undo/redo actions
+                    let (mut undos, mut redos) = self
+                        .action_listener
+                        .frame()
+                        .map(|frame| {
+                            (
+                                frame.action_trigger_count(crate::actions::Action::Undo),
+                                frame.action_trigger_count(crate::actions::Action::Redo),
+                            )
+                        })
+                        .unwrap_or((0, 0));
                     // RTL - add in reverse :P
                     if ui.add(redo).clicked() {
-                        crate::default_provider()
-                            .inspect(current_document, |document| document.redo_n(1));
-                    }
+                        redos += 1
+                    };
                     if ui.add(undo).clicked() {
+                        undos += 1
+                    };
+                    // Submit undo/redos as requested.
+                    if redos != 0 {
                         crate::default_provider()
-                            .inspect(current_document, |document| document.undo_n(1));
+                            .inspect(current_document, |document| document.redo_n(redos));
+                    }
+                    if undos != 0 {
+                        crate::default_provider()
+                            .inspect(current_document, |document| document.undo_n(undos));
                     }
                 } else {
                     // RTL - add in reverse :P
