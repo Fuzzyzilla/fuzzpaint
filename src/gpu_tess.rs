@@ -96,10 +96,22 @@ impl GpuStampTess {
         ))
     }
     pub fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
+        let properties = context.physical_device().properties();
+        // Highest number of workers we're allowed to dispatch with [X, 1, 1] shape.
+        let work_size: u32 = properties
+            .max_compute_work_group_invocations
+            .min(properties.max_compute_work_group_size[0]);
+
         let shader = shaders::tessellate::load(context.device().clone())?;
-        let entry = shader.entry_point("main").unwrap();
+        // Specialize workgroup shape
+        let mut specialize = ahash::HashMap::with_capacity_and_hasher(1, Default::default());
+        specialize.insert(0, work_size.into());
+        let entry = shader.specialize(specialize)?.entry_point("main").unwrap();
+        log::info!("Tess workgroup size: {}", work_size);
+
         let (layout, input_descriptor, output_descriptor) =
             Self::make_layout(context.device().clone())?;
+
         let pipeline = vk::ComputePipeline::new(
             context.device().clone(),
             None,
@@ -109,11 +121,6 @@ impl GpuStampTess {
             ),
         )?;
 
-        let properties = context.physical_device().properties();
-        // Highest number of workers we're allowed to dispatch with [X, 1, 1] shape.
-        let work_size = properties
-            .max_compute_work_group_invocations
-            .min(properties.max_compute_work_group_size[0]);
         Ok(Self {
             context,
             layout,
