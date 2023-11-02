@@ -5,10 +5,10 @@
 //! EXT_mesh_shader.
 pub mod rayon;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TessellationError {
     VertexBufferTooSmall { needed_size: usize },
-    BufferError(vulkano::buffer::BufferError),
+    Anyhow(anyhow::Error),
 }
 
 pub trait StrokeTessellator {

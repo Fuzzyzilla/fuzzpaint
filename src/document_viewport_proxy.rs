@@ -1,3 +1,4 @@
+use crate::vulkano_prelude::*;
 use std::sync::Arc;
 
 use crate::{gizmos::GizmoTree, *};
@@ -12,7 +13,7 @@ pub trait PreviewRenderProxy {
     /// the previous render should be finished before the return result is executed.
     unsafe fn render(
         &self,
-        swapchain_image: Arc<vk::SwapchainImage>,
+        swapchain_image: Arc<vk::Image>,
         swapchain_image_idx: u32,
     ) -> AnyResult<smallvec::SmallVec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>>;
     /// The window surface has been invalidated and remade.
@@ -85,7 +86,7 @@ mod shaders {
 /// or after a user-provided GPU fence.
 pub struct DocumentViewportPreviewProxyImageGuard<'proxy> {
     proxy: &'proxy DocumentViewportPreviewProxy,
-    image: Arc<vk::ImageView<vk::StorageImage>>,
+    image: Arc<vk::ImageView>,
     is_submitted: bool,
 }
 impl DocumentViewportPreviewProxyImageGuard<'_> {
@@ -126,7 +127,7 @@ impl Drop for DocumentViewportPreviewProxyImageGuard<'_> {
     }
 }
 impl std::ops::Deref for DocumentViewportPreviewProxyImageGuard<'_> {
-    type Target = Arc<vk::ImageView<vk::StorageImage>>;
+    type Target = Arc<vk::ImageView>;
     fn deref(&self) -> &Self::Target {
         &self.image
     }
@@ -252,7 +253,7 @@ impl ProxySurfaceData {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             self.context.allocators().command_buffer(),
             self.context.queues().graphics().idx(),
-            vulkano::command_buffer::CommandBufferUsage::MultipleSubmit,
+            vk::CommandBufferUsage::MultipleSubmit,
         )?;
 
         let matrix = self
@@ -300,35 +301,38 @@ impl ProxySurfaceData {
                     clear_values: vec![Some([0.05, 0.05, 0.05, 1.0].into())],
                     ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
                 },
-                vulkano::command_buffer::SubpassContents::Inline,
+                vk::SubpassBeginInfo {
+                    contents: vk::SubpassContents::Inline,
+                    ..Default::default()
+                },
             )?
-            .bind_pipeline_graphics(self.pipeline.clone())
+            .bind_pipeline_graphics(self.pipeline.clone())?
             .bind_descriptor_sets(
-                vulkano::pipeline::PipelineBindPoint::Graphics,
+                vk::PipelineBindPoint::Graphics,
                 self.pipeline.layout().clone(),
                 0,
                 vec![image_binding.clone()],
-            )
+            )?
             .set_viewport(
                 0,
-                [vk::Viewport {
-                    depth_range: 0.0..1.0,
-                    dimensions: [
+                smallvec::smallvec![vk::Viewport {
+                    depth_range: 0.0..=1.0,
+                    extent: [
                         self.surface_dimensions[0] as f32,
                         self.surface_dimensions[1] as f32,
                     ],
-                    origin: [0.0; 2],
+                    offset: [0.0; 2],
                 }],
-            )
+            )?
             .push_constants(
                 self.pipeline.layout().clone(),
                 0,
                 shaders::vertex::Matrix { mat: *matrix },
-            )
+            )?
             .draw(4, 1, 0, 0)?
-            .end_render_pass()?;
+            .end_render_pass(Default::default())?;
 
-        let command_buffer = Arc::new(command_buffer.build()?);
+        let command_buffer = command_buffer.build()?;
 
         // Try to insert into the cache
         if let Some(lock) = self
@@ -375,7 +379,7 @@ pub struct DocumentViewportPreviewProxy {
     viewport: parking_lot::RwLock<(cgmath::Point2<f32>, cgmath::Vector2<f32>)>,
 
     // Double buffer data =========
-    document_images: [Arc<vk::ImageView<vk::StorageImage>>; 2],
+    document_images: [Arc<vk::ImageView>; 2],
     document_image_bindings: [Arc<vk::PersistentDescriptorSet>; 2],
 
     // Sync + Swap data ===========
@@ -403,44 +407,46 @@ pub struct DocumentViewportPreviewProxy {
 impl DocumentViewportPreviewProxy {
     pub fn new(render_surface: &render_device::RenderSurface) -> AnyResult<Self> {
         // Only one frame-in-flight - Keep an additional buffer for writing to.
-        let num_document_buffers = 2u32;
+        const NUM_DOCUMENT_BUFFERS: u32 = 2;
 
-        let document_image_array = vk::StorageImage::with_usage(
-            render_surface.context().allocators().memory(),
-            vk::ImageDimensions::Dim2d {
-                width: crate::DOCUMENT_DIMENSION,
-                height: crate::DOCUMENT_DIMENSION,
-                array_layers: num_document_buffers,
+        let document_image_array = vk::Image::new(
+            render_surface.context().allocators().memory().clone(),
+            vk::ImageCreateInfo {
+                image_type: vk::ImageType::Dim2d,
+                format: crate::DOCUMENT_FORMAT,
+                extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
+                array_layers: NUM_DOCUMENT_BUFFERS,
+                usage: vk::ImageUsage::COLOR_ATTACHMENT
+                    | vk::ImageUsage::SAMPLED
+                    | vk::ImageUsage::TRANSFER_DST
+                    | vk::ImageUsage::STORAGE,
+                sharing: vk::Sharing::Exclusive,
+                ..Default::default()
             },
-            vk::Format::R16G16B16A16_SFLOAT,
-            vk::ImageUsage::COLOR_ATTACHMENT
-                | vk::ImageUsage::SAMPLED
-                | vk::ImageUsage::TRANSFER_DST
-                | vk::ImageUsage::STORAGE,
-            vk::ImageCreateFlags::empty(),
-            [render_surface.context().queues().graphics().idx()],
+            vk::AllocationCreateInfo {
+                memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
         )?;
 
-        // synchronously clear the read buffer, to move it into a well-defined format.
-        // Not sure how to do this cleaner :V
         let initialize_future = {
             let context = render_surface.context();
 
             let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
                 context.allocators().command_buffer(),
                 context.queues().compute().idx(),
-                vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+                vk::CommandBufferUsage::OneTimeSubmit,
             )?;
 
-            command_buffer.clear_color_image(vulkano::command_buffer::ClearColorImageInfo {
-                image_layout: vulkano::image::ImageLayout::General,
+            command_buffer.clear_color_image(vk::ClearColorImageInfo {
+                image_layout: vk::ImageLayout::General,
                 clear_value: [0.0; 4].into(),
                 regions: smallvec::smallvec![vk::ImageSubresourceRange {
                     array_layers: 0..1,
                     aspects: vk::ImageAspects::COLOR,
                     mip_levels: 0..1,
                 },],
-                ..vulkano::command_buffer::ClearColorImageInfo::image(document_image_array.clone())
+                ..vk::ClearColorImageInfo::image(document_image_array.clone())
             })?;
 
             let command_buffer = command_buffer.build()?;
@@ -450,6 +456,8 @@ impl DocumentViewportPreviewProxy {
                 .then_execute(context.queues().compute().queue().clone(), command_buffer)?
                 .then_signal_fence_and_flush()?
         };
+        // Wait on the future at the end of init
+        defer::defer(move || initialize_future.wait(None).unwrap());
 
         let document_image_views = [
             vk::ImageView::new(
@@ -460,7 +468,7 @@ impl DocumentViewportPreviewProxy {
                         aspects: vk::ImageAspects::COLOR,
                         mip_levels: 0..1,
                     },
-                    view_type: vulkano::image::view::ImageViewType::Dim2d,
+                    view_type: vk::ImageViewType::Dim2d,
                     ..vk::ImageViewCreateInfo::from_image(&document_image_array)
                 },
             )?,
@@ -472,7 +480,7 @@ impl DocumentViewportPreviewProxy {
                         aspects: vk::ImageAspects::COLOR,
                         mip_levels: 0..1,
                     },
-                    view_type: vulkano::image::view::ImageViewType::Dim2d,
+                    view_type: vk::ImageViewType::Dim2d,
                     ..vk::ImageViewCreateInfo::from_image(&document_image_array)
                 },
             )?,
@@ -482,10 +490,10 @@ impl DocumentViewportPreviewProxy {
             render_surface.context().device().clone(),
             attachments: {
                 document: {
-                    load: Clear,
-                    store: Store,
                     format: render_surface.format(),
                     samples: 1,
+                    load_op: Clear,
+                    store_op: Store,
                 },
             },
             pass: {
@@ -510,43 +518,88 @@ impl DocumentViewportPreviewProxy {
         let vertex_shader = vertex_shader.entry_point("main").unwrap();
         let fragment_shader = fragment_shader.entry_point("main").unwrap();
 
-        let mut no_blend = vk::ColorBlendState::new(1);
-        no_blend.attachments[0].blend = None;
+        let vertex_stage = vk::PipelineShaderStageCreateInfo::new(vertex_shader);
+        let fragment_stage = vk::PipelineShaderStageCreateInfo::new(fragment_shader);
 
-        let pipeline = vk::GraphicsPipeline::start()
-            .vertex_shader(vertex_shader.clone(), ())
-            .fragment_shader(fragment_shader, ())
-            .vertex_input_state(vulkano::pipeline::graphics::vertex_input::VertexInputState::new())
-            .rasterization_state(
-                vk::RasterizationState::default()
-                    .cull_mode(vulkano::pipeline::graphics::rasterization::CullMode::None),
-            )
-            .input_assembly_state(
-                vk::InputAssemblyState::new().topology(vk::PrimitiveTopology::TriangleStrip),
-            )
-            .color_blend_state(no_blend)
-            .render_pass(render_pass.clone().first_subpass())
-            .viewport_state(vk::ViewportState::viewport_dynamic_scissor_irrelevant())
-            .build(render_surface.context().device().clone())?;
+        let no_blend = vk::ColorBlendState::with_attachment_states(1, Default::default());
 
+        let matrix_push_constant = vk::PushConstantRange {
+            offset: 0,
+            stages: vk::ShaderStages::VERTEX,
+            size: std::mem::size_of::<shaders::vertex::Matrix>() as u32,
+        };
+        let layout = vk::PipelineLayout::new(
+            render_surface.context().device().clone(),
+            vk::PipelineLayoutCreateInfo {
+                set_layouts: vec![vk::DescriptorSetLayout::new(
+                    render_surface.context().device().clone(),
+                    vk::DescriptorSetLayoutCreateInfo {
+                        bindings: [(
+                            0,
+                            vk::DescriptorSetLayoutBinding {
+                                descriptor_count: 1,
+                                stages: vk::ShaderStages::FRAGMENT,
+                                ..vk::DescriptorSetLayoutBinding::descriptor_type(
+                                    vk::DescriptorType::CombinedImageSampler,
+                                )
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
+                )?],
+                push_constant_ranges: vec![matrix_push_constant],
+                ..Default::default()
+            },
+        )?;
+        let pipeline = vk::GraphicsPipeline::new(
+            render_surface.context().device().clone(),
+            None,
+            vk::GraphicsPipelineCreateInfo {
+                color_blend_state: Some(no_blend),
+                input_assembly_state: Some(vk::InputAssemblyState {
+                    topology: vk::PrimitiveTopology::TriangleStrip,
+                    primitive_restart_enable: false,
+                    ..Default::default()
+                }),
+                multisample_state: Some(Default::default()),
+                rasterization_state: Some(vk::RasterizationState {
+                    cull_mode: vk::CullMode::None,
+                    ..Default::default()
+                }),
+                vertex_input_state: Some(
+                    // Vertices are generated in-shader from VertexIndex
+                    Default::default(),
+                ),
+                // One viewport and scissor, scissor irrelevant and viewport dynamic
+                viewport_state: Some(Default::default()),
+                dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
+                subpass: Some(render_pass.clone().first_subpass().into()),
+                stages: smallvec::smallvec![vertex_stage, fragment_stage],
+                ..vk::GraphicsPipelineCreateInfo::layout(layout.clone())
+            },
+        )?;
         let document_image_bindings = [
             vk::PersistentDescriptorSet::new(
                 render_surface.context().allocators().descriptor_set(),
-                pipeline.layout().set_layouts()[0].clone(),
+                layout.set_layouts()[0].clone(),
                 [vk::WriteDescriptorSet::image_view_sampler(
                     0,
                     document_image_views[0].clone(),
                     sampler.clone(),
                 )],
+                [],
             )?,
             vk::PersistentDescriptorSet::new(
                 render_surface.context().allocators().descriptor_set(),
-                pipeline.layout().set_layouts()[0].clone(),
+                layout.set_layouts()[0].clone(),
                 [vk::WriteDescriptorSet::image_view_sampler(
                     0,
                     document_image_views[1].clone(),
                     sampler,
                 )],
+                [],
             )?,
         ];
 
@@ -572,9 +625,6 @@ impl DocumentViewportPreviewProxy {
         let notify = tokio::sync::Notify::new();
         // Start as notified - write buffer is available immediately.
         notify.notify_one();
-
-        // Wait for initialization to finish.
-        initialize_future.wait(None)?;
 
         let gizmo_renderer =
             crate::gizmos::renderer::GizmoRenderer::new(render_surface.context().clone())?;
@@ -732,7 +782,7 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
     #[deny(unsafe_op_in_unsafe_fn)]
     unsafe fn render(
         &self,
-        swapchain_image: Arc<vk::SwapchainImage>,
+        swapchain_image: Arc<vk::Image>,
         swapchain_idx: u32,
     ) -> AnyResult<smallvec::SmallVec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>> {
         // Safety: contract forwarded to the contract of this fn.

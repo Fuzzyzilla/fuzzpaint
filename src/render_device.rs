@@ -63,7 +63,7 @@ pub struct RenderSurface {
     context: Arc<RenderContext>,
     swapchain: Arc<vk::Swapchain>,
     _surface: Arc<vk::Surface>,
-    swapchain_images: Vec<Arc<vk::SwapchainImage>>,
+    swapchain_images: Vec<Arc<vk::Image>>,
 
     swapchain_create_info: vk::SwapchainCreateInfo,
 }
@@ -72,12 +72,12 @@ impl RenderSurface {
         self.swapchain_create_info.image_extent
     }
     pub fn format(&self) -> vk::Format {
-        self.swapchain_create_info.image_format.unwrap()
+        self.swapchain_create_info.image_format
     }
     pub fn swapchain(&self) -> &Arc<vk::Swapchain> {
         &self.swapchain
     }
-    pub fn swapchain_images(&self) -> &[Arc<vk::SwapchainImage>] {
+    pub fn swapchain_images(&self) -> &[Arc<vk::Image>] {
         &self.swapchain_images
     }
     pub fn context(&self) -> &Arc<RenderContext> {
@@ -93,14 +93,21 @@ impl RenderSurface {
         let surface_info = vk::SurfaceInfo::default();
         let capabilies = physical_device.surface_capabilities(&surface, surface_info.clone())?;
 
-        let Some(&(format, color_space)) = physical_device.surface_formats(&surface, surface_info)?.first()
-            else {return Err(anyhow::anyhow!("Device reported no valid surface formats."))};
+        let Some(&(format, color_space)) = physical_device
+            .surface_formats(&surface, surface_info)?
+            .first()
+        else {
+            return Err(anyhow::anyhow!("Device reported no valid surface formats."));
+        };
 
         //Use mailbox for low-latency, if supported. Otherwise, FIFO is always supported.
         let present_mode = physical_device
-            .surface_present_modes(&surface)
+            .surface_present_modes(&surface, Default::default())
             .map(|mut modes| {
-                if let Some(_) = modes.find(|mode| *mode == vk::PresentMode::Mailbox) {
+                if modes
+                    .find(|mode| *mode == vk::PresentMode::Mailbox)
+                    .is_some()
+                {
                     vk::PresentMode::Mailbox
                 } else {
                     vk::PresentMode::Fifo
@@ -120,7 +127,7 @@ impl RenderSurface {
 
         let swapchain_create_info = vk::SwapchainCreateInfo {
             min_image_count: image_count,
-            image_format: Some(format),
+            image_format: format,
             image_color_space: color_space,
             image_extent: size,
             image_usage: vk::ImageUsage::COLOR_ATTACHMENT,
@@ -162,7 +169,7 @@ impl RenderSurface {
 
 pub struct Allocators {
     command_buffer_alloc: vk::StandardCommandBufferAllocator,
-    memory_alloc: vk::StandardMemoryAllocator,
+    memory_alloc: Arc<dyn vulkano::memory::allocator::MemoryAllocator>,
     descriptor_set_alloc: vk::StandardDescriptorSetAllocator,
 }
 
@@ -170,7 +177,7 @@ impl Allocators {
     pub fn command_buffer(&self) -> &vk::StandardCommandBufferAllocator {
         &self.command_buffer_alloc
     }
-    pub fn memory(&self) -> &vk::StandardMemoryAllocator {
+    pub fn memory(&self) -> &Arc<dyn vulkano::memory::allocator::MemoryAllocator> {
         &self.memory_alloc
     }
     pub fn descriptor_set(&self) -> &vk::StandardDescriptorSetAllocator {
@@ -199,7 +206,7 @@ impl RenderContext {
     ) -> AnyResult<(Arc<Self>, RenderSurface)> {
         let library = vk::VulkanLibrary::new()?;
 
-        let mut required_instance_extensions = vulkano_win::required_extensions(&library);
+        let mut required_instance_extensions = vk::Surface::required_extensions(win.event_loop());
         required_instance_extensions.ext_debug_utils = true;
 
         use vulkano::instance::debug as vkDebug;
@@ -207,63 +214,82 @@ impl RenderContext {
         let instance = vk::Instance::new(
             library.clone(),
             vk::InstanceCreateInfo {
-                application_name: Some("Fuzzpaint-vk".to_string()),
+                application_name: Some(option_env!("CARGO_PKG_NAME").unwrap_or("").to_string()),
                 application_version: vk::Version {
-                    major: 0,
-                    minor: 1,
-                    patch: 0,
+                    major: option_env!("CARGO_PKG_VERSION_MAJOR")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0),
+                    minor: option_env!("CARGO_PKG_VERSION_MINOR")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0),
+                    patch: option_env!("CARGO_PKG_VERSION_PATCH")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0),
                 },
                 enabled_extensions: required_instance_extensions,
                 ..Default::default()
             },
         )?;
 
-        // Safety - the closure must not access the vulkan API
-        let debugger = unsafe {
-            vkDebug::DebugUtilsMessenger::new(
-                instance.clone(),
-                vkDebug::DebugUtilsMessengerCreateInfo {
-                    message_severity: vkDebug::DebugUtilsMessageSeverity::ERROR
-                        | vkDebug::DebugUtilsMessageSeverity::WARNING
-                        | vkDebug::DebugUtilsMessageSeverity::INFO
-                        | vkDebug::DebugUtilsMessageSeverity::VERBOSE,
-                    message_type: vkDebug::DebugUtilsMessageType::GENERAL
-                        | vkDebug::DebugUtilsMessageType::PERFORMANCE
-                        | vkDebug::DebugUtilsMessageType::VALIDATION,
-                    ..vkDebug::DebugUtilsMessengerCreateInfo::user_callback(
-                        // Must NOT access the vulkan api.
-                        Arc::new(|message| {
-                            let level = match message.severity {
-                                vkDebug::DebugUtilsMessageSeverity::ERROR => log::Level::Error,
-                                vkDebug::DebugUtilsMessageSeverity::WARNING => log::Level::Warn,
-                                vkDebug::DebugUtilsMessageSeverity::VERBOSE => log::Level::Trace,
-                                vkDebug::DebugUtilsMessageSeverity::INFO | _ => log::Level::Info,
-                            };
-                            let ty = match message.ty {
-                                vkDebug::DebugUtilsMessageType::GENERAL => "GENERAL",
-                                vkDebug::DebugUtilsMessageType::PERFORMANCE => "PERFORMANCE",
-                                vkDebug::DebugUtilsMessageType::VALIDATION => "VALIDATION",
-                                _ => "UNKNOWN",
-                            };
-                            let layer = message.layer_prefix.unwrap_or("");
+        let debugger = vkDebug::DebugUtilsMessenger::new(
+            instance.clone(),
+            vkDebug::DebugUtilsMessengerCreateInfo {
+                message_severity: vkDebug::DebugUtilsMessageSeverity::ERROR
+                    | vkDebug::DebugUtilsMessageSeverity::WARNING
+                    | vkDebug::DebugUtilsMessageSeverity::INFO
+                    | vkDebug::DebugUtilsMessageSeverity::VERBOSE,
+                message_type: vkDebug::DebugUtilsMessageType::GENERAL
+                    | vkDebug::DebugUtilsMessageType::PERFORMANCE
+                    | vkDebug::DebugUtilsMessageType::VALIDATION,
+                ..vkDebug::DebugUtilsMessengerCreateInfo::user_callback(
+                    // SAFETY: the closure must not access vulkan API in any way.
+                    // Not a problem, as it simply logs to console or file, depending on log target.
+                    // In the future when this prints to an internal log however, I must keep
+                    // this in mind!
+                    unsafe {
+                        vulkano::instance::debug::DebugUtilsMessengerCallback::new(
+                            |severity, ty, data| {
+                                let level = match severity {
+                                    vkDebug::DebugUtilsMessageSeverity::ERROR => log::Level::Error,
+                                    vkDebug::DebugUtilsMessageSeverity::WARNING => log::Level::Warn,
+                                    vkDebug::DebugUtilsMessageSeverity::VERBOSE => {
+                                        log::Level::Trace
+                                    }
+                                    vkDebug::DebugUtilsMessageSeverity::INFO | _ => {
+                                        log::Level::Info
+                                    }
+                                };
+                                let ty = match ty {
+                                    vkDebug::DebugUtilsMessageType::GENERAL => "GENERAL",
+                                    vkDebug::DebugUtilsMessageType::PERFORMANCE => "PERFORMANCE",
+                                    vkDebug::DebugUtilsMessageType::VALIDATION => "VALIDATION",
+                                    _ => "UNKNOWN",
+                                };
+                                let layer = data.message_id_name.unwrap_or("");
 
-                            log::log!(target: "vulkan", level, "[{ty}] {layer} - {}", message.description);
-                        }),
-                    )
-                },
-            )
-        }?;
+                                log::log!(target: "vulkan", level, "[{ty}] {layer} - {}", data.message);
+                            },
+                        )
+                    },
+                )
+            },
+        )?;
 
-        let surface = vulkano_win::create_surface_from_winit(win.window(), instance.clone())?;
+        let surface = vk::Surface::from_window(instance.clone(), win.window())?;
         let required_device_extensions = vk::DeviceExtensions {
             khr_swapchain: true,
             ext_line_rasterization: true,
             ..Default::default()
         };
 
-        let Some((physical_device, queue_indices)) =
-            Self::choose_physical_device(instance.clone(), required_device_extensions, Some(surface.clone()))?
-            else {return Err(anyhow::anyhow!("Failed to find a suitable Vulkan device."))};
+        let Some((physical_device, queue_indices)) = Self::choose_physical_device(
+            instance.clone(),
+            required_device_extensions,
+            Some(surface.clone()),
+        )?
+        else {
+            return Err(anyhow::anyhow!("Failed to find a suitable Vulkan device."));
+        };
 
         log::info!(
             "Chose physical device {} ({:?})",
@@ -286,8 +312,14 @@ impl RenderContext {
                     device.clone(),
                     Default::default(),
                 ),
-                memory_alloc: vk::StandardMemoryAllocator::new_default(device.clone()),
-                descriptor_set_alloc: vk::StandardDescriptorSetAllocator::new(device.clone()),
+                memory_alloc: Arc::new(vk::StandardMemoryAllocator::new_default(device.clone())),
+                descriptor_set_alloc: vk::StandardDescriptorSetAllocator::new(
+                    device.clone(),
+                    vulkano::descriptor_set::allocator::StandardDescriptorSetAllocatorCreateInfo {
+                        update_after_bind: false,
+                        ..Default::default()
+                    },
+                ),
             },
             _library: library,
             _instance: instance,
@@ -465,12 +497,12 @@ impl RenderContext {
                 }
 
                 //We need a graphics queue, always! Otherwise, disqualify.
-                let Some(graphics_queue) = families
-                    .iter()
-                    .enumerate()
-                    .find(|q| {
-                        q.1.queue_flags.contains(QueueFlags::GRAPHICS | QueueFlags::TRANSFER)
-                    }) else {return None};
+                let Some(graphics_queue) = families.iter().enumerate().find(|q| {
+                    q.1.queue_flags
+                        .contains(QueueFlags::GRAPHICS | QueueFlags::TRANSFER)
+                }) else {
+                    return None;
+                };
 
                 //We need a compute queue. This can be the same as graphics, but preferably not.
                 let graphics_supports_compute =

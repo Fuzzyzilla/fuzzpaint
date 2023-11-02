@@ -28,18 +28,18 @@ impl WinitKeyboardActionCollector {
         use winit::event::WindowEvent;
         match event {
             WindowEvent::KeyboardInput { input, .. } => {
-                let Some(key) = input.virtual_keycode else {
+                let Some(code) = input.virtual_keycode else {
                     return;
                 };
 
-                let was_pressed = self.currently_pressed.contains(&key);
-                let is_pressed = input.state == winit::event::ElementState::Pressed;
+                let was_pressed = self.currently_pressed.contains(&code);
+                let is_pressed = winit::event::ElementState::Pressed == input.state;
 
                 // Update currently_pressed set accordingly:
                 if is_pressed && !was_pressed {
-                    self.currently_pressed.insert(key);
+                    self.currently_pressed.insert(code);
                 } else if !is_pressed {
-                    self.currently_pressed.remove(&key);
+                    self.currently_pressed.remove(&code);
                 }
 
                 // Depending on the status of ctrl, shift, and alt, this key
@@ -65,7 +65,7 @@ impl WinitKeyboardActionCollector {
                             }
                         };
                         super::hotkeys::KeyboardHotkey {
-                            key,
+                            key: code,
                             alt: consume(alt),
                             shift: consume(shift),
                             ctrl: consume(ctrl),

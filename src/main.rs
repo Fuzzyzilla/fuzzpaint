@@ -308,5 +308,5 @@ fn main() -> AnyResult<std::convert::Infallible> {
         }
     });
 
-    window_renderer.run();
+    window_renderer.run()
 }
