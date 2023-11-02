@@ -253,7 +253,7 @@ impl ProxySurfaceData {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             self.context.allocators().command_buffer(),
             self.context.queues().graphics().idx(),
-            vulkano::command_buffer::CommandBufferUsage::MultipleSubmit,
+            vk::CommandBufferUsage::MultipleSubmit,
         )?;
 
         let matrix = self
@@ -302,13 +302,13 @@ impl ProxySurfaceData {
                     ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
                 },
                 vk::SubpassBeginInfo {
-                    contents: vulkano::command_buffer::SubpassContents::Inline,
+                    contents: vk::SubpassContents::Inline,
                     ..Default::default()
                 },
             )?
             .bind_pipeline_graphics(self.pipeline.clone())?
             .bind_descriptor_sets(
-                vulkano::pipeline::PipelineBindPoint::Graphics,
+                vk::PipelineBindPoint::Graphics,
                 self.pipeline.layout().clone(),
                 0,
                 vec![image_binding.clone()],
@@ -411,8 +411,8 @@ impl DocumentViewportPreviewProxy {
 
         let document_image_array = vk::Image::new(
             render_surface.context().allocators().memory().clone(),
-            vulkano::image::ImageCreateInfo {
-                image_type: vulkano::image::ImageType::Dim2d,
+            vk::ImageCreateInfo {
+                image_type: vk::ImageType::Dim2d,
                 format: crate::DOCUMENT_FORMAT,
                 extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
                 array_layers: NUM_DOCUMENT_BUFFERS,
@@ -420,11 +420,11 @@ impl DocumentViewportPreviewProxy {
                     | vk::ImageUsage::SAMPLED
                     | vk::ImageUsage::TRANSFER_DST
                     | vk::ImageUsage::STORAGE,
-                sharing: vulkano::sync::Sharing::Exclusive,
+                sharing: vk::Sharing::Exclusive,
                 ..Default::default()
             },
-            vulkano::memory::allocator::AllocationCreateInfo {
-                memory_type_filter: vulkano::memory::allocator::MemoryTypeFilter::PREFER_DEVICE,
+            vk::AllocationCreateInfo {
+                memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
                 ..Default::default()
             },
         )?;
@@ -435,18 +435,18 @@ impl DocumentViewportPreviewProxy {
             let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
                 context.allocators().command_buffer(),
                 context.queues().compute().idx(),
-                vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+                vk::CommandBufferUsage::OneTimeSubmit,
             )?;
 
-            command_buffer.clear_color_image(vulkano::command_buffer::ClearColorImageInfo {
-                image_layout: vulkano::image::ImageLayout::General,
+            command_buffer.clear_color_image(vk::ClearColorImageInfo {
+                image_layout: vk::ImageLayout::General,
                 clear_value: [0.0; 4].into(),
                 regions: smallvec::smallvec![vk::ImageSubresourceRange {
                     array_layers: 0..1,
                     aspects: vk::ImageAspects::COLOR,
                     mip_levels: 0..1,
                 },],
-                ..vulkano::command_buffer::ClearColorImageInfo::image(document_image_array.clone())
+                ..vk::ClearColorImageInfo::image(document_image_array.clone())
             })?;
 
             let command_buffer = command_buffer.build()?;
@@ -468,7 +468,7 @@ impl DocumentViewportPreviewProxy {
                         aspects: vk::ImageAspects::COLOR,
                         mip_levels: 0..1,
                     },
-                    view_type: vulkano::image::view::ImageViewType::Dim2d,
+                    view_type: vk::ImageViewType::Dim2d,
                     ..vk::ImageViewCreateInfo::from_image(&document_image_array)
                 },
             )?,
@@ -480,7 +480,7 @@ impl DocumentViewportPreviewProxy {
                         aspects: vk::ImageAspects::COLOR,
                         mip_levels: 0..1,
                     },
-                    view_type: vulkano::image::view::ImageViewType::Dim2d,
+                    view_type: vk::ImageViewType::Dim2d,
                     ..vk::ImageViewCreateInfo::from_image(&document_image_array)
                 },
             )?,

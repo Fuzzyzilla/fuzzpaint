@@ -130,7 +130,7 @@ impl BlendEngine {
             device,
             None,
             vk::ComputePipelineCreateInfo::stage_layout(
-                vulkano::pipeline::PipelineShaderStageCreateInfo::new(
+                vk::PipelineShaderStageCreateInfo::new(
                     entry_point
                         .specialize(specialization)?
                         .entry_point("main")
@@ -171,27 +171,25 @@ impl BlendEngine {
         let mut input_image_bindings = std::collections::BTreeMap::new();
         input_image_bindings.insert(
             0,
-            vulkano::descriptor_set::layout::DescriptorSetLayoutBinding {
+            vk::DescriptorSetLayoutBinding {
                 descriptor_count: 1,
                 immutable_samplers: Default::default(),
-                stages: vulkano::shader::ShaderStages::COMPUTE,
-                ..vulkano::descriptor_set::layout::DescriptorSetLayoutBinding::descriptor_type(
-                    vulkano::descriptor_set::layout::DescriptorType::StorageImage,
-                )
+                stages: vk::ShaderStages::COMPUTE,
+                ..vk::DescriptorSetLayoutBinding::descriptor_type(vk::DescriptorType::StorageImage)
             },
         );
         let output_image_bindings = input_image_bindings.clone();
 
         let input_image_layout = vk::DescriptorSetLayout::new(
             device.clone(),
-            vulkano::descriptor_set::layout::DescriptorSetLayoutCreateInfo {
+            vk::DescriptorSetLayoutCreateInfo {
                 bindings: input_image_bindings,
                 ..Default::default()
             },
         )?;
         let output_image_layout = vk::DescriptorSetLayout::new(
             device.clone(),
-            vulkano::descriptor_set::layout::DescriptorSetLayoutCreateInfo {
+            vk::DescriptorSetLayoutCreateInfo {
                 bindings: output_image_bindings,
                 ..Default::default()
             },
@@ -199,14 +197,14 @@ impl BlendEngine {
 
         let shader_layout = vk::PipelineLayout::new(
             device.clone(),
-            vulkano::pipeline::layout::PipelineLayoutCreateInfo {
+            vk::PipelineLayoutCreateInfo {
                 set_layouts: vec![input_image_layout, output_image_layout],
-                push_constant_ranges: vec![vulkano::pipeline::layout::PushConstantRange {
+                push_constant_ranges: vec![vk::PushConstantRange {
                     offset: 0,
                     size: 24, // f32 + bool32 + Rect:(u32 * 4)
-                    stages: vulkano::shader::ShaderStages::COMPUTE,
+                    stages: vk::ShaderStages::COMPUTE,
                 }],
-                ..vulkano::pipeline::layout::PipelineLayoutCreateInfo::default()
+                ..vk::PipelineLayoutCreateInfo::default()
             },
         )?;
         let size = shaders::WorkgroupSizeConstants {
@@ -265,14 +263,14 @@ impl BlendEngine {
         let mut commands = vk::AutoCommandBufferBuilder::primary(
             context.allocators().command_buffer(),
             context.queues().compute().idx(),
-            vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+            vk::CommandBufferUsage::OneTimeSubmit,
         )?;
 
         if clear_background {
             commands.clear_color_image(vk::ClearColorImageInfo {
                 clear_value: [0.0; 4].into(),
                 regions: smallvec::smallvec![background.subresource_range().clone(),],
-                ..vulkano::command_buffer::ClearColorImageInfo::image(background.image().clone())
+                ..vk::ClearColorImageInfo::image(background.image().clone())
             })?;
         }
 
@@ -306,7 +304,7 @@ impl BlendEngine {
             [],
         )?;
         commands.bind_descriptor_sets(
-            vulkano::pipeline::PipelineBindPoint::Compute,
+            vk::PipelineBindPoint::Compute,
             self.shader_layout.clone(),
             shaders::OUTPUT_IMAGE_SET,
             vec![output_set],
@@ -328,7 +326,7 @@ impl BlendEngine {
                 let Some(program) = self.mode_pipelines.get(mode).map(Arc::clone) else {
                     anyhow::bail!("Blend mode {:?} unsupported", mode)
                 };
-                commands.bind_pipeline_compute(program);
+                commands.bind_pipeline_compute(program)?;
                 last_mode = Some(*mode);
             }
             // Push new clip/alpha constants if different from last iter
@@ -348,7 +346,7 @@ impl BlendEngine {
             )?;
             commands
                 .bind_descriptor_sets(
-                    vulkano::pipeline::PipelineBindPoint::Compute,
+                    vk::PipelineBindPoint::Compute,
                     self.shader_layout.clone(),
                     shaders::INPUT_IMAGE_SET,
                     vec![input_set],

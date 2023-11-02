@@ -1,7 +1,9 @@
 //Traits
 pub use vulkano::{
-    pipeline::graphics::vertex_input::VertexDefinition,
-    pipeline::{graphics::vertex_input::Vertex, Pipeline},
+    pipeline::{
+        graphics::vertex_input::{Vertex, VertexDefinition},
+        Pipeline,
+    },
     sync::GpuFuture,
 };
 
@@ -17,6 +19,7 @@ pub mod vk {
         },
         command_buffer::{
             allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
+
             AutoCommandBufferBuilder,
             BufferImageCopy,
             ClearColorImageInfo,
@@ -24,8 +27,10 @@ pub mod vk {
             //Image ops
             CopyBufferToImageInfo,
             PrimaryAutoCommandBuffer,
-            //Renderpass
             RenderPassBeginInfo,
+            RenderingAttachmentInfo,
+            //Renderpass
+            RenderingInfo,
             SecondaryAutoCommandBuffer,
             SubpassBeginInfo,
             SubpassContents,
@@ -46,9 +51,9 @@ pub mod vk {
         format::{ClearValue, Format},
         image::{
             sampler::{ComponentMapping, ComponentSwizzle, Filter, Sampler, SamplerCreateInfo},
-            view::{ImageView, ImageViewCreateInfo},
-            Image, ImageAspects, ImageCreateFlags, ImageCreateInfo, ImageSubresourceLayers,
-            ImageSubresourceRange, ImageUsage,
+            view::{ImageView, ImageViewCreateInfo, ImageViewType},
+            Image, ImageAspects, ImageCreateFlags, ImageCreateInfo, ImageLayout,
+            ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
         },
         instance::{Instance, InstanceCreateInfo},
         library::VulkanLibrary,
@@ -62,25 +67,35 @@ pub mod vk {
         pipeline::{
             compute::{ComputePipeline, ComputePipelineCreateInfo},
             graphics::{
-                color_blend::{AttachmentBlend, ColorBlendAttachmentState, ColorBlendState},
+                color_blend::{
+                    AttachmentBlend, BlendFactor, BlendOp, ColorBlendAttachmentState,
+                    ColorBlendState,
+                },
                 input_assembly::{InputAssemblyState, PrimitiveTopology},
                 multisample::MultisampleState,
                 rasterization::{CullMode, RasterizationState},
+                subpass::{PipelineRenderingCreateInfo, PipelineSubpassType},
                 vertex_input::{Vertex, VertexInputState},
                 viewport::{Scissor, Viewport, ViewportState},
                 GraphicsPipeline, GraphicsPipelineCreateInfo,
             },
             layout::{PipelineLayout, PipelineLayoutCreateInfo, PushConstantRange},
-            DynamicState, PipelineShaderStageCreateInfo,
+            DynamicState, PipelineBindPoint, PipelineShaderStageCreateInfo,
         },
-        render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
+        render_pass::{
+            AttachmentLoadOp, AttachmentStoreOp, Framebuffer, FramebufferCreateInfo, RenderPass,
+            Subpass,
+        },
         shader::{ShaderStages, SpecializationConstant},
         swapchain::{
             acquire_next_image, PresentInfo, PresentMode, Surface, SurfaceInfo, Swapchain,
             SwapchainCreateInfo, SwapchainPresentInfo,
         },
-        sync,
-        sync::{future::NowFuture, Sharing},
-        DeviceSize, Version,
+        sync::{
+            self,
+            future::{FenceSignalFuture, NowFuture, SemaphoreSignalFuture},
+            Sharing,
+        },
+        DeviceSize, Validated, Version, VulkanError,
     };
 }

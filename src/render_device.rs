@@ -231,58 +231,49 @@ impl RenderContext {
             },
         )?;
 
-        // Safety - the closure must not access the vulkan API
-        let debugger = unsafe {
-            vkDebug::DebugUtilsMessenger::new(
-                instance.clone(),
-                vkDebug::DebugUtilsMessengerCreateInfo {
-                    message_severity: vkDebug::DebugUtilsMessageSeverity::ERROR
-                        | vkDebug::DebugUtilsMessageSeverity::WARNING
-                        | vkDebug::DebugUtilsMessageSeverity::INFO
-                        | vkDebug::DebugUtilsMessageSeverity::VERBOSE,
-                    message_type: vkDebug::DebugUtilsMessageType::GENERAL
-                        | vkDebug::DebugUtilsMessageType::PERFORMANCE
-                        | vkDebug::DebugUtilsMessageType::VALIDATION,
-                    ..vkDebug::DebugUtilsMessengerCreateInfo::user_callback(
-                        // SAFETY: the closure must not access vulkan API in any way.
-                        // Not a problem, as it simply logs to console or file, depending on log target.
-                        // In the future when this prints to an internal log however, I must keep
-                        // this in mind!
-                        unsafe {
-                            vulkano::instance::debug::DebugUtilsMessengerCallback::new(
-                                |severity, ty, data| {
-                                    let level = match severity {
-                                        vkDebug::DebugUtilsMessageSeverity::ERROR => {
-                                            log::Level::Error
-                                        }
-                                        vkDebug::DebugUtilsMessageSeverity::WARNING => {
-                                            log::Level::Warn
-                                        }
-                                        vkDebug::DebugUtilsMessageSeverity::VERBOSE => {
-                                            log::Level::Trace
-                                        }
-                                        vkDebug::DebugUtilsMessageSeverity::INFO | _ => {
-                                            log::Level::Info
-                                        }
-                                    };
-                                    let ty = match ty {
-                                        vkDebug::DebugUtilsMessageType::GENERAL => "GENERAL",
-                                        vkDebug::DebugUtilsMessageType::PERFORMANCE => {
-                                            "PERFORMANCE"
-                                        }
-                                        vkDebug::DebugUtilsMessageType::VALIDATION => "VALIDATION",
-                                        _ => "UNKNOWN",
-                                    };
-                                    let layer = data.message_id_name.unwrap_or("");
+        let debugger = vkDebug::DebugUtilsMessenger::new(
+            instance.clone(),
+            vkDebug::DebugUtilsMessengerCreateInfo {
+                message_severity: vkDebug::DebugUtilsMessageSeverity::ERROR
+                    | vkDebug::DebugUtilsMessageSeverity::WARNING
+                    | vkDebug::DebugUtilsMessageSeverity::INFO
+                    | vkDebug::DebugUtilsMessageSeverity::VERBOSE,
+                message_type: vkDebug::DebugUtilsMessageType::GENERAL
+                    | vkDebug::DebugUtilsMessageType::PERFORMANCE
+                    | vkDebug::DebugUtilsMessageType::VALIDATION,
+                ..vkDebug::DebugUtilsMessengerCreateInfo::user_callback(
+                    // SAFETY: the closure must not access vulkan API in any way.
+                    // Not a problem, as it simply logs to console or file, depending on log target.
+                    // In the future when this prints to an internal log however, I must keep
+                    // this in mind!
+                    unsafe {
+                        vulkano::instance::debug::DebugUtilsMessengerCallback::new(
+                            |severity, ty, data| {
+                                let level = match severity {
+                                    vkDebug::DebugUtilsMessageSeverity::ERROR => log::Level::Error,
+                                    vkDebug::DebugUtilsMessageSeverity::WARNING => log::Level::Warn,
+                                    vkDebug::DebugUtilsMessageSeverity::VERBOSE => {
+                                        log::Level::Trace
+                                    }
+                                    vkDebug::DebugUtilsMessageSeverity::INFO | _ => {
+                                        log::Level::Info
+                                    }
+                                };
+                                let ty = match ty {
+                                    vkDebug::DebugUtilsMessageType::GENERAL => "GENERAL",
+                                    vkDebug::DebugUtilsMessageType::PERFORMANCE => "PERFORMANCE",
+                                    vkDebug::DebugUtilsMessageType::VALIDATION => "VALIDATION",
+                                    _ => "UNKNOWN",
+                                };
+                                let layer = data.message_id_name.unwrap_or("");
 
-                                    log::log!(target: "vulkan", level, "[{ty}] {layer} - {}", data.message);
-                                },
-                            )
-                        },
-                    )
-                },
-            )
-        }?;
+                                log::log!(target: "vulkan", level, "[{ty}] {layer} - {}", data.message);
+                            },
+                        )
+                    },
+                )
+            },
+        )?;
 
         let surface = vk::Surface::from_window(instance.clone(), win.window())?;
         let required_device_extensions = vk::DeviceExtensions {

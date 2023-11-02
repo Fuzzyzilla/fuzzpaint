@@ -91,17 +91,6 @@ impl WindowRenderer {
     ) -> tokio::sync::broadcast::Receiver<crate::stylus_events::StylusEventFrame> {
         self.stylus_events.frame_receiver()
     }
-    /*
-    pub fn gen_framebuffers(&mut self) {
-        self.swapchain_framebuffers = Vec::with_capacity(self.render_surface.swapchain_images.len());
-
-        self.swapchain_framebuffers.extend(
-            self.render_surface.swapchain_images.iter()
-                .map(|image| {
-                    vulkano::render_pass::Framebuffer::
-                })
-        )
-    }*/
     pub fn render_surface(&self) -> &render_device::RenderSurface {
         //this will ALWAYS be Some. The option is for taking from a mutable reference for recreation.
         &self.render_surface.as_ref().unwrap()
@@ -236,7 +225,7 @@ impl WindowRenderer {
     fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =
             match vk::acquire_next_image(self.render_surface().swapchain().clone(), None) {
-                Err(vulkano::Validated::Error(vulkano::VulkanError::OutOfDate)) => {
+                Err(vk::Validated::Error(vk::VulkanError::OutOfDate)) => {
                     log::info!("Swapchain unusable. Recreating");
                     //We cannot draw on this surface as-is. Recreate and request another try next frame.
                     //TODO: Race condition, somehow! Surface is recreated with an out-of-date size.

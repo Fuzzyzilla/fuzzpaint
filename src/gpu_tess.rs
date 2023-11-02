@@ -1,4 +1,4 @@
-use crate::vk;
+use crate::vulkano_prelude::*;
 use std::sync::Arc;
 pub mod interface {
     #[derive(super::vk::Vertex, super::vk::BufferContents, Copy, Clone, Debug)]
@@ -55,12 +55,10 @@ impl GpuStampTess {
         Arc<vk::DescriptorSetLayout>,
     )> {
         // Interface consists of two sets. Input with three buffers, output with two.
-        let buffer_binding = vulkano::descriptor_set::layout::DescriptorSetLayoutBinding {
+        let buffer_binding = vk::DescriptorSetLayoutBinding {
             descriptor_count: 1,
-            stages: vulkano::shader::ShaderStages::COMPUTE,
-            ..vulkano::descriptor_set::layout::DescriptorSetLayoutBinding::descriptor_type(
-                vulkano::descriptor_set::layout::DescriptorType::StorageBuffer,
-            )
+            stages: vk::ShaderStages::COMPUTE,
+            ..vk::DescriptorSetLayoutBinding::descriptor_type(vk::DescriptorType::StorageBuffer)
         };
 
         let mut input_bindings = std::collections::BTreeMap::new();
@@ -69,16 +67,16 @@ impl GpuStampTess {
         let output_bindings = input_bindings.clone();
         input_bindings.insert(2, buffer_binding.clone());
 
-        let inputs = vulkano::descriptor_set::layout::DescriptorSetLayout::new(
+        let inputs = vk::DescriptorSetLayout::new(
             device.clone(),
-            vulkano::descriptor_set::layout::DescriptorSetLayoutCreateInfo {
+            vk::DescriptorSetLayoutCreateInfo {
                 bindings: input_bindings,
                 ..Default::default()
             },
         )?;
-        let outputs = vulkano::descriptor_set::layout::DescriptorSetLayout::new(
+        let outputs = vk::DescriptorSetLayout::new(
             device.clone(),
-            vulkano::descriptor_set::layout::DescriptorSetLayoutCreateInfo {
+            vk::DescriptorSetLayoutCreateInfo {
                 bindings: output_bindings,
                 ..Default::default()
             },
@@ -87,7 +85,7 @@ impl GpuStampTess {
         Ok((
             vk::PipelineLayout::new(
                 device,
-                vulkano::pipeline::layout::PipelineLayoutCreateInfo {
+                vk::PipelineLayoutCreateInfo {
                     push_constant_ranges: Vec::new(),
                     set_layouts: vec![inputs.clone(), outputs.clone()],
                     ..Default::default()
@@ -131,7 +129,7 @@ impl GpuStampTess {
         &self,
         strokes: &[&crate::state::stroke_collection::ImmutableStroke],
     ) -> anyhow::Result<(
-        vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
+        vk::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
@@ -185,11 +183,9 @@ impl GpuStampTess {
     pub fn tess_buffer(
         &self,
         strokes: &[&crate::state::stroke_collection::ImmutableStroke],
-        packed_points: vulkano::buffer::subbuffer::Subbuffer<
-            [shaders::tessellate::InputStrokeVertex],
-        >,
+        packed_points: vk::Subbuffer<[shaders::tessellate::InputStrokeVertex]>,
     ) -> anyhow::Result<(
-        vulkano::sync::future::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
+        vk::SemaphoreSignalFuture<impl GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
@@ -338,14 +334,14 @@ impl GpuStampTess {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             self.context.allocators().command_buffer(),
             self.context.queues().compute().idx(),
-            vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+            vk::CommandBufferUsage::OneTimeSubmit,
         )?;
 
         command_buffer
             .fill_buffer(output_infos.clone().reinterpret(), 0u32)?
             .bind_pipeline_compute(self.pipeline.clone())?
             .bind_descriptor_sets(
-                vulkano::pipeline::PipelineBindPoint::Compute,
+                vk::PipelineBindPoint::Compute,
                 self.layout.clone(),
                 0,
                 (input_descriptor, output_descriptor),
@@ -359,7 +355,6 @@ impl GpuStampTess {
             strokes.len()
         );
 
-        use vk::sync::GpuFuture;
         let future = vk::sync::now(self.context.device().clone())
             .then_execute(
                 self.context.queues().compute().queue().clone(),

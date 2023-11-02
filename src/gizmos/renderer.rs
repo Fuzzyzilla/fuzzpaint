@@ -1,8 +1,6 @@
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
 
-use vulkano::pipeline::{graphics::vertex_input::Vertex, Pipeline};
-
 #[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
 pub struct GizmoVertex {
@@ -100,9 +98,9 @@ impl GizmoRenderer {
         context: &crate::render_device::RenderContext,
     ) -> anyhow::Result<(Arc<vk::PipelineLayout>, Arc<vk::PipelineLayout>)> {
         let push_constant_ranges = {
-            let matrix_color_range = vulkano::pipeline::layout::PushConstantRange {
+            let matrix_color_range = vk::PushConstantRange {
                 offset: 0,
-                stages: vulkano::shader::ShaderStages::VERTEX,
+                stages: vk::ShaderStages::VERTEX,
                 size: 4 * 4 * 4 + 4 * 4, //4x4 matrix of f32, + vec4 of f32
             };
             vec![matrix_color_range]
@@ -110,25 +108,25 @@ impl GizmoRenderer {
         let mut texture_descriptor_set = std::collections::BTreeMap::new();
         texture_descriptor_set.insert(
             0,
-            vulkano::descriptor_set::layout::DescriptorSetLayoutBinding {
+            vk::DescriptorSetLayoutBinding {
                 descriptor_count: 1,
-                stages: vulkano::shader::ShaderStages::FRAGMENT,
-                ..vulkano::descriptor_set::layout::DescriptorSetLayoutBinding::descriptor_type(
-                    vulkano::descriptor_set::layout::DescriptorType::CombinedImageSampler,
+                stages: vk::ShaderStages::FRAGMENT,
+                ..vk::DescriptorSetLayoutBinding::descriptor_type(
+                    vk::DescriptorType::CombinedImageSampler,
                 )
             },
         );
 
         let texture_descriptor_set = vk::DescriptorSetLayout::new(
             context.device().clone(),
-            vulkano::descriptor_set::layout::DescriptorSetLayoutCreateInfo {
+            vk::DescriptorSetLayoutCreateInfo {
                 bindings: texture_descriptor_set,
                 ..Default::default()
             },
         )?;
         let textured = vk::PipelineLayout::new(
             context.device().clone(),
-            vulkano::pipeline::layout::PipelineLayoutCreateInfo {
+            vk::PipelineLayoutCreateInfo {
                 set_layouts: vec![texture_descriptor_set],
                 push_constant_ranges: push_constant_ranges.clone(),
                 ..Default::default()
@@ -136,7 +134,7 @@ impl GizmoRenderer {
         )?;
         let untextured = vk::PipelineLayout::new(
             context.device().clone(),
-            vulkano::pipeline::layout::PipelineLayoutCreateInfo {
+            vk::PipelineLayoutCreateInfo {
                 set_layouts: Vec::new(),
                 push_constant_ranges,
                 ..Default::default()
@@ -214,7 +212,7 @@ impl GizmoRenderer {
         let triangulated_shapes = vk::Buffer::from_iter(
             context.allocators().memory().clone(),
             vk::BufferCreateInfo {
-                sharing: vulkano::sync::Sharing::Exclusive,
+                sharing: vk::Sharing::Exclusive,
                 usage: vk::BufferUsage::VERTEX_BUFFER,
                 ..Default::default()
             },
@@ -255,12 +253,11 @@ impl GizmoRenderer {
             vk::ColorBlendState::with_attachment_states(1, blend_states)
         };
         // ad hoc rendering for now, lazy lazy
-        let render_pass = vulkano::pipeline::graphics::subpass::PipelineSubpassType::BeginRendering(
-            vulkano::pipeline::graphics::subpass::PipelineRenderingCreateInfo {
-                color_attachment_formats: vec![Some(vulkano::format::Format::B8G8R8A8_SRGB)],
+        let render_pass =
+            vk::PipelineSubpassType::BeginRendering(vk::PipelineRenderingCreateInfo {
+                color_attachment_formats: vec![Some(vk::Format::B8G8R8A8_SRGB)],
                 ..Default::default()
-            },
-        );
+            });
         let textured_pipeline_info = vk::GraphicsPipelineCreateInfo {
             color_blend_state: Some(alpha_blend),
             input_assembly_state: Some(vk::InputAssemblyState {
@@ -321,18 +318,16 @@ impl GizmoRenderer {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             self.context.allocators().command_buffer(),
             self.context.queues().graphics().idx(),
-            vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+            vk::CommandBufferUsage::OneTimeSubmit,
         )?;
-        let attachment = vulkano::command_buffer::RenderingAttachmentInfo {
+        let attachment = vk::RenderingAttachmentInfo {
             clear_value: None,
-            load_op: vulkano::render_pass::AttachmentLoadOp::Load,
-            store_op: vulkano::render_pass::AttachmentStoreOp::Store,
-            ..vulkano::command_buffer::RenderingAttachmentInfo::image_view(
-                vk::ImageView::new_default(into_image)?,
-            )
+            load_op: vk::AttachmentLoadOp::Load,
+            store_op: vk::AttachmentStoreOp::Store,
+            ..vk::RenderingAttachmentInfo::image_view(vk::ImageView::new_default(into_image)?)
         };
         command_buffer
-            .begin_rendering(vulkano::command_buffer::RenderingInfo {
+            .begin_rendering(vk::RenderingInfo {
                 color_attachments: vec![Some(attachment)],
                 contents: vk::SubpassContents::Inline,
                 depth_attachment: None,
@@ -423,7 +418,7 @@ impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
                         .bind_pipeline_graphics(self.renderer.textured_pipeline.clone())?;
                 }
                 self.command_buffer.bind_descriptor_sets(
-                    vulkano::pipeline::PipelineBindPoint::Graphics,
+                    vk::PipelineBindPoint::Graphics,
                     self.renderer.textured_pipeline.layout().clone(),
                     0,
                     texture.clone(),

@@ -250,13 +250,13 @@ impl Renderer {
             // Unfortunately transfer queue cannot clear images TwT
             // Here, graphics is more likely to be idle than compute.
             context.queues().graphics().idx(),
-            vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+            vk::CommandBufferUsage::OneTimeSubmit,
         )?;
-        command_buffer.clear_color_image(vulkano::command_buffer::ClearColorImageInfo {
+        command_buffer.clear_color_image(vk::ClearColorImageInfo {
             clear_value: color.into(),
             regions: smallvec::smallvec![image.view.subresource_range().clone()],
-            image_layout: vulkano::image::ImageLayout::General,
-            ..vulkano::command_buffer::ClearColorImageInfo::image(image.image.clone())
+            image_layout: vk::ImageLayout::General,
+            ..vk::ClearColorImageInfo::image(image.image.clone())
         })?;
 
         let command_buffer = command_buffer.build()?;
@@ -383,7 +383,6 @@ mod stroke_renderer {
     use crate::vulkano_prelude::*;
     use anyhow::Result as AnyResult;
     use std::sync::Arc;
-    use vulkano::{pipeline::graphics::vertex_input::Vertex, pipeline::Pipeline, sync::GpuFuture};
     mod vert {
         vulkano_shaders::shader! {
             ty: "vertex",
@@ -454,7 +453,7 @@ mod stroke_renderer {
                 let mut cb = vk::AutoCommandBufferBuilder::primary(
                     context.allocators().command_buffer(),
                     context.queues().transfer().idx(),
-                    vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+                    vk::CommandBufferUsage::OneTimeSubmit,
                 )?;
                 let region = vk::BufferImageCopy {
                     image_extent: device_image.extent(),
@@ -518,16 +517,12 @@ mod stroke_renderer {
             // [1.0; 4] = draw, [0.0; 4] = erase.
             let premul_dyn_constants = {
                 let blend = vk::AttachmentBlend {
-                    src_alpha_blend_factor:
-                        vulkano::pipeline::graphics::color_blend::BlendFactor::Src1Alpha,
-                    src_color_blend_factor:
-                        vulkano::pipeline::graphics::color_blend::BlendFactor::Src1Color,
-                    dst_alpha_blend_factor:
-                        vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-                    dst_color_blend_factor:
-                        vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-                    alpha_blend_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-                    color_blend_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+                    src_alpha_blend_factor: vk::BlendFactor::Src1Alpha,
+                    src_color_blend_factor: vk::BlendFactor::Src1Color,
+                    dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+                    dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+                    alpha_blend_op: vk::BlendOp::Add,
+                    color_blend_op: vk::BlendOp::Add,
                 };
                 let blend_states = vk::ColorBlendAttachmentState {
                     blend: Some(blend),
@@ -597,14 +592,12 @@ mod stroke_renderer {
                         }],
                         ..Default::default()
                     }),
-                    subpass: Some(
-                        vulkano::pipeline::graphics::subpass::PipelineSubpassType::BeginRendering(
-                            vulkano::pipeline::graphics::subpass::PipelineRenderingCreateInfo {
-                                color_attachment_formats: vec![Some(crate::DOCUMENT_FORMAT)],
-                                ..Default::default()
-                            },
-                        ),
-                    ),
+                    subpass: Some(vk::PipelineSubpassType::BeginRendering(
+                        vk::PipelineRenderingCreateInfo {
+                            color_attachment_formats: vec![Some(crate::DOCUMENT_FORMAT)],
+                            ..Default::default()
+                        },
+                    )),
                     stages: smallvec::smallvec![vert_stage, frag_stage,],
                     ..vk::GraphicsPipelineCreateInfo::layout(layout)
                 },
@@ -688,7 +681,7 @@ mod stroke_renderer {
             let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
                 self.context.allocators().command_buffer(),
                 self.context.queues().graphics().idx(),
-                vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
+                vk::CommandBufferUsage::OneTimeSubmit,
             )?;
 
             let mut matrix = cgmath::Matrix4::from_scale(2.0 / crate::DOCUMENT_DIMENSION as f32);
@@ -703,26 +696,22 @@ mod stroke_renderer {
             );
 
             command_buffer
-                .begin_rendering(vulkano::command_buffer::RenderingInfo {
-                    color_attachments: vec![Some(
-                        vulkano::command_buffer::RenderingAttachmentInfo {
-                            clear_value: if clear {
-                                Some([0.0, 0.0, 0.0, 0.0].into())
-                            } else {
-                                None
-                            },
-                            load_op: if clear {
-                                vulkano::render_pass::AttachmentLoadOp::Clear
-                            } else {
-                                vulkano::render_pass::AttachmentLoadOp::Load
-                            },
-                            store_op: vulkano::render_pass::AttachmentStoreOp::Store,
-                            ..vulkano::command_buffer::RenderingAttachmentInfo::image_view(
-                                renderbuf.view.clone(),
-                            )
+                .begin_rendering(vk::RenderingInfo {
+                    color_attachments: vec![Some(vk::RenderingAttachmentInfo {
+                        clear_value: if clear {
+                            Some([0.0, 0.0, 0.0, 0.0].into())
+                        } else {
+                            None
                         },
-                    )],
-                    contents: vulkano::command_buffer::SubpassContents::Inline,
+                        load_op: if clear {
+                            vk::AttachmentLoadOp::Clear
+                        } else {
+                            vk::AttachmentLoadOp::Load
+                        },
+                        store_op: vk::AttachmentStoreOp::Store,
+                        ..vk::RenderingAttachmentInfo::image_view(renderbuf.view.clone())
+                    })],
+                    contents: vk::SubpassContents::Inline,
                     depth_attachment: None,
                     ..Default::default()
                 })?
@@ -733,7 +722,7 @@ mod stroke_renderer {
                     Into::<[[f32; 4]; 4]>::into(matrix),
                 )?
                 .bind_descriptor_sets(
-                    vulkano::pipeline::PipelineBindPoint::Graphics,
+                    vk::PipelineBindPoint::Graphics,
                     self.pipeline.layout().clone(),
                     0,
                     self.texture_descriptor.clone(),

@@ -290,14 +290,12 @@ impl EguiRenderer {
 
         let premul = {
             let premul = vk::AttachmentBlend {
-                src_alpha_blend_factor: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-                src_color_blend_factor: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-                dst_alpha_blend_factor:
-                    vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-                dst_color_blend_factor:
-                    vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-                alpha_blend_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-                color_blend_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+                src_alpha_blend_factor: vk::BlendFactor::One,
+                src_color_blend_factor: vk::BlendFactor::One,
+                dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+                dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+                alpha_blend_op: vk::BlendOp::Add,
+                color_blend_op: vk::BlendOp::Add,
             };
             let blend_states = vk::ColorBlendAttachmentState {
                 blend: Some(premul),
