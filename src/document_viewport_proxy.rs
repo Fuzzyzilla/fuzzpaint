@@ -523,6 +523,11 @@ impl DocumentViewportPreviewProxy {
 
         let no_blend = vk::ColorBlendState::with_attachment_states(1, Default::default());
 
+        let matrix_push_constant = vk::PushConstantRange {
+            offset: 0,
+            stages: vk::ShaderStages::VERTEX,
+            size: std::mem::size_of::<shaders::vertex::Matrix>() as u32,
+        };
         let layout = vk::PipelineLayout::new(
             render_surface.context().device().clone(),
             vk::PipelineLayoutCreateInfo {
@@ -544,6 +549,7 @@ impl DocumentViewportPreviewProxy {
                         ..Default::default()
                     },
                 )?],
+                push_constant_ranges: vec![matrix_push_constant],
                 ..Default::default()
             },
         )?;

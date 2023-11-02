@@ -324,9 +324,11 @@ impl EguiRenderer {
                 vertex_input_state: Some(
                     EguiVertex::per_vertex().definition(&vertex_entry.info().input_interface)?,
                 ),
-                // One viewport and scissor, scissor irrelevant and viewport dynamic
+                // One dynamic viewport and scissor
                 viewport_state: Some(Default::default()),
-                dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
+                dynamic_state: [vk::DynamicState::Viewport, vk::DynamicState::Scissor]
+                    .into_iter()
+                    .collect(),
                 subpass: Some(renderpass.clone().first_subpass().into()),
                 stages: smallvec::smallvec![vertex_stage, fragment_stage,],
                 ..vk::GraphicsPipelineCreateInfo::layout(layout)
