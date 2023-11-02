@@ -218,11 +218,11 @@ impl MainUI {
                     // RTL - add in reverse :P
                     if ui.add(redo).clicked() {
                         crate::default_provider()
-                            .inspect(interface.id, |document| document.redo_n(1));
+                            .inspect(current_document, |document| document.redo_n(1));
                     }
                     if ui.add(undo).clicked() {
                         crate::default_provider()
-                            .inspect(interface.id, |document| document.undo_n(1));
+                            .inspect(current_document, |document| document.undo_n(1));
                     }
                 } else {
                     // RTL - add in reverse :P
@@ -254,6 +254,89 @@ impl MainUI {
 
             crate::default_provider().inspect(interface.id, |queue| {
                 queue.write_with(|writer| {
+                    let graph = writer.graph();
+                    // Node properties editor panel, at the bottom. Shown only when a node is selected.
+                    // Must occur before the graph rendering to prevent ui overflow :V
+                    let node_props = interface
+                        .graph_selection
+                        // Ignore if there is a yanked node.
+                        .filter(|_| interface.yanked_node.is_none())
+                        .and_then(|node| graph.get(node))
+                        .cloned();
+
+                    egui::TopBottomPanel::bottom("LayerProperties").show_animated_inside(
+                        ui,
+                        node_props.is_some(),
+                        |ui| {
+                            // Guarded by panel show condition
+                            let node_props = node_props.unwrap();
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(icon_of_node(&node_props)).monospace(),
+                                );
+                                ui.label(format!("{} properties", node_props.name()));
+                            });
+                            ui.separator();
+                            if let Ok(mut leaf) = node_props.into_leaf() {
+                                use crate::state::graph::LeafType;
+                                let write = match &mut leaf {
+                                    // Nothing to show
+                                    LeafType::Note => false,
+                                    // Color picker
+                                    LeafType::SolidColor {
+                                        source: [r, g, b, a],
+                                        ..
+                                    } => {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Fill color:");
+                                            let mut rgba =
+                                                egui::Rgba::from_rgba_unmultiplied(*r, *g, *b, *a);
+                                            let changed =
+                                                egui::color_picker::color_edit_button_rgba(
+                                                    ui,
+                                                    &mut rgba,
+                                                    // If the user wants Add they should use the blend modes mwuahaha
+                                                    egui::color_picker::Alpha::OnlyBlend,
+                                                )
+                                                .changed();
+                                            *r = rgba.r();
+                                            *b = rgba.b();
+                                            *g = rgba.g();
+                                            *a = rgba.a();
+                                            changed
+                                        })
+                                        .inner
+                                    }
+                                    LeafType::StrokeLayer { collection, .. } => {
+                                        // Nothing interactible, but display some infos
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{} stroke items from {}",
+                                                writer
+                                                    .stroke_collections()
+                                                    .get(*collection)
+                                                    .map(|collection| collection.strokes.len())
+                                                    .unwrap_or(0),
+                                                *collection,
+                                            ))
+                                            .italics()
+                                            .weak(),
+                                        );
+                                        false
+                                    }
+                                };
+
+                                if write {
+                                    if let Some(crate::state::graph::AnyID::Leaf(id)) =
+                                        interface.graph_selection
+                                    {
+                                        let _ = writer.graph().set_leaf(id, leaf);
+                                    }
+                                }
+                            }
+                        },
+                    );
+                    // Buttons
                     ui.horizontal(|ui| {
                         // Copied logic since we can't borrow test_graph_selection throughout this whole
                         // ui section
@@ -410,7 +493,7 @@ impl MainUI {
                         });
                     }
                     egui::ScrollArea::new([false, true])
-                        .auto_shrink([false; 2])
+                        .auto_shrink([false, true])
                         .show(ui, |ui| {
                             graph_edit_recurse(
                                 ui,
@@ -431,121 +514,39 @@ impl MainUI {
             });
         });
 
-        egui::SidePanel::left("Color picker").show(&ctx, |ui| {
-            /*
-            {
-                let settings = &mut selections.brush_settings;
-                ui.label("Color");
-                ui.separator();
-                // Why..
-                let mut color = egui::Rgba::from_rgba_premultiplied(
-                    settings.color_modulate[0],
-                    settings.color_modulate[1],
-                    settings.color_modulate[2],
-                    settings.color_modulate[3],
-                );
-                if egui::color_picker::color_edit_button_rgba(
-                    ui,
-                    &mut color,
-                    egui::color_picker::Alpha::OnlyBlend,
-                )
-                .changed()
+        egui::SidePanel::left("Color picker")
+            .resizable(false)
+            .show(&ctx, |ui| {
+                /*
                 {
-                    settings.color_modulate = color.to_array();
-                };
-            }
-
-            ui.separator();
-            ui.label("Brushes");
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                if ui.button("➕").clicked() {
-                    let brush = brush::Brush::default();
-                    self.brushes.push(brush);
-                }
-                if ui.button("✖").on_hover_text("Delete brush").clicked() {
-                    if let Some(id) = selections.cur_brush.take() {
-                        self.brushes.retain(|brush| brush.id() != id);
-                    }
-                };
-                ui.toggle_value(&mut selections.brush_settings.is_eraser, "Erase");
+                    let settings = &mut selections.brush_settings;
+                    ui.label("Color");
+                    ui.separator();
+                    // Why..
+                    let mut color = egui::Rgba::from_rgba_premultiplied(
+                        settings.color_modulate[0],
+                        settings.color_modulate[1],
+                        settings.color_modulate[2],
+                        settings.color_modulate[3],
+                    );
+                    if egui::color_picker::color_edit_button_rgba(
+                        ui,
+                        &mut color,
+                        egui::color_picker::Alpha::OnlyBlend,
+                    )
+                    .changed()
+                    {
+                        settings.color_modulate = color.to_array();
+                    };
+                }*/
+                ui.label("Memory Usage Stats");
+                let point_resident_usage = crate::repositories::points::global().resident_usage();
+                ui.label(format!(
+                    "Point repository: {}/{}",
+                    human_bytes::human_bytes(point_resident_usage.0 as f64),
+                    human_bytes::human_bytes(point_resident_usage.1 as f64),
+                ));
             });
-            ui.separator();
-
-            for brush in self.brushes.iter_mut() {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.radio_value(&mut selections.cur_brush, Some(brush.id().weak()), "");
-                        ui.text_edit_singleline(brush.name_mut());
-                    })
-                    .response
-                    .on_hover_ui(|ui| {
-                        ui.label(format!("{}", brush.id()));
-
-                        //Smol optimization to avoid formatters
-                        let mut buf = uuid::Uuid::encode_buffer();
-                        let uuid = brush.universal_id().as_hyphenated().encode_upper(&mut buf);
-                        ui.label(&uuid[..]);
-                    });
-                    egui::CollapsingHeader::new("Settings")
-                        .id_source(brush.id())
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            let mut brush_kind = brush.style().brush_kind();
-
-                            egui::ComboBox::new(brush.id(), "")
-                                .selected_text(brush_kind.as_ref())
-                                .show_ui(ui, |ui| {
-                                    for kind in
-                                        <brush::BrushKind as strum::IntoEnumIterator>::iter()
-                                    {
-                                        ui.selectable_value(&mut brush_kind, kind, kind.as_ref());
-                                    }
-                                });
-
-                            //Changed by user, switch to defaults for the new kind
-                            if brush_kind != brush.style().brush_kind() {
-                                *brush.style_mut() = brush::BrushStyle::default_for(brush_kind);
-                            }
-
-                            match brush.style_mut() {
-                                brush::BrushStyle::Stamped { .. } => {
-                                    let slider = egui::widgets::Slider::new(
-                                        &mut selections.brush_settings.size_mul,
-                                        2.0..=50.0,
-                                    )
-                                    .clamp_to_range(true)
-                                    .logarithmic(true)
-                                    .suffix("px");
-
-                                    ui.add(slider);
-
-                                    let slider2 = egui::widgets::Slider::new(
-                                        &mut selections.brush_settings.spacing_px,
-                                        0.1..=10.0,
-                                    )
-                                    .clamp_to_range(true)
-                                    .logarithmic(true)
-                                    .suffix("px");
-
-                                    ui.add(slider2);
-                                }
-                                brush::BrushStyle::Rolled => {}
-                            }
-                        })
-                });
-            }
-            ui.separator();
-            */
-            ui.label("Memory Usage Stats");
-            let point_resident_usage = crate::repositories::points::global().resident_usage();
-            ui.label(format!(
-                "Point repository: {}/{}",
-                human_bytes::human_bytes(point_resident_usage.0 as f64),
-                human_bytes::human_bytes(point_resident_usage.1 as f64),
-            ));
-        });
 
         egui::TopBottomPanel::top("documents").show(&ctx, |ui| {
             egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -601,6 +602,22 @@ impl MainUI {
                 y: size.y,
             },
         )
+    }
+}
+
+fn icon_of_node(node: &crate::state::graph::NodeData) -> &'static str {
+    use crate::state::graph::{LeafType, NodeType};
+    const UNKNOWN: &'static str = "？";
+    match (node.leaf(), node.node()) {
+        // Leaves
+        (Some(LeafType::SolidColor { .. }), None) => FILL_LAYER_ICON,
+        (Some(LeafType::StrokeLayer { .. }), None) => STROKE_LAYER_ICON,
+        (Some(LeafType::Note), None) => NOTE_LAYER_ICON,
+
+        // Groups
+        (None, Some(NodeType::Passthrough | NodeType::GroupedBlend(..))) => GROUP_ICON,
+        // Invalid states
+        (Some(..), Some(..)) | (None, None) => UNKNOWN,
     }
 }
 
@@ -792,15 +809,7 @@ fn graph_edit_recurse<
             let icon = if Some(id) == *yanked_node {
                 SCISSOR_ICON
             } else {
-                if let Some(leaf) = data.leaf() {
-                    match leaf {
-                        crate::state::graph::LeafType::Note => NOTE_LAYER_ICON,
-                        crate::state::graph::LeafType::StrokeLayer { .. } => STROKE_LAYER_ICON,
-                        crate::state::graph::LeafType::SolidColor { .. } => FILL_LAYER_ICON,
-                    }
-                } else {
-                    GROUP_ICON
-                }
+                icon_of_node(data)
             };
             // Selection radio button + toggle function.
             let is_selected = *selected_node == Some(id);
