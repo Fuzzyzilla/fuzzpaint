@@ -37,18 +37,20 @@ pub struct MainUI {
     cur_document: Option<crate::state::DocumentID>,
 
     requests_send: requests::RequestSender,
-    // Only some during a drag event on the view rotation slider. Not to be used aside from that! :P
-    rotation_drag_value: Option<f32>,
+    action_listener: crate::actions::ActionListener,
 }
 impl MainUI {
-    pub fn new(requests_send: requests::RequestSender) -> Self {
+    pub fn new(
+        requests_send: requests::RequestSender,
+        action_listener: crate::actions::ActionListener,
+    ) -> Self {
         Self {
             modals: vec![],
             inlays: vec![],
             documents: vec![],
             cur_document: None,
-            rotation_drag_value: None,
             requests_send,
+            action_listener,
         }
     }
     /// Main UI and any modals, with the top bar, layers, brushes, color, etc. To be displayed in front of the document and it's gizmos.
@@ -191,23 +193,24 @@ impl MainUI {
                         ),
                     });
                 };
-                let mut rotation = self.rotation_drag_value.get_or_insert(0.0);
-                let rotation_response = ui.drag_angle(&mut rotation);
-                if rotation_response.changed() {
-                    let _ = self.requests_send.send(requests::UiRequest::Document {
-                        target: document,
-                        request: requests::DocumentRequest::View(
-                            requests::DocumentViewRequest::SetRotation(
-                                *rotation % std::f32::consts::TAU,
+                latch::latch(ui, (document, "rotation"), 0.0, |ui, rotation| {
+                    let rotation_response = ui.drag_angle(rotation);
+                    if rotation_response.changed() {
+                        let _ = self.requests_send.send(requests::UiRequest::Document {
+                            target: document,
+                            request: requests::DocumentRequest::View(
+                                requests::DocumentViewRequest::SetRotation(
+                                    *rotation % std::f32::consts::TAU,
+                                ),
                             ),
-                        ),
-                    });
-                }
-                // Discard rotation state if we're done interacting.
-                if !rotation_response.dragged() {
-                    self.rotation_drag_value = None;
-                }
-
+                        });
+                    }
+                    if !rotation_response.dragged() {
+                        latch::Latch::None
+                    } else {
+                        latch::Latch::Continue
+                    }
+                });
                 ui.add(egui::Separator::default().vertical());
 
                 // Undo/redo - only show if there is a currently selected layer.
@@ -215,14 +218,32 @@ impl MainUI {
                 let redo = egui::Button::new("⮫");
 
                 if let Some(current_document) = self.cur_document {
+                    // Accept undo/redo actions
+                    let (mut undos, mut redos) = self
+                        .action_listener
+                        .frame()
+                        .map(|frame| {
+                            (
+                                frame.action_trigger_count(crate::actions::Action::Undo),
+                                frame.action_trigger_count(crate::actions::Action::Redo),
+                            )
+                        })
+                        .unwrap_or((0, 0));
                     // RTL - add in reverse :P
                     if ui.add(redo).clicked() {
-                        crate::default_provider()
-                            .inspect(interface.id, |document| document.redo_n(1));
-                    }
+                        redos += 1
+                    };
                     if ui.add(undo).clicked() {
+                        undos += 1
+                    };
+                    // Submit undo/redos as requested.
+                    if redos != 0 {
                         crate::default_provider()
-                            .inspect(interface.id, |document| document.undo_n(1));
+                            .inspect(current_document, |document| document.redo_n(redos));
+                    }
+                    if undos != 0 {
+                        crate::default_provider()
+                            .inspect(current_document, |document| document.undo_n(undos));
                     }
                 } else {
                     // RTL - add in reverse :P
@@ -248,12 +269,116 @@ impl MainUI {
             else {
                 // Not found! Reset cur_document.
                 self.cur_document = None;
-                *crate::Selections::get().write() = None;
+                *crate::AdHocGlobals::get().write() = None;
                 return;
             };
 
             crate::default_provider().inspect(interface.id, |queue| {
                 queue.write_with(|writer| {
+                    let graph = writer.graph();
+                    // Node properties editor panel, at the bottom. Shown only when a node is selected.
+                    // Must occur before the graph rendering to prevent ui overflow :V
+                    let node_props = interface
+                        .graph_selection
+                        // Ignore if there is a yanked node.
+                        .filter(|_| interface.yanked_node.is_none())
+                        .and_then(|node| graph.get(node))
+                        .cloned();
+
+                    egui::TopBottomPanel::bottom("LayerProperties").show_animated_inside(
+                        ui,
+                        node_props.is_some(),
+                        |ui| {
+                            // Guarded by panel show condition
+                            let node_props = node_props.unwrap();
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(icon_of_node(&node_props)).monospace(),
+                                );
+                                ui.label(format!("{} properties", node_props.name()));
+                            });
+                            ui.separator();
+                            if let Ok(mut leaf) = node_props.into_leaf() {
+                                use crate::state::graph::LeafType;
+                                let write = match &mut leaf {
+                                    // Nothing to show
+                                    LeafType::Note => false,
+                                    // Color picker
+                                    LeafType::SolidColor { source, .. } => {
+                                        let color_latch = ui
+                                            .horizontal(|ui| {
+                                                ui.label("Fill color:");
+                                                // Latch onto fill color, to submit update only when selection is finished.
+                                                latch::latch(
+                                                    ui,
+                                                    (&interface.graph_selection, "fill-color"),
+                                                    *source,
+                                                    |ui, [r, g, b, a]| {
+                                                        let mut rgba =
+                                                            egui::Rgba::from_rgba_premultiplied(
+                                                                *r, *g, *b, *a,
+                                                            );
+                                                        egui::color_picker::color_edit_button_rgba(
+                                                            ui,
+                                                            &mut rgba,
+                                                            // If the user wants Add they should use the blend modes mwuahaha
+                                                            egui::color_picker::Alpha::OnlyBlend,
+                                                        );
+                                                        *r = rgba.r();
+                                                        *b = rgba.b();
+                                                        *g = rgba.g();
+                                                        *a = rgba.a();
+
+                                                        // None of the response fields for color pickers seem to indicate
+                                                        // a finished interaction TwT
+                                                        if ui.button("Apply").clicked() {
+                                                            latch::Latch::Finish
+                                                        } else {
+                                                            latch::Latch::Continue
+                                                        }
+                                                    },
+                                                )
+                                                .result()
+                                            })
+                                            .inner;
+
+                                        if let Some(color) = color_latch {
+                                            *source = color;
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    LeafType::StrokeLayer { collection, .. } => {
+                                        // Nothing interactible, but display some infos
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{} stroke items from {}",
+                                                writer
+                                                    .stroke_collections()
+                                                    .get(*collection)
+                                                    .map(|collection| collection.strokes.len())
+                                                    .unwrap_or(0),
+                                                *collection,
+                                            ))
+                                            .italics()
+                                            .weak(),
+                                        );
+                                        false
+                                    }
+                                };
+
+                                if write {
+                                    if let Some(crate::state::graph::AnyID::Leaf(id)) =
+                                        interface.graph_selection
+                                    {
+                                        let _ = writer.graph().set_leaf(id, leaf);
+                                    }
+                                }
+                            }
+                        },
+                    );
+                    // Buttons
                     ui.horizontal(|ui| {
                         // Copied logic since we can't borrow test_graph_selection throughout this whole
                         // ui section
@@ -319,7 +444,7 @@ impl MainUI {
                                 .add_leaf(
                                     crate::state::graph::LeafType::SolidColor {
                                         blend: Default::default(),
-                                        source: [0.5, 0.0, 0.0, 0.5],
+                                        source: [1.0; 4],
                                     },
                                     add_location!(),
                                     "Fill".to_string(),
@@ -410,7 +535,7 @@ impl MainUI {
                         });
                     }
                     egui::ScrollArea::new([false, true])
-                        .auto_shrink([false; 2])
+                        .auto_shrink([false, true])
                         .show(ui, |ui| {
                             graph_edit_recurse(
                                 ui,
@@ -425,127 +550,78 @@ impl MainUI {
             });
 
             // Update selections.
-            *crate::Selections::get().write() = Some(crate::Selections {
+            let mut globals = crate::AdHocGlobals::get().write();
+            let old_brush = globals.take().map(|globals| globals.brush);
+            *globals = Some(crate::AdHocGlobals {
                 document,
+                brush: old_brush.unwrap_or(crate::state::StrokeBrushSettings {
+                    is_eraser: false,
+                    brush: crate::brush::todo_brush().id(),
+                    color_modulate: [0.0, 0.0, 0.0, 1.0],
+                    size_mul: 10.0,
+                    spacing_px: 0.5,
+                }),
                 node: interface.graph_selection,
             });
         });
 
-        egui::SidePanel::left("Color picker").show(&ctx, |ui| {
-            /*
-            {
-                let settings = &mut selections.brush_settings;
-                ui.label("Color");
-                ui.separator();
-                // Why..
-                let mut color = egui::Rgba::from_rgba_premultiplied(
-                    settings.color_modulate[0],
-                    settings.color_modulate[1],
-                    settings.color_modulate[2],
-                    settings.color_modulate[3],
-                );
-                if egui::color_picker::color_edit_button_rgba(
-                    ui,
-                    &mut color,
-                    egui::color_picker::Alpha::OnlyBlend,
-                )
-                .changed()
-                {
-                    settings.color_modulate = color.to_array();
-                };
-            }
-
-            ui.separator();
-            ui.label("Brushes");
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                if ui.button("➕").clicked() {
-                    let brush = brush::Brush::default();
-                    self.brushes.push(brush);
-                }
-                if ui.button("✖").on_hover_text("Delete brush").clicked() {
-                    if let Some(id) = selections.cur_brush.take() {
-                        self.brushes.retain(|brush| brush.id() != id);
-                    }
-                };
-                ui.toggle_value(&mut selections.brush_settings.is_eraser, "Erase");
-            });
-            ui.separator();
-
-            for brush in self.brushes.iter_mut() {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.radio_value(&mut selections.cur_brush, Some(brush.id().weak()), "");
-                        ui.text_edit_singleline(brush.name_mut());
-                    })
-                    .response
-                    .on_hover_ui(|ui| {
-                        ui.label(format!("{}", brush.id()));
-
-                        //Smol optimization to avoid formatters
-                        let mut buf = uuid::Uuid::encode_buffer();
-                        let uuid = brush.universal_id().as_hyphenated().encode_upper(&mut buf);
-                        ui.label(&uuid[..]);
+        egui::SidePanel::left("Inspector")
+            .resizable(false)
+            .show(&ctx, |ui| {
+                egui::TopBottomPanel::bottom("mem-usage")
+                    .resizable(false)
+                    .show_inside(ui, |ui| {
+                        ui.label("Memory Usage Stats");
+                        let point_resident_usage =
+                            crate::repositories::points::global().resident_usage();
+                        ui.label(format!(
+                            "Point repository: {}/{}",
+                            human_bytes::human_bytes(point_resident_usage.0 as f64),
+                            human_bytes::human_bytes(point_resident_usage.1 as f64),
+                        ));
                     });
-                    egui::CollapsingHeader::new("Settings")
-                        .id_source(brush.id())
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            let mut brush_kind = brush.style().brush_kind();
-
-                            egui::ComboBox::new(brush.id(), "")
-                                .selected_text(brush_kind.as_ref())
-                                .show_ui(ui, |ui| {
-                                    for kind in
-                                        <brush::BrushKind as strum::IntoEnumIterator>::iter()
-                                    {
-                                        ui.selectable_value(&mut brush_kind, kind, kind.as_ref());
-                                    }
-                                });
-
-                            //Changed by user, switch to defaults for the new kind
-                            if brush_kind != brush.style().brush_kind() {
-                                *brush.style_mut() = brush::BrushStyle::default_for(brush_kind);
-                            }
-
-                            match brush.style_mut() {
-                                brush::BrushStyle::Stamped { .. } => {
-                                    let slider = egui::widgets::Slider::new(
-                                        &mut selections.brush_settings.size_mul,
-                                        2.0..=50.0,
-                                    )
-                                    .clamp_to_range(true)
-                                    .logarithmic(true)
-                                    .suffix("px");
-
-                                    ui.add(slider);
-
-                                    let slider2 = egui::widgets::Slider::new(
-                                        &mut selections.brush_settings.spacing_px,
-                                        0.1..=10.0,
-                                    )
-                                    .clamp_to_range(true)
-                                    .logarithmic(true)
-                                    .suffix("px");
-
-                                    ui.add(slider2);
-                                }
-                                brush::BrushStyle::Rolled => {}
-                            }
-                        })
-                });
-            }
-            ui.separator();
-            */
-            ui.label("Memory Usage Stats");
-            let point_resident_usage = crate::repositories::points::global().resident_usage();
-            ui.label(format!(
-                "Point repository: {}/{}",
-                human_bytes::human_bytes(point_resident_usage.0 as f64),
-                human_bytes::human_bytes(point_resident_usage.1 as f64),
-            ));
-        });
+                let mut globals = crate::AdHocGlobals::get().write();
+                if let Some(brush) = globals.as_mut().map(|globals| &mut globals.brush) {
+                    ui.label("Color");
+                    ui.separator();
+                    // Why..
+                    let mut color = egui::Rgba::from_rgba_premultiplied(
+                        brush.color_modulate[0],
+                        brush.color_modulate[1],
+                        brush.color_modulate[2],
+                        brush.color_modulate[3],
+                    );
+                    if egui::color_picker::color_edit_button_rgba(
+                        ui,
+                        &mut color,
+                        egui::color_picker::Alpha::OnlyBlend,
+                    )
+                    .changed()
+                    {
+                        brush.color_modulate = color.to_array();
+                    };
+                    ui.label("Brush");
+                    ui.separator();
+                    ui.add(
+                        egui::Slider::new(&mut brush.spacing_px, 0.25..=10.0)
+                            .text("Spacing")
+                            .suffix("px")
+                            .max_decimals(2)
+                            .clamp_to_range(false),
+                    );
+                    // Prevent negative
+                    brush.spacing_px = brush.spacing_px.max(0.1);
+                    ui.add(
+                        egui::Slider::new(&mut brush.size_mul, brush.spacing_px..=50.0)
+                            .text("Size")
+                            .suffix("px")
+                            .max_decimals(2)
+                            .clamp_to_range(false),
+                    );
+                    // Prevent negative
+                    brush.size_mul = brush.size_mul.max(0.1);
+                }
+            });
 
         egui::TopBottomPanel::top("documents").show(&ctx, |ui| {
             egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -604,6 +680,102 @@ impl MainUI {
     }
 }
 
+fn icon_of_node(node: &crate::state::graph::NodeData) -> &'static str {
+    use crate::state::graph::{LeafType, NodeType};
+    const UNKNOWN: &'static str = "？";
+    match (node.leaf(), node.node()) {
+        // Leaves
+        (Some(LeafType::SolidColor { .. }), None) => FILL_LAYER_ICON,
+        (Some(LeafType::StrokeLayer { .. }), None) => STROKE_LAYER_ICON,
+        (Some(LeafType::Note), None) => NOTE_LAYER_ICON,
+
+        // Groups
+        (None, Some(NodeType::Passthrough | NodeType::GroupedBlend(..))) => GROUP_ICON,
+        // Invalid states
+        (Some(..), Some(..)) | (None, None) => UNKNOWN,
+    }
+}
+mod latch {
+    pub enum Latch {
+        /// The interaction is finished. State will be returned and deleted from persistant memory.
+        Finish,
+        /// The interaction is ongoing. State will not be reported, but will be persisted.
+        Continue,
+        /// The interaction is cancelled or hasn't started. State will not be reported nor persisted.
+        None,
+    }
+    pub struct LatchResponse<'ui, State> {
+        // Needed for cancellation functionality
+        ui: &'ui mut egui::Ui,
+        persisted_id: egui::Id,
+        output: Option<State>,
+    }
+    impl<State: 'static> LatchResponse<'_, State> {
+        /// Stop the interaction, preventing it from reporting Finished in the future.
+        pub fn cancel(self) {
+            // Delete egui's persisted state
+            self.ui
+                .data_mut(|data| data.remove::<State>(self.persisted_id))
+        }
+        /// Get the output. Returns Some only once when the operation has finished.
+        pub fn result(self) -> Option<State> {
+            self.output
+        }
+    }
+    /// Interactible UI component where changes in-progress should be ignored,
+    /// only producing output when the interaction is fully finished.
+    ///
+    /// Takes a closure which inspects the mutable State, modifying it and reporting changes via
+    /// the [Latch] enum. By default, when no interaction is occuring, it should report [Latch::None]
+    pub fn latch<'ui, State, F>(
+        ui: &'ui mut egui::Ui,
+        id_src: impl std::hash::Hash,
+        state: State,
+        f: F,
+    ) -> LatchResponse<'ui, State>
+    where
+        F: FnOnce(&mut egui::Ui, &mut State) -> Latch,
+        // bounds implied by insert_temp
+        State: 'static + Clone + std::any::Any + Send + Sync,
+    {
+        let persisted_id = egui::Id::new(id_src);
+        let mut mutable_state = ui
+            .data(|data| data.get_temp::<State>(persisted_id))
+            .unwrap_or(state);
+        let fn_response = f(ui, &mut mutable_state);
+
+        match fn_response {
+            // Intern the state.
+            Latch::Continue => {
+                ui.data_mut(|data| data.insert_temp::<State>(persisted_id, mutable_state));
+                LatchResponse {
+                    ui,
+                    persisted_id,
+                    output: None,
+                }
+            }
+            // Return the state and clear it
+            Latch::Finish => {
+                ui.data_mut(|data| data.remove::<State>(persisted_id));
+                LatchResponse {
+                    ui,
+                    persisted_id,
+                    output: Some(mutable_state),
+                }
+            }
+            // Nothing to do, clear it if it exists.
+            Latch::None => {
+                ui.data_mut(|data| data.remove::<State>(persisted_id));
+                LatchResponse {
+                    ui,
+                    persisted_id,
+                    output: None,
+                }
+            }
+        }
+    }
+}
+
 /// Inline UI component for changing a non-optional blend. Makes a copy of the blend internally,
 /// only returning a new one on change (skipping partial changes like a dragging slider), returning None otherwise.
 fn ui_layer_blend(
@@ -612,98 +784,20 @@ fn ui_layer_blend(
     blend: crate::blend::Blend,
     disable: bool,
 ) -> Option<crate::blend::Blend> {
-    // Any change occured, even one we wouldn't report.
-    let mut changed = false;
-    // A change occured that's considered "final" - report it!
-    let mut finished = false;
-
-    let persistance_id = egui::Id::new((&id, "blend-state"));
     // Get the persisted blend, or use the caller's blend if none.
-    let mut blend = ui
-        .data_mut(|data| data.get_temp(persistance_id))
-        .unwrap_or(blend);
-    ui.horizontal(|ui| {
-        ui.set_enabled(!disable);
-        changed |= ui
-            .toggle_value(
-                &mut blend.alpha_clip,
-                egui::RichText::new("α").monospace().strong(),
-            )
-            .on_hover_text("Alpha clip")
-            .clicked();
-        finished |= changed;
-
-        // do NOT report "finished" mid-drag, only when it's complete!
-        let response = ui.add(
-            egui::DragValue::new(&mut blend.opacity)
-                .fixed_decimals(2)
-                .speed(0.01)
-                .clamp_range(0.0..=1.0),
-        );
-        changed |= response.dragged();
-        // Bug: This reports a release on every frame when dragged and an egui
-        // modal (eg, the combobox below) is open. wh y
-        finished |= response.drag_released();
-
-        egui::ComboBox::new(id, "")
-            .selected_text(blend.mode.as_ref())
-            .show_ui(ui, |ui| {
-                for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
-                    changed |= ui
-                        .selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref())
-                        .clicked();
-                    finished |= changed;
-                }
-            });
-    });
-    match (changed, finished) {
-        //Changed, and will continue in future frames. Persist the value!
-        (true, false) => {
-            ui.data_mut(|data| data.insert_temp(persistance_id, blend));
-            None
-        }
-        // Finished. State to return is in local
-        // var, not in the egui data repo! Still, clear the repo value.
-        (_, true) => {
-            ui.data_mut(|data| data.remove::<crate::blend::Blend>(persistance_id));
-            Some(blend)
-        }
-        // No change. Clear just in case :3
-        (false, false) => {
-            ui.data_mut(|data| data.remove::<crate::blend::Blend>(persistance_id));
-            None
-        }
-    }
-}
-/// Inline UI component for changing an optional (possibly passthrough) blend. Makes a copy of the blend internally,
-/// only returning a new one on change (skipping partial changes like a dragging slider), returning None otherwise.
-fn ui_passthrough_or_blend(
-    ui: &mut egui::Ui,
-    id: impl std::hash::Hash,
-    blend: Option<crate::blend::Blend>,
-    disable: bool,
-) -> Option<Option<crate::blend::Blend>> {
-    // Any change occured, even one we wouldn't report.
-    let mut changed = false;
-    // A change occured that's considered "final" - report it!
-    let mut finished = false;
-
-    let persistance_id = egui::Id::new((&id, "blend-state"));
-    // Get the persisted blend, or use the caller's blend if none.
-    let mut blend = ui
-        .data_mut(|data| data.get_temp(persistance_id))
-        .unwrap_or(blend);
-    ui.horizontal(|ui| {
-        ui.set_enabled(!disable);
-        if let Some(blend) = blend.as_mut() {
-            changed |= ui
+    latch::latch(ui, (&id, "blend-state"), blend, |ui, blend| {
+        let mut finished = false;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.set_enabled(!disable);
+            finished |= ui
                 .toggle_value(
                     &mut blend.alpha_clip,
                     egui::RichText::new("α").monospace().strong(),
                 )
                 .on_hover_text("Alpha clip")
-                .changed();
-            finished |= changed;
+                .clicked();
+
             // do NOT report "finished" mid-drag, only when it's complete!
             let response = ui.add(
                 egui::DragValue::new(&mut blend.opacity)
@@ -715,52 +809,87 @@ fn ui_passthrough_or_blend(
             // Bug: This reports a release on every frame when dragged and an egui
             // modal (eg, the combobox below) is open. wh y
             finished |= response.drag_released();
-        };
 
-        egui::ComboBox::new(id, "")
-            .selected_text(
-                blend
-                    .map(|blend| blend.mode.as_ref().to_string())
-                    .unwrap_or("Passthrough".to_string()),
-            )
-            .show_ui(ui, |ui| {
+            egui::ComboBox::new(&id, "")
+                .selected_text(blend.mode.as_ref())
+                .show_ui(ui, |ui| {
+                    for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
+                        finished |= ui
+                            .selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref())
+                            .clicked();
+                    }
+                });
+        });
+        match (finished, changed) {
+            (true, _) => latch::Latch::Finish,
+            (false, true) => latch::Latch::Continue,
+            (false, false) => latch::Latch::None,
+        }
+    })
+    .result()
+}
+/// Inline UI component for changing an optional (possibly passthrough) blend. Makes a copy of the blend internally,
+/// only returning a new one on change (skipping partial changes like a dragging slider), returning None otherwise.
+fn ui_passthrough_or_blend(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash,
+    blend: Option<crate::blend::Blend>,
+    disable: bool,
+) -> Option<Option<crate::blend::Blend>> {
+    latch::latch(ui, (&id, "blend-state"), blend, |ui, blend| {
+        let mut finished = false;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.set_enabled(!disable);
+            if let Some(blend) = blend.as_mut() {
                 changed |= ui
-                    .selectable_value(&mut blend, None, "Passthrough")
-                    .clicked();
-                ui.separator();
-                for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
-                    let select_value = Some(crate::blend::Blend {
-                        mode: blend_mode,
-                        // Set the blend to itself with new mode,
-                        // or default fields if blend is None.
-                        ..blend.unwrap_or_default()
-                    });
-                    changed |= ui
-                        .selectable_value(&mut blend, select_value, blend_mode.as_ref())
-                        .clicked();
-                }
-                // All of these changes are considered finishing.
+                    .toggle_value(
+                        &mut blend.alpha_clip,
+                        egui::RichText::new("α").monospace().strong(),
+                    )
+                    .on_hover_text("Alpha clip")
+                    .changed();
                 finished |= changed;
-            });
-    });
-    match (changed, finished) {
-        //Changed, and will continue in future frames. Persist the value!
-        (true, false) => {
-            ui.data_mut(|data| data.insert_temp(persistance_id, blend));
-            None
-        }
-        // Finished. State to return is in local
-        // var, not in the egui data repo! Still, clear the repo value.
-        (_, true) => {
-            ui.data_mut(|data| data.remove::<Option<crate::blend::Blend>>(persistance_id));
-            Some(blend)
-        }
-        // No change. Clear just in case :3
-        (false, false) => {
-            ui.data_mut(|data| data.remove::<Option<crate::blend::Blend>>(persistance_id));
-            None
-        }
-    }
+                // do NOT report "finished" mid-drag, only when it's complete!
+                let response = ui.add(
+                    egui::DragValue::new(&mut blend.opacity)
+                        .fixed_decimals(2)
+                        .speed(0.01)
+                        .clamp_range(0.0..=1.0),
+                );
+                changed |= response.dragged();
+                // Bug: This reports a release on every frame when dragged and an egui
+                // modal (eg, the combobox below) is open. wh y
+                finished |= response.drag_released();
+            };
+
+            egui::ComboBox::new(&id, "")
+                .selected_text(
+                    blend
+                        .map(|blend| blend.mode.as_ref().to_string())
+                        .unwrap_or("Passthrough".to_string()),
+                )
+                .show_ui(ui, |ui| {
+                    changed |= ui.selectable_value(blend, None, "Passthrough").clicked();
+                    ui.separator();
+                    for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
+                        let select_value = Some(crate::blend::Blend {
+                            mode: blend_mode,
+                            // Set the blend to itself with new mode,
+                            // or default fields if blend is None.
+                            ..blend.unwrap_or_default()
+                        });
+                        changed |= ui
+                            .selectable_value(blend, select_value, blend_mode.as_ref())
+                            .clicked();
+                    }
+                    // All of these changes are considered finishing.
+                    finished |= changed;
+                });
+        });
+        todo!()
+    })
+    .result()
 }
 fn graph_edit_recurse<
     // Well that's.... not great...
@@ -792,15 +921,7 @@ fn graph_edit_recurse<
             let icon = if Some(id) == *yanked_node {
                 SCISSOR_ICON
             } else {
-                if let Some(leaf) = data.leaf() {
-                    match leaf {
-                        crate::state::graph::LeafType::Note => NOTE_LAYER_ICON,
-                        crate::state::graph::LeafType::StrokeLayer { .. } => STROKE_LAYER_ICON,
-                        crate::state::graph::LeafType::SolidColor { .. } => FILL_LAYER_ICON,
-                    }
-                } else {
-                    GROUP_ICON
-                }
+                icon_of_node(data)
             };
             // Selection radio button + toggle function.
             let is_selected = *selected_node == Some(id);

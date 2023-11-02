@@ -127,20 +127,21 @@ impl GlobalHotkeys {
 
 /// FIXME! This is temp until I can see that everything is working :3
 /// There still needs to be a way to intercommunicate between UI selections, Pen actions, and renderer preview.
-#[derive(Clone, Copy)]
-pub struct Selections {
+#[derive(Clone)]
+pub struct AdHocGlobals {
     pub document: state::DocumentID,
+    pub brush: state::StrokeBrushSettings,
     pub node: Option<state::graph::AnyID>,
 }
-impl Selections {
-    pub fn get() -> &'static parking_lot::RwLock<Option<Selections>> {
-        static ONCE: std::sync::OnceLock<parking_lot::RwLock<Option<Selections>>> =
+impl AdHocGlobals {
+    pub fn get() -> &'static parking_lot::RwLock<Option<AdHocGlobals>> {
+        static ONCE: std::sync::OnceLock<parking_lot::RwLock<Option<AdHocGlobals>>> =
             std::sync::OnceLock::new();
 
         ONCE.get_or_init(|| Default::default())
     }
-    pub fn read_copy() -> Option<Self> {
-        *Self::get().read()
+    pub fn read_clone() -> Option<Self> {
+        Self::get().read().clone()
     }
 }
 
@@ -242,14 +243,6 @@ fn main() -> AnyResult<std::convert::Infallible> {
         log::warn!("Failed to save hotkey config:\n{e:?}");
     };
 
-    let (send, recv) = std::sync::mpsc::channel();
-    let ui = ui::MainUI::new(send);
-    std::thread::spawn(move || {
-        while let Ok(recv) = recv.recv() {
-            log::trace!("UI Message: {recv:?}");
-        }
-    });
-
     // Test image generators.
     //let (image, future) = make_test_image(render_context.clone())?;
     //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("/home/aspen/Pictures/thesharc.png"))?;
@@ -262,7 +255,6 @@ fn main() -> AnyResult<std::convert::Infallible> {
         render_surface,
         render_context.clone(),
         document_view.clone(),
-        ui,
     )?;
 
     let event_stream = window_renderer.stylus_events();

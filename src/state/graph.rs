@@ -120,6 +120,14 @@ impl NodeData {
     pub fn is_node(&self) -> bool {
         self.ty.is_node()
     }
+    /// Take ownership of the node, converting into a leaf. Returns ownership of
+    /// self on failure
+    pub fn into_leaf(self) -> Result<LeafType, Self> {
+        match self.ty {
+            NodeDataTy::Leaf(l) => Ok(l),
+            _ => Err(self),
+        }
+    }
     pub fn leaf(&self) -> Option<&LeafType> {
         if let NodeDataTy::Leaf(l) = &self.ty {
             Some(l)
@@ -132,6 +140,14 @@ impl NodeData {
             Some(l)
         } else {
             None
+        }
+    }
+    /// Take ownership of the node, converting into a node. Returns ownership of
+    /// self on failure
+    pub fn into_node(self) -> Result<NodeType, Self> {
+        match self.ty {
+            NodeDataTy::Node(n) => Ok(n),
+            _ => Err(self),
         }
     }
     pub fn node(&self) -> Option<&NodeType> {
