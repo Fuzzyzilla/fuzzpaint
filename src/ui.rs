@@ -37,8 +37,6 @@ pub struct MainUI {
     cur_document: Option<crate::state::DocumentID>,
 
     requests_send: requests::RequestSender,
-    // Only some during a drag event on the view rotation slider. Not to be used aside from that! :P
-    rotation_drag_value: Option<f32>,
 }
 impl MainUI {
     pub fn new(requests_send: requests::RequestSender) -> Self {
@@ -47,7 +45,6 @@ impl MainUI {
             inlays: vec![],
             documents: vec![],
             cur_document: None,
-            rotation_drag_value: None,
             requests_send,
         }
     }
@@ -191,23 +188,24 @@ impl MainUI {
                         ),
                     });
                 };
-                let mut rotation = self.rotation_drag_value.get_or_insert(0.0);
-                let rotation_response = ui.drag_angle(&mut rotation);
-                if rotation_response.changed() {
-                    let _ = self.requests_send.send(requests::UiRequest::Document {
-                        target: document,
-                        request: requests::DocumentRequest::View(
-                            requests::DocumentViewRequest::SetRotation(
-                                *rotation % std::f32::consts::TAU,
+                latch::latch(ui, (document, "rotation"), 0.0, |ui, rotation| {
+                    let rotation_response = ui.drag_angle(rotation);
+                    if rotation_response.changed() {
+                        let _ = self.requests_send.send(requests::UiRequest::Document {
+                            target: document,
+                            request: requests::DocumentRequest::View(
+                                requests::DocumentViewRequest::SetRotation(
+                                    *rotation % std::f32::consts::TAU,
+                                ),
                             ),
-                        ),
-                    });
-                }
-                // Discard rotation state if we're done interacting.
-                if !rotation_response.dragged() {
-                    self.rotation_drag_value = None;
-                }
-
+                        });
+                    }
+                    if !rotation_response.dragged() {
+                        latch::Latch::None
+                    } else {
+                        latch::Latch::Continue
+                    }
+                });
                 ui.add(egui::Separator::default().vertical());
 
                 // Undo/redo - only show if there is a currently selected layer.
@@ -283,29 +281,51 @@ impl MainUI {
                                     // Nothing to show
                                     LeafType::Note => false,
                                     // Color picker
-                                    LeafType::SolidColor {
-                                        source: [r, g, b, a],
-                                        ..
-                                    } => {
-                                        ui.horizontal(|ui| {
-                                            ui.label("Fill color:");
-                                            let mut rgba =
-                                                egui::Rgba::from_rgba_premultiplied(*r, *g, *b, *a);
-                                            let changed =
-                                                egui::color_picker::color_edit_button_rgba(
+                                    LeafType::SolidColor { source, .. } => {
+                                        let color_latch = ui
+                                            .horizontal(|ui| {
+                                                ui.label("Fill color:");
+                                                // Latch onto fill color, to submit update only when selection is finished.
+                                                latch::latch(
                                                     ui,
-                                                    &mut rgba,
-                                                    // If the user wants Add they should use the blend modes mwuahaha
-                                                    egui::color_picker::Alpha::OnlyBlend,
+                                                    (&interface.graph_selection, "fill-color"),
+                                                    *source,
+                                                    |ui, [r, g, b, a]| {
+                                                        let mut rgba =
+                                                            egui::Rgba::from_rgba_premultiplied(
+                                                                *r, *g, *b, *a,
+                                                            );
+                                                        let response =
+                                                        egui::color_picker::color_edit_button_rgba(
+                                                            ui,
+                                                            &mut rgba,
+                                                            // If the user wants Add they should use the blend modes mwuahaha
+                                                            egui::color_picker::Alpha::OnlyBlend,
+                                                        );
+                                                        *r = rgba.r();
+                                                        *b = rgba.b();
+                                                        *g = rgba.g();
+                                                        *a = rgba.a();
+
+                                                        // None of the response fields for color pickers seem to indicate
+                                                        // a finished interaction TwT
+                                                        if response.drag_released() {
+                                                            latch::Latch::Finish
+                                                        } else {
+                                                            latch::Latch::Continue
+                                                        }
+                                                    },
                                                 )
-                                                .drag_released();
-                                            *r = rgba.r();
-                                            *b = rgba.b();
-                                            *g = rgba.g();
-                                            *a = rgba.a();
-                                            changed
-                                        })
-                                        .inner
+                                                .result()
+                                            })
+                                            .inner;
+
+                                        if let Some(color) = color_latch {
+                                            *source = color;
+                                            true
+                                        } else {
+                                            false
+                                        }
                                     }
                                     LeafType::StrokeLayer { collection, .. } => {
                                         // Nothing interactible, but display some infos
@@ -709,98 +729,20 @@ fn ui_layer_blend(
     blend: crate::blend::Blend,
     disable: bool,
 ) -> Option<crate::blend::Blend> {
-    // Any change occured, even one we wouldn't report.
-    let mut changed = false;
-    // A change occured that's considered "final" - report it!
-    let mut finished = false;
-
-    let persistance_id = egui::Id::new((&id, "blend-state"));
     // Get the persisted blend, or use the caller's blend if none.
-    let mut blend = ui
-        .data_mut(|data| data.get_temp(persistance_id))
-        .unwrap_or(blend);
-    ui.horizontal(|ui| {
-        ui.set_enabled(!disable);
-        changed |= ui
-            .toggle_value(
-                &mut blend.alpha_clip,
-                egui::RichText::new("α").monospace().strong(),
-            )
-            .on_hover_text("Alpha clip")
-            .clicked();
-        finished |= changed;
-
-        // do NOT report "finished" mid-drag, only when it's complete!
-        let response = ui.add(
-            egui::DragValue::new(&mut blend.opacity)
-                .fixed_decimals(2)
-                .speed(0.01)
-                .clamp_range(0.0..=1.0),
-        );
-        changed |= response.dragged();
-        // Bug: This reports a release on every frame when dragged and an egui
-        // modal (eg, the combobox below) is open. wh y
-        finished |= response.drag_released();
-
-        egui::ComboBox::new(id, "")
-            .selected_text(blend.mode.as_ref())
-            .show_ui(ui, |ui| {
-                for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
-                    changed |= ui
-                        .selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref())
-                        .clicked();
-                    finished |= changed;
-                }
-            });
-    });
-    match (changed, finished) {
-        //Changed, and will continue in future frames. Persist the value!
-        (true, false) => {
-            ui.data_mut(|data| data.insert_temp(persistance_id, blend));
-            None
-        }
-        // Finished. State to return is in local
-        // var, not in the egui data repo! Still, clear the repo value.
-        (_, true) => {
-            ui.data_mut(|data| data.remove::<crate::blend::Blend>(persistance_id));
-            Some(blend)
-        }
-        // No change. Clear just in case :3
-        (false, false) => {
-            ui.data_mut(|data| data.remove::<crate::blend::Blend>(persistance_id));
-            None
-        }
-    }
-}
-/// Inline UI component for changing an optional (possibly passthrough) blend. Makes a copy of the blend internally,
-/// only returning a new one on change (skipping partial changes like a dragging slider), returning None otherwise.
-fn ui_passthrough_or_blend(
-    ui: &mut egui::Ui,
-    id: impl std::hash::Hash,
-    blend: Option<crate::blend::Blend>,
-    disable: bool,
-) -> Option<Option<crate::blend::Blend>> {
-    // Any change occured, even one we wouldn't report.
-    let mut changed = false;
-    // A change occured that's considered "final" - report it!
-    let mut finished = false;
-
-    let persistance_id = egui::Id::new((&id, "blend-state"));
-    // Get the persisted blend, or use the caller's blend if none.
-    let mut blend = ui
-        .data_mut(|data| data.get_temp(persistance_id))
-        .unwrap_or(blend);
-    ui.horizontal(|ui| {
-        ui.set_enabled(!disable);
-        if let Some(blend) = blend.as_mut() {
-            changed |= ui
+    latch::latch(ui, (&id, "blend-state"), blend, |ui, blend| {
+        let mut finished = false;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.set_enabled(!disable);
+            finished |= ui
                 .toggle_value(
                     &mut blend.alpha_clip,
                     egui::RichText::new("α").monospace().strong(),
                 )
                 .on_hover_text("Alpha clip")
-                .changed();
-            finished |= changed;
+                .clicked();
+
             // do NOT report "finished" mid-drag, only when it's complete!
             let response = ui.add(
                 egui::DragValue::new(&mut blend.opacity)
@@ -812,52 +754,87 @@ fn ui_passthrough_or_blend(
             // Bug: This reports a release on every frame when dragged and an egui
             // modal (eg, the combobox below) is open. wh y
             finished |= response.drag_released();
-        };
 
-        egui::ComboBox::new(id, "")
-            .selected_text(
-                blend
-                    .map(|blend| blend.mode.as_ref().to_string())
-                    .unwrap_or("Passthrough".to_string()),
-            )
-            .show_ui(ui, |ui| {
+            egui::ComboBox::new(&id, "")
+                .selected_text(blend.mode.as_ref())
+                .show_ui(ui, |ui| {
+                    for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
+                        finished |= ui
+                            .selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref())
+                            .clicked();
+                    }
+                });
+        });
+        match (finished, changed) {
+            (true, _) => latch::Latch::Finish,
+            (false, true) => latch::Latch::Continue,
+            (false, false) => latch::Latch::None,
+        }
+    })
+    .result()
+}
+/// Inline UI component for changing an optional (possibly passthrough) blend. Makes a copy of the blend internally,
+/// only returning a new one on change (skipping partial changes like a dragging slider), returning None otherwise.
+fn ui_passthrough_or_blend(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash,
+    blend: Option<crate::blend::Blend>,
+    disable: bool,
+) -> Option<Option<crate::blend::Blend>> {
+    latch::latch(ui, (&id, "blend-state"), blend, |ui, blend| {
+        let mut finished = false;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.set_enabled(!disable);
+            if let Some(blend) = blend.as_mut() {
                 changed |= ui
-                    .selectable_value(&mut blend, None, "Passthrough")
-                    .clicked();
-                ui.separator();
-                for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
-                    let select_value = Some(crate::blend::Blend {
-                        mode: blend_mode,
-                        // Set the blend to itself with new mode,
-                        // or default fields if blend is None.
-                        ..blend.unwrap_or_default()
-                    });
-                    changed |= ui
-                        .selectable_value(&mut blend, select_value, blend_mode.as_ref())
-                        .clicked();
-                }
-                // All of these changes are considered finishing.
+                    .toggle_value(
+                        &mut blend.alpha_clip,
+                        egui::RichText::new("α").monospace().strong(),
+                    )
+                    .on_hover_text("Alpha clip")
+                    .changed();
                 finished |= changed;
-            });
-    });
-    match (changed, finished) {
-        //Changed, and will continue in future frames. Persist the value!
-        (true, false) => {
-            ui.data_mut(|data| data.insert_temp(persistance_id, blend));
-            None
-        }
-        // Finished. State to return is in local
-        // var, not in the egui data repo! Still, clear the repo value.
-        (_, true) => {
-            ui.data_mut(|data| data.remove::<Option<crate::blend::Blend>>(persistance_id));
-            Some(blend)
-        }
-        // No change. Clear just in case :3
-        (false, false) => {
-            ui.data_mut(|data| data.remove::<Option<crate::blend::Blend>>(persistance_id));
-            None
-        }
-    }
+                // do NOT report "finished" mid-drag, only when it's complete!
+                let response = ui.add(
+                    egui::DragValue::new(&mut blend.opacity)
+                        .fixed_decimals(2)
+                        .speed(0.01)
+                        .clamp_range(0.0..=1.0),
+                );
+                changed |= response.dragged();
+                // Bug: This reports a release on every frame when dragged and an egui
+                // modal (eg, the combobox below) is open. wh y
+                finished |= response.drag_released();
+            };
+
+            egui::ComboBox::new(&id, "")
+                .selected_text(
+                    blend
+                        .map(|blend| blend.mode.as_ref().to_string())
+                        .unwrap_or("Passthrough".to_string()),
+                )
+                .show_ui(ui, |ui| {
+                    changed |= ui.selectable_value(blend, None, "Passthrough").clicked();
+                    ui.separator();
+                    for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
+                        let select_value = Some(crate::blend::Blend {
+                            mode: blend_mode,
+                            // Set the blend to itself with new mode,
+                            // or default fields if blend is None.
+                            ..blend.unwrap_or_default()
+                        });
+                        changed |= ui
+                            .selectable_value(blend, select_value, blend_mode.as_ref())
+                            .clicked();
+                    }
+                    // All of these changes are considered finishing.
+                    finished |= changed;
+                });
+        });
+        todo!()
+    })
+    .result()
 }
 fn graph_edit_recurse<
     // Well that's.... not great...
