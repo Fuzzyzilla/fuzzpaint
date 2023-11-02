@@ -28,10 +28,11 @@ impl super::PenTool for Brush {
         render_output: &mut super::ToolRenderOutput,
     ) {
         // destructure the selections. Otherwise, bail.
-        let Some(crate::Selections {
+        let Some(crate::AdHocGlobals {
             document,
+            brush,
             node: Some(node),
-        }) = crate::Selections::read_copy()
+        }) = crate::AdHocGlobals::read_clone()
         else {
             // Clear and bail.
             self.in_progress_stroke = None;
@@ -45,10 +46,7 @@ impl super::PenTool for Brush {
                     .get_or_insert_with(|| crate::Stroke {
                         brush: crate::state::StrokeBrushSettings {
                             is_eraser: actions.is_action_held(crate::actions::Action::Erase),
-                            brush: crate::brush::todo_brush().id(),
-                            color_modulate: [0.0, 0.0, 0.0, 1.0],
-                            size_mul: 10.0,
-                            spacing_px: 0.5,
+                            ..brush.clone()
                         },
                         points: Vec::new(),
                     });

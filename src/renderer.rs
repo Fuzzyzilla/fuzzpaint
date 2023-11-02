@@ -338,7 +338,7 @@ pub async fn render_worker(
                 // it will see that the document has closed.
                 //renderer.render(&changed)?;
                 // No current doc, skip rendering.
-                let Some(selections) = crate::Selections::read_copy() else {
+                let Some(selections) = crate::AdHocGlobals::read_clone() else {
                     continue;
                 };
                 // Rerender, if requested

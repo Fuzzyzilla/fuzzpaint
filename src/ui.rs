@@ -246,7 +246,7 @@ impl MainUI {
             else {
                 // Not found! Reset cur_document.
                 self.cur_document = None;
-                *crate::Selections::get().write() = None;
+                *crate::AdHocGlobals::get().write() = None;
                 return;
             };
 
@@ -295,7 +295,6 @@ impl MainUI {
                                                             egui::Rgba::from_rgba_premultiplied(
                                                                 *r, *g, *b, *a,
                                                             );
-                                                        let response =
                                                         egui::color_picker::color_edit_button_rgba(
                                                             ui,
                                                             &mut rgba,
@@ -309,7 +308,7 @@ impl MainUI {
 
                                                         // None of the response fields for color pickers seem to indicate
                                                         // a finished interaction TwT
-                                                        if response.drag_released() {
+                                                        if ui.button("Apply").clicked() {
                                                             latch::Latch::Finish
                                                         } else {
                                                             latch::Latch::Continue
@@ -422,7 +421,7 @@ impl MainUI {
                                 .add_leaf(
                                     crate::state::graph::LeafType::SolidColor {
                                         blend: Default::default(),
-                                        source: [0.5, 0.0, 0.0, 0.5],
+                                        source: [1.0; 4],
                                     },
                                     add_location!(),
                                     "Fill".to_string(),
@@ -528,26 +527,46 @@ impl MainUI {
             });
 
             // Update selections.
-            *crate::Selections::get().write() = Some(crate::Selections {
+            let mut globals = crate::AdHocGlobals::get().write();
+            let old_brush = globals.take().map(|globals| globals.brush);
+            *globals = Some(crate::AdHocGlobals {
                 document,
+                brush: old_brush.unwrap_or(crate::state::StrokeBrushSettings {
+                    is_eraser: false,
+                    brush: crate::brush::todo_brush().id(),
+                    color_modulate: [0.0, 0.0, 0.0, 1.0],
+                    size_mul: 10.0,
+                    spacing_px: 0.5,
+                }),
                 node: interface.graph_selection,
             });
         });
 
-        egui::SidePanel::left("Color picker")
+        egui::SidePanel::left("Inspector")
             .resizable(false)
             .show(&ctx, |ui| {
-                /*
-                {
-                    let settings = &mut selections.brush_settings;
+                egui::TopBottomPanel::bottom("mem-usage")
+                    .resizable(false)
+                    .show_inside(ui, |ui| {
+                        ui.label("Memory Usage Stats");
+                        let point_resident_usage =
+                            crate::repositories::points::global().resident_usage();
+                        ui.label(format!(
+                            "Point repository: {}/{}",
+                            human_bytes::human_bytes(point_resident_usage.0 as f64),
+                            human_bytes::human_bytes(point_resident_usage.1 as f64),
+                        ));
+                    });
+                let mut globals = crate::AdHocGlobals::get().write();
+                if let Some(brush) = globals.as_mut().map(|globals| &mut globals.brush) {
                     ui.label("Color");
                     ui.separator();
                     // Why..
                     let mut color = egui::Rgba::from_rgba_premultiplied(
-                        settings.color_modulate[0],
-                        settings.color_modulate[1],
-                        settings.color_modulate[2],
-                        settings.color_modulate[3],
+                        brush.color_modulate[0],
+                        brush.color_modulate[1],
+                        brush.color_modulate[2],
+                        brush.color_modulate[3],
                     );
                     if egui::color_picker::color_edit_button_rgba(
                         ui,
@@ -556,16 +575,29 @@ impl MainUI {
                     )
                     .changed()
                     {
-                        settings.color_modulate = color.to_array();
+                        brush.color_modulate = color.to_array();
                     };
-                }*/
-                ui.label("Memory Usage Stats");
-                let point_resident_usage = crate::repositories::points::global().resident_usage();
-                ui.label(format!(
-                    "Point repository: {}/{}",
-                    human_bytes::human_bytes(point_resident_usage.0 as f64),
-                    human_bytes::human_bytes(point_resident_usage.1 as f64),
-                ));
+                    ui.label("Brush");
+                    ui.separator();
+                    ui.add(
+                        egui::Slider::new(&mut brush.spacing_px, 0.25..=10.0)
+                            .text("Spacing")
+                            .suffix("px")
+                            .max_decimals(2)
+                            .clamp_to_range(false),
+                    );
+                    // Prevent negative
+                    brush.spacing_px = brush.spacing_px.max(0.1);
+                    ui.add(
+                        egui::Slider::new(&mut brush.size_mul, brush.spacing_px..=50.0)
+                            .text("Size")
+                            .suffix("px")
+                            .max_decimals(2)
+                            .clamp_to_range(false),
+                    );
+                    // Prevent negative
+                    brush.size_mul = brush.size_mul.max(0.1);
+                }
             });
 
         egui::TopBottomPanel::top("documents").show(&ctx, |ui| {
