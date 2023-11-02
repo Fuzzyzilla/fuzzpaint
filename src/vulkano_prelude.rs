@@ -1,5 +1,6 @@
 //Traits
 pub use vulkano::{
+    pipeline::graphics::vertex_input::VertexDefinition,
     pipeline::{graphics::vertex_input::Vertex, Pipeline},
     sync::GpuFuture,
 };
@@ -10,16 +11,15 @@ pub mod vk {
     pub use ultraviolet::projection::lh_ydown as projection;
 
     pub use vulkano::{
-        DeviceSize,
         buffer::{
             view::{BufferView, BufferViewCreateInfo},
-            Buffer, BufferContents, BufferCreateInfo, BufferUsage,
-            Subbuffer,
+            Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer,
         },
         command_buffer::{
             allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
             AutoCommandBufferBuilder,
             BufferImageCopy,
+            ClearColorImageInfo,
             CommandBufferUsage,
             //Image ops
             CopyBufferToImageInfo,
@@ -27,11 +27,15 @@ pub mod vk {
             //Renderpass
             RenderPassBeginInfo,
             SecondaryAutoCommandBuffer,
+            SubpassBeginInfo,
             SubpassContents,
-            ClearColorImageInfo,
         },
         descriptor_set::{
-            allocator::StandardDescriptorSetAllocator, layout::DescriptorSetLayout,
+            allocator::StandardDescriptorSetAllocator,
+            layout::{
+                DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo,
+                DescriptorType,
+            },
             PersistentDescriptorSet, WriteDescriptorSet,
         },
         device::{
@@ -41,37 +45,42 @@ pub mod vk {
         },
         format::{ClearValue, Format},
         image::{
+            sampler::{ComponentMapping, ComponentSwizzle, Filter, Sampler, SamplerCreateInfo},
             view::{ImageView, ImageViewCreateInfo},
-            AttachmentImage, ImageCreateFlags, ImageDimensions, ImageUsage, ImmutableImage,
-            StorageImage, SwapchainImage,
-            ImageSubresourceRange, ImageAspects, ImageAccess,
-            SampleCount,
+            Image, ImageAspects, ImageCreateFlags, ImageCreateInfo, ImageSubresourceLayers,
+            ImageSubresourceRange, ImageUsage,
         },
         instance::{Instance, InstanceCreateInfo},
         library::VulkanLibrary,
-        memory::allocator::{AllocationCreateInfo, MemoryUsage, StandardMemoryAllocator},
-        pipeline::{
-            compute::ComputePipeline,
-            graphics::{
-                color_blend::{AttachmentBlend, ColorBlendState},
-                input_assembly::{InputAssemblyState, PrimitiveTopology},
-                rasterization::{CullMode, RasterizationState},
-                vertex_input::Vertex,
-                viewport::{Scissor, Viewport, ViewportState},
-                GraphicsPipeline, GraphicsPipelineBuilder,
-                multisample::MultisampleState,
+        memory::{
+            allocator::{
+                AllocationCreateInfo, MemoryAllocatePreference, MemoryTypeFilter,
+                StandardMemoryAllocator,
             },
-            layout::PipelineLayout,
-            PartialStateMode, StateMode,
+            MemoryPropertyFlags,
+        },
+        pipeline::{
+            compute::{ComputePipeline, ComputePipelineCreateInfo},
+            graphics::{
+                color_blend::{AttachmentBlend, ColorBlendAttachmentState, ColorBlendState},
+                input_assembly::{InputAssemblyState, PrimitiveTopology},
+                multisample::MultisampleState,
+                rasterization::{CullMode, RasterizationState},
+                vertex_input::{Vertex, VertexInputState},
+                viewport::{Scissor, Viewport, ViewportState},
+                GraphicsPipeline, GraphicsPipelineCreateInfo,
+            },
+            layout::{PipelineLayout, PipelineLayoutCreateInfo, PushConstantRange},
+            DynamicState, PipelineShaderStageCreateInfo,
         },
         render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
-        sampler::{ComponentMapping, ComponentSwizzle, Filter, Sampler, SamplerCreateInfo},
+        shader::{ShaderStages, SpecializationConstant},
         swapchain::{
             acquire_next_image, PresentInfo, PresentMode, Surface, SurfaceInfo, Swapchain,
             SwapchainCreateInfo, SwapchainPresentInfo,
         },
         sync,
         sync::{future::NowFuture, Sharing},
-        Version,
+        DeviceSize, Version,
     };
 }

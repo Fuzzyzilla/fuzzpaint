@@ -57,7 +57,6 @@ impl GpuStampTess {
         // Interface consists of two sets. Input with three buffers, output with two.
         let buffer_binding = vulkano::descriptor_set::layout::DescriptorSetLayoutBinding {
             descriptor_count: 1,
-            variable_descriptor_count: false,
             stages: vulkano::shader::ShaderStages::COMPUTE,
             ..vulkano::descriptor_set::layout::DescriptorSetLayoutBinding::descriptor_type(
                 vulkano::descriptor_set::layout::DescriptorType::StorageBuffer,
@@ -73,7 +72,6 @@ impl GpuStampTess {
         let inputs = vulkano::descriptor_set::layout::DescriptorSetLayout::new(
             device.clone(),
             vulkano::descriptor_set::layout::DescriptorSetLayoutCreateInfo {
-                push_descriptor: false,
                 bindings: input_bindings,
                 ..Default::default()
             },
@@ -81,7 +79,6 @@ impl GpuStampTess {
         let outputs = vulkano::descriptor_set::layout::DescriptorSetLayout::new(
             device.clone(),
             vulkano::descriptor_set::layout::DescriptorSetLayoutCreateInfo {
-                push_descriptor: false,
                 bindings: output_bindings,
                 ..Default::default()
             },
@@ -105,12 +102,13 @@ impl GpuStampTess {
         let entry = shader.entry_point("main").unwrap();
         let (layout, input_descriptor, output_descriptor) =
             Self::make_layout(context.device().clone())?;
-        let pipeline = vk::ComputePipeline::with_pipeline_layout(
+        let pipeline = vk::ComputePipeline::new(
             context.device().clone(),
-            entry,
-            &shaders::tessellate::SpecializationConstants::default(),
-            layout.clone(),
             None,
+            vk::ComputePipelineCreateInfo::stage_layout(
+                vk::PipelineShaderStageCreateInfo::new(entry),
+                layout.clone(),
+            ),
         )?;
 
         let properties = context.physical_device().properties();
@@ -154,13 +152,13 @@ impl GpuStampTess {
             anyhow::bail!("Tess invoked on zero points!")
         }
         let packed_points = vk::Buffer::new_slice::<shaders::tessellate::InputStrokeVertex>(
-            self.context.allocators().memory(),
+            self.context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::STORAGE_BUFFER,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Upload,
+                memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
             count,
@@ -207,13 +205,13 @@ impl GpuStampTess {
         let point_repo = crate::repositories::points::global();
 
         let input_infos = vk::Buffer::from_iter(
-            self.context.allocators().memory(),
+            self.context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::STORAGE_BUFFER,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Upload,
+                memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
             strokes.iter().map(|stroke| {
@@ -265,14 +263,14 @@ impl GpuStampTess {
         }
         // One element per workgroup, telling it which info to work on.
         let input_map = vk::Buffer::new_slice::<u32>(
-            self.context.allocators().memory(),
+            self.context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 // Transfer dest for clearing
                 usage: vk::BufferUsage::STORAGE_BUFFER,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Upload,
+                memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
             group_index_counter as u64,
@@ -290,7 +288,7 @@ impl GpuStampTess {
             .for_each(|(map, info_idx)| *map = info_idx);
 
         let output_infos = vk::Buffer::new_slice::<interface::OutputStrokeInfo>(
-            self.context.allocators().memory(),
+            self.context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 // Transfer dest for clearing
                 usage: vk::BufferUsage::STORAGE_BUFFER
@@ -299,19 +297,19 @@ impl GpuStampTess {
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::DeviceOnly,
+                memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
                 ..Default::default()
             },
             strokes.len() as u64,
         )?;
         let output_verts = vk::Buffer::new_slice::<interface::OutputStrokeVertex>(
-            self.context.allocators().memory(),
+            self.context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::STORAGE_BUFFER | vk::BufferUsage::VERTEX_BUFFER,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::DeviceOnly,
+                memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
                 ..Default::default()
             },
             vertex_output_index_counter as u64,
@@ -325,6 +323,7 @@ impl GpuStampTess {
                 vk::WriteDescriptorSet::buffer(1, input_map),
                 vk::WriteDescriptorSet::buffer(2, packed_points),
             ],
+            [],
         )?;
         let output_descriptor = vk::PersistentDescriptorSet::new(
             self.context.allocators().descriptor_set(),
@@ -333,6 +332,7 @@ impl GpuStampTess {
                 vk::WriteDescriptorSet::buffer(0, output_infos.clone()),
                 vk::WriteDescriptorSet::buffer(1, output_verts.clone()),
             ],
+            [],
         )?;
 
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
@@ -342,15 +342,14 @@ impl GpuStampTess {
         )?;
 
         command_buffer
-            // Unwrap ok - Output infos is aligned to u32
-            .fill_buffer(output_infos.clone().try_cast_slice().unwrap(), 0u32)?
-            .bind_pipeline_compute(self.pipeline.clone())
+            .fill_buffer(output_infos.clone().reinterpret(), 0u32)?
+            .bind_pipeline_compute(self.pipeline.clone())?
             .bind_descriptor_sets(
                 vulkano::pipeline::PipelineBindPoint::Compute,
                 self.layout.clone(),
                 0,
                 (input_descriptor, output_descriptor),
-            )
+            )?
             .dispatch([group_index_counter, 1, 1])?;
         let command_buffer = command_buffer.build()?;
 

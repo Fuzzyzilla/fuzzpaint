@@ -34,8 +34,8 @@ impl EguiCtx {
         let mut renderer = EguiRenderer::new(render_surface.context(), render_surface.format())?;
         renderer.gen_framebuffers(&render_surface)?;
 
-        let mut state = egui_winit::State::new(window);
-        state.set_pixels_per_point(egui_winit::native_pixels_per_point(window));
+        let mut state = egui_winit::State::new(&window);
+        //state.set_pixels_per_point(egui_winit::native_pixels_per_point(window));
         let properties = render_surface.context().physical_device().properties();
         let max_size = properties.max_image_dimension2_d;
         state.set_max_texture_side(max_size as usize);
@@ -54,21 +54,24 @@ impl EguiCtx {
     pub fn replace_surface(&mut self, surface: &RenderSurface) -> anyhow::Result<()> {
         self.renderer.gen_framebuffers(surface)
     }
-    pub fn push_winit_event<'e>(
+    pub fn push_winit_event(
         &mut self,
-        winit_event: &winit::event::WindowEvent<'e>,
+        winit_event: &winit::event::WindowEvent,
     ) -> egui_winit::EventResponse {
+        /*
         let response = self.state.on_event(&self.ctx, winit_event);
         if response.repaint {
             self.redraw_requested = true;
         }
-        response
+        response*/
+        todo!()
     }
     pub fn update(
         &'_ mut self,
         window: &winit::window::Window,
         f: impl FnOnce(&'_ egui::Context) -> (),
     ) {
+        /*
         //Call into user code to draw
         self.ctx.begin_frame(self.state.take_egui_input(window));
         f(&self.ctx);
@@ -91,7 +94,8 @@ impl EguiCtx {
         self.state
             .handle_platform_output(window, &self.ctx, output.platform_output.clone());
         //return platform outputs
-        self.full_output = Some(output);
+        self.full_output = Some(output);*/
+        todo!()
     }
     pub fn needs_redraw(&self) -> bool {
         self.redraw_requested
@@ -100,8 +104,8 @@ impl EguiCtx {
         &mut self,
         swapchain_idx: u32,
     ) -> Option<(
-        Option<vk::PrimaryAutoCommandBuffer>,
-        vk::PrimaryAutoCommandBuffer,
+        Option<Arc<vk::PrimaryAutoCommandBuffer>>,
+        Arc<vk::PrimaryAutoCommandBuffer>,
     )> {
         self.redraw_requested = false;
 
@@ -211,7 +215,7 @@ impl From<egui::epaint::Vertex> for EguiVertex {
     }
 }
 struct EguiTexture {
-    image: Arc<vk::StorageImage>,
+    image: Arc<vk::Image>,
 
     descriptor_set: Arc<vk::PersistentDescriptorSet>,
 }
@@ -234,15 +238,48 @@ impl EguiRenderer {
             device.clone(),
             attachments : {
                 swapchain_color : {
-                    load: Load,
-                    store: Store,
                     format: surface_format,
                     samples: 1,
+                    load_op: Load,
+                    store_op: Store,
                 },
             },
             pass: {
                 color: [swapchain_color],
                 depth_stencil: {},
+            },
+        )?;
+
+        let matrix_push_constant = vk::PushConstantRange {
+            offset: 0,
+            stages: vk::ShaderStages::VERTEX,
+            size: std::mem::size_of::<vs::Matrix>() as u32,
+        };
+        let image_sampler_layout = vk::DescriptorSetLayout::new(
+            render_context.device().clone(),
+            vk::DescriptorSetLayoutCreateInfo {
+                bindings: [(
+                    0,
+                    vk::DescriptorSetLayoutBinding {
+                        descriptor_count: 1,
+                        stages: vk::ShaderStages::FRAGMENT,
+                        ..vk::DescriptorSetLayoutBinding::descriptor_type(
+                            vk::DescriptorType::CombinedImageSampler,
+                        )
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )?;
+
+        let layout = vk::PipelineLayout::new(
+            render_context.device().clone(),
+            vk::PipelineLayoutCreateInfo {
+                push_constant_ranges: vec![matrix_push_constant],
+                set_layouts: vec![image_sampler_layout],
+                ..Default::default()
             },
         )?;
 
@@ -252,38 +289,53 @@ impl EguiRenderer {
         let fragment_entry = fragment.entry_point("main").unwrap();
         let vertex_entry = vertex.entry_point("main").unwrap();
 
-        let mut blend_premul = vk::ColorBlendState::new(1);
-        blend_premul.attachments[0].blend = Some(vk::AttachmentBlend {
-            alpha_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-            color_source: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
-            alpha_destination:
-                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-            color_destination:
-                vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
-            alpha_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-            color_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
-        });
+        let fragment_stage = vk::PipelineShaderStageCreateInfo::new(fragment_entry);
+        let vertex_stage = vk::PipelineShaderStageCreateInfo::new(vertex_entry.clone());
 
-        let pipeline = vk::GraphicsPipeline::start()
-            .vertex_shader(vertex_entry, vs::SpecializationConstants::default())
-            .fragment_shader(fragment_entry, fs::SpecializationConstants::default())
-            .vertex_input_state(EguiVertex::per_vertex())
-            .render_pass(vk::Subpass::from(renderpass.clone(), 0).unwrap())
-            .rasterization_state(vk::RasterizationState {
-                cull_mode: vk::StateMode::Fixed(vk::CullMode::None),
+        let premul = {
+            let premul = vk::AttachmentBlend {
+                src_alpha_blend_factor: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+                src_color_blend_factor: vulkano::pipeline::graphics::color_blend::BlendFactor::One,
+                dst_alpha_blend_factor:
+                    vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+                dst_color_blend_factor:
+                    vulkano::pipeline::graphics::color_blend::BlendFactor::OneMinusSrcAlpha,
+                alpha_blend_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+                color_blend_op: vulkano::pipeline::graphics::color_blend::BlendOp::Add,
+            };
+            let blend_states = vk::ColorBlendAttachmentState {
+                blend: Some(premul),
                 ..Default::default()
-            })
-            .input_assembly_state(vk::InputAssemblyState {
-                topology: vk::PartialStateMode::Fixed(vk::PrimitiveTopology::TriangleList),
-                primitive_restart_enable: vk::StateMode::Fixed(false),
-            })
-            .color_blend_state(blend_premul)
-            .viewport_state(vk::ViewportState::Dynamic {
-                count: 1,
-                viewport_count_dynamic: false,
-                scissor_count_dynamic: false,
-            })
-            .build(render_context.device().clone())?;
+            };
+            vk::ColorBlendState::with_attachment_states(1, blend_states)
+        };
+
+        let pipeline = vk::GraphicsPipeline::new(
+            render_context.device().clone(),
+            None,
+            vk::GraphicsPipelineCreateInfo {
+                color_blend_state: Some(premul),
+                input_assembly_state: Some(vk::InputAssemblyState {
+                    topology: vk::PrimitiveTopology::TriangleList,
+                    primitive_restart_enable: false,
+                    ..Default::default()
+                }),
+                multisample_state: Some(Default::default()),
+                rasterization_state: Some(vk::RasterizationState {
+                    cull_mode: vk::CullMode::None,
+                    ..Default::default()
+                }),
+                vertex_input_state: Some(
+                    EguiVertex::per_vertex().definition(&vertex_entry.info().input_interface)?,
+                ),
+                // One viewport and scissor, scissor irrelevant and viewport dynamic
+                viewport_state: Some(Default::default()),
+                dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
+                subpass: Some(renderpass.clone().first_subpass().into()),
+                stages: smallvec::smallvec![vertex_stage, fragment_stage,],
+                ..vk::GraphicsPipelineCreateInfo::layout(layout)
+            },
+        )?;
 
         Ok(Self {
             remove_next_frame: Vec::new(),
@@ -323,7 +375,7 @@ impl EguiRenderer {
         &self,
         present_img_index: u32,
         tesselated_geom: &[egui::epaint::ClippedPrimitive],
-    ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
+    ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
         let mut vert_buff_size = 0;
         let mut index_buff_size = 0;
         for clipped in tesselated_geom {
@@ -358,25 +410,25 @@ impl EguiRenderer {
             }
         }
         let vertices = vk::Buffer::from_iter(
-            self.render_context.allocators().memory(),
+            self.render_context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::VERTEX_BUFFER,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Upload,
+                memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
             vertex_vec,
         )?;
         let indices = vk::Buffer::from_iter(
-            self.render_context.allocators().memory(),
+            self.render_context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::INDEX_BUFFER,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Upload,
+                memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
             index_vec,
@@ -411,26 +463,26 @@ impl EguiRenderer {
                     clear_values: vec![None],
                     ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
                 },
-                vk::SubpassContents::Inline,
+                Default::default(),
             )?
-            .bind_pipeline_graphics(self.pipeline.clone())
-            .bind_vertex_buffers(0, [vertices])
-            .bind_index_buffer(indices)
+            .bind_pipeline_graphics(self.pipeline.clone())?
+            .bind_vertex_buffers(0, [vertices])?
+            .bind_index_buffer(indices)?
             .set_viewport(
                 0,
-                [vk::Viewport {
-                    depth_range: 0.0..1.0,
-                    dimensions: framebuffer.extent().map(|dim| dim as f32),
-                    origin: [0.0; 2],
+                smallvec::smallvec![vk::Viewport {
+                    depth_range: 0.0..=1.0,
+                    extent: framebuffer.extent().map(|dim| dim as f32),
+                    offset: [0.0; 2],
                 }],
-            )
+            )?
             .push_constants(
                 pipeline_layout.clone(),
                 0,
                 vs::Matrix {
                     ortho: matrix.into(),
                 },
-            );
+            )?;
 
         let mut start_vertex_buffer_offset: usize = 0;
         let mut start_index_buffer_offset: usize = 0;
@@ -438,14 +490,14 @@ impl EguiRenderer {
         for clipped in tesselated_geom {
             if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
                 // *Technically* it wants a float scissor rect. But.. oh well
-                let origin = clipped.clip_rect.left_top();
-                let origin = [origin.x.max(0.0) as u32, origin.y.max(0.0) as u32];
+                let offset = clipped.clip_rect.left_top();
+                let offset = [offset.x.max(0.0) as u32, offset.y.max(0.0) as u32];
 
-                let dimensions = clipped.clip_rect.size();
-                let dimensions = [dimensions.x as u32, dimensions.y as u32];
+                let extent = clipped.clip_rect.size();
+                let extent = [extent.x as u32, extent.y as u32];
 
                 command_buffer_builder
-                    .set_scissor(0, [vk::Scissor { origin, dimensions }])
+                    .set_scissor(0, smallvec::smallvec![vk::Scissor { offset, extent }])?
                     //Maybe there's a better way than rebinding every draw.
                     //shaderSampledImageArrayDynamicIndexing perhaps?
                     .bind_descriptor_sets(
@@ -457,7 +509,7 @@ impl EguiRenderer {
                             .expect("Egui draw requested non-existent texture")
                             .descriptor_set
                             .clone(),
-                    )
+                    )?
                     .draw_indexed(
                         mesh.indices.len() as u32,
                         1,
@@ -470,7 +522,7 @@ impl EguiRenderer {
             }
         }
 
-        command_buffer_builder.end_render_pass()?;
+        command_buffer_builder.end_render_pass(Default::default())?;
         let command_buffer = command_buffer_builder.build()?;
 
         Ok(command_buffer)
@@ -496,7 +548,7 @@ impl EguiRenderer {
     pub fn do_image_deltas(
         &mut self,
         deltas: egui::TexturesDelta,
-    ) -> Option<anyhow::Result<vk::PrimaryAutoCommandBuffer>> {
+    ) -> Option<anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>>> {
         // Deltas order of operations:
         // Set -> Draw -> Free
 
@@ -518,7 +570,7 @@ impl EguiRenderer {
     fn do_image_deltas_set(
         &mut self,
         deltas: egui::TexturesDelta,
-    ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
+    ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
         //Free is handled by do_image_deltas
 
         //Pre-allocate on the heap so we don't end up re-allocating a bunch as we populate
@@ -538,7 +590,7 @@ impl EguiRenderer {
                     data_vec.extend_from_slice(bytemuck::cast_slice(&data.pixels[..]));
                 }
                 egui::ImageData::Font(data) => {
-                    //Convert f32 image to u8 norm image
+                    //Convert f32 image to u8 unorm image
                     data_vec.extend(
                         data.pixels
                             .iter()
@@ -548,17 +600,15 @@ impl EguiRenderer {
             }
         }
 
-        //This is  dumb. Why can't i use the data directly? It's a slice of [u8]. Maybe (hopefully) it optimizes out?
-        //TODO: Maybe mnually implement unsafe trait BufferContents to allow this without byte-by-byte iterator copying.
         let staging_buffer = vk::Buffer::from_iter(
-            self.render_context.allocators().memory(),
+            self.render_context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 sharing: vk::Sharing::Exclusive,
                 usage: vk::BufferUsage::TRANSFER_SRC,
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                usage: vk::MemoryUsage::Upload,
+                memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
             data_vec.into_iter(),
@@ -583,25 +633,27 @@ impl EguiRenderer {
                         egui::ImageData::Color(_) => vk::Format::R8G8B8A8_UNORM,
                         egui::ImageData::Font(_) => vk::Format::R8_UNORM,
                     };
-                    let dimensions = {
-                        let mut dimensions = delta.pos.unwrap_or([0, 0]);
-                        dimensions[0] += delta.image.width();
-                        dimensions[1] += delta.image.height();
+                    let extent = {
+                        let mut extent = delta.pos.unwrap_or([0, 0]);
+                        extent[0] += delta.image.width();
+                        extent[1] += delta.image.height();
 
-                        vk::ImageDimensions::Dim2d {
-                            width: dimensions[0] as u32,
-                            height: dimensions[1] as u32,
-                            array_layers: 1,
-                        }
+                        [extent[0] as u32, extent[1] as u32, 1]
                     };
-                    let image = vk::StorageImage::with_usage(
-                        self.render_context.allocators().memory(),
-                        dimensions,
-                        format,
-                        //We will not be using this StorageImage for storage :P
-                        vk::ImageUsage::TRANSFER_DST | vk::ImageUsage::SAMPLED,
-                        vk::ImageCreateFlags::empty(),
-                        std::iter::empty(), //A puzzling difference in API from buffers - this just means Exclusive access.
+                    let image = vk::Image::new(
+                        self.render_context.allocators().memory().clone(),
+                        vk::ImageCreateInfo {
+                            array_layers: 1,
+                            format,
+                            extent,
+                            usage: vk::ImageUsage::TRANSFER_DST | vk::ImageUsage::SAMPLED,
+                            sharing: vk::Sharing::Exclusive,
+                            ..Default::default()
+                        },
+                        vk::AllocationCreateInfo {
+                            memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
+                            ..Default::default()
+                        },
                     )?;
 
                     let egui_to_vk_filter =
@@ -649,6 +701,7 @@ impl EguiRenderer {
                             view.clone(),
                             sampler.clone(),
                         )],
+                        [],
                     )?;
                     Ok(vacant
                         .insert(EguiTexture {
@@ -671,25 +724,30 @@ impl EguiRenderer {
             let start_offset = current_base_offset as u64;
             current_base_offset += size;
 
-            //The only way to get a struct of this is to call this method -
-            //we need to redo many of the fields however.
-            let transfer_info =
-                vk::CopyBufferToImageInfo::buffer_image(staging_buffer.clone(), image);
-
             let transfer_offset = delta.pos.unwrap_or([0, 0]);
 
-            command_buffer.copy_buffer_to_image(vk::CopyBufferToImageInfo {
-                //Update regions according to delta
-                regions: smallvec::smallvec![vk::BufferImageCopy {
-                    buffer_offset: start_offset,
-                    image_offset: [transfer_offset[0] as u32, transfer_offset[1] as u32, 0],
-                    buffer_image_height: delta.image.height() as u32,
-                    buffer_row_length: delta.image.width() as u32,
-                    image_extent: [delta.image.width() as u32, delta.image.height() as u32, 1],
-                    ..transfer_info.regions[0].clone()
-                }],
-                ..transfer_info
-            })?;
+            //Update regions according to delta
+            let region = vk::BufferImageCopy {
+                buffer_offset: start_offset,
+
+                image_offset: [transfer_offset[0] as u32, transfer_offset[1] as u32, 0],
+                buffer_image_height: delta.image.height() as u32,
+                buffer_row_length: delta.image.width() as u32,
+                image_extent: [delta.image.width() as u32, delta.image.height() as u32, 1],
+                image_subresource: vk::ImageSubresourceLayers {
+                    array_layers: 0..1,
+                    aspects: vk::ImageAspects::COLOR,
+                    mip_level: 0,
+                },
+                ..Default::default()
+            };
+
+            let transfer_info = vk::CopyBufferToImageInfo {
+                regions: smallvec::smallvec![region],
+                ..vk::CopyBufferToImageInfo::buffer_image(staging_buffer.clone(), image)
+            };
+
+            command_buffer.copy_buffer_to_image(transfer_info)?;
         }
 
         Ok(command_buffer.build()?)

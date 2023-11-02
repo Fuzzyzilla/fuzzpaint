@@ -84,7 +84,7 @@ impl super::StrokeTessellator for RayonTessellator {
     ) -> std::result::Result<(), TessellationError> {
         let mut vertices_into = match vertices_into.write() {
             Ok(o) => o,
-            Err(e) => return Err(TessellationError::BufferError(e)),
+            Err(e) => return Err(TessellationError::Anyhow(e.into())),
         };
 
         for stroke in strokes.iter() {

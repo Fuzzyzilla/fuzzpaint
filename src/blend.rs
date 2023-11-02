@@ -44,24 +44,6 @@ mod shaders {
         pub x: u32,
         pub y: u32,
     }
-    // Safety: They all share the same source which unconditionally defines two constants:
-    // workgroup size x@0, workgroup size y@1. This is explicitly checked in debug builds
-    unsafe impl vulkano::shader::SpecializationConstants for WorkgroupSizeConstants {
-        fn descriptors() -> &'static [vulkano::shader::SpecializationMapEntry] {
-            &[
-                vulkano::shader::SpecializationMapEntry {
-                    constant_id: 0,
-                    offset: 0,
-                    size: 4,
-                },
-                vulkano::shader::SpecializationMapEntry {
-                    constant_id: 1,
-                    offset: 4,
-                    size: 4,
-                },
-            ]
-        }
-    }
     /// The push constants to customize blending. Corresponds to fields in super::Blend.
     /// Every blend shader must accept this struct format!
     // Noteably, NOT AnyBitPattern nor Pod, bool32 has invalid states
@@ -122,8 +104,6 @@ mod shaders {
     }
 }
 
-use vulkano::image::ImageAccess;
-
 use crate::vk;
 pub struct BlendEngine {
     workgroup_size: (u32, u32),
@@ -137,42 +117,27 @@ impl BlendEngine {
         device: Arc<vk::Device>,
         layout: Arc<vk::PipelineLayout>,
         size: shaders::WorkgroupSizeConstants,
-        entry_point: vulkano::shader::EntryPoint,
+        entry_point: Arc<vulkano::shader::ShaderModule>,
     ) -> anyhow::Result<Arc<vk::ComputePipeline>> {
-        // Ensure that the unsafe assumptions of WorkgroupSizeConstants matches reality.
-        // As well as making sure that push constant layouts are correct.
-        #[cfg(debug_assertions)]
-        {
-            use vulkano::shader::SpecializationConstantRequirements as Req;
-            let mut constants = entry_point.specialization_constant_requirements();
-            debug_assert!(matches!(
-                constants.next(),
-                Some((1, Req { size: 4 })) | Some((0, Req { size: 4 }))
-            ));
-            debug_assert!(matches!(
-                constants.next(),
-                Some((1, Req { size: 4 })) | Some((0, Req { size: 4 }))
-            ));
-            debug_assert!(matches!(constants.next(), None));
-
-            // Ensure that push constants are acceptable
-            let mut push = entry_point.push_constant_requirements().map(|&v| v);
-            debug_assert_eq!(
-                push,
-                Some(vulkano::pipeline::layout::PushConstantRange {
-                    stages: vulkano::shader::ShaderStages::COMPUTE,
-                    offset: 0,
-                    size: 24, // Blend: (f32 + bool32), Rect:(u32 * 4)
-                })
+        let mut specialization =
+            ahash::HashMap::<u32, vk::SpecializationConstant>::with_capacity_and_hasher(
+                2,
+                Default::default(),
             );
-        };
-
-        let pipeline = vk::ComputePipeline::with_pipeline_layout(
-            device.clone(),
-            entry_point,
-            &size,
-            layout,
-            None, // Cache would be ideal here, todo!
+        specialization.insert(0, size.x.into());
+        specialization.insert(1, size.y.into());
+        let pipeline = vk::ComputePipeline::new(
+            device,
+            None,
+            vk::ComputePipelineCreateInfo::stage_layout(
+                vulkano::pipeline::PipelineShaderStageCreateInfo::new(
+                    entry_point
+                        .specialize(specialization)?
+                        .entry_point("main")
+                        .ok_or_else(|| anyhow::anyhow!("Entry point not found"))?,
+                ),
+                layout,
+            ),
         )?;
         Ok(pipeline)
     }
@@ -208,7 +173,6 @@ impl BlendEngine {
             0,
             vulkano::descriptor_set::layout::DescriptorSetLayoutBinding {
                 descriptor_count: 1,
-                variable_descriptor_count: false,
                 immutable_samplers: Default::default(),
                 stages: vulkano::shader::ShaderStages::COMPUTE,
                 ..vulkano::descriptor_set::layout::DescriptorSetLayoutBinding::descriptor_type(
@@ -222,7 +186,6 @@ impl BlendEngine {
             device.clone(),
             vulkano::descriptor_set::layout::DescriptorSetLayoutCreateInfo {
                 bindings: input_image_bindings,
-                push_descriptor: false,
                 ..Default::default()
             },
         )?;
@@ -230,7 +193,6 @@ impl BlendEngine {
             device.clone(),
             vulkano::descriptor_set::layout::DescriptorSetLayoutCreateInfo {
                 bindings: output_image_bindings,
-                push_descriptor: false,
                 ..Default::default()
             },
         )?;
@@ -263,11 +225,7 @@ impl BlendEngine {
                         device.clone(),
                         shader_layout.clone(),
                         size,
-                        shaders::$namespace::load(device.clone())?
-                            .entry_point("main")
-                            // Unwrap ok here, GLSL only allows "main" as entry point name.
-                            // No main = compile time failure!
-                            .unwrap(),
+                        shaders::$namespace::load(device.clone())?,
                     )?,
                 );
                 assert!(
@@ -298,12 +256,12 @@ impl BlendEngine {
     pub fn blend(
         &self,
         context: &crate::render_device::RenderContext,
-        background: Arc<vk::ImageView<vk::StorageImage>>,
+        background: Arc<vk::ImageView>,
         clear_background: bool,
-        layers: &[(Blend, Arc<vk::ImageView<vk::StorageImage>>)],
+        layers: &[(Blend, Arc<vk::ImageView>)],
         origin: [u32; 2],
         extent: [u32; 2],
-    ) -> anyhow::Result<vk::PrimaryAutoCommandBuffer> {
+    ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
         let mut commands = vk::AutoCommandBufferBuilder::primary(
             context.allocators().command_buffer(),
             context.queues().compute().idx(),
@@ -311,7 +269,6 @@ impl BlendEngine {
         )?;
 
         if clear_background {
-            use vulkano::image::ImageViewAbstract;
             commands.clear_color_image(vk::ClearColorImageInfo {
                 clear_value: [0.0; 4].into(),
                 regions: smallvec::smallvec![background.subresource_range().clone(),],
@@ -327,10 +284,10 @@ impl BlendEngine {
 
         // Compute the number of workgroups to dispatch for a given image
         // Or, None if the number of workgroups exceeds the maximum the device supports.
-        let output_size = background.image().dimensions();
-        let get_dispatch_size = |dimensions: vk::ImageDimensions| -> Option<[u32; 3]> {
-            let x = dimensions.width().min(output_size.width());
-            let y = dimensions.height().min(output_size.height());
+        let output_size = background.image().extent();
+        let get_dispatch_size = |dimensions: [u32; 3]| -> Option<[u32; 3]> {
+            let x = dimensions[0].min(output_size[0]);
+            let y = dimensions[1].min(output_size[1]);
             if x > self.max_image_size.0 || y > self.max_image_size.1 {
                 None
             } else {
@@ -346,13 +303,14 @@ impl BlendEngine {
             context.allocators().descriptor_set(),
             self.shader_layout.set_layouts()[shaders::OUTPUT_IMAGE_SET as usize].clone(),
             [vk::WriteDescriptorSet::image_view(0, background.clone())],
+            [],
         )?;
         commands.bind_descriptor_sets(
             vulkano::pipeline::PipelineBindPoint::Compute,
             self.shader_layout.clone(),
             shaders::OUTPUT_IMAGE_SET,
             vec![output_set],
-        );
+        )?;
 
         let mut last_mode = None;
         let mut last_blend_settings = None;
@@ -378,7 +336,7 @@ impl BlendEngine {
             // I believe push constants should remain across compatible pipeline binds
             let constants = shaders::BlendConstants::new(*opacity, *alpha_clip);
             if Some(constants) != last_blend_settings {
-                commands.push_constants(self.shader_layout.clone(), 0, constants);
+                commands.push_constants(self.shader_layout.clone(), 0, constants)?;
                 last_blend_settings = Some(constants);
             }
 
@@ -386,6 +344,7 @@ impl BlendEngine {
                 context.allocators().descriptor_set(),
                 self.shader_layout.set_layouts()[shaders::INPUT_IMAGE_SET as usize].clone(),
                 [vk::WriteDescriptorSet::image_view(0, image.clone())],
+                [],
             )?;
             commands
                 .bind_descriptor_sets(
@@ -393,9 +352,9 @@ impl BlendEngine {
                     self.shader_layout.clone(),
                     shaders::INPUT_IMAGE_SET,
                     vec![input_set],
-                )
+                )?
                 .dispatch(
-                    get_dispatch_size(image.image().dimensions())
+                    get_dispatch_size(image.image().extent())
                         .ok_or_else(|| anyhow::anyhow!("Image too large to blend!"))?,
                 )?;
         }

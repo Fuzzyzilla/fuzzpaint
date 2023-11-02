@@ -13,7 +13,7 @@ impl WindowSurface {
     pub fn new() -> AnyResult<Self> {
         const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
-        let event_loop = winit::event_loop::EventLoopBuilder::default().build();
+        let event_loop = winit::event_loop::EventLoopBuilder::default().build()?;
         let win = winit::window::WindowBuilder::default()
             .with_title(format!("Fuzzpaint v{}", VERSION.unwrap_or("[unknown]")))
             .with_min_inner_size(winit::dpi::LogicalSize::new(500u32, 500u32))
@@ -27,6 +27,9 @@ impl WindowSurface {
     }
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
+    }
+    pub fn event_loop(&self) -> &winit::event_loop::EventLoop<()> {
+        &self.event_loop
     }
     pub fn with_render_surface(
         self,
@@ -139,12 +142,12 @@ impl WindowRenderer {
             }
         }
     }
-    pub fn run(mut self) -> ! {
+    pub fn run(mut self) -> Result<(), winit::error::EventLoopError> {
         //There WILL be an event loop if we got here
         let event_loop = self.event_loop.take().unwrap();
         self.window().request_redraw();
 
-        event_loop.run(move |event, _, control_flow| {
+        event_loop.run(move |event, target| {
             use winit::event::{Event, WindowEvent};
             match event {
                 Event::WindowEvent { event, .. } => {
@@ -154,7 +157,7 @@ impl WindowRenderer {
                     }
                     match event {
                         WindowEvent::CloseRequested => {
-                            *control_flow = winit::event_loop::ControlFlow::Exit;
+                            target.exit();
                             return;
                         }
                         WindowEvent::Resized(..) => {
@@ -181,6 +184,11 @@ impl WindowRenderer {
                                 self.stylus_events.set_mouse_pressed(false)
                             }
                         }
+                        WindowEvent::RedrawRequested => {
+                            if let Err(e) = self.paint() {
+                                log::error!("{e:?}")
+                            };
+                        }
                         _ => (),
                     }
                 }
@@ -199,30 +207,22 @@ impl WindowRenderer {
                     // 4 -> Tilt Y, degrees from vertical, + towards user
                     // 5 -> unknown, always zero (rotation?)
                 }
-                Event::MainEventsCleared => {
-                    //Draw!
+                Event::AboutToWait => {
+                    // run UI logics
                     self.do_ui();
                     self.apply_document_cursor();
 
+                    // Request draw if either the UI or document want it
                     if self.egui_ctx.needs_redraw() || self.preview_renderer.has_update() {
                         self.window().request_redraw()
                     }
 
+                    // End frame
                     self.stylus_events.finish();
-                }
-                Event::RedrawRequested(..) => {
-                    if let Err(e) = self.paint() {
-                        log::error!("{e:?}")
-                    };
-                }
-                Event::RedrawEventsCleared => {
-                    *control_flow = winit::event_loop::ControlFlow::WaitUntil(
-                        std::time::Instant::now() + std::time::Duration::from_secs(2),
-                    );
                 }
                 _ => (),
             }
-        });
+        })
     }
     fn do_ui(&mut self) {
         let mut viewport = Default::default();
@@ -236,7 +236,7 @@ impl WindowRenderer {
     fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =
             match vk::acquire_next_image(self.render_surface().swapchain().clone(), None) {
-                Err(vulkano::swapchain::AcquireError::OutOfDate) => {
+                Err(vulkano::Validated::Error(vulkano::VulkanError::OutOfDate)) => {
                     log::info!("Swapchain unusable. Recreating");
                     //We cannot draw on this surface as-is. Recreate and request another try next frame.
                     //TODO: Race condition, somehow! Surface is recreated with an out-of-date size.
@@ -250,7 +250,12 @@ impl WindowRenderer {
                 }
                 Ok(r) => r,
             };
-
+        // After we present, recreate if suboptimal.
+        defer::defer(|| {
+            if suboptimal {
+                self.recreate_surface().unwrap()
+            }
+        });
         let commands = self.egui_ctx.build_commands(idx);
 
         //Wait for previous frame to end. (required for safety of preview render proxy)
@@ -339,10 +344,6 @@ impl WindowRenderer {
             .then_signal_fence_and_flush()?;
 
         self.last_frame_fence = Some(next_frame_future);
-
-        if suboptimal {
-            self.recreate_surface()?
-        }
 
         Ok(())
     }

@@ -3,7 +3,7 @@ use super::hotkeys::HotkeyShadow;
 pub struct WinitKeyboardActionCollector {
     /// Maps keys to the number of times they are shadowed.
     current_hotkeys: std::collections::HashMap<super::hotkeys::KeyboardHotkey, usize>,
-    currently_pressed: std::collections::HashSet<winit::event::VirtualKeyCode>,
+    currently_pressed: std::collections::HashSet<winit::keyboard::KeyCode>,
     ctrl: bool,
     shift: bool,
     alt: bool,
@@ -27,19 +27,19 @@ impl WinitKeyboardActionCollector {
 
         use winit::event::WindowEvent;
         match event {
-            WindowEvent::KeyboardInput { input, .. } => {
-                let Some(key) = input.virtual_keycode else {
+            WindowEvent::KeyboardInput { event, .. } => {
+                let winit::keyboard::PhysicalKey::Code(code) = event.physical_key else {
                     return;
                 };
 
-                let was_pressed = self.currently_pressed.contains(&key);
-                let is_pressed = input.state == winit::event::ElementState::Pressed;
+                let was_pressed = self.currently_pressed.contains(&code);
+                let is_pressed = event.state.is_pressed();
 
                 // Update currently_pressed set accordingly:
                 if is_pressed && !was_pressed {
-                    self.currently_pressed.insert(key);
+                    self.currently_pressed.insert(code);
                 } else if !is_pressed {
-                    self.currently_pressed.remove(&key);
+                    self.currently_pressed.remove(&code);
                 }
 
                 // Depending on the status of ctrl, shift, and alt, this key
@@ -65,7 +65,7 @@ impl WinitKeyboardActionCollector {
                             }
                         };
                         super::hotkeys::KeyboardHotkey {
-                            key,
+                            key: code,
                             alt: consume(alt),
                             shift: consume(shift),
                             ctrl: consume(ctrl),
@@ -94,9 +94,10 @@ impl WinitKeyboardActionCollector {
                 self.cull();
             }
             WindowEvent::ModifiersChanged(m) => {
-                self.alt = m.alt();
-                self.ctrl = m.ctrl();
-                self.shift = m.shift();
+                let state = m.state();
+                self.alt = state.alt_key();
+                self.ctrl = state.control_key();
+                self.shift = state.shift_key();
                 // Original plan:
                 // For every held key, re-evaluate their meaning w.r.t new
                 // modifiers.

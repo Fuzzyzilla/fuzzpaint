@@ -219,7 +219,7 @@ async fn stylus_event_collector(
 
 //If we return, it was due to an error.
 //convert::Infallible is a quite ironic name for this useage, isn't it? :P
-fn main() -> AnyResult<std::convert::Infallible> {
+fn main() -> AnyResult<()> {
     #[cfg(feature = "dhat_heap")]
     let _profiler = {
         log::trace!("Installed dhat");
@@ -308,5 +308,5 @@ fn main() -> AnyResult<std::convert::Infallible> {
         }
     });
 
-    window_renderer.run();
+    window_renderer.run().map_err(Into::into)
 }
