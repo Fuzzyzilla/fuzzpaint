@@ -208,6 +208,9 @@ impl WindowRenderer {
 
                     // End frame
                     self.stylus_events.finish();
+                    // Wait. We'll be notified when to redraw UI, but the document preview could assert
+                    // an update at any time! Thus, we must poll. U_U
+                    control_flow.set_wait_timeout(std::time::Duration::from_millis(50));
                 }
                 _ => (),
             }
