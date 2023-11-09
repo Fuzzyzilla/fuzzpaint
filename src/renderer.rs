@@ -143,30 +143,31 @@ impl Renderer {
         // Collect nodes renders
         let mut semaphores =
             Vec::<vk::sync::future::SemaphoreSignalFuture<Box<dyn GpuFuture>>>::new();
-        let mut blend_infos = Vec::new();
 
-        for (node_id, node_data) in state.graph().iter_top_level() {
-            match (node_data.leaf(), node_data.node()) {
-                // Render solid color image:
-                (Some(crate::state::graph::LeafType::SolidColor { source, blend }), None) => {
-                    let image = document_data.graph_render_data
-                        .get(&node_id)
-                        .ok_or_else(|| anyhow::anyhow!("Expected image to be created by allocate_prune_graph for {node_id:?}"))?;
+        // Walk the tree in arbitrary order, rendering all as needed and collecting their futures.
+        for (id, data) in state.graph().iter() {
+            use crate::state::graph::LeafType;
+            match data.leaf() {
+                Some(LeafType::SolidColor { source, .. }) => {
+                    let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Expected image to be created by allocate_prune_graph for {id:?}"
+                        )
+                    })?;
                     // Fill image, store semaphore.
                     semaphores.push(Self::render_color(context.as_ref(), image, *source)?);
-                    blend_infos.push((*blend, image.view.clone()));
                 }
                 // Render stroke image
-                (Some(crate::state::graph::LeafType::StrokeLayer { collection, blend }), None) => {
-                    let image = document_data.graph_render_data
-                        .get(&node_id)
-                        .ok_or_else(|| anyhow::anyhow!("Expected image to be created by allocate_prune_graph for {node_id:?}"))?;
+                Some(LeafType::StrokeLayer { collection, .. }) => {
+                    let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Expected image to be created by allocate_prune_graph for {id:?}"
+                        )
+                    })?;
                     let strokes = state.stroke_collections().get(*collection).ok_or_else(|| {
                         anyhow::anyhow!("Missing stroke collection {collection:?}")
                     })?;
                     let strokes: Vec<_> = strokes.iter_active().collect();
-                    // Todo: strokes.strokes shouldn't be public x3
-                    // and the renderer should respect stroke deletion state.
                     if strokes.is_empty() {
                         //FIXME: Renderer doesn't know how to handle zero strokes.
                         semaphores.push(Self::render_color(
@@ -177,16 +178,241 @@ impl Renderer {
                     } else {
                         semaphores.push(renderer.draw(strokes.as_ref(), image, true)?);
                     }
-                    blend_infos.push((*blend, image.view.clone()));
                 }
-                // Groups todo lol
-                (None, Some(..)) => unimplemented!(),
-                // impossible states :V
-                (None, None) | (Some(..), Some(..)) => unreachable!(),
-                // No other types have render work to do
-                _ => (),
+                Some(LeafType::Note) => (),
+                None => (),
             }
         }
+
+        /// Recursively add children into existing blend builder.
+        fn blend_for_passthrough(
+            blend_engine: &crate::blend::BlendEngine,
+            builder: &mut crate::blend::BlendInvocationBuilder,
+            document_data: &PerDocumentData,
+            graph: &crate::state::graph::BlendGraph,
+            node: crate::state::graph::NodeID,
+        ) -> anyhow::Result<()> {
+            let mut iter = graph
+                .iter_node(&node)
+                .ok_or_else(|| anyhow::anyhow!("Passthrough node not found"))?;
+            for (id, data) in iter {
+                match (data.leaf(), data.node()) {
+                    // Pre-rendered leaves
+                    (
+                        Some(
+                            crate::state::graph::LeafType::SolidColor { blend, .. }
+                            | crate::state::graph::LeafType::StrokeLayer { blend, .. },
+                        ),
+                        None,
+                    ) => {
+                        let view = document_data
+                            .graph_render_data
+                            .get(&id)
+                            .unwrap()
+                            .view
+                            .clone();
+                        builder
+                            .then_blend(crate::blend::BlendImageSource::Immediate(view), *blend)?;
+                    }
+                    (Some(crate::state::graph::LeafType::Note), None) => (),
+                    // Passthrough - add children directly without grouped blend
+                    (None, Some(crate::state::graph::NodeType::Passthrough)) => {
+                        blend_for_passthrough(
+                            blend_engine,
+                            builder,
+                            document_data,
+                            graph,
+                            id.try_into().unwrap(),
+                        )?;
+                    }
+                    // Grouped blend - add children to a new blend worker.
+                    (None, Some(crate::state::graph::NodeType::GroupedBlend(blend))) => {
+                        let handle = blend_for_node(
+                            blend_engine,
+                            document_data,
+                            graph,
+                            id.try_into().unwrap(),
+                            document_data
+                                .graph_render_data
+                                .get(&id)
+                                .unwrap()
+                                .view
+                                .clone(),
+                            true,
+                        )?;
+                        builder.then_blend(handle.into(), *blend)?;
+                    }
+                    // Invalid states
+                    (Some(_), Some(_)) | (None, None) => unreachable!(),
+                }
+            }
+            Ok(())
+        }
+
+        /// Recursively build a blend invocation for the node, or None for root.
+        fn blend_for_node(
+            blend_engine: &crate::blend::BlendEngine,
+            document_data: &PerDocumentData,
+            graph: &crate::state::graph::BlendGraph,
+            node: crate::state::graph::NodeID,
+
+            into_image: Arc<vk::ImageView>,
+            clear_image: bool,
+        ) -> anyhow::Result<crate::blend::BlendInvocationHandle> {
+            use crate::state::graph::{AnyID, NodeData};
+            // // Funny static disbatch type to handle different iters for top level vs. children
+            // enum EitherIter<
+            //     'a,
+            //     A: Iterator<Item = (AnyID, &'a NodeData)> + 'a,
+            //     B: Iterator<Item = (AnyID, &'a NodeData)> + 'a,
+            // > {
+            //     A(A),
+            //     B(B),
+            // }
+            // impl<
+            //         'a,
+            //         A: Iterator<Item = (AnyID, &'a NodeData)> + 'a,
+            //         B: Iterator<Item = (AnyID, &'a NodeData)> + 'a,
+            //     > Iterator for EitherIter<'a, A, B>
+            // {
+            //     type Item = (AnyID, &'a NodeData);
+            //     fn next(&mut self) -> Option<Self::Item> {
+            //         match self {
+            //             Self::A(a) => a.next(),
+            //             Self::B(b) => b.next(),
+            //         }
+            //     }
+            // }
+
+            // Iterate the top level if no node, otherwise iter the children of the given node.
+            // let mut iter = if let Some(node) = node.as_ref() {
+            //     EitherIter::A(
+            //         graph
+            //             .iter_node(node)
+            //             .ok_or_else(|| anyhow::anyhow!("Node not found"))?,
+            //     )
+            // } else {
+            //     EitherIter::B(graph.iter_top_level())
+            // };
+            let mut iter = graph
+                .iter_node(&node)
+                .ok_or_else(|| anyhow::anyhow!("Node not found"))?;
+            let mut builder = blend_engine.start(into_image, clear_image);
+
+            for (id, data) in iter {
+                match (data.leaf(), data.node()) {
+                    // Pre-rendered leaves
+                    (
+                        Some(
+                            crate::state::graph::LeafType::SolidColor { blend, .. }
+                            | crate::state::graph::LeafType::StrokeLayer { blend, .. },
+                        ),
+                        None,
+                    ) => {
+                        let view = document_data
+                            .graph_render_data
+                            .get(&id)
+                            .unwrap()
+                            .view
+                            .clone();
+                        builder
+                            .then_blend(crate::blend::BlendImageSource::Immediate(view), *blend)?;
+                    }
+                    (Some(crate::state::graph::LeafType::Note), None) => (),
+                    // Passthrough - add children directly without grouped blend
+                    (None, Some(crate::state::graph::NodeType::Passthrough)) => {
+                        blend_for_passthrough(
+                            blend_engine,
+                            &mut builder,
+                            document_data,
+                            graph,
+                            id.try_into().unwrap(),
+                        )?;
+                    }
+                    // Grouped blend - add children to a new blend worker.
+                    (None, Some(crate::state::graph::NodeType::GroupedBlend(blend))) => {
+                        let handle = blend_for_node(
+                            blend_engine,
+                            document_data,
+                            graph,
+                            id.try_into().unwrap(),
+                            document_data
+                                .graph_render_data
+                                .get(&id)
+                                .unwrap()
+                                .view
+                                .clone(),
+                            true,
+                        )?;
+                        builder.then_blend(handle.into(), *blend)?;
+                    }
+                    // Invalid states
+                    (Some(_), Some(_)) | (None, None) => unreachable!(),
+                }
+            }
+
+            // We traverse top-down, we need to blend bottom-up
+            builder.reverse();
+            Ok(builder.build())
+        };
+
+        let mut top_level_blend = blend_engine.start(into, true);
+        let graph = state.graph();
+        // Walk the tree in tree-order, building up a blend operation.
+        for (id, data) in graph.iter_top_level() {
+            match (data.leaf(), data.node()) {
+                // Pre-rendered leaves
+                (
+                    Some(
+                        crate::state::graph::LeafType::SolidColor { blend, .. }
+                        | crate::state::graph::LeafType::StrokeLayer { blend, .. },
+                    ),
+                    None,
+                ) => {
+                    let view = document_data
+                        .graph_render_data
+                        .get(&id)
+                        .unwrap()
+                        .view
+                        .clone();
+                    top_level_blend
+                        .then_blend(crate::blend::BlendImageSource::Immediate(view), *blend)?;
+                }
+                (Some(crate::state::graph::LeafType::Note), None) => (),
+                // Passthrough - add children directly without grouped blend
+                (None, Some(crate::state::graph::NodeType::Passthrough)) => {
+                    blend_for_passthrough(
+                        blend_engine,
+                        &mut top_level_blend,
+                        &document_data,
+                        graph,
+                        id.try_into().unwrap(),
+                    )?;
+                }
+                // Grouped blend - add children to a new blend worker.
+                (None, Some(crate::state::graph::NodeType::GroupedBlend(blend))) => {
+                    let handle = blend_for_node(
+                        blend_engine,
+                        &document_data,
+                        graph,
+                        id.try_into().unwrap(),
+                        document_data
+                            .graph_render_data
+                            .get(&id)
+                            .unwrap()
+                            .view
+                            .clone(),
+                        true,
+                    )?;
+                    top_level_blend.then_blend(handle.into(), *blend)?;
+                }
+                // Invalid states
+                (Some(_), Some(_)) | (None, None) => unreachable!(),
+            }
+        }
+        // We traverse top-down, we need to blend bottom-up
+        top_level_blend.reverse();
+        let top_level_blend = top_level_blend.build();
         // At this point, every layer with render data is rendering in the background, signaling the items in `semaphores`
         // Fold them all into a single semaphore future, or None if there is no rendering happenening.
         let composite = if let Some(front) = semaphores.pop() {
@@ -202,14 +428,24 @@ impl Renderer {
             None
         };
 
-        // Build blend tree
-        todo!();
-
         // Host wait for all semaphores to finish.
         // Dirty dirty!
         if let Some(composite) = composite {
-            composite.then_signal_fence_and_flush()?.wait(None)?;
+            composite.flush()?;
+            // Waa
+            // wait for stall. Fence wait deadlocks.
+            drop(composite)
         };
+
+        // Execute blend
+        blend_engine
+            .submit(
+                context.as_ref(),
+                vk::sync::now(context.device().clone()).boxed(),
+                top_level_blend,
+            )?
+            .then_signal_fence_and_flush()?
+            .wait(None)?;
 
         Ok(())
     }

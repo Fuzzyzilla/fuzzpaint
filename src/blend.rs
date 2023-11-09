@@ -190,14 +190,13 @@ pub enum ImageSourceError {
     #[error("the source image aliases the background image")]
     AlisesBackground,
 }
-pub struct BlendInvocationBuilder<'engine> {
-    engine: &'engine mut BlendEngine,
+pub struct BlendInvocationBuilder {
     clear_destination: bool,
     destination_image: Arc<vk::ImageView>,
     // Top of list = first operation.
     operations: Vec<(BlendImageSource, Blend)>,
 }
-impl BlendInvocationBuilder<'_> {
+impl BlendInvocationBuilder {
     /// Blend the given image onto the cumulative results of all previous blend operations.
     pub fn then_blend(
         &mut self,
@@ -210,6 +209,11 @@ impl BlendInvocationBuilder<'_> {
             self.operations.push((image, mode));
             Ok(())
         }
+    }
+    /// Reverse the order of the blend operations. The background will remain the background.
+    /// Handles are treated as one blend unit, and their contents are not reversed in this operation.
+    pub fn reverse(&mut self) {
+        self.operations.reverse()
     }
     /// Build the invocation. This handle can be used in other blend invocations as a source,
     /// or it may be provided to [BlendEngine::submit] to begin device execution of the blend operation.
@@ -373,13 +377,12 @@ impl BlendEngine {
     }
     /// Begin a blend operation with the engine.
     /// The destination image must be available at the time of calling `submit`.
-    pub fn start<'engine>(
-        &'engine mut self,
+    pub fn start(
+        &self,
         destination_image: Arc<vk::ImageView>,
         clear_destination: bool,
-    ) -> BlendInvocationBuilder<'engine> {
+    ) -> BlendInvocationBuilder {
         BlendInvocationBuilder {
-            engine: self,
             clear_destination,
             destination_image,
             operations: Default::default(),

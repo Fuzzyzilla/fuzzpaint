@@ -44,9 +44,27 @@ impl From<LeafID> for AnyID {
         Self::Leaf(value)
     }
 }
+impl TryFrom<AnyID> for LeafID {
+    type Error = ();
+    fn try_from(value: AnyID) -> Result<Self, Self::Error> {
+        match value {
+            AnyID::Leaf(l) => Ok(l),
+            AnyID::Node(_) => Err(()),
+        }
+    }
+}
 impl From<NodeID> for AnyID {
     fn from(value: NodeID) -> Self {
         Self::Node(value)
+    }
+}
+impl TryFrom<AnyID> for NodeID {
+    type Error = ();
+    fn try_from(value: AnyID) -> Result<Self, Self::Error> {
+        match value {
+            AnyID::Leaf(_) => Err(()),
+            AnyID::Node(n) => Ok(n),
+        }
     }
 }
 impl AnyID {
