@@ -396,9 +396,8 @@ impl BlendEngine {
     pub fn submit(
         &self,
         context: &crate::render_device::RenderContext,
-        mut after: Box<dyn GpuFuture>,
         handle: BlendInvocationHandle,
-    ) -> anyhow::Result<impl GpuFuture> {
+    ) -> anyhow::Result<()> {
         // Per the vulkan specification, operations that result in binary semaphore signals
         // must be submitted prior to the operations that wait on those semaphores.
         // Thus, we must traverse the blend tree from the bottom-up.
@@ -448,9 +447,17 @@ impl BlendEngine {
             // After all of these, the next iteration can proceed following a semaphore.
             // continue thusly until all is consumed, then return that future!
 
-            let mut chunks = buffers.chunks(3);
+            let mut chunks = buffers.into_iter();
+            let after = chunks.try_fold(
+                vk::sync::now(context.device().clone()).boxed(),
+                |after, buffer| -> anyhow::Result<_> {
+                    Ok(after
+                        .then_execute(context.queues().compute().queue().clone(), buffer)?
+                        .boxed())
+                },
+            )?;
             // Execute in batches of three to minimize boxing overhead :V
-            after = chunks.try_fold(after, |after, buffers| -> anyhow::Result<_> {
+            /*{
                 match buffers {
                     // Execute A full chunk, then box.
                     [a, b, c] => Ok(after
@@ -469,12 +476,12 @@ impl BlendEngine {
                     // chunks invariant
                     _ => unreachable!(),
                 }
-            })?;
-
+            }*/
             // Signal semaphore for next pass.
-            after = after.then_signal_semaphore().boxed();
+            after.then_signal_fence_and_flush()?.wait(None)?;
         }
-        Ok(after)
+
+        Ok(())
     }
     /// Layers will be blended, from front to back of the slice, into a mutable background.
     /// `background` must not be aliased by any image view of `layers` (will it panic or error?)
