@@ -4,7 +4,6 @@
 //! and groups forming upper levels. Leaves are not allowed to have children.
 
 pub mod commands;
-pub mod rendering;
 mod stable_id;
 pub mod writer;
 // Re-export the various public ids

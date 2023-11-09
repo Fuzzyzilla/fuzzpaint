@@ -202,23 +202,14 @@ impl Renderer {
             None
         };
 
-        // Build blend commands
-        blend_infos.reverse();
-        let blend_commands =
-            blend_engine.blend(&context, into, true, &blend_infos[..], [0; 2], [0; 2])?;
+        // Build blend tree
+        todo!();
 
-        // After all the semaphores finish, execute the blend and signal a fence.
-        // Or, if no sempahores, execute immediately. (It will just be a clear.)
-        let fence = if let Some(composite) = composite {
-            composite.boxed()
-        } else {
-            vk::sync::now(context.device().clone()).boxed()
-        }
-        .then_execute(context.queues().compute().queue().clone(), blend_commands)?
-        .then_signal_fence_and_flush()?;
-
-        // Oof
-        fence.wait(None)?;
+        // Host wait for all semaphores to finish.
+        // Dirty dirty!
+        if let Some(composite) = composite {
+            composite.then_signal_fence_and_flush()?.wait(None)?;
+        };
 
         Ok(())
     }
