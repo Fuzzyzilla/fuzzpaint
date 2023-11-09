@@ -887,7 +887,12 @@ fn ui_passthrough_or_blend(
                     finished |= changed;
                 });
         });
-        todo!()
+
+        match (finished, changed) {
+            (true, _) => latch::Latch::Finish,
+            (false, true) => latch::Latch::Continue,
+            (false, false) => latch::Latch::None,
+        }
     })
     .result()
 }

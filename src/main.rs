@@ -260,45 +260,52 @@ fn main() -> AnyResult<std::convert::Infallible> {
     let event_stream = window_renderer.stylus_events();
     let action_listener = window_renderer.action_listener();
 
-    std::thread::spawn(move || {
-        #[cfg(feature = "dhat_heap")]
-        // Keep alive. Winit takes ownership of main, and will never
-        // drop this unless we steal it.
-        let _profiler = _profiler;
+    std::thread::Builder::new()
+        .name("Stylus+Render worker".to_owned())
+        .spawn(move || {
+            #[cfg(feature = "dhat_heap")]
+            // Keep alive. Winit takes ownership of main, and will never
+            // drop this unless we steal it.
+            let _profiler = _profiler;
 
-        let result: Result<((), ()), anyhow::Error> = 'block: {
-            let mut tools = match pen_tools::ToolState::new_from_renderer(&render_context) {
-                Ok(tools) => tools,
-                Err(e) => break 'block Err(e),
+            let result: Result<((), ()), anyhow::Error> = 'block: {
+                let mut tools = match pen_tools::ToolState::new_from_renderer(&render_context) {
+                    Ok(tools) => tools,
+                    Err(e) => break 'block Err(e),
+                };
+                // We don't expect this channel to get very large, but it's important
+                // that messages don't get lost under any circumstance, lest an expensive
+                // document rebuild be needed :P
+                let (render_sender, render_reciever) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap();
+                // between current_thread runtime and try_join, these tasks are
+                // not actually run in parallel, just interleaved. This is preferable
+                // for now, just a note for future self UwU
+                runtime.block_on(async {
+                    tokio::try_join!(
+                        renderer::render_worker(
+                            render_context,
+                            document_view.clone(),
+                            render_reciever,
+                        ),
+                        stylus_event_collector(
+                            event_stream,
+                            action_listener,
+                            tools,
+                            document_view,
+                            render_sender,
+                        ),
+                    )
+                })
             };
-            // We don't expect this channel to get very large, but it's important
-            // that messages don't get lost under any circumstance, lest an expensive
-            // document rebuild be needed :P
-            let (render_sender, render_reciever) = tokio::sync::mpsc::unbounded_channel::<()>();
-
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap();
-            // between current_thread runtime and try_join, these tasks are
-            // not actually run in parallel, just interleaved. This is preferable
-            // for now, just a note for future self UwU
-            runtime.block_on(async {
-                tokio::try_join!(
-                    renderer::render_worker(render_context, document_view.clone(), render_reciever,),
-                    stylus_event_collector(
-                        event_stream,
-                        action_listener,
-                        tools,
-                        document_view,
-                        render_sender,
-                    ),
-                )
-            })
-        };
-        if let Err(e) = result {
-            log::error!("Helper task exited with err, runtime terminated:\n{e:?}")
-        }
-    });
+            if let Err(e) = result {
+                log::error!("Helper task exited with err, runtime terminated:\n{e:?}")
+            }
+        })
+        .unwrap();
 
     window_renderer.run()
 }
