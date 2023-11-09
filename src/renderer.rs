@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::vulkano_prelude::*;
+use crate::{state::graph, vulkano_prelude::*};
 
 type AnySemaphoreFuture = vk::sync::future::SemaphoreSignalFuture<Box<dyn GpuFuture>>;
 
@@ -183,6 +183,64 @@ impl Renderer {
             }
         }
 
+        /// Insert a single node (possibly recursing) into the builder.
+        fn insert_blend(
+            blend_engine: &crate::blend::BlendEngine,
+            builder: &mut crate::blend::BlendInvocationBuilder,
+            document_data: &PerDocumentData,
+            graph: &crate::state::graph::BlendGraph,
+
+            id: crate::state::graph::AnyID,
+            data: &crate::state::graph::NodeData,
+        ) -> anyhow::Result<()> {
+            match (data.leaf(), data.node()) {
+                // Pre-rendered leaves
+                (
+                    Some(LeafType::SolidColor { blend, .. } | LeafType::StrokeLayer { blend, .. }),
+                    None,
+                ) => {
+                    let view = document_data
+                        .graph_render_data
+                        .get(&id)
+                        .unwrap()
+                        .view
+                        .clone();
+                    builder.then_blend(crate::blend::BlendImageSource::Immediate(view), *blend)?;
+                }
+                (Some(LeafType::Note), None) => (),
+                // Passthrough - add children directly without grouped blend
+                (None, Some(NodeType::Passthrough)) => {
+                    blend_for_passthrough(
+                        blend_engine,
+                        builder,
+                        document_data,
+                        graph,
+                        id.try_into().unwrap(),
+                    )?;
+                }
+                // Grouped blend - add children to a new blend worker.
+                (None, Some(NodeType::GroupedBlend(blend))) => {
+                    let handle = blend_for_node(
+                        blend_engine,
+                        document_data,
+                        graph,
+                        id.try_into().unwrap(),
+                        document_data
+                            .graph_render_data
+                            .get(&id)
+                            .unwrap()
+                            .view
+                            .clone(),
+                        true,
+                    )?;
+                    builder.then_blend(handle.into(), *blend)?;
+                }
+                // Invalid states
+                (Some(_), Some(_)) | (None, None) => unreachable!(),
+            }
+            Ok(())
+        }
+
         /// Recursively add children into existing blend builder.
         fn blend_for_passthrough(
             blend_engine: &crate::blend::BlendEngine,
@@ -195,55 +253,7 @@ impl Renderer {
                 .iter_node(&node)
                 .ok_or_else(|| anyhow::anyhow!("Passthrough node not found"))?;
             for (id, data) in iter {
-                match (data.leaf(), data.node()) {
-                    // Pre-rendered leaves
-                    (
-                        Some(
-                            LeafType::SolidColor { blend, .. }
-                            | LeafType::StrokeLayer { blend, .. },
-                        ),
-                        None,
-                    ) => {
-                        let view = document_data
-                            .graph_render_data
-                            .get(&id)
-                            .unwrap()
-                            .view
-                            .clone();
-                        builder
-                            .then_blend(crate::blend::BlendImageSource::Immediate(view), *blend)?;
-                    }
-                    (Some(LeafType::Note), None) => (),
-                    // Passthrough - add children directly without grouped blend
-                    (None, Some(NodeType::Passthrough)) => {
-                        blend_for_passthrough(
-                            blend_engine,
-                            builder,
-                            document_data,
-                            graph,
-                            id.try_into().unwrap(),
-                        )?;
-                    }
-                    // Grouped blend - add children to a new blend worker.
-                    (None, Some(NodeType::GroupedBlend(blend))) => {
-                        let handle = blend_for_node(
-                            blend_engine,
-                            document_data,
-                            graph,
-                            id.try_into().unwrap(),
-                            document_data
-                                .graph_render_data
-                                .get(&id)
-                                .unwrap()
-                                .view
-                                .clone(),
-                            true,
-                        )?;
-                        builder.then_blend(handle.into(), *blend)?;
-                    }
-                    // Invalid states
-                    (Some(_), Some(_)) | (None, None) => unreachable!(),
-                }
+                insert_blend(blend_engine, builder, document_data, graph, id, data)?;
             }
             Ok(())
         }
@@ -264,55 +274,7 @@ impl Renderer {
             let mut builder = blend_engine.start(into_image, clear_image);
 
             for (id, data) in iter {
-                match (data.leaf(), data.node()) {
-                    // Pre-rendered leaves
-                    (
-                        Some(
-                            LeafType::SolidColor { blend, .. }
-                            | LeafType::StrokeLayer { blend, .. },
-                        ),
-                        None,
-                    ) => {
-                        let view = document_data
-                            .graph_render_data
-                            .get(&id)
-                            .unwrap()
-                            .view
-                            .clone();
-                        builder
-                            .then_blend(crate::blend::BlendImageSource::Immediate(view), *blend)?;
-                    }
-                    (Some(LeafType::Note), None) => (),
-                    // Passthrough - add children directly without grouped blend
-                    (None, Some(NodeType::Passthrough)) => {
-                        blend_for_passthrough(
-                            blend_engine,
-                            &mut builder,
-                            document_data,
-                            graph,
-                            id.try_into().unwrap(),
-                        )?;
-                    }
-                    // Grouped blend - add children to a new blend worker.
-                    (None, Some(NodeType::GroupedBlend(blend))) => {
-                        let handle = blend_for_node(
-                            blend_engine,
-                            document_data,
-                            graph,
-                            id.try_into().unwrap(),
-                            document_data
-                                .graph_render_data
-                                .get(&id)
-                                .unwrap()
-                                .view
-                                .clone(),
-                            true,
-                        )?;
-                        builder.then_blend(handle.into(), *blend)?;
-                    }
-                    // Invalid states
-                    (Some(_), Some(_)) | (None, None) => unreachable!(),
-                }
+                insert_blend(blend_engine, &mut builder, document_data, graph, id, data)?;
             }
 
             // We traverse top-down, we need to blend bottom-up
@@ -324,52 +286,14 @@ impl Renderer {
         let graph = state.graph();
         // Walk the tree in tree-order, building up a blend operation.
         for (id, data) in graph.iter_top_level() {
-            match (data.leaf(), data.node()) {
-                // Pre-rendered leaves
-                (
-                    Some(LeafType::SolidColor { blend, .. } | LeafType::StrokeLayer { blend, .. }),
-                    None,
-                ) => {
-                    let view = document_data
-                        .graph_render_data
-                        .get(&id)
-                        .unwrap()
-                        .view
-                        .clone();
-                    top_level_blend
-                        .then_blend(crate::blend::BlendImageSource::Immediate(view), *blend)?;
-                }
-                (Some(LeafType::Note), None) => (),
-                // Passthrough - add children directly without grouped blend
-                (None, Some(NodeType::Passthrough)) => {
-                    blend_for_passthrough(
-                        blend_engine,
-                        &mut top_level_blend,
-                        &document_data,
-                        graph,
-                        id.try_into().unwrap(),
-                    )?;
-                }
-                // Grouped blend - add children to a new blend worker.
-                (None, Some(NodeType::GroupedBlend(blend))) => {
-                    let handle = blend_for_node(
-                        blend_engine,
-                        &document_data,
-                        graph,
-                        id.try_into().unwrap(),
-                        document_data
-                            .graph_render_data
-                            .get(&id)
-                            .unwrap()
-                            .view
-                            .clone(),
-                        true,
-                    )?;
-                    top_level_blend.then_blend(handle.into(), *blend)?;
-                }
-                // Invalid states
-                (Some(_), Some(_)) | (None, None) => unreachable!(),
-            }
+            insert_blend(
+                blend_engine,
+                &mut top_level_blend,
+                document_data,
+                graph,
+                id,
+                data,
+            )?;
         }
         // We traverse top-down, we need to blend bottom-up
         top_level_blend.reverse();
