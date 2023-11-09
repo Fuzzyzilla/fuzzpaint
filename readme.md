@@ -2,7 +2,7 @@
 
 Graphics accelerated vector-based paint program for people who like compositing software :3
 
-In heavy development, many features are in-progress. But you can doodle to your heart's content!
+In heavy development, many features are in-progress and semver is ignored. But, you can doodle to your heart's content!
 
 ## Building
 Requires the [most recent Rust nightly toolchain](https://www.rust-lang.org/tools/install). Clone this repo and execute `cargo run --release` from within the root directory of this repo!
@@ -12,7 +12,7 @@ Requires the [most recent Rust nightly toolchain](https://www.rust-lang.org/tool
 | **Platform**      | Pen input   | Pad input   | Notes                                                   |
 |-------------------|-------------|-------------|---------------------------------------------------------|
 | Windows (Ink)     |None         |None         |                                                         |
-| Unix (Xorg)       |Pressure only|None         |                                                         |
+| Unix (Xorg)       |Pressure only|None         |`WINIT_UNIX_BACKEND=x11` to activate using xwayland      |
 | ~~Unix (Wayland)~~|None         |None         |No universally supported tablet API. [Currently disabled!](https://github.com/Fuzzyzilla/fuzzpaint-vk/issues/21#issue-1953431137)|
 | Windows (wintab)  |None         |None         |Documentation tough to come accross                      |
 
@@ -29,16 +29,16 @@ To declare **0.2.0**, I would like to be able to freely doodle a thing and save 
    - [ ] Save brushes to file
      - To document or to global repo? - resolved: both, with UUIDs! That way, files can be freely shared, and brushes can be easily re-used.
    - [X] Tesselation engine capable of mixed brushes
-   - [ ] ~~Roller brushes~~
    - [X] Stamped brushes
    - [X] Efficient erasers
  - [X] Layers
    - [X] Simple UI to manage layer creation, order, modes, etc.
    - [X] Blending compute shaders
-     - In the future, compile a document-specific compute shader to do the blending in a more optimizer-friendly manner.
-     - Also, take advantage of associativity and commutativity of blend modes to reduce number of distinct dispatches
+     - take advantage of associativity and commutativity of blend modes to reduce number of distinct dispatches?
      - fall forward on `EXT_blend_operation_advanced` or `EXT_fragment_shader_interlock`?
-   - Groups + FX + self-populating layers (clone, fill, gradients) come ~~later~~ **SOON >:3**
+   - [X] Passthrough, grouped-blend layers
+   - [X] Color fill layers
+   - FX + other self-populating layers (clone, gradients) come later
  - [ ] UI
    - [X] Initial layout
    - [X] A ~~simple~~ **✨robust and rebindable✨** hotkey system, with support for
