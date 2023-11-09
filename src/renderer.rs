@@ -142,6 +142,8 @@ impl Renderer {
             state.graph(),
         )?;
 
+        let mut fences = Vec::<vk::FenceSignalFuture<Box<dyn GpuFuture>>>::new();
+
         // Walk the tree in arbitrary order, rendering all as needed and collecting their futures.
         for (id, data) in state.graph().iter() {
             match data.leaf() {
@@ -152,7 +154,7 @@ impl Renderer {
                         )
                     })?;
                     // Fill image, store semaphore.
-                    Self::render_color(context.as_ref(), image, *source)?.wait(None)?;
+                    fences.push(Self::render_color(context.as_ref(), image, *source)?);
                 }
                 // Render stroke image
                 Some(LeafType::StrokeLayer { collection, .. }) => {
@@ -167,10 +169,13 @@ impl Renderer {
                     let strokes: Vec<_> = strokes.iter_active().collect();
                     if strokes.is_empty() {
                         //FIXME: Renderer doesn't know how to handle zero strokes.
-                        Self::render_color(context.as_ref(), image, [0.0, 0.0, 0.0, 0.0])?
-                            .wait(None)?;
+                        fences.push(Self::render_color(
+                            context.as_ref(),
+                            image,
+                            [0.0, 0.0, 0.0, 0.0],
+                        )?);
                     } else {
-                        renderer.draw(strokes.as_ref(), image, true)?.wait(None)?;
+                        fences.push(renderer.draw(strokes.as_ref(), image, true)?);
                     }
                 }
                 Some(LeafType::Note) => (),
@@ -370,6 +375,13 @@ impl Renderer {
         top_level_blend.reverse();
         let top_level_blend = top_level_blend.build();
 
+        // Wait for every fence. Terrible, but vulkano semaphores don't seem to be working currently.
+        // Note to self: see commit fuzzpaint-vk @ d435ca7c29cf045be413c9849be928693a2de458 for a time when this worked.
+        // Iunno what changed :<
+        for fence in fences.into_iter() {
+            fence.wait(None)?;
+        }
+
         // Execute blend after the images are ready
         blend_engine.submit(context.as_ref(), top_level_blend)
     }
@@ -395,7 +407,7 @@ impl Renderer {
         context: &crate::render_device::RenderContext,
         image: &RenderData,
         color: [f32; 4],
-    ) -> anyhow::Result<vk::FenceSignalFuture<impl GpuFuture>> {
+    ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn GpuFuture>>> {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             context.allocators().command_buffer(),
             // Unfortunately transfer queue cannot clear images TwT

@@ -442,42 +442,37 @@ impl BlendEngine {
         // now, layers should be filled, from back to front, with commands in the order they must be
         // executed for proper blending.
 
+        let mut after = vk::sync::now(context.device().clone()).boxed();
+
         for buffers in layers.into_iter().rev() {
             // `buffers` may all be executed in parallel without sync.
             // After all of these, the next iteration can proceed following a semaphore.
             // continue thusly until all is consumed, then return that future!
 
-            let mut chunks = buffers.into_iter();
-            let after = chunks.try_fold(
+            let mut chunks = buffers.chunks(3);
+            after = chunks.try_fold(
                 vk::sync::now(context.device().clone()).boxed(),
-                |after, buffer| -> anyhow::Result<_> {
-                    Ok(after
-                        .then_execute(context.queues().compute().queue().clone(), buffer)?
-                        .boxed())
+                |after, buffers| -> anyhow::Result<_> {
+                    match buffers {
+                        // Execute A full chunk, then box.
+                        [a, b, c] => Ok(after
+                            .then_execute(context.queues().compute().queue().clone(), a.clone())?
+                            .then_execute_same_queue(b.clone())?
+                            .then_execute_same_queue(c.clone())?
+                            .boxed()),
+                        // Execute residuals, then box.
+                        [a, b] => Ok(after
+                            .then_execute(context.queues().compute().queue().clone(), a.clone())?
+                            .then_execute_same_queue(b.clone())?
+                            .boxed()),
+                        [a] => Ok(after
+                            .then_execute(context.queues().compute().queue().clone(), a.clone())?
+                            .boxed()),
+                        // chunks invariant
+                        _ => unreachable!(),
+                    }
                 },
             )?;
-            // Execute in batches of three to minimize boxing overhead :V
-            /*{
-                match buffers {
-                    // Execute A full chunk, then box.
-                    [a, b, c] => Ok(after
-                        .then_execute(context.queues().compute().queue().clone(), a.clone())?
-                        .then_execute_same_queue(b.clone())?
-                        .then_execute_same_queue(c.clone())?
-                        .boxed()),
-                    // Execute residuals, then box.
-                    [a, b] => Ok(after
-                        .then_execute(context.queues().compute().queue().clone(), a.clone())?
-                        .then_execute_same_queue(b.clone())?
-                        .boxed()),
-                    [a] => Ok(after
-                        .then_execute(context.queues().compute().queue().clone(), a.clone())?
-                        .boxed()),
-                    // chunks invariant
-                    _ => unreachable!(),
-                }
-            }*/
-            // Signal semaphore for next pass.
             after.then_signal_fence_and_flush()?.wait(None)?;
         }
 
