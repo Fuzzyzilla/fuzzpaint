@@ -853,6 +853,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "async-trait",
+ "bitflags 2.4.1",
  "bitvec",
  "bytemuck",
  "cgmath",

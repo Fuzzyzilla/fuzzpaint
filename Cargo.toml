@@ -9,6 +9,7 @@ edition = "2021"
 ahash = { version = "0.8.6", default-features = false, features = ["std"] }
 anyhow = "1.0.71"
 async-trait = "0.1.73"
+bitflags = "2.4.1"
 bitvec = { version = "1.0.1", default-features = false, features = [
     "alloc",
     "std",

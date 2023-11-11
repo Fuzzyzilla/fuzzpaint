@@ -12,6 +12,84 @@ pub fn global() -> &'static PointRepository {
     REPO.get_or_init(PointRepository::new)
 }
 
+bitflags::bitflags! {
+    #[derive(Copy, Clone, Eq, PartialEq, Hash)]
+    /// Description of a point's data fields. Organized such that devices that have later flags are
+    /// also likely to have prior flags.
+    ///
+    /// Note that position nor arc_length are required fields. Arc_length is derived data,
+    /// and position may be ignored for strokes which trace a predefined path.
+    ///
+    /// Selected (loosely) from 2D-drawing-relavent packets defined in the windows ink API:
+    /// https://learn.microsoft.com/en-us/windows/win32/tablet/packetpropertyguids-constants
+    #[rustfmt::skip]
+    pub struct PointArchetype : u8 {
+        /// The point stream reports an (X: f32, Y: f32) position.
+        const POSITION =   0b0000_0001;
+        /// The point stream reports an f32, representing the cumulative length of the path from the start.
+        const ARC_LENGTH = 0b0000_0010;
+        /// The point stream reports a normalized, non-saturated pressure value.
+        const PRESSURE =   0b0000_0100;
+        /// The point stream reports a signed noramlized (X: f32, Y: f32) tilt, where positive X is to the right,
+        /// positive Y is towards the user.
+        const TILT =       0b0000_1000;
+        /// Alias for bits that contain two fields
+        const TWO_FIELDS = 0b0000_1001;
+        /// The point stream reports a normalized f32 distance, in arbitrary units.
+        const DISTANCE =   0b0001_0000;
+        /// The point stream reports stylus roll (rotation along it's axis). Units and sign unknown!
+        ///
+        /// FIXME: Someone with such hardware, please let me know what it's units are :3
+        const ROLL =       0b0010_0000;
+        /// The point stream reports wheel values in signed, unnormalized, non-wrapping degrees, f32.
+        ///
+        /// Wheels are a general-purpose value which the user can use in their brushes. It may
+        /// correspond to a physical wheel on the pen or pad, a touch slider, ect. which may be interacted
+        /// with during the stroke for expressive effects.
+        const WHEEL =      0b0100_0000;
+        /// f32, meaningless. Not associated with any axis, but available for one should a device expose
+        /// another possible expressive axis that cannot already be assigned to any other field. As such, it could be
+        /// used in the future!
+        const UNASSIGNED = 0b1000_0000;
+    }
+}
+impl PointArchetype {
+    /// How many elements (f32) does a point of this archetype occupy?
+    pub fn len(self) -> usize {
+        // Formerly Self::iter based but the codegen was un-scrumptious
+
+        // Every field specifies one element, count them all
+        self.bits().count_ones() as usize
+        // These fields specify two elements, count them again
+            + (self & Self::TWO_FIELDS).bits().count_ones() as usize
+    }
+    pub fn len_bytes(self) -> usize {
+        self.len() * std::mem::size_of::<f32>()
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct CollectionSummary {
+    /// The archetype of the points of the collection.
+    pub archetype: PointArchetype,
+    /// Count of points within the collection
+    pub len: usize,
+    /// final arc length of the collected points, available if the archetype includes PointArchetype::ARC_LENGTH bit.
+    pub arc_length: Option<f32>,
+}
+
+impl From<&[crate::StrokePoint]> for CollectionSummary {
+    fn from(value: &[crate::StrokePoint]) -> Self {
+        CollectionSummary {
+            archetype: PointArchetype::POSITION
+                | PointArchetype::ARC_LENGTH
+                | PointArchetype::PRESSURE,
+            len: value.len(),
+            arc_length: Some(value.last().map(|point| point.dist).unwrap_or(0.0)),
+        }
+    }
+}
+
 pub struct PointCollectionIDMarker;
 pub type PointCollectionID = crate::FuzzID<PointCollectionIDMarker>;
 
@@ -36,15 +114,23 @@ impl std::ops::Deref for PointCollectionReadLock {
     }
 }
 
-#[derive(Clone)]
+#[derive(thiserror::Error, Debug)]
+pub enum WriteError {
+    #[error("point collection {} is unknown", .0)]
+    UnknownID(PointCollectionID),
+    #[error("IO error {}", .0)]
+    IOError(std::io::Error),
+}
+#[derive(Copy, Clone)]
 struct PointCollectionAllocInfo {
     /// Which PointSlab is it in?
     /// (currently an index)
     slab_id: usize,
     /// What point index into that slab does it start?
     start: usize,
-    /// How many points long?
-    len: usize,
+    /// A summary of the data within, that can be queried even if the bulk
+    /// data is non-resident.
+    summary: CollectionSummary,
 }
 pub struct PointRepository {
     slabs: parking_lot::RwLock<Vec<PointSlab>>,
@@ -88,8 +174,8 @@ impl PointRepository {
 
                 // populate info
                 let info = PointCollectionAllocInfo {
-                    len: collection.len(),
-                    slab_id: slab_id,
+                    summary: collection.into(),
+                    slab_id,
                     start,
                 };
                 // generate a new id and write metadata
@@ -109,7 +195,7 @@ impl PointRepository {
                 };
                 // populate info
                 let info = PointCollectionAllocInfo {
-                    len: collection.len(),
+                    summary: collection.into(),
                     slab_id,
                     start,
                 };
@@ -122,13 +208,20 @@ impl PointRepository {
             None
         }
     }
-    /// Get the number of points in the given point collection, or None if the ID is not known
+    /// Given an iterator of collection IDs, encodes them directly (in order) into the given Write stream, potentially skipping
+    /// a round-trip decode-encode for non-resident data.
+    pub fn write_into(
+        &self,
+        ids: impl Iterator<Item = PointCollectionID>,
+        write: impl std::io::Write,
+    ) -> Result<(), WriteError> {
+        todo!()
+    }
+    /// Get a [CollectionSummary] for the given collection, reporting certain key aspects of a stroke without
+    /// it needing to be loaded into resident memory. None if the ID is not known
     /// to this repository.
-    ///
-    /// Provides the ability to fetch the number of points in a collection even if the data is not resident.
-    /// If you need the data afterwards, prefer try_get() followed by PointCollectionReadLock::len()
-    pub fn len_of(&self, id: PointCollectionID) -> Option<usize> {
-        self.allocs.read().get(&id).map(|info| info.len)
+    pub fn summary_of(&self, id: PointCollectionID) -> Option<CollectionSummary> {
+        self.allocs.read().get(&id).map(|info| info.summary)
     }
     pub fn try_get(
         &self,
@@ -149,10 +242,10 @@ impl PointRepository {
         // Check the alloc range is reasonable
         debug_assert!(alloc
             .start
-            .checked_add(alloc.len)
+            .checked_add(alloc.summary.len)
             .is_some_and(|last| last <= SLAB_SIZE));
 
-        let Some(slice) = slab.try_read(alloc.start, alloc.len) else {
+        let Some(slice) = slab.try_read(alloc.start, alloc.summary.len) else {
             // Implementation bug!
             log::debug!("{id} allocation found, but out of bounds within it's slab!");
             return Err(super::TryRepositoryError::NotFound);
