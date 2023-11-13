@@ -20,8 +20,8 @@ Requires the [most recent Rust nightly toolchain](https://www.rust-lang.org/tool
 To declare **0.2.0**, I would like to be able to freely doodle a thing and save it to disk. We're getting dangerously close!
 
  - [ ] File I/O
-   - [ ] Read/Write custom vector image format
-   - [ ] File history (linear)
+   - [ ] Read/Write [custom vector image format](fileschema.md)
+   - [ ] Write file history
    - [ ] Export common image formats
      - via image-rs/image
  - [ ] Brushes
@@ -46,6 +46,11 @@ To declare **0.2.0**, I would like to be able to freely doodle a thing and save 
    - [X] Infinite Undo/Redo
    - [X] Pan, Zoom, Scroll, Rotate, Mirror viewport
    - [ ] Fit, 100% modes
+ - [ ] Editor
+   - [ ] Select strokes
+     - [ ] Select parts of strokes
+   - [ ] Transform existing layers and strokes
+   - [ ] Cut, Copy, Paste strokes (within program only)
 
 ## Long-term Goals
  * Support the "95%" GPU - For accessibility, this should work on low-end GPUs. Don't rely on overly niche vulkan extensions, but fall-forward on them if they provide sufficient benifit (eg, `EXT_mesh_shader`)

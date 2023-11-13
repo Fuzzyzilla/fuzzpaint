@@ -14,7 +14,7 @@ Rust type syntax is used to describe the schema where appropriate, with an impli
 contain the least-significant digits of the represented number and the eighth bit is a continue flag which, when set,
 indicates the integer spans another byte.
 * `string` - a length-prefixed UTF-8 string without terminator, as in `{length: varint, utf8: [u8; length]}`
-* `strz` - a zero-terminated UTF-8 string. Used only in the `INFO` chunk for EXIF interoperability. UTF-8 is allowed to contain the null character, which would need to be explicitly dissallowed by the writing software.
+* `strz` - a length-prefixed and zero-terminated UTF-8 string. the null terminator *is* included in the length. Used only in the `INFO` chunk for EXIF interoperability. UTF-8 is normally allowed to contain the null character, which would need to be explicitly dissallowed by the writing software. `{length: u32, utf8: [NonZeroU8; length-1], 0u8}`
 
 ## Chunk Specifications
  * [INFO](#info)
@@ -37,8 +37,8 @@ This needs work! Should I support `exif` chunk aswell? Potentially an exif previ
 | `ISFT`      | "fuzzpaint vX.X.X\0"      |
 | ...         |                           |
 
-### `fdoc`
-Information about document layout, including it's position, size, resolution, background color, ect.
+### `docv`
+Information about document viewport layouts, including positions, sizes, resolutions, background colors, ect. of viewports within the document.
 ### `grph`
 Contains zero or more blend nodes and their relationships, specifying how items are to be rendered and composited down into a single image.
 Corresponds with `fuzzpaint_vk::state::graph`.
