@@ -96,7 +96,7 @@ impl<W: Write + Seek> BinaryChunkWriter<W> {
     /// Flush the len field of this chunk. Prefer this over Self::drop, as it will report errors.
     /// In the event of an error, the status of the inner writer is unknown.
     pub fn update_len(&mut self) -> IOResult<()> {
-        let length_offs = self.len as i64;
+        let length_offs = self.cursor as i64;
 
         self.writer.seek(SeekFrom::Current(-length_offs - 4))?;
         self.writer.write(&self.len.to_le_bytes())?;
@@ -121,11 +121,12 @@ impl<W: Write + Seek> Write for BinaryChunkWriter<W> {
         // Closure to lazily create an error object
         let err = || IOError::other(anyhow::anyhow!("RIFF chunk {} exceeds 4GiB", self.id));
         // Check that self.size + written doesn't overflow u32
-        self.len = written
+        self.cursor = written
             .try_into()
             .ok()
-            .and_then(|written: u32| self.len.checked_add(written))
+            .and_then(|written: u32| self.cursor.checked_add(written))
             .ok_or_else(err)?;
+        self.len = self.len.max(self.cursor);
 
         self.needs_len_flush = true;
         Ok(written)
