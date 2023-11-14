@@ -14,28 +14,22 @@ Rust type syntax is used to describe the schema where appropriate, with an impli
 contain the least-significant digits of the represented number and the eighth bit is a continue flag which, when set,
 indicates the integer spans another byte.
 * `string` - a length-prefixed UTF-8 string without terminator, as in `{length: varint, utf8: [u8; length]}`
-* `strz` - a length-prefixed and zero-terminated UTF-8 string. the null terminator *is* included in the length. Used only in the `INFO` chunk for EXIF interoperability. UTF-8 is normally allowed to contain the null character, which would need to be explicitly dissallowed by the writing software. `{length: u32, utf8: [NonZeroU8; length-1], 0u8}`
+* `strz` - a length-prefixed and zero-terminated UTF-8 string, valid as an entire chunk definition. the null terminator *is* included in the length. Used only in the `INFO` chunk for EXIF interoperability. UTF-8 is normally allowed to contain the null character, which would need to be explicitly dissallowed by the writing software. `{length: u32, utf8: [NonZeroU8; length-1], 0u8}`
 
-## Chunk Specifications
- * [INFO](#info)
- * [fdoc](#grph)
- * [grph](#grph)
- * [ptls](#ptls)
- * [hist](#hist)
- * [brsh](#brsh)
+## Chunk Structure
+The file is a flattened tree structure that does not allow arbitrary depth or recursion.
 
-
-### `INFO`
-Standard RIFF information chunk, using de-facto standard subchunks from [exiftool.org](https://exiftool.org/TagNames/RIFF.html#Info).
-These fields can be useful for shells to display information on the file without being able to parse it, as well as for users who do not have access to the fuzzpaint software to view basic information about it's contents.
-
-This needs work! Should I support `exif` chunk aswell? Potentially an exif preview image as well!
-| Subchunk ID | Content desc.             |
-|-------------|---------------------------|
-| `ICMT`      | comment: strz             |
-| `IART`      | artist: strz              |
-| `ISFT`      | "fuzzpaint vX.X.X\0"      |
-| ...         |                           |
+1. RIFF "fzp "
+   1. LIST "INFO"
+      - ICMT: `strz`
+      - ISFT: `strz`
+      - IART: `strz`
+      - ... example fields taken from [exiftool.org](https://exiftool.org/TagNames/RIFF.html#Info). These are actually defacto standards from AVI and WAV and are thus actually designed for music/video distribution, not digitial images.
+   - [`docv`](#docv)
+   - [`grph`](#grph)
+   - [`ptls`](#ptls)
+   - [`hist`](#hist)
+   - [`brsh`](#brsh)
 
 ### `docv`
 Information about document viewport layouts, including positions, sizes, resolutions, background colors, ect. of viewports within the document.
