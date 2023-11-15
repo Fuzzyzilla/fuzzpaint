@@ -10,6 +10,7 @@ It uses the RIFF file container with a draft extension of `.fzp`.
 ## Data types
 Rust type syntax is used to describe the schema where appropriate, with an implicit `repr(packed)`. Data types are in little-endian byte order as specified by RIFF, except where otherwise specified.
 
+* `ChunkID` - A RIFF chunk ID, [u8;4]. Usually ascii, but any arbitrary bytes are allowed.
 * `varint` - a variable-length integer, spanning 1-4 bytes. For each byte in little-endian order, the first seven bits
 contain the least-significant digits of the represented number and the eighth bit is a continue flag which, when set,
 indicates the integer spans another byte.
@@ -31,21 +32,38 @@ Chunks may refer to arbitrary datastructures within its own or its children's bi
       - ... example fields taken from [exiftool.org](https://exiftool.org/TagNames/RIFF.html#Info). These are actually defacto standards from AVI and WAV and are thus actually designed for music/video distribution, not digitial images.
    - [`docv`](#docv)
    - [`grph`](#grph)
-   - [`ptls`](#ptls)
+   - [`DICT`](#dict) [`"ptls"`](#ptls)
    - [`hist`](#hist)
-   - [`brsh`](#brsh)
+   - [`DICT`](#dict) [`"brsh"`](#brsh)
 
+### `DICT`
+A chunk schema which provides a number of ordered entities, a table of statically-sized tightly packed metadata for each entry, followed by a stream of variable length data which the entities are allowed to spill into. Intended for bulk data storage with quick O(1) access times to a given entry's metadata and data.
+
+`MetadataTy` consists of a `u32` offset, `u32` length, followed by any fixed length user data as specified by the subtype. A Zero offset represents the first element of the dynamic spillover array.
+A reader may discard any spillover data which is not referenced by any entry. It may also duplicate overlapping spillover data into separate regions.
+| Type                        | Meaning                                                                  |
+|-----------------------------|--------------------------------------------------------------------------|
+| `ChunkID`                   | Subtype                                                                  | 
+| `VersionedChunkHeader`      | -                                                                        |
+| `u32`                       | Number of entries in the metadata table                                  |
+| `u32`                       | sizeof MetadataTy                                                        |
+| `[MetadataTy; num_entries]` | Entries                                                                  |
+| `[u8]`                      | Dynamic sized spillover area, taking up remainder of this chunk's length |
 ### `docv`
 Information about document viewport layouts, including positions, sizes, resolutions, background colors, ect. of viewports within the document.
 ### `grph`
 Contains zero or more blend nodes and their relationships, specifying how items are to be rendered and composited down into a single image.
 Corresponds with `fuzzpaint_vk::state::graph`.
 ### `ptls`
-Contains zero or more point lists in Array-of-structures or Structure-of-arrays encoding, potentially using compression. Points can come in several different schemas depending on the capabilities of the graphics device which generated them.
-Corresponds with `fuzzpaint_vk::repositories::points`.
+A `DICT` Subtype.
+Contains zero or more point lists in Array-of-structures encoding. (SoA and compression to come) Points can come in several different schemas depending on the capabilities of the graphics interface device which generated them.
+
+Extends the `DICT` `MetadataTy` with `fuzzpaint_vk::repositories::points::PointArchetype`.
+Spillover data per entry consists of a slice of dynamic sized Points who's size is determined by PointArchetype. Every point in a given entry has the same size.
 ### `hist`
 Optional. Contains the history tree for the document. May be arbitrarily trimmed, however it should be assured that the cumulative results of the history tree are equivalent to the document state presented in the rest of the chunks.
 Corresponds with `fuzzpaint_vk::commands`
 ### `brsh`
+A `DICT` Subtype.
 Contains zero or more brush definitions. Every brush utilized in the document must be included, although there may be extra brushes not used by the document listed as well. This allows for documents to serve as a method of brush distribution.
 Corresponds with `fuzzpaint_vk::repositories::brush` (not implemented)

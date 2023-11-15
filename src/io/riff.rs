@@ -1,3 +1,4 @@
+use az::{CheckedAs, SaturatingAs};
 use std::io::{
     BufRead, Error as IOError, ErrorKind as IOErrorKind, Read, Result as IOResult, Seek, SeekFrom,
     Write,
@@ -12,6 +13,7 @@ impl ChunkID {
     pub const INFO: Self = ChunkID(*b"INFO");
     pub const LIST: Self = ChunkID(*b"LIST");
     // fuzzpaint custom chunks
+    pub const DICT: Self = ChunkID(*b"DICT");
     pub const FZP_: Self = ChunkID(*b"fzp ");
     pub const DOCV: Self = ChunkID(*b"docv");
     pub const GRPH: Self = ChunkID(*b"grph");
@@ -43,7 +45,138 @@ impl std::ops::DerefMut for ChunkID {
         &mut self.0
     }
 }
+/// A RIFF Chunk composed of unstructured binary, with fixed size in bytes.
+/// This relaxes the Seek bound on the writer and allows for greater
+/// efficiency uwu
+/// Bytes not written before the writer is dropped are zeroed. This could change at any time.
+///
+/// EOF will be signaled upon reaching the end of the chunk.
+pub struct SizedBinaryChunkWriter<W: Write> {
+    id: ChunkID,
+    len_remaining: u32,
+    writer: W,
+}
+impl<W: Write> SizedBinaryChunkWriter<W> {
+    const ZEROS: &'static [u8] = &[0; 1024];
+    pub fn new(mut writer: W, id: ChunkID, len: usize) -> IOResult<Self> {
+        // Hide the fact that we can only store u32::MAX bytes as an implementation detail.
+        let len: u32 = len
+            .checked_as()
+            .ok_or_else(|| IOError::other(anyhow::anyhow!("RIFF chunk {} exceeded 4GiB", id)))?;
+        let len_le = len.to_le_bytes();
+        let start_data = [
+            id[0], id[1], id[2], id[3], len_le[0], len_le[1], len_le[2], len_le[3],
+        ];
+        writer.write_all(&start_data)?;
 
+        Ok(Self {
+            id,
+            len_remaining: len,
+            writer,
+        })
+    }
+    /// Make a new chunk with a subtype header included. subtype is NOT included in `len`
+    pub fn new_subtype(mut writer: W, id: ChunkID, subtype: ChunkID, len: usize) -> IOResult<Self> {
+        // Hide the fact that we can only store u32::MAX bytes as an implementation detail.
+        // Add four bytes for the subtype id.
+        let len: u32 = len
+            .checked_as()
+            .and_then(|len: u32| len.checked_add(4u32))
+            .ok_or_else(|| IOError::other(anyhow::anyhow!("RIFF chunk {} exceeded 4GiB", id)))?;
+
+        let len_le = len.to_le_bytes();
+        #[rustfmt::skip]
+        let start_data = [
+            id[0], id[1], id[2], id[3],
+            len_le[0], len_le[1], len_le[2], len_le[3],
+            subtype[0], subtype[1], subtype[2], subtype[3]
+        ];
+        writer.write_all(&start_data)?;
+
+        Ok(Self {
+            id,
+            // We already wrote 4 bytes for subtype id
+            len_remaining: len - 4,
+            writer,
+        })
+    }
+    /// Same as Drop, but is able to report errors.
+    pub fn finish(mut self) -> IOResult<()> {
+        self.pad()?;
+        self.flush()
+        // Immediately drops, which shouldn't re-pad as len is set to zero within self::pad
+    }
+    /// Write padding bytes to finish the write operation.
+    fn pad(&mut self) -> IOResult<()> {
+        if self.len_remaining != 0 {
+            let slice = std::io::IoSlice::new(Self::ZEROS);
+            let (quotient, remainder) = (
+                self.len_remaining as usize / Self::ZEROS.len(),
+                self.len_remaining as usize % Self::ZEROS.len(),
+            );
+            // Fill a vec with enough slices
+            let num_slices = quotient + if remainder != 0 { 1 } else { 0 };
+            let mut slices = Vec::with_capacity(num_slices);
+            // `quotient` full slices...
+            slices.extend(std::iter::repeat(slice).take(quotient));
+            // plus one partial slice if there's a remainder.
+            if remainder != 0 {
+                slices.push(std::io::IoSlice::new(&Self::ZEROS[..remainder]));
+            }
+
+            // Set to zero before fallible call.
+            // That way we don't double-drop.
+            self.len_remaining = 0;
+            self.writer.write_all_vectored(&mut slices)?;
+        }
+        Ok(())
+    }
+}
+impl<W: Write> Write for SizedBinaryChunkWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
+        let clamped_len = (self.len_remaining as usize).min(buf.len());
+        // Explicit hint that the stream is full.
+        if clamped_len == 0 {
+            return Ok(0);
+        }
+        let trimmed_buf = &buf[..clamped_len];
+        let written = self.writer.write(buf)?;
+        self.len_remaining = written
+            .checked_as()
+            .and_then(|written| self.len_remaining.checked_sub(written))
+            .ok_or_else(|| IOError::other("inner writer overflowed chunk"))?;
+
+        Ok(written)
+    }
+    fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> IOResult<usize> {
+        // Todo: pre-clamp length.
+        if self.len_remaining == 0 {
+            return Ok(0);
+        }
+        let written = self.writer.write_vectored(bufs)?;
+        self.len_remaining = written
+            .checked_as()
+            .and_then(|written| self.len_remaining.checked_sub(written))
+            .ok_or_else(|| IOError::other("inner writer overflowed chunk"))?;
+
+        Ok(written)
+    }
+    fn flush(&mut self) -> IOResult<()> {
+        self.writer.flush()
+    }
+}
+impl<W: Write> Drop for SizedBinaryChunkWriter<W> {
+    fn drop(&mut self) {
+        // We have to pad out the rest of the chunk to match the set length!
+        // Generally a bad idea...
+        if self.len_remaining != 0 {
+            log::warn!("padding in SizedBinaryChunkWriter dtor!");
+            if let Err(e) = self.pad() {
+                log::error!("error while padding in dtor: {e:?}")
+            }
+        }
+    }
+}
 /// A RIFF Chunk composed of unstructured binary.
 pub struct BinaryChunkWriter<W: Write + Seek> {
     id: ChunkID,
@@ -118,14 +251,11 @@ impl<W: Write + Seek> Drop for BinaryChunkWriter<W> {
 impl<W: Write + Seek> Write for BinaryChunkWriter<W> {
     fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
         let written = self.writer.write(buf)?;
-        // Closure to lazily create an error object
-        let err = || IOError::other(anyhow::anyhow!("RIFF chunk {} exceeds 4GiB", self.id));
         // Check that self.size + written doesn't overflow u32
         self.cursor = written
-            .try_into()
-            .ok()
-            .and_then(|written: u32| self.cursor.checked_add(written))
-            .ok_or_else(err)?;
+            .checked_as()
+            .and_then(|written| self.cursor.checked_add(written))
+            .ok_or_else(|| IOError::other("inner writer overflowed chunk"))?;
         self.len = self.len.max(self.cursor);
 
         self.needs_len_flush = true;
@@ -135,7 +265,22 @@ impl<W: Write + Seek> Write for BinaryChunkWriter<W> {
         self.update_len()?;
         self.writer.flush()
     }
-    // TODO: write_vectored
+    /*
+    fn is_write_vectored(&self) -> bool {
+        self.writer.is_write_vectored()
+    }*/
+    fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> IOResult<usize> {
+        let written = self.writer.write_vectored(bufs)?;
+        // Check that self.size + written doesn't overflow u32
+        self.cursor = written
+            .checked_as()
+            .and_then(|written| self.cursor.checked_add(written))
+            .ok_or_else(|| IOError::other("inner writer overflowed chunk"))?;
+        self.len = self.len.max(self.cursor);
+
+        self.needs_len_flush = true;
+        Ok(written)
+    }
 }
 impl<W: Write + Seek> Seek for BinaryChunkWriter<W> {
     /// Seek the stream within this reader's address space. Behavior of seeks past-the-end are deferred to the writer.
@@ -146,7 +291,7 @@ impl<W: Write + Seek> Seek for BinaryChunkWriter<W> {
             SeekFrom::Current(delta) => (self.cursor as i64).checked_add(delta),
             SeekFrom::Start(delta) => {
                 // Overflow with None if too large to fit
-                delta.try_into().ok()
+                delta.checked_as()
             }
         }
         .ok_or_else(add_with_overflow)?;
@@ -154,7 +299,7 @@ impl<W: Write + Seek> Seek for BinaryChunkWriter<W> {
         if new_cursor < 0 {
             return Err(IOError::other(anyhow::anyhow!("seek past-the-start")));
         }
-        let Ok(new_cursor): Result<u32, _> = new_cursor.try_into() else {
+        let Some(new_cursor) = new_cursor.checked_as() else {
             return Err(add_with_overflow())?;
         };
 
@@ -164,6 +309,12 @@ impl<W: Write + Seek> Seek for BinaryChunkWriter<W> {
         self.cursor = new_cursor;
         Ok(self.cursor as u64)
     }
+    fn stream_position(&mut self) -> IOResult<u64> {
+        Ok(self.cursor as u64)
+    }
+    /*fn stream_len(&mut self) -> IOResult<u64> {
+        Ok(self.len as u64)
+    }*/
 }
 pub struct BinaryChunkReader<R: Read> {
     id: ChunkID,
@@ -181,8 +332,12 @@ impl<R: Read> Read for BinaryChunkReader<R> {
 
         let num_read = self.reader.read(clamped_buf)?;
 
-        // As cast and addition OK as we clampled the buf size.
-        self.cursor += num_read as u32;
+        // Add to cursor, ensure that inner reader didn't do a silly.
+        self.cursor += num_read.checked_as::<u32>().ok_or_else(|| {
+            IOError::other(anyhow::anyhow!(
+                "internal reader violated len requirements!"
+            ))
+        })?;
         debug_assert!(self.cursor <= self.len);
 
         Ok(num_read)
@@ -200,7 +355,7 @@ impl<R: Read + Seek> Seek for BinaryChunkReader<R> {
                 // Signed add to find absolute position
                 (self.len as i64).checked_add(delta)
             }
-            SeekFrom::Start(pos) => pos.try_into().ok(),
+            SeekFrom::Start(pos) => pos.checked_as(),
         }
         .ok_or_else(|| IOError::other(anyhow::anyhow!("seek with overflow")))?;
         // Seek-before-start is an error
@@ -217,6 +372,12 @@ impl<R: Read + Seek> Seek for BinaryChunkReader<R> {
 
         Ok(self.cursor as u64)
     }
+    fn stream_position(&mut self) -> IOResult<u64> {
+        Ok(self.cursor as u64)
+    }
+    /*fn stream_len(&mut self) -> IOResult<u64> {
+        Ok(self.len as u64)
+    }*/
 }
 /* /// How to clamp the inner BufRead from reading past chunk EOF?
 /// Perhaps BufReader<ChunkReader> is correct instead of ChunkReader<BufRead>

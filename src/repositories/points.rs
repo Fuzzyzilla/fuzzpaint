@@ -118,8 +118,17 @@ impl std::ops::Deref for PointCollectionReadLock {
 pub enum WriteError {
     #[error("point collection {} is unknown", .0)]
     UnknownID(PointCollectionID),
+    #[error("too much data")]
+    TooLong,
+    #[error("too many entries")]
+    TooManyEntries,
     #[error("IO error {}", .0)]
     IOError(std::io::Error),
+}
+impl From<std::io::Error> for WriteError {
+    fn from(value: std::io::Error) -> Self {
+        Self::IOError(value)
+    }
 }
 #[derive(Copy, Clone)]
 struct PointCollectionAllocInfo {
@@ -208,14 +217,69 @@ impl PointRepository {
             None
         }
     }
-    /// Given an iterator of collection IDs, encodes them directly (in order) into the given Write stream, potentially skipping
-    /// a round-trip decode-encode for non-resident data.
-    pub fn write_into(
+    /// Given an iterator of collection IDs, encodes them directly (in order) into the given Write stream in a `DICT ptls` chunk.
+    pub fn write_dict_into(
         &self,
         ids: impl Iterator<Item = PointCollectionID>,
-        write: impl std::io::Write,
+        writer: impl std::io::Write,
     ) -> Result<(), WriteError> {
-        todo!()
+        use crate::io::{
+            riff::{ChunkID, SizedBinaryChunkWriter},
+            DictMetadata, Version,
+        };
+        use az::CheckedAs;
+        use std::io::Write;
+
+        const PTLS_WRITE_VERSION: Version = Version(0, 0, 0);
+
+        let entries: Result<Vec<_>, WriteError> = ids
+            .map(|id| self.summary_of(id).ok_or(WriteError::UnknownID(id)))
+            .collect();
+        let entries = entries?;
+
+        let mut running_total = 0u32;
+        let meta_entries: Result<Vec<DictMetadata<()>>, WriteError> = entries
+            .iter()
+            .map(|summary| {
+                // Len must fit in u32
+                let len = summary.len.checked_as().ok_or(WriteError::TooLong)?;
+                let meta = DictMetadata {
+                    offset: running_total,
+                    len,
+                    inner: (),
+                };
+
+                // Data must not overrun u32
+                running_total = running_total.checked_add(len).ok_or(WriteError::TooLong)?;
+                Ok(meta)
+            })
+            .collect();
+        let meta_entries = meta_entries?;
+        let num_meta_entries: u32 = meta_entries
+            .len()
+            .checked_as()
+            .ok_or(WriteError::TooManyEntries)?;
+        let meta_size: u32 = std::mem::size_of::<DictMetadata<()>>()
+            .checked_as()
+            .ok_or(WriteError::TooLong)?;
+
+        // Allocate the chunk.
+        // I should make a helper for DICT
+        let mut chunk =
+            SizedBinaryChunkWriter::new_subtype(writer, ChunkID::DICT, ChunkID::PTLS, todo!())?;
+        chunk.write_all(bytemuck::bytes_of(&PTLS_WRITE_VERSION))?;
+        // DENY (todo, i need to work out semantics of all this :V)
+        chunk.write_all(&[2u8])?;
+        // Num metadata entries
+        chunk.write_all(bytemuck::bytes_of(&num_meta_entries))?;
+        // metadata len per entry
+        chunk.write_all(bytemuck::bytes_of(&meta_size))?;
+        // Dump entries
+        chunk.write_all(bytemuck::cast_slice(&meta_entries))?;
+
+        // Pad, if needed (shouldn't be)
+        chunk.finish()?;
+        Ok(())
     }
     /// Get a [CollectionSummary] for the given collection, reporting certain key aspects of a stroke without
     /// it needing to be loaded into resident memory. None if the ID is not known

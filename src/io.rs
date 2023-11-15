@@ -26,7 +26,7 @@ impl From<std::io::Error> for WriteError {
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 #[repr(u8)]
-enum OrphanMode {
+pub enum OrphanMode {
     Keep = 0,
     Discard = 1,
     Deny = 2,
@@ -40,6 +40,13 @@ impl OrphanMode {
             _ => None,
         }
     }
+}
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
+#[repr(C, packed)]
+pub struct DictMetadata<InnerMeta: bytemuck::Pod + bytemuck::Zeroable + Copy> {
+    pub offset: u32,
+    pub len: u32,
+    pub inner: InnerMeta,
 }
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
