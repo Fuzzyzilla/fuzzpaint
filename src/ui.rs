@@ -108,7 +108,49 @@ impl MainUI {
                             self.cur_document = Some(new_id);
                             self.documents.push(interface);
                         };
-                        let _ = add_button(ui, "Save", Some("Ctrl+S"));
+                        if add_button(ui, "Save", Some("Ctrl+S")).clicked() {
+                            // Dirty testing implementation!
+                            if let Some(current) = self.cur_document {
+                                std::thread::spawn(move || -> () {
+                                    if let Some(reader) = crate::default_provider()
+                                        .inspect(current, |doc| doc.peek_clone_state())
+                                    {
+                                        let repo = crate::repositories::points::global();
+
+                                        let try_block = || -> anyhow::Result<()> {
+                                            let mut path = dirs::document_dir().unwrap();
+                                            path.push("temp.fzp");
+                                            let file = std::fs::File::create(path)?;
+
+                                            let start = std::time::Instant::now();
+                                            crate::io::write_into(reader, repo, &file)?;
+                                            let duration = std::time::Instant::now() - start;
+
+                                            file.sync_all()?;
+                                            if let Some(size) =
+                                                file.metadata().ok().map(|meta| meta.len())
+                                            {
+                                                let size = size as f64;
+                                                let speed = size / duration.as_secs_f64();
+                                                log::info!(
+                                                    "Wrote {} in {}us ({}/s)",
+                                                    human_bytes::human_bytes(size),
+                                                    duration.as_micros(),
+                                                    human_bytes::human_bytes(speed)
+                                                );
+                                            } else {
+                                                log::info!("Wrote in {}us", duration.as_micros());
+                                            }
+                                            Ok(())
+                                        };
+
+                                        if let Err(e) = try_block() {
+                                            log::error!("Failed to write document: {e:?}");
+                                        }
+                                    }
+                                });
+                            }
+                        }
                         let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
                         let _ = add_button(ui, "Open", Some("Ctrl+O"));
                         let _ = add_button(ui, "Open as new", None);

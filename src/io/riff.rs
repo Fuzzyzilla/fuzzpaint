@@ -140,7 +140,7 @@ impl<W: Write> Write for SizedBinaryChunkWriter<W> {
             return Ok(0);
         }
         let trimmed_buf = &buf[..clamped_len];
-        let written = self.writer.write(buf)?;
+        let written = self.writer.write(trimmed_buf)?;
         self.len_remaining = written
             .checked_as()
             .and_then(|written| self.len_remaining.checked_sub(written))

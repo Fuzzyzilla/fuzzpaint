@@ -15,12 +15,19 @@ pub struct OrphanedData {
 
 #[derive(thiserror::Error, Debug)]
 pub enum WriteError {
-    #[error("io error: {}", .0)]
+    #[error("{}", .0)]
     IO(std::io::Error),
+    #[error("{}", .0)]
+    Anyhow(anyhow::Error),
 }
 impl From<std::io::Error> for WriteError {
     fn from(value: std::io::Error) -> Self {
         Self::IO(value)
+    }
+}
+impl From<anyhow::Error> for WriteError {
+    fn from(value: anyhow::Error) -> Self {
+        Self::Anyhow(value)
     }
 }
 
@@ -77,8 +84,20 @@ where
         let _ = BinaryChunkWriter::new(&mut root, ChunkID::DOCV)?;
         let _ = BinaryChunkWriter::new(&mut root, ChunkID::GRPH)?;
         let _ = BinaryChunkWriter::new(&mut root, ChunkID::HIST)?;
-        let _ = BinaryChunkWriter::new(&mut root, ChunkID::PTLS)?;
-        let _ = BinaryChunkWriter::new(&mut root, ChunkID::BRSH)?;
+        {
+            let collections = document.stroke_collections();
+            point_repository
+                .write_dict_into(
+                    collections
+                        .0
+                        .iter()
+                        .flat_map(|collection| collection.1.strokes.iter())
+                        .map(|stroke| stroke.point_collection),
+                    &mut root,
+                )
+                .map_err(|err| -> anyhow::Error { err.into() })?;
+        }
+        let _ = BinaryChunkWriter::new_subtype(&mut root, ChunkID::DICT, ChunkID::BRSH)?;
     }
 
     Ok(())

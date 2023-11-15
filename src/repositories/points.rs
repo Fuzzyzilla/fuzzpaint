@@ -13,7 +13,7 @@ pub fn global() -> &'static PointRepository {
 }
 
 bitflags::bitflags! {
-    #[derive(Copy, Clone, Eq, PartialEq, Hash)]
+    #[derive(Copy, Clone, Eq, PartialEq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
     /// Description of a point's data fields. Organized such that devices that have later flags are
     /// also likely to have prior flags.
     ///
@@ -23,6 +23,7 @@ bitflags::bitflags! {
     /// Selected (loosely) from 2D-drawing-relavent packets defined in the windows ink API:
     /// https://learn.microsoft.com/en-us/windows/win32/tablet/packetpropertyguids-constants
     #[rustfmt::skip]
+    #[repr(transparent)]
     pub struct PointArchetype : u8 {
         /// The point stream reports an (X: f32, Y: f32) position.
         const POSITION =   0b0000_0001;
@@ -225,58 +226,107 @@ impl PointRepository {
     ) -> Result<(), WriteError> {
         use crate::io::{
             riff::{ChunkID, SizedBinaryChunkWriter},
-            DictMetadata, Version,
+            DictMetadata, OrphanMode, Version,
         };
         use az::CheckedAs;
-        use std::io::Write;
+        use std::io::{IoSlice, Write};
 
         const PTLS_WRITE_VERSION: Version = Version(0, 0, 0);
 
-        let entries: Result<Vec<_>, WriteError> = ids
-            .map(|id| self.summary_of(id).ok_or(WriteError::UnknownID(id)))
+        let allocation_entries: Result<Vec<_>, WriteError> = ids
+            .map(|id| self.alloc_of(id).ok_or(WriteError::UnknownID(id)))
             .collect();
-        let entries = entries?;
+        let allocation_entries = allocation_entries?;
 
-        let mut running_total = 0u32;
-        let meta_entries: Result<Vec<DictMetadata<()>>, WriteError> = entries
-            .iter()
-            .map(|summary| {
-                // Len must fit in u32
-                let len = summary.len.checked_as().ok_or(WriteError::TooLong)?;
-                let meta = DictMetadata {
-                    offset: running_total,
-                    len,
-                    inner: (),
-                };
+        let mut total_data_len = 0u32;
+        let meta_entries: Result<Vec<DictMetadata<PointArchetype>>, WriteError> =
+            allocation_entries
+                .iter()
+                .map(|alloc| {
+                    let summary = alloc.summary;
+                    // Len in bytes must fit in u32
+                    let len = summary
+                        .len
+                        .checked_mul(summary.archetype.len_bytes())
+                        .and_then(|len| len.checked_as())
+                        .ok_or(WriteError::TooLong)?;
+                    let meta = DictMetadata {
+                        offset: total_data_len,
+                        len,
+                        inner: summary.archetype,
+                    };
 
-                // Data must not overrun u32
-                running_total = running_total.checked_add(len).ok_or(WriteError::TooLong)?;
-                Ok(meta)
-            })
-            .collect();
+                    // Data length must not overrun u32
+                    total_data_len = total_data_len.checked_add(len).ok_or(WriteError::TooLong)?;
+                    Ok(meta)
+                })
+                .collect();
         let meta_entries = meta_entries?;
         let num_meta_entries: u32 = meta_entries
             .len()
             .checked_as()
             .ok_or(WriteError::TooManyEntries)?;
-        let meta_size: u32 = std::mem::size_of::<DictMetadata<()>>()
+        let meta_size: u32 = std::mem::size_of::<DictMetadata<PointArchetype>>()
             .checked_as()
             .ok_or(WriteError::TooLong)?;
 
-        // Allocate the chunk.
-        // I should make a helper for DICT
-        let mut chunk =
-            SizedBinaryChunkWriter::new_subtype(writer, ChunkID::DICT, ChunkID::PTLS, todo!())?;
-        chunk.write_all(bytemuck::bytes_of(&PTLS_WRITE_VERSION))?;
-        // DENY (todo, i need to work out semantics of all this :V)
-        chunk.write_all(&[2u8])?;
-        // Num metadata entries
-        chunk.write_all(bytemuck::bytes_of(&num_meta_entries))?;
-        // metadata len per entry
-        chunk.write_all(bytemuck::bytes_of(&meta_size))?;
-        // Dump entries
-        chunk.write_all(bytemuck::cast_slice(&meta_entries))?;
+        // Num metas times meta size
+        let chunk_size = num_meta_entries
+            .checked_mul(meta_size)
+            // Header size
+            .and_then(|total| total.checked_add(12))
+            // Unstructure data size
+            .and_then(|total| total.checked_add(total_data_len))
+            .ok_or(WriteError::TooLong)?;
 
+        // Allocate the chunk.
+        // I should make a helper for DICT...
+        let mut chunk = SizedBinaryChunkWriter::new_subtype(
+            writer,
+            ChunkID::DICT,
+            ChunkID::PTLS,
+            chunk_size as usize,
+        )?;
+        // Write header, metas
+        {
+            let meta_info = [num_meta_entries, meta_size];
+            let mut header_and_meta = [
+                IoSlice::new(bytemuck::bytes_of(&PTLS_WRITE_VERSION)),
+                IoSlice::new(&[OrphanMode::Deny as u8]),
+                IoSlice::new(bytemuck::cast_slice(&meta_info)),
+                IoSlice::new(bytemuck::cast_slice(&meta_entries)),
+            ];
+            chunk.write_all_vectored(&mut header_and_meta)?;
+        };
+
+        // Collect and write bulk points
+        let data_slices: Result<Vec<IoSlice<'_>>, ()> = {
+            let slabs = self.slabs.read();
+            allocation_entries
+                .iter()
+                .map(|entry| {
+                    let Some(slab) = slabs.get(entry.slab_id) else {
+                        // Implementation bug!
+                        return Err(());
+                    };
+                    // Check the alloc range is reasonable
+                    debug_assert!(entry
+                        .start
+                        .checked_add(entry.summary.len)
+                        .is_some_and(|last| last <= SLAB_SIZE));
+
+                    let Some(slice) = slab.try_read(entry.start, entry.summary.len) else {
+                        // Implementation bug!
+                        return Err(());
+                    };
+                    Ok(IoSlice::new(bytemuck::cast_slice(slice)))
+                })
+                .collect()
+        };
+        let mut data_slices = data_slices.map_err(|_| {
+            WriteError::IOError(std::io::Error::other(anyhow::anyhow!("internal error :(")))
+        })?;
+        chunk.write_all_vectored(&mut data_slices)?;
         // Pad, if needed (shouldn't be)
         chunk.finish()?;
         Ok(())
@@ -285,18 +335,18 @@ impl PointRepository {
     /// it needing to be loaded into resident memory. None if the ID is not known
     /// to this repository.
     pub fn summary_of(&self, id: PointCollectionID) -> Option<CollectionSummary> {
-        self.allocs.read().get(&id).map(|info| info.summary)
+        self.alloc_of(id).map(|alloc| alloc.summary)
+    }
+    fn alloc_of(&self, id: PointCollectionID) -> Option<PointCollectionAllocInfo> {
+        self.allocs.read().get(&id).cloned()
     }
     pub fn try_get(
         &self,
         id: PointCollectionID,
     ) -> Result<PointCollectionReadLock, super::TryRepositoryError> {
         let alloc = self
-            .allocs
-            .read()
-            .get(&id)
-            .ok_or(super::TryRepositoryError::NotFound)?
-            .clone();
+            .alloc_of(id)
+            .ok_or(super::TryRepositoryError::NotFound)?;
         let slabs_read = self.slabs.read();
         let Some(slab) = slabs_read.get(alloc.slab_id) else {
             // Implementation bug!
