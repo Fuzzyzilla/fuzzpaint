@@ -1,0 +1,21 @@
+[Desktop Entry]
+# TODO: DNS-based naming convention
+Type=Application
+Name=Fuzzpaint
+GenericName=Vector Graphics Editor
+Categories=Graphics;
+
+Icon=/home/aspen/Pictures/sheespe.png
+NoDisplay=false
+
+MimeType=application/x.fuzzpaint-doc;
+
+# Execute with potentially many files
+Exec=/home/aspen/Documents/Code/Rust/fuzzpaint-vk/target/debug/fuzzpaint-vk %F
+Path=/home/aspen/Documents/Code/Rust/fuzzpaint-vk
+
+Terminal=true
+# Ask politely for a discrete GPU
+# (Unsure how this is supposed to influence device selection,
+# `linux_read_sorted_physical_devices` reports the same info regardless of user's choice)
+PrefersNonDefaultGPU=true

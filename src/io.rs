@@ -79,11 +79,13 @@ where
     {
         {
             let mut info = BinaryChunkWriter::new_subtype(&mut root, ChunkID::LIST, ChunkID::INFO)?;
-            BinaryChunkWriter::new(&mut info, ChunkID(*b"ISFT"))?.write_all(b"fuzzpaint")?;
+            let software = b"fuzzpaint\0";
+            SizedBinaryChunkWriter::new(&mut info, ChunkID(*b"ISFT"), software.len())?
+                .write_all(software)?;
         }
-        let _ = BinaryChunkWriter::new(&mut root, ChunkID::DOCV)?;
-        let _ = BinaryChunkWriter::new(&mut root, ChunkID::GRPH)?;
-        let _ = BinaryChunkWriter::new(&mut root, ChunkID::HIST)?;
+        let _ = SizedBinaryChunkWriter::new(&mut root, ChunkID::DOCV, 0)?;
+        let _ = SizedBinaryChunkWriter::new(&mut root, ChunkID::GRPH, 0)?;
+        let _ = SizedBinaryChunkWriter::new(&mut root, ChunkID::HIST, 0)?;
         {
             let collections = document.stroke_collections();
             point_repository
@@ -97,7 +99,7 @@ where
                 )
                 .map_err(|err| -> anyhow::Error { err.into() })?;
         }
-        let _ = BinaryChunkWriter::new_subtype(&mut root, ChunkID::DICT, ChunkID::BRSH)?;
+        let _ = SizedBinaryChunkWriter::new_subtype(&mut root, ChunkID::DICT, ChunkID::BRSH, 0)?;
     }
 
     Ok(())
