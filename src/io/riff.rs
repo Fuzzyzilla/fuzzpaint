@@ -15,6 +15,7 @@ impl ChunkID {
     // fuzzpaint custom chunks
     pub const DICT: Self = ChunkID(*b"DICT");
     pub const FZP_: Self = ChunkID(*b"fzp ");
+    pub const THMB: Self = ChunkID(*b"thmb");
     pub const DOCV: Self = ChunkID(*b"docv");
     pub const GRPH: Self = ChunkID(*b"grph");
     pub const PTLS: Self = ChunkID(*b"ptls");

@@ -223,18 +223,53 @@ async fn stylus_event_collector(
 //If we return, it was due to an error.
 //convert::Infallible is a quite ironic name for this useage, isn't it? :P
 fn main() -> AnyResult<std::convert::Infallible> {
-    #[cfg(feature = "dhat_heap")]
-    let _profiler = {
-        log::trace!("Installed dhat");
-        dhat::Profiler::new_heap()
-    };
+    let has_term = std::io::IsTerminal::is_terminal(&std::io::stdin());
     // Log to a terminal, if available. Else, log to "log.out" in the working directory.
-    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+    if has_term {
         env_logger::builder()
             .filter_level(log::LevelFilter::max())
             .init();
     } else {
         let _ = simple_logging::log_to_file("log.out", log::LevelFilter::max());
+    }
+    #[cfg(feature = "dhat_heap")]
+    let _profiler = {
+        log::trace!("Installed dhat");
+        dhat::Profiler::new_heap()
+    };
+
+    let loading_succeeded = {
+        use rayon::iter::{IntoParallelIterator, ParallelIterator};
+        // Args are a simple list of paths to open at startup.
+        // Paths are OSStrings, let the system handle character encoding restrictions.
+        // Todo: Expand glob patterns on windows (on unix this is handled by shell)
+        let paths: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
+        // Did we have at least one success? No paths is a success.
+        let had_success: std::sync::atomic::AtomicBool = paths.is_empty().into();
+        let repo = repositories::points::global();
+        paths.into_par_iter().for_each(|path| {
+            let try_block = || -> Result<(), std::io::Error> {
+                let file = std::io::BufReader::new(std::fs::File::open(&path)?);
+                io::read_from(file, repo)?;
+                Ok(())
+            };
+
+            if let Err(e) = try_block() {
+                log::error!("failed to open file {path:?}: {e:?}");
+            } else {
+                // We don't care when it's stored, so long as it gets there eventually.
+                had_success.store(true, std::sync::atomic::Ordering::Relaxed);
+                default_provider().insert_new();
+            }
+        });
+
+        had_success.into_inner()
+    };
+    // False if every file failed.
+    // This should abort the startup if ran from commandline, or give a visual warning and continue
+    // if using a GUI.
+    if !loading_succeeded {
+        log::warn!("Failed to load any provided document.");
     }
 
     let window_surface = window::WindowSurface::new()?;
@@ -244,11 +279,6 @@ fn main() -> AnyResult<std::convert::Infallible> {
     if let Err(e) = GlobalHotkeys::get().save() {
         log::warn!("Failed to save hotkey config:\n{e:?}");
     };
-
-    // Test image generators.
-    //let (image, future) = make_test_image(render_context.clone())?;
-    //let (image, future) = load_document_image(render_context.clone(), &std::path::PathBuf::from("/home/aspen/Pictures/thesharc.png"))?;
-    //future.wait(None)?;
 
     let document_view = Arc::new(document_viewport_proxy::DocumentViewportPreviewProxy::new(
         &render_surface,

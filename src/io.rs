@@ -83,6 +83,11 @@ where
             SizedBinaryChunkWriter::new(&mut info, ChunkID(*b"ISFT"), software.len())?
                 .write_all(software)?;
         }
+        {
+            const TEST_QOI: &'static [u8] = include_bytes!("../test-data/test image.qoi");
+            let mut thumb = SizedBinaryChunkWriter::new(&mut root, ChunkID::THMB, TEST_QOI.len())?;
+            thumb.write_all(TEST_QOI)?;
+        }
         let _ = SizedBinaryChunkWriter::new(&mut root, ChunkID::DOCV, 0)?;
         let _ = SizedBinaryChunkWriter::new(&mut root, ChunkID::GRPH, 0)?;
         let _ = SizedBinaryChunkWriter::new(&mut root, ChunkID::HIST, 0)?;
@@ -103,4 +108,23 @@ where
     }
 
     Ok(())
+}
+
+// Todo: explicit bufread support in chunks!
+pub fn read_from<Reader: std::io::Read>(
+    mut r: Reader,
+    point_repository: &crate::repositories::points::PointRepository,
+) -> Result<crate::commands::queue::DocumentCommandQueue, std::io::Error> {
+    use riff::*;
+    // Dont need to check magic before extracting subchunks. If extracting fails, it
+    // must've been bad anyway!
+    let mut root = BinaryChunkReader::new(r)?.subchunks()?;
+    if root.id() != ChunkID::RIFF || root.subtype_id() != ChunkID::FZP_ {
+        return Err(std::io::Error::other("bad file magic"))?;
+    }
+
+    let (dummy_sender_lol, _) = tokio::sync::broadcast::channel(2);
+    Ok(crate::commands::queue::DocumentCommandQueue::new(
+        dummy_sender_lol,
+    ))
 }

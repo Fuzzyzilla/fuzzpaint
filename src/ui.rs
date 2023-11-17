@@ -44,11 +44,21 @@ impl MainUI {
         requests_send: requests::RequestSender,
         action_listener: crate::actions::ActionListener,
     ) -> Self {
+        let documents = crate::default_provider().document_iter();
+        let documents: Vec<_> = documents
+            .map(|id| PerDocumentData {
+                id,
+                graph_focused_subtree: None,
+                graph_selection: None,
+                yanked_node: None,
+            })
+            .collect();
+        let cur_document = documents.last().map(|doc| doc.id);
         Self {
             modals: vec![],
             inlays: vec![],
-            documents: vec![],
-            cur_document: None,
+            documents,
+            cur_document,
             requests_send,
             action_listener,
         }
