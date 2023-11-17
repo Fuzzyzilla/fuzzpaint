@@ -65,8 +65,10 @@ impl<W: Write> SizedBinaryChunkWriter<W> {
             .checked_as()
             .ok_or_else(|| IOError::other(anyhow::anyhow!("RIFF chunk {} exceeded 4GiB", id)))?;
         let len_le = len.to_le_bytes();
+        #[rustfmt::skip]
         let start_data = [
-            id[0], id[1], id[2], id[3], len_le[0], len_le[1], len_le[2], len_le[3],
+            id[0],     id[1],     id[2],     id[3],
+            len_le[0], len_le[1], len_le[2], len_le[3],
         ];
         writer.write_all(&start_data)?;
 
@@ -81,16 +83,17 @@ impl<W: Write> SizedBinaryChunkWriter<W> {
         // Hide the fact that we can only store u32::MAX bytes as an implementation detail.
         // Add four bytes for the subtype id.
         let len: u32 = len
-            .checked_as()
-            .and_then(|len: u32| len.checked_add(4u32))
+            .checked_as::<u32>()
+            // 4 more bytes for inner ID
+            .and_then(|len| len.checked_add(4))
             .ok_or_else(|| IOError::other(anyhow::anyhow!("RIFF chunk {} exceeded 4GiB", id)))?;
 
         let len_le = len.to_le_bytes();
         #[rustfmt::skip]
         let start_data = [
-            id[0], id[1], id[2], id[3],
-            len_le[0], len_le[1], len_le[2], len_le[3],
-            subtype[0], subtype[1], subtype[2], subtype[3]
+            id[0],      id[1],      id[2],      id[3],
+            len_le[0],  len_le[1],  len_le[2],  len_le[3],
+            subtype[0], subtype[1], subtype[2], subtype[3],
         ];
         writer.write_all(&start_data)?;
 
@@ -100,6 +103,56 @@ impl<W: Write> SizedBinaryChunkWriter<W> {
             len_remaining: len - 4,
             writer,
         })
+    }
+    /// Convenience fn to place a whole buffer as a SizedBinaryChunk
+    pub fn write_buf(mut writer: W, id: ChunkID, data: &[u8]) -> IOResult<()> {
+        let len: u32 = data
+            .len()
+            .checked_as()
+            .ok_or_else(|| IOError::other(anyhow::anyhow!("RIFF chunk {} exceeded 4GiB", id)))?;
+
+        let len_le = len.to_le_bytes();
+        #[rustfmt::skip]
+        let start_data = [
+            id[0],     id[1],     id[2],     id[3],
+            len_le[0], len_le[1], len_le[2], len_le[3],
+        ];
+
+        let mut slices = [
+            std::io::IoSlice::new(&start_data),
+            std::io::IoSlice::new(data),
+        ];
+
+        writer.write_all_vectored(&mut slices)
+    }
+    /// Convenience fn to place a whole buffer as a SizedBinaryChunk subtype
+    pub fn write_buf_subtype(
+        mut writer: W,
+        id: ChunkID,
+        subtype: ChunkID,
+        data: &[u8],
+    ) -> IOResult<()> {
+        let len: u32 = data
+            .len()
+            .checked_as::<u32>()
+            // 4 more bytes for inner ID
+            .and_then(|len| len.checked_add(4))
+            .ok_or_else(|| IOError::other(anyhow::anyhow!("RIFF chunk {} exceeded 4GiB", id)))?;
+
+        let len_le = len.to_le_bytes();
+        #[rustfmt::skip]
+        let start_data = [
+            id[0],      id[1],      id[2],      id[3],
+            len_le[0],  len_le[1],  len_le[2],  len_le[3],
+            subtype[0], subtype[1], subtype[2], subtype[3],
+        ];
+
+        let mut slices = [
+            std::io::IoSlice::new(&start_data),
+            std::io::IoSlice::new(data),
+        ];
+
+        writer.write_all_vectored(&mut slices)
     }
     /// Same as Drop, but is able to report errors.
     pub fn finish(mut self) -> IOResult<()> {

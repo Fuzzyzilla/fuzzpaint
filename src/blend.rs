@@ -1,7 +1,18 @@
 use crate::vulkano_prelude::*;
 use std::{default, fmt::Debug, sync::Arc};
 
-#[derive(strum::AsRefStr, PartialEq, Eq, strum::EnumIter, Copy, Clone, Hash, Debug)]
+#[derive(
+    strum::AsRefStr,
+    PartialEq,
+    Eq,
+    strum::EnumIter,
+    Copy,
+    Clone,
+    Hash,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[repr(u8)]
 pub enum BlendMode {
     Normal,
@@ -16,7 +27,7 @@ impl Default for BlendMode {
 }
 
 /// Blend mode for an object, including a mode, opacity modulate, and alpha clip
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Blend {
     pub mode: BlendMode,
     pub opacity: f32,

@@ -33,12 +33,10 @@ pub struct DocumentCommandQueue {
     document: crate::state::DocumentID,
     /// Bad bad bad bad this shouldn't be in here :V
     /// Can't think of a better way rn.
-    on_change_channel: tokio::sync::broadcast::Sender<provider::ProviderMessage>,
+    on_change_channel: Option<tokio::sync::broadcast::Sender<provider::ProviderMessage>>,
 }
 impl DocumentCommandQueue {
-    pub fn new(
-        on_change_channel: tokio::sync::broadcast::Sender<provider::ProviderMessage>,
-    ) -> Self {
+    pub fn new() -> Self {
         let command_tree = slab_tree::TreeBuilder::new()
             .with_root(super::Command::Dummy)
             .build();
@@ -53,8 +51,43 @@ impl DocumentCommandQueue {
                 .into(),
             ),
             document: Default::default(),
-            on_change_channel,
+            on_change_channel: None,
         }
+    }
+    // Create a queue from data, without a history.
+    pub fn from_state(
+        document: crate::state::Document,
+        blend_graph: crate::state::graph::BlendGraph,
+        stroke_state: crate::state::stroke_collection::StrokeCollectionState,
+    ) -> Self {
+        let command_tree = slab_tree::TreeBuilder::new()
+            .with_root(super::Command::Dummy)
+            .build();
+        let root = command_tree.root_id().unwrap();
+        Self {
+            inner: Arc::new(
+                DocumentCommandQueueInner {
+                    state: queue_state::State {
+                        document,
+                        graph: blend_graph,
+                        stroke_state,
+                        present: root,
+                    },
+                    command_tree,
+                    root,
+                }
+                .into(),
+            ),
+            document: Default::default(),
+            on_change_channel: None,
+        }
+    }
+    /// Message this channel when a change is made to the document.
+    pub fn send_on_change(
+        &mut self,
+        send: tokio::sync::broadcast::Sender<provider::ProviderMessage>,
+    ) {
+        self.on_change_channel = Some(send)
     }
     pub fn id(&self) -> crate::state::DocumentID {
         self.document
@@ -80,7 +113,8 @@ impl DocumentCommandQueue {
             // Send notify *after* the write has flushed, hence the scope above.
             let _ = self
                 .on_change_channel
-                .send(provider::ProviderMessage::Modified(self.id()));
+                .as_ref()
+                .map(|c| c.send(provider::ProviderMessage::Modified(self.id())));
         }
         result
     }
@@ -126,7 +160,8 @@ impl DocumentCommandQueue {
         if changed {
             let _ = self
                 .on_change_channel
-                .send(provider::ProviderMessage::Modified(self.id()));
+                .as_ref()
+                .map(|c| c.send(provider::ProviderMessage::Modified(self.id())));
         }
     }
     pub fn redo_n(&self, num: usize) {
@@ -163,11 +198,10 @@ impl DocumentCommandQueue {
             start != end
         };
         // Report change (if any) only after the write lock is dropped.
-        if changed {
-            let _ = self
-                .on_change_channel
-                .send(provider::ProviderMessage::Modified(self.id()));
-        }
+        let _ = self
+            .on_change_channel
+            .as_ref()
+            .map(|c| c.send(provider::ProviderMessage::Modified(self.id())));
     }
     /// Create a listener that starts at the beginning of history.
     pub fn listen_from_start(&self) -> DocumentCommandListener {

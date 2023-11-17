@@ -25,6 +25,7 @@ struct PerDocumentData {
     graph_focused_subtree: Option<crate::state::graph::NodeID>,
     /// Yanked node during a reparent operation
     yanked_node: Option<crate::state::graph::AnyID>,
+    name: String,
 }
 pub struct MainUI {
     // Could totally be static dispatch, but for simplicity:
@@ -51,6 +52,7 @@ impl MainUI {
                 graph_focused_subtree: None,
                 graph_selection: None,
                 yanked_node: None,
+                name: "Unknown".into(),
             })
             .collect();
         let cur_document = documents.last().map(|doc| doc.id);
@@ -104,12 +106,16 @@ impl MainUI {
                             ui.add(button)
                         };
                         if add_button(ui, "New", Some("Ctrl+N")).clicked() {
-                            let new_id = crate::default_provider().insert_new();
+                            let new_doc = crate::commands::queue::DocumentCommandQueue::new();
+                            let new_id = new_doc.id();
+                            // Can't fail
+                            let _ = crate::default_provider().insert(new_doc);
                             let interface = PerDocumentData {
                                 id: new_id,
                                 graph_focused_subtree: None,
                                 graph_selection: None,
                                 yanked_node: None,
+                                name: "Unknown".into(),
                             };
                             let _ = self.requests_send.send(requests::UiRequest::Document {
                                 target: new_id,
@@ -680,11 +686,11 @@ impl MainUI {
                 ui.horizontal(|ui| {
                     let mut deleted_ids =
                         smallvec::SmallVec::<[crate::state::DocumentID; 1]>::new();
-                    for document_id in self.documents.iter().map(|interface| interface.id) {
+                    for PerDocumentData { id, name, .. } in self.documents.iter() {
                         egui::containers::Frame::group(ui.style())
                             .outer_margin(egui::Margin::symmetric(0.0, 0.0))
                             .inner_margin(egui::Margin::symmetric(0.0, 0.0))
-                            .multiply_with_opacity(if self.cur_document == Some(document_id) {
+                            .multiply_with_opacity(if self.cur_document == Some(*id) {
                                 1.0
                             } else {
                                 0.0
@@ -695,22 +701,18 @@ impl MainUI {
                                 ..0.0.into()
                             })
                             .show(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.cur_document,
-                                    Some(document_id),
-                                    "UwU", //&document.name,
-                                );
+                                ui.selectable_value(&mut self.cur_document, Some(*id), name);
                                 if ui.small_button("✖").clicked() {
-                                    deleted_ids.push(document_id);
+                                    deleted_ids.push(*id);
                                     //Disselect if deleted.
-                                    if self.cur_document == Some(document_id) {
+                                    if self.cur_document == Some(*id) {
                                         self.cur_document = None;
                                     }
                                 }
                             })
                             .response
                             .on_hover_ui(|ui| {
-                                ui.label(format!("{}", document_id));
+                                ui.label(format!("{}", id));
                             });
                     }
                     self.documents

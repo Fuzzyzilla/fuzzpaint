@@ -1,3 +1,4 @@
+pub mod id;
 pub mod riff;
 
 /// Data that has been read from a file newer than this
@@ -10,6 +11,38 @@ pub struct OrphanedData {
     id: riff::ChunkID,
     version: Version,
     /// Entire data of the chunk, including header.
+    data: Vec<u8>,
+}
+/// Fields read from a file that were not understood, either due to unrecognized
+/// chunkID or incompatible version, but the fields requested to be preserved through read/writes.
+///
+/// The data is not inspectible, as that would be an anti-pattern!
+/// Extend the reader instead. When I inevitably come back to add
+/// an accessor for this for whatever reason I ought to think really hard about it.
+pub struct Residual {
+    // Since the tree shape is static and well-known, we can simply
+    // store the levels by name lol. If some extension adds recursion or
+    // whatever, it will still fall into one of these buckets and the whole
+    // structure will get dumped into a single ResidualChunk.
+    /// Chunks from the top level RIFF
+    riff: Vec<ResidualChunk>,
+    /// Chunks from RIFF > LIST OBJS
+    riff_list_objs: Vec<ResidualChunk>,
+}
+impl Residual {
+    /// No residual data.
+    pub fn empty() -> Self {
+        Self {
+            riff: vec![],
+            riff_list_objs: vec![],
+        }
+    }
+}
+struct ResidualChunk {
+    id: riff::ChunkID,
+    header: VersionedChunkHeader,
+    /// chunk length is implicit from this vec's length.
+    /// bytes include the header, but not the id - just as RIFF does.
     data: Vec<u8>,
 }
 
@@ -61,6 +94,7 @@ pub struct Version(pub u8, pub u8, pub u8);
 impl Version {
     pub const CURRENT: Self = Version(0, 0, 0);
 }
+
 #[repr(C)]
 pub struct VersionedChunkHeader(Version, OrphanMode);
 /// From the given document state reader and repository handle, write a `.fzp` document into the given writer.
@@ -79,18 +113,15 @@ where
     {
         {
             let mut info = BinaryChunkWriter::new_subtype(&mut root, ChunkID::LIST, ChunkID::INFO)?;
-            let software = b"fuzzpaint\0";
-            SizedBinaryChunkWriter::new(&mut info, ChunkID(*b"ISFT"), software.len())?
-                .write_all(software)?;
+            SizedBinaryChunkWriter::write_buf(&mut info, ChunkID(*b"ISFT"), b"fuzzpaint\0")?;
         }
         {
             const TEST_QOI: &'static [u8] = include_bytes!("../test-data/test image.qoi");
-            let mut thumb = SizedBinaryChunkWriter::new(&mut root, ChunkID::THMB, TEST_QOI.len())?;
-            thumb.write_all(TEST_QOI)?;
+            SizedBinaryChunkWriter::write_buf(&mut root, ChunkID::THMB, TEST_QOI)?;
         }
-        let _ = SizedBinaryChunkWriter::new(&mut root, ChunkID::DOCV, 0)?;
-        let _ = SizedBinaryChunkWriter::new(&mut root, ChunkID::GRPH, 0)?;
-        let _ = SizedBinaryChunkWriter::new(&mut root, ChunkID::HIST, 0)?;
+        SizedBinaryChunkWriter::write_buf(&mut root, ChunkID::DOCV, &[])?;
+        SizedBinaryChunkWriter::write_buf(&mut root, ChunkID::GRPH, &[])?;
+        SizedBinaryChunkWriter::write_buf(&mut root, ChunkID::HIST, &[])?;
         {
             let collections = document.stroke_collections();
             point_repository
@@ -104,18 +135,20 @@ where
                 )
                 .map_err(|err| -> anyhow::Error { err.into() })?;
         }
-        let _ = SizedBinaryChunkWriter::new_subtype(&mut root, ChunkID::DICT, ChunkID::BRSH, 0)?;
+        SizedBinaryChunkWriter::write_buf_subtype(&mut root, ChunkID::DICT, ChunkID::BRSH, &[])?;
     }
 
     Ok(())
 }
 
 // Todo: explicit bufread support in chunks!
-pub fn read_from<Reader: std::io::Read>(
-    mut r: Reader,
+pub fn read_path<Path: Into<std::path::PathBuf>>(
+    path: Path,
     point_repository: &crate::repositories::points::PointRepository,
 ) -> Result<crate::commands::queue::DocumentCommandQueue, std::io::Error> {
     use riff::*;
+    let path_buf = path.into();
+    let mut r = std::io::BufReader::new(std::fs::File::open(&path_buf)?);
     // Dont need to check magic before extracting subchunks. If extracting fails, it
     // must've been bad anyway!
     let mut root = BinaryChunkReader::new(r)?.subchunks()?;
@@ -123,8 +156,18 @@ pub fn read_from<Reader: std::io::Read>(
         return Err(std::io::Error::other("bad file magic"))?;
     }
 
-    let (dummy_sender_lol, _) = tokio::sync::broadcast::channel(2);
-    Ok(crate::commands::queue::DocumentCommandQueue::new(
-        dummy_sender_lol,
+    let document_info = crate::state::Document {
+        // File stem (without ext) if available, else the whole path.
+        name: path_buf
+            .file_stem()
+            .map(|p| p.to_string_lossy().to_owned())
+            .unwrap_or_else(|| path_buf.to_string_lossy().to_owned())
+            .to_string(),
+        path: Some(path_buf),
+    };
+    Ok(crate::commands::queue::DocumentCommandQueue::from_state(
+        document_info,
+        Default::default(),
+        Default::default(),
     ))
 }

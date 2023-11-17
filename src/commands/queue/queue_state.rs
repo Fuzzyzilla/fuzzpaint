@@ -7,7 +7,7 @@ use crate::state;
 
 pub struct State {
     //pub stroke_layers: Vec<state::StrokeLayer>,
-    //pub document: state::Document,
+    pub document: state::Document,
     pub graph: state::graph::BlendGraph,
     pub stroke_state: state::stroke_collection::StrokeCollectionState,
     /// The node in the command tree that this state corresponds to
@@ -16,6 +16,7 @@ pub struct State {
 impl State {
     pub fn new(root: slab_tree::NodeId) -> Self {
         Self {
+            document: Default::default(),
             graph: Default::default(),
             stroke_state: Default::default(),
             present: root,
@@ -26,6 +27,7 @@ impl State {
     pub fn fork(&self) -> Self {
         // For now, this is just clone.
         Self {
+            document: self.document.clone(),
             graph: self.graph.clone(),
             stroke_state: self.stroke_state.clone(),
             present: self.present.clone(),

@@ -331,6 +331,14 @@ impl PointRepository {
         chunk.finish()?;
         Ok(())
     }
+    /// Intern all the data from the given `DICT ptls`, returning a vector of assigned IDs
+    /// for the point lists, in order.
+    fn read_dict(
+        &self,
+        dict: crate::io::riff::BinaryChunkReader<impl std::io::Read>,
+    ) -> std::io::Result<Vec<PointCollectionID>> {
+        todo!()
+    }
     /// Get a [CollectionSummary] for the given collection, reporting certain key aspects of a stroke without
     /// it needing to be loaded into resident memory. None if the ID is not known
     /// to this repository.

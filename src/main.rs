@@ -248,18 +248,19 @@ fn main() -> AnyResult<std::convert::Infallible> {
         let had_success: std::sync::atomic::AtomicBool = paths.is_empty().into();
         let repo = repositories::points::global();
         paths.into_par_iter().for_each(|path| {
-            let try_block = || -> Result<(), std::io::Error> {
-                let file = std::io::BufReader::new(std::fs::File::open(&path)?);
-                io::read_from(file, repo)?;
-                Ok(())
-            };
+            let try_block =
+                || -> Result<crate::commands::queue::DocumentCommandQueue, std::io::Error> {
+                    io::read_path(&path, repo)
+                };
 
-            if let Err(e) = try_block() {
-                log::error!("failed to open file {path:?}: {e:?}");
-            } else {
-                // We don't care when it's stored, so long as it gets there eventually.
-                had_success.store(true, std::sync::atomic::Ordering::Relaxed);
-                default_provider().insert_new();
+            match try_block() {
+                Err(e) => log::error!("failed to open file {path:?}: {e:?}"),
+                Ok(queue) => {
+                    // We don't care when it's stored, so long as it gets there eventually.
+                    had_success.store(true, std::sync::atomic::Ordering::Relaxed);
+                    // Defaulted ID, can't fail
+                    let _ = default_provider().insert(queue);
+                }
             }
         });
 

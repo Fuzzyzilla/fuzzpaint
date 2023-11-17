@@ -7,22 +7,19 @@ pub mod stroke_collection;
 
 pub type DocumentID = crate::FuzzID<Document>;
 
+#[derive(Clone)]
 pub struct Document {
     /// The path from which the file was loaded or saved, or None if opened as new.
     pub path: Option<std::path::PathBuf>,
     /// Name of the document, inferred from its path or generated.
     pub name: String,
-    /// ID that is unique within this execution of the program
-    pub id: DocumentID,
     // Size, position, dpi, ect todo!
 }
 impl Default for Document {
     fn default() -> Self {
-        let id = Default::default();
         Self {
             path: None,
-            name: format!("{}", id),
-            id,
+            name: "New Document".into(),
         }
     }
 }

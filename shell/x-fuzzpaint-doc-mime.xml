@@ -6,6 +6,7 @@
     <expanded-acronym>FuZzPaint</expanded-acronym>
     <sub-class-of type="application/x-riff"/>
     <glob pattern="*.fzp"/>
+    <icon name="application-x-fuzzpaint-doc"/>
     <generic-icon name="image-x-generic"/>
     <magic>
       <match type="string" offset="0" value="RIFF">
