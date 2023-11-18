@@ -219,11 +219,12 @@ impl PointRepository {
         }
     }
     /// Given an iterator of collection IDs, encodes them directly (in order) into the given Write stream in a `DICT ptls` chunk.
+    /// On success, returns a map between PointCollectionID and file local id as written.
     pub fn write_dict_into(
         &self,
         ids: impl Iterator<Item = PointCollectionID>,
         writer: impl std::io::Write,
-    ) -> Result<(), WriteError> {
+    ) -> Result<crate::io::id::FileLocalInterner<PointCollectionIDMarker>, WriteError> {
         use crate::io::{
             riff::{ChunkID, SizedBinaryChunkWriter},
             DictMetadata, OrphanMode, Version,
@@ -233,8 +234,19 @@ impl PointRepository {
 
         const PTLS_WRITE_VERSION: Version = Version(0, 0, 0);
 
+        let mut file_ids = crate::io::id::FileLocalInterner::new();
+        // Collect all uniqe entries and allocs.
         let allocation_entries: Result<Vec<_>, WriteError> = ids
-            .map(|id| self.alloc_of(id).ok_or(WriteError::UnknownID(id)))
+            .filter_map(|id| match file_ids.insert(id) {
+                // New entry, collect it's alloc or short-circuit if not found
+                Ok(true) => Some(self.alloc_of(id).ok_or(WriteError::UnknownID(id))),
+                // Already collected
+                Ok(false) => None,
+                // Short circuit collection on err
+                Err(crate::io::id::InternError::TooManyEntries) => {
+                    Some(Err(WriteError::TooManyEntries))
+                }
+            })
             .collect();
         let allocation_entries = allocation_entries?;
 
@@ -329,14 +341,15 @@ impl PointRepository {
         chunk.write_all_vectored(&mut data_slices)?;
         // Pad, if needed (shouldn't be)
         chunk.finish()?;
-        Ok(())
+        Ok(file_ids)
     }
-    /// Intern all the data from the given `DICT ptls`, returning a vector of assigned IDs
-    /// for the point lists, in order.
-    fn read_dict(
+    /// Intern all the data from the given `DICT ptls`, returning a map of the newly allocated
+    /// IDs.
+    pub fn read_dict(
         &self,
-        dict: crate::io::riff::BinaryChunkReader<impl std::io::Read>,
-    ) -> std::io::Result<Vec<PointCollectionID>> {
+        dict: &mut crate::io::riff::BinaryChunkReader<impl std::io::Read>,
+    ) -> std::io::Result<crate::io::id::ProcessLocalInterner<PointCollectionIDMarker>> {
+        // Need a dict reader!!
         todo!()
     }
     /// Get a [CollectionSummary] for the given collection, reporting certain key aspects of a stroke without

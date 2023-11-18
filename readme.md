@@ -24,6 +24,7 @@ To declare **0.2.0**, I would like to be able to freely doodle a thing and save 
    - [ ] Write file history
    - [ ] Export common image formats
      - via image-rs/image
+   - [X] [Shell integration](https://github.com/Fuzzyzilla/fuzzpaint-thumbnailer)
  - [ ] Brushes
    - [ ] Make and manage textured brushes from inside fuzzpaint
    - [ ] Save brushes to file

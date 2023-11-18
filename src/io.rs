@@ -148,13 +148,32 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
 ) -> Result<crate::commands::queue::DocumentCommandQueue, std::io::Error> {
     use riff::*;
     let path_buf = path.into();
-    let mut r = std::io::BufReader::new(std::fs::File::open(&path_buf)?);
+    let r = std::io::BufReader::new(std::fs::File::open(&path_buf)?);
     // Dont need to check magic before extracting subchunks. If extracting fails, it
     // must've been bad anyway!
     let mut root = BinaryChunkReader::new(r)?.subchunks()?;
     if root.id() != ChunkID::RIFF || root.subtype_id() != ChunkID::FZP_ {
         return Err(std::io::Error::other("bad file magic"))?;
     }
+    // while let Ok(mut subchunk) = root.next_subchunk() {
+    //     match subchunk.id() {
+    //         ChunkID::THMB => (),
+    //         ChunkID::DOCV => (),
+    //         ChunkID::LIST => {
+    //             // We're goin deeper!
+    //             let nested_subchunks = subchunk.subchunks()?;
+    //             match nested_subchunks.subtype_id() {
+    //                 ChunkID::INFO => (),
+    //                 ChunkID::OBJS => (),
+    //                 other => unimplemented!("can't parse chunk LIST \"{other}\""),
+    //             }
+    //         }
+    //         ChunkID::HIST => (),
+    //         other => unimplemented!("can't parse chunk {other}"),
+    //     }
+    //     // Advance cursor. This should be automatic, fix your api, me!!!
+    //     subchunk.skip()?;
+    // }
 
     let document_info = crate::state::Document {
         // File stem (without ext) if available, else the whole path.

@@ -1,7 +1,7 @@
 //! Utilities for conversion between process-local and file-local IDs during
 //! Serialization and deserialization.
 
-use crate::FuzzID;
+use crate::id::FuzzID;
 
 pub struct FileLocalID<T: std::any::Any> {
     pub id: u32,
@@ -92,10 +92,23 @@ impl<T: std::any::Any> FileLocalInterner<T> {
     pub fn get(&self, id: FuzzID<T>) -> Option<FileLocalID<T>> {
         self.map.get(&id).cloned()
     }
-    /// Insert an id. Convenience fn for get_or_insert while discarding the result.
-    pub fn insert(&mut self, id: FuzzID<T>) -> Result<(), InternError> {
+    /// Insert an id. Returns Ok(true) if the id was new.
+    pub fn insert(&mut self, id: FuzzID<T>) -> Result<bool, InternError> {
         // Implementation of get_or_insert is equally as cheap as a custom insert.
-        self.get_or_insert(id).map(|_| ())
+        match self.map.entry(id) {
+            hashbrown::hash_map::Entry::Occupied(_) => Ok(false),
+            hashbrown::hash_map::Entry::Vacant(v) => {
+                let id = checked_postfix_increment(&mut self.next_id)
+                    .ok_or(InternError::TooManyEntries)?;
+
+                let id = FileLocalID {
+                    id,
+                    _phantom: Default::default(),
+                };
+                v.insert(id);
+                Ok(true)
+            }
+        }
     }
 }
 
@@ -114,6 +127,37 @@ impl<T: std::any::Any> ProcessLocalInterner<T> {
             map: Default::default(),
         }
     }
+    /// From many sequential FileLocalIDs from zero up to count, allocate IDs.
+    /// Much more efficient than allocating one-by-one.
+    pub fn many_sequential(count: usize) -> Result<Self, InternError> {
+        use az::CheckedAs;
+        let count: u32 = count.checked_as().ok_or(InternError::TooManyEntries)?;
+        let mut map =
+            hashbrown::HashMap::<FileLocalID<T>, FuzzID<T>>::with_capacity(count as usize);
+        // Allocate ids.
+        let file_local_ids = (0..count).into_iter();
+        let process_local_ids = FuzzID::many(count as usize);
+
+        // Extend with pairs of sequential file id, bulk allocated process ID.
+        map.extend(
+            file_local_ids
+                .zip(process_local_ids)
+                .map(|(file_id, fuzz_id)| {
+                    (
+                        FileLocalID {
+                            id: file_id,
+                            _phantom: Default::default(),
+                        },
+                        fuzz_id,
+                    )
+                }),
+        );
+
+        // Make sure we allocated as many as promised
+        debug_assert_eq!(map.len(), count as usize);
+
+        Ok(Self { map })
+    }
     /// Gets or creates a FuzzID id for the given file-local
     pub fn get_or_insert(&mut self, id: FileLocalID<T>) -> FuzzID<T> {
         match self.map.entry(id) {
@@ -125,10 +169,6 @@ impl<T: std::any::Any> ProcessLocalInterner<T> {
             }
         }
     }
-    // TODO: an impl for interning many IDs in bulk, allocating all FuzzIDs at once with a single atomic op instead
-    // of the one-at-a-time atomic adds of current. Problem is, checking an iterator for duplicate file IDs to ensure
-    // not double-assigning is O(n*something) anyway :V
-    /// Get a FuzzID without creating it if it's not present.
     pub fn get(&self, id: FileLocalID<T>) -> Option<FuzzID<T>> {
         self.map.get(&id).cloned()
     }

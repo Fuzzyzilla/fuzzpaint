@@ -15,6 +15,7 @@ impl ChunkID {
     // fuzzpaint custom chunks
     pub const DICT: Self = ChunkID(*b"DICT");
     pub const FZP_: Self = ChunkID(*b"fzp ");
+    pub const OBJS: Self = ChunkID(*b"objs");
     pub const THMB: Self = ChunkID(*b"thmb");
     pub const DOCV: Self = ChunkID(*b"docv");
     pub const GRPH: Self = ChunkID(*b"grph");
@@ -256,7 +257,7 @@ impl<W: Write + Seek> BinaryChunkWriter<W> {
             writer,
         })
     }
-    /// Creates a writer with LIST or RIFF style subtype header.
+    /// Creates a writer with LIST, RIFF, or DICT style subtype header.
     // Should this be it's own writer type?
     pub fn new_subtype(mut writer: W, id: ChunkID, subtype: ChunkID) -> IOResult<Self> {
         // Write the ID, length field set to 4, and subtype.
