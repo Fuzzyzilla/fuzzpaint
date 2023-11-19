@@ -1,3 +1,5 @@
+/// IO utilities not specific to the format.
+pub mod common;
 pub mod id;
 pub mod riff;
 
@@ -107,7 +109,7 @@ where
     Document: crate::commands::queue::state_reader::CommandQueueStateReader,
     Writer: std::io::Write + std::io::Seek,
 {
-    use riff::*;
+    use riff::{encode::*, ChunkID};
     use std::io::Write;
     let mut root = BinaryChunkWriter::new_subtype(writer, ChunkID::RIFF, ChunkID::FZP_)?;
     {
@@ -146,7 +148,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
     path: Path,
     point_repository: &crate::repositories::points::PointRepository,
 ) -> Result<crate::commands::queue::DocumentCommandQueue, std::io::Error> {
-    use riff::*;
+    use riff::{decode::*, ChunkID};
     let path_buf = path.into();
     let r = std::io::BufReader::new(std::fs::File::open(&path_buf)?);
     // Dont need to check magic before extracting subchunks. If extracting fails, it

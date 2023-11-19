@@ -226,7 +226,7 @@ impl PointRepository {
         writer: impl std::io::Write,
     ) -> Result<crate::io::id::FileLocalInterner<PointCollectionIDMarker>, WriteError> {
         use crate::io::{
-            riff::{ChunkID, SizedBinaryChunkWriter},
+            riff::{encode::SizedBinaryChunkWriter, ChunkID},
             DictMetadata, OrphanMode, Version,
         };
         use az::CheckedAs;
@@ -311,6 +311,12 @@ impl PointRepository {
             chunk.write_all_vectored(&mut header_and_meta)?;
         };
 
+        // TODO: native -> little endian conversion.
+        // Expensive to do! Would be cheaper if we know we're about to consume and invalidate the lists,
+        // as we could convert in-place.
+        #[cfg(not(target_endian = "little"))]
+        compile_error!("FIXME!");
+
         // Collect and write bulk points
         let data_slices: Result<Vec<IoSlice<'_>>, ()> = {
             let slabs = self.slabs.read();
@@ -347,7 +353,7 @@ impl PointRepository {
     /// IDs.
     pub fn read_dict(
         &self,
-        dict: &mut crate::io::riff::BinaryChunkReader<impl std::io::Read>,
+        dict: &mut crate::io::riff::decode::BinaryChunkReader<impl std::io::Read>,
     ) -> std::io::Result<crate::io::id::ProcessLocalInterner<PointCollectionIDMarker>> {
         // Need a dict reader!!
         todo!()
