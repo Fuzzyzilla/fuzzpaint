@@ -3,18 +3,6 @@ pub mod common;
 pub mod id;
 pub mod riff;
 
-/// Data that has been read from a file newer than this
-/// version supports, but is marked by the writer as keepable.
-pub struct OrphanedData {
-    /// TODO: keep track of from where in the RIFF tree this
-    /// node belongs. It must have the same parent as it originally had,
-    /// but may be placed in any index within that parent.
-    position: (),
-    id: riff::ChunkID,
-    version: Version,
-    /// Entire data of the chunk, including header.
-    data: Vec<u8>,
-}
 /// Fields read from a file that were not understood, either due to unrecognized
 /// chunkID or incompatible version, but the fields requested to be preserved through read/writes.
 ///
@@ -66,29 +54,16 @@ impl From<anyhow::Error> for WriteError {
     }
 }
 
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy, bytemuck::Contiguous, bytemuck::NoUninit)]
 #[repr(u8)]
 pub enum OrphanMode {
+    /// The reader should copy this chunk to the output even if it cannot parse it.
     Keep = 0,
+    /// The reader should *not* copy this chunk to the output if it cannot parse it
+    /// and modifications have been made to the document.
     Discard = 1,
+    /// The reader should not parse the document if it cannot parse this chunk.
     Deny = 2,
-}
-impl OrphanMode {
-    pub fn from_byte(byte: u8) -> Option<Self> {
-        match byte {
-            0 => Some(Self::Keep),
-            1 => Some(Self::Discard),
-            2 => Some(Self::Deny),
-            _ => None,
-        }
-    }
-}
-#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
-#[repr(C, packed)]
-pub struct DictMetadata<InnerMeta: bytemuck::Pod + bytemuck::Zeroable + Copy> {
-    pub offset: u32,
-    pub len: u32,
-    pub inner: InnerMeta,
 }
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
@@ -99,6 +74,18 @@ impl Version {
 
 #[repr(C)]
 pub struct VersionedChunkHeader(Version, OrphanMode);
+/// Try to create a versioned chunk header from four bytes.
+/// Returns an error only if the final byte is invalid as a [OrphanMode]
+impl TryFrom<[u8; 4]> for VersionedChunkHeader {
+    type Error = ();
+    fn try_from(value: [u8; 4]) -> Result<Self, Self::Error> {
+        use bytemuck::Contiguous;
+        Ok(Self(
+            Version(value[0], value[1], value[2]),
+            OrphanMode::from_integer(value[3]).ok_or(())?,
+        ))
+    }
+}
 /// From the given document state reader and repository handle, write a `.fzp` document into the given writer.
 pub fn write_into<Document, Writer>(
     document: Document,
@@ -153,7 +140,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
     let r = std::io::BufReader::new(std::fs::File::open(&path_buf)?);
     // Dont need to check magic before extracting subchunks. If extracting fails, it
     // must've been bad anyway!
-    let mut root = BinaryChunkReader::new(r)?.subchunks()?;
+    let mut root = BinaryChunkReader::new(r)?.into_subchunks()?;
     if root.id() != ChunkID::RIFF || root.subtype_id() != ChunkID::FZP_ {
         return Err(std::io::Error::other("bad file magic"))?;
     }

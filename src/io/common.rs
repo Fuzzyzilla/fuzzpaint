@@ -45,6 +45,12 @@ impl<S> MyTake<S> {
     pub fn cursor(&self) -> u64 {
         self.cursor
     }
+    /// Returns the total length of the stream, exactly as passed into `new` regardless of stream position.
+    ///
+    /// For length remaining, use `remaining`.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
     /// Consumes this take, returning a smaller one from the current position.
     /// Fails and returns ownership of self if the requested length is longer than the remaining length.
     ///
@@ -62,6 +68,14 @@ impl<S> MyTake<S> {
             })
         }
     }
+    /// Create a new take from the current position up to the end of this take.
+    pub fn retake_remaining(self) -> Self {
+        Self {
+            len: self.remaining(),
+            stream: self.stream,
+            cursor: 0,
+        }
+    }
 }
 impl<S: Seek> MyTake<S> {
     /// Advance the cursor to the end, returning the stream.
@@ -70,6 +84,10 @@ impl<S: Seek> MyTake<S> {
     /// In case of an error, stream state is left undefined and is lost.
     pub fn skip(self) -> IOResult<S> {
         let remaining = self.remaining();
+        // Skip a syscall. This optimization used a lot by the riff decoders.
+        if remaining == 0 {
+            return Ok(self.stream);
+        }
         let mut stream = self.stream;
         let iremaining: i64 = remaining.saturating_as();
 
@@ -179,7 +197,7 @@ impl<R: Seek> Seek for MyTake<R> {
                     // Also catches past-the-start
                     .ok_or_else(|| IOError::other(err_overflow_cursor))?
             }
-            SeekFrom::Start(pos) => pos.min(self.remaining()),
+            SeekFrom::Start(pos) => pos.min(self.len),
             SeekFrom::End(pos) => {
                 // Clamp upper bound, flip to positive for subtraction
                 let pos = pos.max(0).unsigned_abs();
@@ -189,19 +207,22 @@ impl<R: Seek> Seek for MyTake<R> {
             }
         };
 
-        // Each branch checks this individually. Still, make very sure.
-        debug_assert!(new_cursor <= self.len);
+        // Avoid a syscall. This optimization used a lot in the RIFF decoders.
+        if new_cursor != self.cursor {
+            // Each branch checks this individually. Still, make very sure.
+            debug_assert!(new_cursor <= self.len);
 
-        // We must seek the underlying reader with a Relative seek, as we
-        // don't know what it's End and Start are relative to ours
-        let delta: i64 = new_cursor
-            .checked_as::<i64>()
-            .zip(self.cursor.checked_as::<i64>())
-            .and_then(|(new, old)| new.checked_sub(old))
-            .ok_or_else(|| IOError::other("delta seek overflows"))?;
+            // We must seek the underlying reader with a Relative seek, as we
+            // don't know what it's End and Start are relative to ours
+            let delta: i64 = new_cursor
+                .checked_as::<i64>()
+                .zip(self.cursor.checked_as::<i64>())
+                .and_then(|(new, old)| new.checked_sub(old))
+                .ok_or_else(|| IOError::other("delta seek overflows"))?;
 
-        self.stream.seek(SeekFrom::Current(delta))?;
-        self.cursor = new_cursor;
+            self.stream.seek(SeekFrom::Current(delta))?;
+            self.cursor = new_cursor;
+        }
 
         Ok(self.cursor)
     }

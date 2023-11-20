@@ -227,7 +227,7 @@ impl PointRepository {
     ) -> Result<crate::io::id::FileLocalInterner<PointCollectionIDMarker>, WriteError> {
         use crate::io::{
             riff::{encode::SizedBinaryChunkWriter, ChunkID},
-            DictMetadata, OrphanMode, Version,
+            OrphanMode, Version,
         };
         use az::CheckedAs;
         use std::io::{IoSlice, Write};
@@ -251,6 +251,7 @@ impl PointRepository {
         let allocation_entries = allocation_entries?;
 
         let mut total_data_len = 0u32;
+        /* Writer api in flux.
         let meta_entries: Result<Vec<DictMetadata<PointArchetype>>, WriteError> =
             allocation_entries
                 .iter()
@@ -346,7 +347,7 @@ impl PointRepository {
         })?;
         chunk.write_all_vectored(&mut data_slices)?;
         // Pad, if needed (shouldn't be)
-        chunk.finish()?;
+        chunk.finish()?;*/
         Ok(file_ids)
     }
     /// Intern all the data from the given `DICT ptls`, returning a map of the newly allocated
