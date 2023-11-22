@@ -37,7 +37,7 @@ ron = "0.8.1"
 serde = { version = "1.0.188", features = ["derive", "rc"] }
 simple-logging = "2.0.2"
 slab_tree = "0.3.2"
-smallvec = { version = "1.10.0", features = ["serde"] }
+smallvec = { version = "1.10.0", features = ["serde", "union"] }
 strum = { version = "0.25.0", features = ["derive"] }
 thiserror = "1.0.40"
 tokio = { version = "1.28.2", features = [

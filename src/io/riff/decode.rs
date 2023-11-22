@@ -22,34 +22,55 @@ impl<R> Read for BinaryChunkReader<R>
 where
     MyTake<R>: Read,
 {
+    // Defer all calls
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
         self.reader.read(buf)
     }
     fn read_vectored(&mut self, bufs: &mut [std::io::IoSliceMut<'_>]) -> IOResult<usize> {
         self.reader.read_vectored(bufs)
     }
+    fn read_exact(&mut self, buf: &mut [u8]) -> IOResult<()> {
+        self.reader.read_exact(buf)
+    }
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> IOResult<usize> {
+        self.reader.read_to_end(buf)
+    }
+    fn read_to_string(&mut self, buf: &mut String) -> IOResult<usize> {
+        self.reader.read_to_string(buf)
+    }
 }
 impl<R> BufRead for BinaryChunkReader<R>
 where
     MyTake<R>: BufRead,
 {
+    // Defer all calls
     fn fill_buf(&mut self) -> IOResult<&[u8]> {
         self.reader.fill_buf()
     }
     fn consume(&mut self, amt: usize) {
         self.reader.consume(amt)
     }
+    fn read_line(&mut self, buf: &mut String) -> IOResult<usize> {
+        self.reader.read_line(buf)
+    }
+    fn read_until(&mut self, byte: u8, buf: &mut Vec<u8>) -> IOResult<usize> {
+        self.reader.read_until(byte, buf)
+    }
 }
 impl<R> Seek for BinaryChunkReader<R>
 where
     MyTake<R>: Seek,
 {
+    // Defer all calls
     /// Seek the stream within this reader's address space. Seeks past-the-end are clamped.
     fn seek(&mut self, pos: SeekFrom) -> IOResult<u64> {
         self.reader.seek(pos)
     }
     fn stream_position(&mut self) -> IOResult<u64> {
         self.reader.stream_position()
+    }
+    fn rewind(&mut self) -> IOResult<()> {
+        self.reader.rewind()
     }
 }
 

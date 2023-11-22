@@ -77,6 +77,18 @@ impl<S> MyTake<S> {
         }
     }
 }
+impl<W: Write> MyTake<W> {
+    /// Attemt to fill the remainder of this Take with data. Useful for when W: !Seek, prefer the Seek impl
+    /// where possible.
+    ///
+    /// If this returns Ok, the MyTake is exhausted.
+    pub fn pad_slow(&mut self) -> IOResult<()> {
+        let remaining = self.remaining();
+        pad_writer(&mut self.stream, remaining)?;
+        self.cursor = self.len;
+        Ok(())
+    }
+}
 impl<S: Seek> MyTake<S> {
     /// Advance the cursor to the end, returning the stream.
     /// If remaining > i64::MAX, will require two seeks.
@@ -122,7 +134,25 @@ impl<R: Read> Read for MyTake<R> {
 
         Ok(num_read)
     }
-    // todo: fast read_vectored impl
+    fn read_vectored(&mut self, bufs: &mut [std::io::IoSliceMut<'_>]) -> IOResult<usize> {
+        let (len, mut bufs) = trim_ioslices_mut(bufs, self.remaining());
+        if len == 0 {
+            return Ok(0);
+        }
+
+        let num_read = self.stream.read_vectored(&mut bufs)?;
+        // Defensive checks for bad inner reader impl
+        // (or my own bugs :P)
+        let new_cursor = self
+            .cursor
+            .checked_add(num_read as u64)
+            .filter(|new| *new <= self.len)
+            .ok_or_else(|| IOError::other("inner reader overflowed MyTake cursor"))?;
+
+        self.cursor = new_cursor;
+
+        Ok(num_read)
+    }
     // todo: eargerly fail read_all, read_all_vectored if too long
 }
 impl<R: BufRead> BufRead for MyTake<R> {
@@ -173,7 +203,23 @@ impl<W: Write> Write for MyTake<W> {
     fn flush(&mut self) -> IOResult<()> {
         self.stream.flush()
     }
-    // todo: fast write_vectored impl
+    fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> IOResult<usize> {
+        let (new_len, bufs) = trim_ioslices(bufs, self.remaining());
+        if new_len == 0 {
+            return Ok(0);
+        }
+        let num_written = self.stream.write_vectored(&bufs)?;
+        // Defensive checks for bad inner writer impl
+        // (or my own bugs :P)
+        let new_cursor = self
+            .cursor
+            .checked_add(num_written as u64)
+            .filter(|new| *new <= self.len)
+            .ok_or_else(|| IOError::other("inner writer overflowed MyTake cursor"))?;
+        self.cursor = new_cursor;
+
+        Ok(num_written)
+    }
     // todo: eargerly fail write_all, write_all_vectored if too long
 }
 impl<R: Seek> Seek for MyTake<R> {
@@ -242,5 +288,141 @@ fn trim_buf_mut<T>(buf: &mut [T], len: u64) -> &mut [T] {
     let len = buf.len().min(len.saturating_as());
     &mut buf[..len]
 }
-// TODO: clamp [IoSlice{Mut}]. Hard to do because it requires alloc'ing a new vec of slices, which is no good!
-// Could use a stack-based tinyvec, but then what do I do if the number of slices exceeds capacity?
+/// Trims the IoSlices down to be no more than `len` bytes cumulative bytes.
+/// Returns the total len, and a new slice.
+fn trim_ioslices<'a>(
+    bufs: &'a [std::io::IoSlice<'a>],
+    len: u64,
+) -> (u64, smallvec::SmallVec<[std::io::IoSlice<'a>; 8]>) {
+    use std::io::IoSlice;
+
+    let mut trimmed_slices = smallvec::smallvec![];
+    let mut total_len: u64 = 0;
+
+    for buf in bufs.iter() {
+        // Won't overflow
+        let size_left = len - total_len;
+
+        if (buf.len() as u64) < size_left {
+            // Won't overflow
+            total_len += buf.len() as u64;
+            // Small enough to fit, push it
+            trimmed_slices.push(IoSlice::new(&buf[..]));
+        } else {
+            // `as` cast ok - buf len was larger, buf len is usize, therefore size left < usize::MAX
+            trimmed_slices.push(IoSlice::new(&buf[..size_left as usize]));
+            // That was the last we could fit!
+            // Report full-size and return.
+            return (len, trimmed_slices);
+        }
+    }
+
+    // Fell through - all bufs ok!
+    // Report actual size
+    (total_len, trimmed_slices)
+}
+
+/// Trims the IoSlices down to be no more than `len` bytes cumulative bytes.
+/// Returns the total len, and a new slice.
+// Can happen in-place?
+fn trim_ioslices_mut<'slice, 'data: 'slice>(
+    // mutably borrow outer slice for lifetime of return val, that way our return value is the only
+    // mutable access.
+    bufs: &'slice mut [std::io::IoSliceMut<'data>],
+    len: u64,
+    // We end up (counterintuitively) only borrowing for 'slice, however this is OK!
+) -> (u64, smallvec::SmallVec<[std::io::IoSliceMut<'slice>; 8]>) {
+    use std::io::IoSliceMut;
+
+    let mut trimmed_slices = smallvec::smallvec![];
+    let mut total_len: u64 = 0;
+
+    for buf in bufs.iter_mut() {
+        // Won't overflow
+        let size_left = len - total_len;
+
+        if (buf.len() as u64) < size_left {
+            // Won't overflow
+            total_len += buf.len() as u64;
+            // Small enough to fit, push it
+            trimmed_slices.push(IoSliceMut::new(&mut buf[..]));
+        } else {
+            // `as` cast ok - buf len was larger, buf len is usize, therefore size left < usize::MAX
+            trimmed_slices.push(IoSliceMut::new(&mut buf[..size_left as usize]));
+            // That was the last we could fit!
+            // Report full-size and return.
+            return (len, trimmed_slices);
+        }
+    }
+
+    // Fell through - all bufs ok!
+    // Report actual size
+    (total_len, trimmed_slices)
+}
+
+/// Pad a !Seek writer with `num_bytes` zeros.
+fn pad_writer(mut w: impl Write, num_bytes: u64) -> IOResult<()> {
+    use std::io::IoSlice;
+
+    const NUM_ZEROS: usize = 512;
+    // Does this contribute to final binary size, or is it put into BSS?
+    const ZEROS: &'static [u8] = &[0; NUM_ZEROS];
+
+    // How many full slices of ZEROS doe we need?
+    let num_full_slices = num_bytes / NUM_ZEROS as u64;
+    // How many bytes left over?
+    let residual_bytes = num_bytes % NUM_ZEROS as u64;
+
+    const MAX_STACK_ARRAY_SIZE: usize = 8;
+    // How many packed arrays of slices?
+    let num_full_arrays = num_full_slices / MAX_STACK_ARRAY_SIZE as u64;
+    // How many partial arrays?
+    let residual_full_arrays = num_full_slices % MAX_STACK_ARRAY_SIZE as u64;
+
+    let full_array = [IoSlice::new(ZEROS); MAX_STACK_ARRAY_SIZE];
+
+    // Write full arrays.
+    for _ in 0..num_full_arrays {
+        // copy and write
+        let mut full_array = full_array;
+        w.write_all_vectored(&mut full_array)?;
+    }
+
+    // Write residual arrays + residual bytes
+
+    // Known big enough for all residuals - wont alloc!
+    // residual_full_arrays < MAX_STACK_ARRAY_SIZE due to modulo, + 1 for residual bytes if any.
+    let mut residual_arrays = smallvec::SmallVec::<[IoSlice<'static>; MAX_STACK_ARRAY_SIZE]>::new();
+
+    // residual full arrays
+    residual_arrays.extend_from_slice(&full_array[..residual_full_arrays as usize]);
+
+    // residual bytes
+    if residual_bytes != 0 {
+        residual_arrays.push(IoSlice::new(&ZEROS[..residual_bytes as usize]));
+    }
+
+    // Write residuals, if there were any
+    if !residual_arrays.is_empty() {
+        w.write_all_vectored(&mut residual_arrays)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn pad() {
+        let test_sizes = [0, 1, 100, 511, 512, 513, 1000, 10_000];
+        let mut vec = Vec::<u8>::with_capacity(10_000);
+        for size in test_sizes {
+            let cursor = std::io::Cursor::new(&mut vec);
+
+            super::pad_writer(cursor, size as u64).unwrap();
+            assert_eq!(vec.len(), size);
+
+            vec.clear();
+        }
+    }
+}
