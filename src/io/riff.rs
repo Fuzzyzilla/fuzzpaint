@@ -62,7 +62,7 @@ mod test {
     fn read_empty_fzp_riff() {
         let file = Cursor::new(EMPTY_FZP);
         let root = BinaryChunkReader::new(file).unwrap();
-        let outer_chunk_size = root.data_len();
+        let outer_chunk_size = root.data_len_unsanitized();
         // Root node should be a RIFF element.
         assert_eq!(root.id(), ChunkID::RIFF);
         // Start with RIFF inner id (4 bytes)
@@ -179,7 +179,7 @@ mod test {
                     .unwrap();
 
                 assert!(test_contents.is_empty());
-                assert_eq!(spillover.data_len(), 0);
+                assert_eq!(spillover.data_len_unsanitized(), 0);
 
                 Ok(())
             })

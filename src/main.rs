@@ -254,7 +254,9 @@ fn main() -> AnyResult<std::convert::Infallible> {
                 };
 
             match try_block() {
-                Err(e) => log::error!("failed to open file {path:?}: {e:?}"),
+                Err(e) => {
+                    log::error!("failed to open file {path:?}: {e:#}")
+                }
                 Ok(queue) => {
                     // We don't care when it's stored, so long as it gets there eventually.
                     had_success.store(true, std::sync::atomic::Ordering::Relaxed);

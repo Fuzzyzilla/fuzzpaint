@@ -65,7 +65,7 @@ pub enum OrphanMode {
     /// The reader should not parse the document if it cannot parse this chunk.
     Deny = 2,
 }
-#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct Version(pub u8, pub u8, pub u8);
 impl Version {
@@ -86,6 +86,34 @@ impl TryFrom<[u8; 4]> for VersionedChunkHeader {
         ))
     }
 }
+
+/// Presets for how the writer implementation should behave.
+///
+/// *All of the strategies should result in a complete file with no unrecoverable data left out!*
+///
+/// All the underlying writers use `Cautious` implementations - allocations are avoided
+/// to the greatest extent reasonable, no global state is accessed, ect.
+/// This is therefore a front-end hint (should we thread? should we use the
+/// graphics device to assist? ...) and does not effect the backend.
+///
+/// Implementation is free to fallback on a lower-level strategy should an error occur.
+///
+/// This is just a sketch for future me to read and implement :3
+pub enum IOStrategy {
+    /// The writer should be careful not to consume any resources more than
+    /// necessary. Useful for if the program is facing exhaustion and we need to
+    /// dump the files before the ship goes down. Should not rely on the graphics device and should
+    /// write minimum data necessary to be fully recoverable.
+    Cautious,
+    /// The writer should optimize for speed. Optional elements like thumbnails are left out.
+    /// Useful for automated background activities - evicting old open documents to disk, autosaves, ect.
+    Fast,
+    /// A save in normal circumstances, i.e. user pressed Ctrl+S. We are free to use extra resources,
+    /// the graphics device, whatever. Include full optional datas, attempt to thumbnail, all those goodies.
+    Normal,
+}
+const EMPTY_DICT: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
 /// From the given document state reader and repository handle, write a `.fzp` document into the given writer.
 pub fn write_into<Document, Writer>(
     document: Document,
@@ -109,9 +137,9 @@ where
             SizedBinaryChunkWriter::write_buf(&mut root, ChunkID::THMB, TEST_QOI)?;
         }
         SizedBinaryChunkWriter::write_buf(&mut root, ChunkID::DOCV, &[])?;
-        SizedBinaryChunkWriter::write_buf(&mut root, ChunkID::GRPH, &[])?;
-        SizedBinaryChunkWriter::write_buf(&mut root, ChunkID::HIST, &[])?;
         {
+            let mut objs = BinaryChunkWriter::new_subtype(&mut root, ChunkID::LIST, ChunkID::OBJS)?;
+
             let collections = document.stroke_collections();
             point_repository
                 .write_dict_into(
@@ -120,11 +148,18 @@ where
                         .iter()
                         .flat_map(|collection| collection.1.strokes.iter())
                         .map(|stroke| stroke.point_collection),
-                    &mut root,
+                    &mut objs,
                 )
                 .map_err(|err| -> anyhow::Error { err.into() })?;
+            SizedBinaryChunkWriter::write_buf(&mut objs, ChunkID::GRPH, &[])?;
+            SizedBinaryChunkWriter::write_buf_subtype(
+                &mut objs,
+                ChunkID::DICT,
+                ChunkID::BRSH,
+                &EMPTY_DICT,
+            )?;
         }
-        SizedBinaryChunkWriter::write_buf_subtype(&mut root, ChunkID::DICT, ChunkID::BRSH, &[])?;
+        SizedBinaryChunkWriter::write_buf(&mut root, ChunkID::HIST, &[])?;
     }
 
     Ok(())
@@ -136,33 +171,50 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
     point_repository: &crate::repositories::points::PointRepository,
 ) -> Result<crate::commands::queue::DocumentCommandQueue, std::io::Error> {
     use riff::{decode::*, ChunkID};
+    use std::io::{Error as IOError, Read};
     let path_buf = path.into();
     let r = std::io::BufReader::new(std::fs::File::open(&path_buf)?);
     // Dont need to check magic before extracting subchunks. If extracting fails, it
     // must've been bad anyway!
-    let mut root = BinaryChunkReader::new(r)?.into_subchunks()?;
+    let root = BinaryChunkReader::new(r)?.into_subchunks()?;
     if root.id() != ChunkID::RIFF || root.subtype_id() != ChunkID::FZP_ {
         return Err(std::io::Error::other("bad file magic"))?;
     }
-    // while let Ok(mut subchunk) = root.next_subchunk() {
-    //     match subchunk.id() {
-    //         ChunkID::THMB => (),
-    //         ChunkID::DOCV => (),
-    //         ChunkID::LIST => {
-    //             // We're goin deeper!
-    //             let nested_subchunks = subchunk.subchunks()?;
-    //             match nested_subchunks.subtype_id() {
-    //                 ChunkID::INFO => (),
-    //                 ChunkID::OBJS => (),
-    //                 other => unimplemented!("can't parse chunk LIST \"{other}\""),
-    //             }
-    //         }
-    //         ChunkID::HIST => (),
-    //         other => unimplemented!("can't parse chunk {other}"),
-    //     }
-    //     // Advance cursor. This should be automatic, fix your api, me!!!
-    //     subchunk.skip()?;
-    // }
+
+    root.try_for_each(|subchunk| match subchunk.id() {
+        ChunkID::LIST => {
+            let subchunk = subchunk.into_subchunks()?;
+            match subchunk.subtype_id() {
+                ChunkID::INFO => Ok(()),
+                ChunkID::OBJS => subchunk.try_for_each(|obj| match obj.id() {
+                    ChunkID::DICT => {
+                        let dict = obj.into_dict()?;
+                        match dict.subtype_id() {
+                            ChunkID::PTLS => point_repository.read_dict(dict).map(|_| ()),
+                            ChunkID::BRSH => Ok(()),
+                            other => Err(IOError::other(anyhow::anyhow!(
+                                "Unrecognized dict \"{other}\""
+                            ))),
+                        }
+                    }
+                    ChunkID::GRPH => Ok(()),
+
+                    other => Err(IOError::other(anyhow::anyhow!(
+                        "Unrecognized obj \"{other}\""
+                    ))),
+                }),
+                other => Err(IOError::other(anyhow::anyhow!(
+                    "Unrecognized list \"{other}\""
+                ))),
+            }
+        }
+        ChunkID::THMB => Ok(()),
+        ChunkID::HIST => Ok(()),
+        ChunkID::DOCV => Ok(()),
+        other => Err(IOError::other(anyhow::anyhow!(
+            "Unrecognized chunk \"{other}\""
+        ))),
+    })?;
 
     let document_info = crate::state::Document {
         // File stem (without ext) if available, else the whole path.

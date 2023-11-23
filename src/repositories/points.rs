@@ -13,7 +13,7 @@ pub fn global() -> &'static PointRepository {
 }
 
 bitflags::bitflags! {
-    #[derive(Copy, Clone, Eq, PartialEq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+    #[derive(Copy, Clone, Eq, PartialEq, Hash, bytemuck::Pod, bytemuck::Zeroable, Debug)]
     /// Description of a point's data fields. Organized such that devices that have later flags are
     /// also likely to have prior flags.
     ///
@@ -27,31 +27,29 @@ bitflags::bitflags! {
     pub struct PointArchetype : u8 {
         /// The point stream reports an (X: f32, Y: f32) position.
         const POSITION =   0b0000_0001;
+        /// The point stream reports an f32 timestamp, in seconds from an arbitrary start moment.
+        const TIME =       0b0000_0010;
         /// The point stream reports an f32, representing the cumulative length of the path from the start.
-        const ARC_LENGTH = 0b0000_0010;
+        const ARC_LENGTH = 0b0000_0100;
         /// The point stream reports a normalized, non-saturated pressure value.
-        const PRESSURE =   0b0000_0100;
+        const PRESSURE =   0b0000_1000;
         /// The point stream reports a signed noramlized (X: f32, Y: f32) tilt, where positive X is to the right,
         /// positive Y is towards the user.
-        const TILT =       0b0000_1000;
+        const TILT =       0b0001_0000;
         /// Alias for bits that contain two fields
-        const TWO_FIELDS = 0b0000_1001;
+        const TWO_FIELDS = 0b0001_0001;
         /// The point stream reports a normalized f32 distance, in arbitrary units.
-        const DISTANCE =   0b0001_0000;
+        const DISTANCE =   0b0010_0000;
         /// The point stream reports stylus roll (rotation along it's axis). Units and sign unknown!
         ///
         /// FIXME: Someone with such hardware, please let me know what it's units are :3
-        const ROLL =       0b0010_0000;
+        const ROLL =       0b0100_0000;
         /// The point stream reports wheel values in signed, unnormalized, non-wrapping degrees, f32.
         ///
         /// Wheels are a general-purpose value which the user can use in their brushes. It may
         /// correspond to a physical wheel on the pen or pad, a touch slider, ect. which may be interacted
         /// with during the stroke for expressive effects.
-        const WHEEL =      0b0100_0000;
-        /// f32, meaningless. Not associated with any axis, but available for one should a device expose
-        /// another possible expressive axis that cannot already be assigned to any other field. As such, it could be
-        /// used in the future!
-        const UNASSIGNED = 0b1000_0000;
+        const WHEEL =      0b1000_0000;
     }
 }
 impl PointArchetype {
@@ -250,36 +248,42 @@ impl PointRepository {
             .collect();
         let allocation_entries = allocation_entries?;
 
-        let mut total_data_len = 0u32;
-        /* Writer api in flux.
-        let meta_entries: Result<Vec<DictMetadata<PointArchetype>>, WriteError> =
-            allocation_entries
-                .iter()
-                .map(|alloc| {
-                    let summary = alloc.summary;
-                    // Len in bytes must fit in u32
-                    let len = summary
-                        .len
-                        .checked_mul(summary.archetype.len_bytes())
-                        .and_then(|len| len.checked_as())
-                        .ok_or(WriteError::TooLong)?;
-                    let meta = DictMetadata {
-                        offset: total_data_len,
-                        len,
-                        inner: summary.archetype,
-                    };
+        #[derive(Clone, Copy, bytemuck::NoUninit)]
+        #[repr(C, packed)]
+        struct DictMetadata {
+            offset: u32,
+            len: u32,
+            arch: PointArchetype,
+        }
 
-                    // Data length must not overrun u32
-                    total_data_len = total_data_len.checked_add(len).ok_or(WriteError::TooLong)?;
-                    Ok(meta)
-                })
-                .collect();
+        let mut total_data_len = 0u32;
+        let meta_entries: Result<Vec<DictMetadata>, WriteError> = allocation_entries
+            .iter()
+            .map(|alloc| {
+                let summary = alloc.summary;
+                // Len in bytes must fit in u32
+                let len = summary
+                    .len
+                    .checked_mul(summary.archetype.len_bytes())
+                    .and_then(|len| len.checked_as())
+                    .ok_or(WriteError::TooLong)?;
+                let meta = DictMetadata {
+                    offset: total_data_len,
+                    len,
+                    arch: summary.archetype,
+                };
+
+                // Data length must not overrun u32
+                total_data_len = total_data_len.checked_add(len).ok_or(WriteError::TooLong)?;
+                Ok(meta)
+            })
+            .collect();
         let meta_entries = meta_entries?;
         let num_meta_entries: u32 = meta_entries
             .len()
             .checked_as()
             .ok_or(WriteError::TooManyEntries)?;
-        let meta_size: u32 = std::mem::size_of::<DictMetadata<PointArchetype>>()
+        let meta_size: u32 = std::mem::size_of::<DictMetadata>()
             .checked_as()
             .ok_or(WriteError::TooLong)?;
 
@@ -347,17 +351,53 @@ impl PointRepository {
         })?;
         chunk.write_all_vectored(&mut data_slices)?;
         // Pad, if needed (shouldn't be)
-        chunk.finish()?;*/
+        chunk.pad_slow()?;
+
         Ok(file_ids)
     }
     /// Intern all the data from the given `DICT ptls`, returning a map of the newly allocated
     /// IDs.
-    pub fn read_dict(
+    pub fn read_dict<R>(
         &self,
-        dict: &mut crate::io::riff::decode::BinaryChunkReader<impl std::io::Read>,
-    ) -> std::io::Result<crate::io::id::ProcessLocalInterner<PointCollectionIDMarker>> {
-        // Need a dict reader!!
-        todo!()
+        mut dict: crate::io::riff::decode::DictReader<R>,
+    ) -> std::io::Result<crate::io::id::ProcessLocalInterner<PointCollectionIDMarker>>
+    where
+        R: std::io::Read + std::io::Seek,
+    {
+        use crate::io::{id::ProcessLocalInterner, Version};
+        use std::io::{Error as IOError, Read};
+        if dict.version() != Version::CURRENT {
+            // TODO lol
+            return Err(IOError::other(anyhow::anyhow!("bad ver")));
+        }
+        // There's metas, but they're not the right size.
+        // (this allows arbitrary size when there are zero entries - this is fine)
+        if dict
+            .meta_len_unsanitized()
+            .is_some_and(|val| val.get() != std::mem::size_of::<DictMetadata>())
+        {
+            return Err(IOError::other(anyhow::anyhow!("bad metadata len")));
+        }
+        #[derive(Clone, Copy, bytemuck::AnyBitPattern, Debug)]
+        #[repr(C, packed)]
+        struct DictMetadata {
+            offset: u32,
+            len: u32,
+            arch: PointArchetype,
+        }
+        let mut metas = Vec::<DictMetadata>::new();
+        let mut unstructured = dict.try_for_each(|mut meta_read| {
+            let mut bytes = [0; std::mem::size_of::<DictMetadata>()];
+            meta_read.read_exact(&mut bytes)?;
+            let meta: DictMetadata = bytemuck::pod_read_unaligned(&bytes);
+            metas.push(meta);
+
+            Ok(())
+        })?;
+
+        println!("{metas:#?}");
+
+        Ok(ProcessLocalInterner::new())
     }
     /// Get a [CollectionSummary] for the given collection, reporting certain key aspects of a stroke without
     /// it needing to be loaded into resident memory. None if the ID is not known

@@ -145,11 +145,17 @@ impl<R> BinaryChunkReader<R> {
         self.id
     }
     /// Size of chunk payload
-    pub fn data_len(&self) -> usize {
+    ///
+    /// This value is read directly from the chunk header, and may be wrong or malicious.
+    /// Do not trust this to be correct.
+    pub fn data_len_unsanitized(&self) -> usize {
         // Unwrap ok - we constructed with a size that was a u32, so should fit!
         self.reader.len() as usize
     }
-    /// Size the the chunk including ID and length sections
+    /// Size the the chunk including ID and length secti
+    ///_ons
+    /// This value is calculated directly from the chunk header, and may be wrong or malicious.
+    /// Do not trust this to be correct.
     pub fn self_len(&self) -> usize {
         self.reader.len() as usize + 8
     }
@@ -232,18 +238,43 @@ impl<R> DictReader<R> {
     pub fn subtype_id(&self) -> ChunkID {
         self.inner_id
     }
+    /// Length of each metadata entry, in bytes.
+    /// None if there is no metadata.
+    ///
+    /// This value is read directly from the chunk header, and may be wrong or malicious.
+    /// Do not trust this to be correct.
+    pub fn meta_len_unsanitized(&self) -> Option<std::num::NonZeroUsize> {
+        if self.meta_count == 0 {
+            None
+        } else {
+            std::num::NonZeroUsize::new(self.meta_stride.saturating_as::<usize>())
+        }
+    }
+    /// Length of number of metadata entries, in bytes.
+    ///
+    /// This value is read directly from the chunk header, and may be wrong or malicious.
+    /// Do not trust this to be correct.
+    pub fn meta_count_unsanitized(&self) -> usize {
+        self.meta_count.saturating_as::<usize>()
+    }
     /// Length of the metadata section, in bytes.
-    pub fn meta_len(&self) -> usize {
+    ///
+    /// This value is calculated directly from the chunk header, and may be wrong or malicious.
+    /// Do not trust this to be correct.
+    pub fn metas_len_unsanitized(&self) -> usize {
         self.meta_stride
             .saturating_as::<usize>()
             .saturating_mul(self.meta_count.saturating_as())
     }
     /// Length of the spillover data section, in bytes.
-    pub fn spillover_len(&self) -> usize {
+    ///
+    /// This value is calculated directly from the chunk header, and may be wrong or malicious.
+    /// Do not trust this to be correct.
+    pub fn spillover_len_unsanitized(&self) -> usize {
         self.reader
             .len()
             .saturating_as::<usize>()
-            .saturating_sub(self.meta_len())
+            .saturating_sub(self.metas_len_unsanitized())
     }
     pub fn version(&self) -> crate::io::Version {
         self.version.0

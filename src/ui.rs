@@ -168,7 +168,38 @@ impl MainUI {
                             }
                         }
                         let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
-                        let _ = add_button(ui, "Open", Some("Ctrl+O"));
+                        if add_button(ui, "Open", Some("Ctrl+O")).clicked() {
+                            // Synchronous and bad just for testing.
+                            if let Some(files) = rfd::FileDialog::new().pick_files() {
+                                let point_repository = crate::repositories::points::global();
+                                let provider = crate::default_provider();
+
+                                // Keep track of the last successful loaded id
+                                let mut recent_success = None;
+                                for file in files.into_iter() {
+                                    match crate::io::read_path(file, point_repository) {
+                                        Ok(doc) => {
+                                            let id = doc.id();
+                                            if provider.insert(doc).is_ok() {
+                                                recent_success = Some(id);
+                                            }
+                                        }
+                                        Err(e) => log::error!("Failed to load: {e:#}"),
+                                    }
+                                }
+                                // Select last one, if any succeeded.
+                                if let Some(new_doc) = recent_success {
+                                    self.documents.push(PerDocumentData {
+                                        id: new_doc,
+                                        graph_focused_subtree: None,
+                                        graph_selection: None,
+                                        yanked_node: None,
+                                        name: "Unknown".into(),
+                                    });
+                                    self.cur_document = Some(new_doc);
+                                }
+                            }
+                        }
                         let _ = add_button(ui, "Open as new", None);
                         let _ = add_button(ui, "Export", None);
                     });
