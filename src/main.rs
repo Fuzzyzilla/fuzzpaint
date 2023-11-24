@@ -157,6 +157,19 @@ pub struct StrokePoint {
 }
 
 impl StrokePoint {
+    pub const fn archetype() -> repositories::points::PointArchetype {
+        use repositories::points::PointArchetype;
+        // | isn't const except for on the bits type! x3
+        // This is infallible but unwrap also isn't const.
+        match PointArchetype::from_bits(
+            PointArchetype::POSITION.bits()
+                | PointArchetype::PRESSURE.bits()
+                | PointArchetype::ARC_LENGTH.bits(),
+        ) {
+            Some(s) => s,
+            None => unreachable!(),
+        }
+    }
     pub fn lerp(&self, other: &Self, factor: f32) -> Self {
         let inv_factor = 1.0 - factor;
 

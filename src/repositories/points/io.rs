@@ -1,0 +1,334 @@
+use super::*;
+
+impl super::PointRepository {
+    /// Given an iterator of collection IDs, encodes them directly (in order) into the given Write stream in a `DICT ptls` chunk.
+    /// On success, returns a map between PointCollectionID and file local id as written.
+    pub fn write_dict_into(
+        &self,
+        ids: impl Iterator<Item = PointCollectionID>,
+        writer: impl std::io::Write,
+    ) -> Result<crate::io::id::FileLocalInterner<PointCollectionIDMarker>, WriteError> {
+        use crate::io::{
+            riff::{encode::SizedBinaryChunkWriter, ChunkID},
+            OrphanMode, Version,
+        };
+        use az::CheckedAs;
+        use std::io::{IoSlice, Write};
+
+        const PTLS_WRITE_VERSION: Version = Version(0, 0, 0);
+
+        let mut file_ids = crate::io::id::FileLocalInterner::new();
+        // Collect all uniqe entries and allocs.
+        let allocation_entries: Result<Vec<_>, WriteError> = ids
+            .filter_map(|id| match file_ids.insert(id) {
+                // New entry, collect it's alloc or short-circuit if not found
+                Ok(true) => Some(self.alloc_of(id).ok_or(WriteError::UnknownID(id))),
+                // Already collected
+                Ok(false) => None,
+                // Short circuit collection on err
+                Err(crate::io::id::InternError::TooManyEntries) => {
+                    Some(Err(WriteError::TooManyEntries))
+                }
+            })
+            .collect();
+        let allocation_entries = allocation_entries?;
+
+        #[derive(Clone, Copy, bytemuck::NoUninit)]
+        #[repr(C, packed)]
+        struct DictMetadata {
+            offset: u32,
+            len: u32,
+            arch: PointArchetype,
+        }
+
+        let mut total_data_len = 0u32;
+        let meta_entries: Result<Vec<DictMetadata>, WriteError> = allocation_entries
+            .iter()
+            .map(|alloc| {
+                let summary = alloc.summary;
+                // Len in bytes must fit in u32
+                let len = summary
+                    .len
+                    .checked_mul(summary.archetype.len_bytes())
+                    .and_then(|len| len.checked_as())
+                    .ok_or(WriteError::TooLong)?;
+                let meta = DictMetadata {
+                    offset: total_data_len,
+                    len,
+                    arch: summary.archetype,
+                };
+
+                // Data length must not overrun u32
+                total_data_len = total_data_len.checked_add(len).ok_or(WriteError::TooLong)?;
+                Ok(meta)
+            })
+            .collect();
+        let meta_entries = meta_entries?;
+        let num_meta_entries: u32 = meta_entries
+            .len()
+            .checked_as()
+            .ok_or(WriteError::TooManyEntries)?;
+        let meta_size: u32 = std::mem::size_of::<DictMetadata>()
+            .checked_as()
+            .ok_or(WriteError::TooLong)?;
+
+        // Num metas times meta size
+        let chunk_size = num_meta_entries
+            .checked_mul(meta_size)
+            // Header size
+            .and_then(|total| total.checked_add(12))
+            // Unstructure data size
+            .and_then(|total| total.checked_add(total_data_len))
+            .ok_or(WriteError::TooLong)?;
+
+        // Allocate the chunk.
+        // I should make a helper for DICT...
+        let mut chunk = SizedBinaryChunkWriter::new_subtype(
+            writer,
+            ChunkID::DICT,
+            ChunkID::PTLS,
+            chunk_size as usize,
+        )?;
+        // Write header, metas
+        {
+            let meta_info = [num_meta_entries, meta_size];
+            let mut header_and_meta = [
+                IoSlice::new(bytemuck::bytes_of(&PTLS_WRITE_VERSION)),
+                IoSlice::new(&[OrphanMode::Deny as u8]),
+                IoSlice::new(bytemuck::cast_slice(&meta_info)),
+                IoSlice::new(bytemuck::cast_slice(&meta_entries)),
+            ];
+            chunk.write_all_vectored(&mut header_and_meta)?;
+        };
+
+        // TODO: native -> little endian conversion.
+        // Expensive to do! Would be cheaper if we know we're about to consume and invalidate the lists,
+        // as we could convert in-place.
+        #[cfg(not(target_endian = "little"))]
+        compile_error!("FIXME!");
+
+        // Collect and write bulk points
+        let data_slices: Result<Vec<IoSlice<'_>>, ()> = {
+            let slabs = self.slabs.read();
+            allocation_entries
+                .iter()
+                .map(|entry| {
+                    let Some(slab) = slabs.get(entry.slab_id) else {
+                        // Implementation bug!
+                        return Err(());
+                    };
+
+                    let Some(slice) = slab.try_read(
+                        entry.start,
+                        entry.summary.len * entry.summary.archetype.elements(),
+                    ) else {
+                        // Implementation bug!
+                        return Err(());
+                    };
+                    Ok(IoSlice::new(bytemuck::cast_slice(slice)))
+                })
+                .collect()
+        };
+        let mut data_slices = data_slices.map_err(|_| {
+            WriteError::IOError(std::io::Error::other(anyhow::anyhow!("internal error :(")))
+        })?;
+        chunk.write_all_vectored(&mut data_slices)?;
+        // Pad, if needed (shouldn't be)
+        chunk.pad_slow()?;
+
+        Ok(file_ids)
+    }
+    /// Intern all the data from the given `DICT ptls`, returning a map of the newly allocated
+    /// IDs.
+    pub fn read_dict<R>(
+        &self,
+        mut dict: crate::io::riff::decode::DictReader<R>,
+    ) -> std::io::Result<crate::io::id::ProcessLocalInterner<PointCollectionIDMarker>>
+    where
+        R: std::io::Read + std::io::Seek,
+    {
+        use crate::io::{id::ProcessLocalInterner, Version};
+        use az::CheckedAs;
+        use std::io::{Error as IOError, Read};
+        if dict.version() != Version::CURRENT {
+            // TODO lol
+            return Err(IOError::other(anyhow::anyhow!("bad ver")));
+        }
+        // There's metas, but they're not the right size.
+        // (this allows arbitrary size when there are zero entries - this is fine)
+        if dict
+            .meta_len_unsanitized()
+            .is_some_and(|val| val.get() != std::mem::size_of::<DictMetadata>())
+        {
+            return Err(IOError::other(anyhow::anyhow!("bad metadata len")));
+        }
+
+        #[derive(Clone, Copy, bytemuck::AnyBitPattern, Debug)]
+        #[repr(C, packed)]
+        struct DictMetadata {
+            offset: u32,
+            len: u32,
+            arch: PointArchetype,
+        }
+        let mut metas = Vec::<(Option<PointCollectionID>, DictMetadata)>::new();
+        let mut unstructured = dict.try_for_each(|mut meta_read| {
+            let mut bytes = [0; std::mem::size_of::<DictMetadata>()];
+            meta_read.read_exact(&mut bytes)?;
+            let meta: DictMetadata = bytemuck::pod_read_unaligned(&bytes);
+            metas.push((None, meta));
+
+            Ok(())
+        })?;
+        let reported_len = unstructured.data_len_unsanitized();
+        // Make sure none surpass the end of the data chunk
+        // AND make sure none surpass the limit of allocatable points, `SLAB_SIZE`
+        if !metas.iter().all(|m| {
+            m.1.len
+                .checked_add(m.1.offset)
+                .is_some_and(|end| end <= reported_len as u32)
+                && m.1.len as usize <= SLAB_ELEMENT_COUNT * std::mem::size_of::<f32>()
+        }) {
+            return Err(IOError::other(anyhow::anyhow!("point list data too long")));
+        }
+        // Allocate many ids, and disperse them
+        let ids = {
+            let count = metas
+                .len()
+                .checked_as::<u32>()
+                .ok_or_else(|| IOError::other(anyhow::anyhow!("Too many elements")))?;
+            let mut ids = ProcessLocalInterner::many_sequential(count as usize).unwrap();
+            for (file_id, meta) in (0..count).into_iter().zip(metas.iter_mut()) {
+                meta.0 = Some(ids.get_or_insert(file_id.into()))
+            }
+            ids
+        };
+        // Sort pointlists by start position
+        metas.sort_unstable_by_key(|meta| meta.1.offset);
+
+        // Strategy: because we cannot trust the length of `unstructured` nor the reported size of the metas
+        // we cannot simply read all the data blindly. Instead:
+        //   * Pop the first meta
+        //   * Find an existing slab that'll fit it, or allocate if None (limit 16MiB)
+        //   * Pop all remaining metas that can *also* fit into that chunk
+        //   * Bulk read.
+        //  * Repeat until all metas are loaded.
+        // * If we allocated and it failed, we can de-allocate.
+        // Limitations: Can't yet de-allocate from existing slabs so failures leak mem,
+        // + concurrent loading will over-commit on new blocks.
+
+        // Blocks that were newly allocated for reading. May be freed if an error occurs.
+        let mut new_blocks = smallvec::SmallVec::<[ElementSlab; 2]>::new();
+        // We can trust metas.len, as we were successfully able to read that many.
+        let mut infos = Vec::<PointCollectionAllocInfo>::with_capacity(metas.len());
+
+        let mut try_read_points = || -> Result<(), IOError> {
+            while let Some(first_meta) = metas.pop() {
+                // This is pseudocode at this point lol
+                todo!();
+                // Find a block that fits it
+                let slabs = self.slabs.read();
+                let slab_lock = slabs.iter().find_map(|slab| {
+                    // FIXME - bytes vs points, too lazy
+                    // Check if it *might* fit (can still fail)
+                    if slab.remaining() >= first_meta.1.len as usize {
+                        let lock = slab.lock();
+                        // Check if it actually fits
+                        if lock.remaining() >= first_meta.1.len as usize {
+                            Some(lock)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+
+                // If no block has enough space, make a new one and lock that one instead.
+                let slab_lock = slab_lock.unwrap_or_else(|| {
+                    new_blocks.push(Slab::new());
+                    new_blocks.last().unwrap().lock()
+                });
+
+                // Collect all subsequent ones that will also fit
+                // (allows overlapping blocks) (todo: alignment issues?)
+
+                /// Collect a slice while `pred` returns true.
+                ///
+                /// Inverse of the unstable [T]::split_once but it's unstable anyway.
+                /// Similar to group_by, split, split_once ect...... hmmst
+                fn take_while<T, Pred>(slice: &[T], mut pred: Pred) -> &[T]
+                where
+                    Pred: FnMut(&T) -> bool,
+                {
+                    if let Some(pos) = slice.iter().position(|t| !pred(t)) {
+                        &slice[..pos]
+                    } else {
+                        slice
+                    }
+                }
+
+                // Immutable - they're sorted, so the start point never needs to move.
+                let range_start = first_meta.1.offset;
+                let mut range_past_end = range_start + first_meta.1.len;
+                // TODO: bytes -> points
+                let mut remaining_len = slab_lock.remaining() - first_meta.1.len as usize;
+                let also_fit = take_while(&metas, |meta| {
+                    // Discontiguous!
+                    // (dont need to check < start, they're sorted!)
+                    if meta.1.offset > range_past_end {
+                        return false;
+                    }
+                    // Unaligned!
+                    if (meta.1.offset - range_start) % 4 != 0 {
+                        return false;
+                    }
+                    // Fits?
+                    if meta.1.len as usize <= remaining_len {
+                        remaining_len -= meta.1.len as usize;
+                        // Push forward, if needed
+                        range_past_end = range_past_end.max(meta.1.offset + meta.1.len);
+                        true
+                    } else {
+                        false
+                    }
+                });
+
+                // TODO: bytes -> points
+                let count = (range_past_end - range_start) as usize;
+
+                // Read!
+                // todo: seek
+                unstructured
+                    .read_exact(bytemuck::cast_slice_mut(&mut slab_lock.unfilled()[..count]))?;
+                // todo: postprocess
+                // TODO: bytes -> points;
+                slab_lock.bump(count).unwrap();
+                // unlock asap
+                drop(slab_lock);
+
+                // todo: Summarize, Create alloc infos
+
+                // Pop all that we handled this iteration
+                metas.drain(..also_fit.len());
+            }
+
+            // Fellthrough - we successfully read all points!
+            Ok(())
+        };
+
+        // Failed to read. Free any blocks we allocated for this task and diverge.
+        if let Err(e) = try_read_points() {
+            for block in new_blocks.into_iter() {
+                // Safety - we took no references to this data.
+                unsafe { block.free() }
+            }
+            return Err(e);
+        }
+        // Read successful! Share our new blocks with the class
+        self.slabs.write().extend(new_blocks.into_iter());
+        // Share new allocs (todo)
+
+        // Report back the FileID->FuzzID mapping
+        Ok(ids)
+    }
+}
