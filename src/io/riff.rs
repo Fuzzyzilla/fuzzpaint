@@ -94,7 +94,7 @@ mod test {
                 names.remove(idx);
 
                 // Total up running length.
-                total_inner_size += sub.self_len();
+                total_inner_size += sub.self_len_unsanitized();
 
                 Ok(())
             })

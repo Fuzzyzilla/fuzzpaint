@@ -21,7 +21,7 @@ pub struct ViewTransform {
 pub enum TransformError {
     /// The transform cannot be inverted anymore, and has become useless.
     /// Occurs if scale gets too close to zero.
-    #[error("Uninvertable")]
+    #[error("uninvertable")]
     Uninvertable,
 }
 

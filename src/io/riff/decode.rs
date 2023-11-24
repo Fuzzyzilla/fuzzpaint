@@ -152,11 +152,10 @@ impl<R> BinaryChunkReader<R> {
         // Unwrap ok - we constructed with a size that was a u32, so should fit!
         self.reader.len() as usize
     }
-    /// Size the the chunk including ID and length secti
-    ///_ons
+    /// Size the the chunk including ID and length sections
     /// This value is calculated directly from the chunk header, and may be wrong or malicious.
     /// Do not trust this to be correct.
-    pub fn self_len(&self) -> usize {
+    pub fn self_len_unsanitized(&self) -> usize {
         self.reader.len() as usize + 8
     }
 }
@@ -192,7 +191,7 @@ where
             // We can't guaruntee the user will read all the data.
             // Seek to the end of the chunk afterwards.
             let cursor_after = cur_position
-                .checked_add(read.self_len() as u64)
+                .checked_add(read.self_len_unsanitized() as u64)
                 .ok_or_else(|| {
                     IOError::other(anyhow::anyhow!("chunk too long, overflows cursor"))
                 })?;

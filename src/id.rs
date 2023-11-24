@@ -9,10 +9,7 @@
 // Type name mess, but a RWLock'd BTreeMap from typeID to next available FuzzID
 static ID_SERVER: parking_lot::RwLock<
     std::collections::BTreeMap<std::any::TypeId, std::sync::atomic::AtomicU64>,
-> = parking_lot::RwLock::const_new(
-    <parking_lot::RawRwLock as parking_lot::lock_api::RawRwLock>::INIT,
-    std::collections::BTreeMap::new(),
-);
+> = parking_lot::const_rwlock(std::collections::BTreeMap::new());
 
 /// ID that is guarunteed unique within this execution of the program.
 /// IDs with different types may share a value but should not be considered equal.

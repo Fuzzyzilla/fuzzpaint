@@ -224,10 +224,10 @@ impl DocumentCommandQueue {
 }
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum ListenerError {
-    #[error("Document no longer available")]
+    #[error("document not available")]
     DocumentClosed,
     // Hints that something has gone horribly wrong internally!
-    #[error("Command tree malformed: {}", .0)]
+    #[error("tree malformed: {}", .0)]
     TreeMalformed(TraverseError),
 }
 pub struct DocumentCommandListener {
@@ -384,9 +384,9 @@ fn nearest_ancestor<T>(
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum TraverseError {
-    #[error("Nodes come from disconnected subtrees")]
+    #[error("can't traverse disconnected subtrees")]
     Disconnected,
-    #[error("Node ID not present in tree")]
+    #[error("ID not present in tree")]
     NotFound,
 }
 /// Create an iterator that traverses the shortest path between start and end nodes, or None if the start

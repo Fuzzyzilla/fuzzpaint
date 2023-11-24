@@ -173,19 +173,19 @@ impl NodeData {
 
 #[derive(thiserror::Error, Debug)]
 pub enum TargetError {
-    #[error("The ID is not known to this blend graph")]
+    #[error("ID not found")]
     TargetNotFound,
-    #[error("The target ID is deleted")]
+    #[error("target ID is deleted")]
     TargetDeleted,
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum ReparentError {
-    #[error("The target could not be found: {}", .0)]
+    #[error("target not found: {}", .0)]
     TargetError(TargetError),
-    #[error("The destination could not be found: {}", .0)]
+    #[error("destination not found: {}", .0)]
     DestinationError(TargetError),
-    #[error("Cannot reparent to one of the node's own [grand]children")]
+    #[error("can't reparent to the node's own [grand]children")]
     WouldCycle,
 }
 

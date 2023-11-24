@@ -38,20 +38,10 @@ struct ResidualChunk {
 
 #[derive(thiserror::Error, Debug)]
 pub enum WriteError {
-    #[error("{}", .0)]
-    IO(std::io::Error),
-    #[error("{}", .0)]
-    Anyhow(anyhow::Error),
-}
-impl From<std::io::Error> for WriteError {
-    fn from(value: std::io::Error) -> Self {
-        Self::IO(value)
-    }
-}
-impl From<anyhow::Error> for WriteError {
-    fn from(value: anyhow::Error) -> Self {
-        Self::Anyhow(value)
-    }
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+    #[error(transparent)]
+    Anyhow(#[from] anyhow::Error),
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy, bytemuck::Contiguous, bytemuck::NoUninit)]

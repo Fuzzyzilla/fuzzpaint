@@ -198,7 +198,7 @@ fn does_alias(dest: &vk::ImageView, src: &BlendImageSource) -> bool {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ImageSourceError {
-    #[error("the source image aliases the background image")]
+    #[error("source image aliases the background image")]
     AlisesBackground,
 }
 pub struct BlendInvocationBuilder {

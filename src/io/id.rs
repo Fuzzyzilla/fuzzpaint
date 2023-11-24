@@ -34,6 +34,14 @@ impl<T: std::any::Any> PartialEq for FileLocalID<T> {
     }
 }
 impl<T: std::any::Any> Eq for FileLocalID<T> {}
+impl<T: std::any::Any> From<u32> for FileLocalID<T> {
+    fn from(value: u32) -> Self {
+        Self {
+            id: value,
+            _phantom: Default::default(),
+        }
+    }
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum InternError {
@@ -79,10 +87,7 @@ impl<T: std::any::Any> FileLocalInterner<T> {
                 let id = checked_postfix_increment(&mut self.next_id)
                     .ok_or(InternError::TooManyEntries)?;
 
-                let id = FileLocalID {
-                    id,
-                    _phantom: Default::default(),
-                };
+                let id = id.into();
                 v.insert(id);
                 Ok(id)
             }
@@ -101,11 +106,7 @@ impl<T: std::any::Any> FileLocalInterner<T> {
                 let id = checked_postfix_increment(&mut self.next_id)
                     .ok_or(InternError::TooManyEntries)?;
 
-                let id = FileLocalID {
-                    id,
-                    _phantom: Default::default(),
-                };
-                v.insert(id);
+                v.insert(id.into());
                 Ok(true)
             }
         }
@@ -142,15 +143,7 @@ impl<T: std::any::Any> ProcessLocalInterner<T> {
         map.extend(
             file_local_ids
                 .zip(process_local_ids)
-                .map(|(file_id, fuzz_id)| {
-                    (
-                        FileLocalID {
-                            id: file_id,
-                            _phantom: Default::default(),
-                        },
-                        fuzz_id,
-                    )
-                }),
+                .map(|(file_idx, fuzz_id)| (file_idx.into(), fuzz_id)),
         );
 
         // Make sure we allocated as many as promised

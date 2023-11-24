@@ -6,6 +6,8 @@
 //! however, the API is constructed to allow for smart in-memory compression or dumping old
 //! data to disk in the future.
 
+use crate::FuzzID;
+
 /// Get the shared global instance of the point repository.
 pub fn global() -> &'static PointRepository {
     static REPO: std::sync::OnceLock<PointRepository> = std::sync::OnceLock::new();
@@ -121,13 +123,8 @@ pub enum WriteError {
     TooLong,
     #[error("too many entries")]
     TooManyEntries,
-    #[error("IO error {}", .0)]
-    IOError(std::io::Error),
-}
-impl From<std::io::Error> for WriteError {
-    fn from(value: std::io::Error) -> Self {
-        Self::IOError(value)
-    }
+    #[error(transparent)]
+    IOError(#[from] std::io::Error),
 }
 #[derive(Copy, Clone)]
 struct PointCollectionAllocInfo {
@@ -156,9 +153,7 @@ impl PointRepository {
     pub fn resident_usage(&self) -> (usize, usize) {
         let read = self.slabs.read();
         let num_slabs = read.len();
-        let capacity = num_slabs
-            .saturating_mul(SLAB_SIZE)
-            .saturating_mul(std::mem::size_of::<crate::StrokePoint>());
+        let capacity = num_slabs.saturating_mul(SLAB_SIZE_BYTES);
         let usage = read
             .iter()
             .map(|slab| slab.usage())
@@ -169,7 +164,7 @@ impl PointRepository {
     /// Insert the collection into the repository, yielding a unique ID.
     /// Fails if the length of the collection is > 0x10_00_00
     pub fn insert(&self, collection: &[crate::StrokePoint]) -> Option<PointCollectionID> {
-        if collection.len() <= SLAB_SIZE {
+        if collection.len() <= SLAB_SIZE_POINTS {
             // Find a slab where `try_bump` succeeds.
             let slab_reads = self.slabs.upgradable_read();
             if let Some((slab_id, start)) = slab_reads
@@ -336,7 +331,7 @@ impl PointRepository {
                     debug_assert!(entry
                         .start
                         .checked_add(entry.summary.len)
-                        .is_some_and(|last| last <= SLAB_SIZE));
+                        .is_some_and(|last| last <= SLAB_SIZE_POINTS));
 
                     let Some(slice) = slab.try_read(entry.start, entry.summary.len) else {
                         // Implementation bug!
@@ -365,6 +360,7 @@ impl PointRepository {
         R: std::io::Read + std::io::Seek,
     {
         use crate::io::{id::ProcessLocalInterner, Version};
+        use az::CheckedAs;
         use std::io::{Error as IOError, Read};
         if dict.version() != Version::CURRENT {
             // TODO lol
@@ -378,6 +374,7 @@ impl PointRepository {
         {
             return Err(IOError::other(anyhow::anyhow!("bad metadata len")));
         }
+
         #[derive(Clone, Copy, bytemuck::AnyBitPattern, Debug)]
         #[repr(C, packed)]
         struct DictMetadata {
@@ -385,19 +382,86 @@ impl PointRepository {
             len: u32,
             arch: PointArchetype,
         }
-        let mut metas = Vec::<DictMetadata>::new();
+        let mut metas = Vec::<(Option<PointCollectionID>, DictMetadata)>::new();
         let mut unstructured = dict.try_for_each(|mut meta_read| {
             let mut bytes = [0; std::mem::size_of::<DictMetadata>()];
             meta_read.read_exact(&mut bytes)?;
             let meta: DictMetadata = bytemuck::pod_read_unaligned(&bytes);
-            metas.push(meta);
+            metas.push((None, meta));
 
             Ok(())
         })?;
+        let reported_len = unstructured.data_len_unsanitized();
+        // Make sure none surpass the end of the data chunk
+        // AND make sure none surpass the limit of allocatable points, `SLAB_SIZE`
+        if !metas.iter().all(|m| {
+            m.1.len
+                .checked_add(m.1.offset)
+                .is_some_and(|end| end <= reported_len as u32)
+                && m.1.len as usize <= SLAB_SIZE_BYTES
+        }) {
+            return Err(IOError::other(anyhow::anyhow!("point list data too long")));
+        }
+        // Allocate many ids, and disperse them
+        let ids = {
+            let count = metas
+                .len()
+                .checked_as::<u32>()
+                .ok_or_else(|| IOError::other(anyhow::anyhow!("Too many elements")))?;
+            let mut ids = ProcessLocalInterner::many_sequential(count as usize).unwrap();
+            for (file_id, meta) in (0..count).into_iter().zip(metas.iter_mut()) {
+                meta.0 = Some(ids.get_or_insert(file_id.into()))
+            }
+            ids
+        };
+        // Sort pointlists by start position
+        metas.sort_unstable_by_key(|meta| meta.1.offset);
 
-        println!("{metas:#?}");
+        // Strategy: because we cannot trust the length of `unstructured` nor the reported size of the metas
+        // we cannot simply read all the data blindly. Instead:
+        // * Pop the first meta
+        // * Find an existing slab that'll fit it, or allocate if None (limit 16MiB)
+        // * Pop all remaining metas that can *also* fit into that chunk
+        // * Bulk read.
+        // * Repeat until all metas are loaded.
+        // * If we allocated and it failed, we can de-allocate.
+        // Limitations: Can't yet de-allocate from existing slabs so failures leak mem,
+        // + concurrent loading will over-commit on new blocks.
 
-        Ok(ProcessLocalInterner::new())
+        // Blocks that were newly allocated for reading. May be freed if an error occurs.
+        let mut new_blocks = smallvec::SmallVec::<[PointSlab; 2]>::new();
+        // We can trust metas.len, as we were successfully able to read that many.
+        let mut infos = Vec::<PointCollectionAllocInfo>::with_capacity(metas.len());
+
+        let mut try_read_points = || -> Result<(), IOError> {
+            // Get next - or finished!
+            let Some(next) = metas.pop() else {
+                return Ok(());
+            };
+            // Find a block that fits it
+            let blocks = self.slabs.read();
+            todo!();
+
+            // Collect all subsequent ones that will also fit
+            // (allows overlapping blocks) (todo: alignment issues?)
+
+            // Read into
+
+            // Create infos
+
+            Ok(())
+        };
+
+        // Failed to read. Free any blocks we allocated for this task.
+        if let Err(e) = try_read_points() {
+            for block in new_blocks.into_iter() {
+                // Safety - we took no references to this data.
+                unsafe { block.free() }
+            }
+            return Err(e);
+        }
+
+        Ok(ids)
     }
     /// Get a [CollectionSummary] for the given collection, reporting certain key aspects of a stroke without
     /// it needing to be loaded into resident memory. None if the ID is not known
@@ -425,7 +489,7 @@ impl PointRepository {
         debug_assert!(alloc
             .start
             .checked_add(alloc.summary.len)
-            .is_some_and(|last| last <= SLAB_SIZE));
+            .is_some_and(|last| last <= SLAB_SIZE_POINTS));
 
         let Some(slice) = slab.try_read(alloc.start, alloc.summary.len) else {
             // Implementation bug!
@@ -441,31 +505,92 @@ struct PointSlab {
     points: *mut crate::StrokePoint,
     /// Current past-the-end index for the allocator.
     /// Indices before this are considered immutable, after are considered mutable.
+    // TODO: This can be replaced by a atomicUsize and an access token, allowing similtaneous lockless reading
+    // and lockful writing to the two halves.
     bump_free_idx: parking_lot::Mutex<usize>,
 }
-const SLAB_SIZE: usize = 1024 * 1024;
+const SLAB_SIZE_POINTS: usize = 1024 * 1024;
+const SLAB_SIZE_BYTES: usize = SLAB_SIZE_POINTS * std::mem::size_of::<crate::StrokePoint>();
+
+#[derive(thiserror::Error, Debug, Clone, Copy)]
+#[error("bump exceeds capacity")]
+struct BumpTooLargeError;
+struct SlabGuard<'a> {
+    /// a non-null pointer to array of slab_SIZE points.
+    points: *mut crate::StrokePoint,
+    bump_free_idx: parking_lot::MutexGuard<'a, usize>,
+}
+impl<'a> SlabGuard<'a> {
+    /// How many more points can fit?
+    fn remaining(&self) -> usize {
+        SLAB_SIZE_POINTS.saturating_sub(self.position())
+    }
+    /// Get a mutable reference to the unfilled portion of the slab.
+    /// Be sure to mark any consumed space as used!
+    fn unfilled<'s>(&'s mut self) -> &'s mut [crate::StrokePoint] {
+        // Invariant should be upheld by everone else.
+        assert!(*self.bump_free_idx <= SLAB_SIZE_POINTS);
+        debug_assert!(SLAB_SIZE_POINTS != 0); // -w- completeness
+
+        // Safety - must remain inside the alloc'd object
+        // We checked with assert!
+        let ptr_start = unsafe { self.points.add(*self.bump_free_idx) };
+
+        // Safety - self has exclusive access to the Slab's writable portion.
+        // We then hold self mutably while accessing.
+        unsafe {
+            std::slice::from_raw_parts_mut::<'s, crate::StrokePoint>(ptr_start, self.remaining())
+        }
+    }
+    /// Bump the inner slab by this number of points. The points become frozen
+    /// and cannot be modified if this call returns Ok().
+    ///
+    /// Returns Err and makes no changes if `num_points > remaining`.
+    fn bump(&mut self, num_points: usize) -> Result<(), BumpTooLargeError> {
+        if num_points > self.remaining() {
+            Err(BumpTooLargeError)
+        } else {
+            *self.bump_free_idx += num_points;
+            Ok(())
+        }
+    }
+    /// Returns the position of the bump index.
+    /// This is the first index in the slab that is available for mutation, everything
+    /// before this index is frozen and immutable.
+    fn position(&self) -> usize {
+        *self.bump_free_idx
+    }
+}
 impl PointSlab {
+    /// Lock the slab for exclusive low-level writing access.
+    ///
+    /// *Reads are still free to occur to any point before the bump index even while this lock is held.*
+    fn lock<'a>(&'a self) -> SlabGuard<'a> {
+        SlabGuard {
+            points: self.points,
+            bump_free_idx: self.bump_free_idx.lock(),
+        }
+    }
     /// Try to allocate and write a contiguous section of points, returning the start idx of where it was written.
     /// If not enough space, the `self` is left unchanged and None is returned.
     fn try_bump_write(&self, data: &[crate::StrokePoint]) -> Option<usize> {
-        if data.len() <= SLAB_SIZE {
-            let mut free_idx = self.bump_free_idx.lock();
-            let old_idx = *free_idx;
-            let new_idx = old_idx.checked_add(data.len())?;
-            if new_idx > SLAB_SIZE {
-                None
-            } else {
-                // Safety - No shared mutable or immutable access can occur here,
-                // since we own the mutex. Todo: could cause much pointless waiting for before the idx!
-                let slice: &'static mut [crate::StrokePoint] =
-                    unsafe { std::slice::from_raw_parts_mut(self.points.add(old_idx), data.len()) };
-                slice
-                    .iter_mut()
-                    .zip(data.iter())
-                    .for_each(|(into, from)| *into = *from);
-                *free_idx = new_idx;
-                Some(old_idx)
+        if data.len() <= SLAB_SIZE_POINTS {
+            let mut lock = self.lock();
+            let start = lock.position();
+
+            let unfilled = lock.unfilled();
+            // Not enough space
+            if unfilled.len() < data.len() {
+                return None;
             }
+            // Copy data into start region of unfilled range
+            // Indexing ok - we checked the precondition manually.
+            unfilled[..data.len()].copy_from_slice(data);
+            // Bump the new data into immutable range
+            // Unwrap ok - we checked the precondition manually.
+            lock.bump(data.len()).unwrap();
+
+            Some(start)
         } else {
             None
         }
@@ -473,7 +598,7 @@ impl PointSlab {
     /// Try to read some continuous section of strokes. returns None if the region is outside the span
     /// of the currently allocated memory.
     ///
-    /// Performs no check that the given start and length correspond to a single allocation!
+    /// Performs no check that the given start and length correspond to a single suballocation!
     fn try_read(&self, start: usize, len: usize) -> Option<&'static [crate::StrokePoint]> {
         // Check if this whole region is within the allocated, read-only section.
         if start
@@ -490,25 +615,54 @@ impl PointSlab {
     fn usage(&self) -> usize {
         *self.bump_free_idx.lock()
     }
+    /// Allocate a new slab of SLAB_SIZE points.
+    ///
+    /// `Self::try_new`, except terminates on allocation failure.
     fn new() -> Self {
-        let size = std::mem::size_of::<crate::StrokePoint>() * SLAB_SIZE;
-        let align = std::mem::align_of::<crate::StrokePoint>();
-        debug_assert!(size != 0);
-        debug_assert!(align != 0 && align.is_power_of_two());
-
-        // Safety: Size and align constraints ensured by debug asserts and unwraps.
-        // (is there a better way to get a large zeroed heap array?)
-        let points = unsafe {
-            std::alloc::alloc_zeroed(std::alloc::Layout::from_size_align(size, align).unwrap())
-                .cast::<crate::StrokePoint>()
-        };
-        assert!(!points.is_null());
-        // We do not dealloc points at any point.
-        // The slabs will be re-used for the lifetime of the program.
-        Self {
-            points,
-            bump_free_idx: 0.into(),
+        match Self::try_new() {
+            Some(s) => s,
+            None => std::alloc::handle_alloc_error(Self::layout()),
         }
+    }
+    /// Allocate a new slab of SLAB_SIZE points.
+    ///
+    /// Returns None if the allocation failed. To fail on this condition,
+    /// prefer [std::alloc::handle_alloc_error] over a panic.
+    ///
+    /// There is no guaruntee that this won't terminate the process instead of returning None.
+    fn try_new() -> Option<Self> {
+        let layout = Self::layout();
+        // (is there a better way to get a large, arbitrarily-initialized heap array?)
+        let points = unsafe { std::alloc::alloc_zeroed(layout).cast::<crate::StrokePoint>() };
+
+        if points.is_null() {
+            None
+        } else {
+            Some(Self {
+                points,
+                bump_free_idx: 0.into(),
+            })
+        }
+    }
+    /// Free the memory of this slab. By default, memory is leaked on drop as the references to this slab's
+    /// data live arbitrarily long.
+    ///
+    /// Safety: There must not be any outstanding references to this slab's memory (acquired by `try_read`).
+    unsafe fn free(self) {
+        // Safety - using same layout as used to create it.
+        // Use-after-free forwarded to this fn's safety contract.
+        unsafe { std::alloc::dealloc(self.points as *mut _, Self::layout()) }
+    }
+    fn layout() -> std::alloc::Layout {
+        const SIZE: usize = SLAB_SIZE_BYTES;
+        const ALIGN: usize = std::mem::align_of::<crate::StrokePoint>();
+        debug_assert!(SIZE != 0);
+        debug_assert!(ALIGN != 0 && ALIGN.is_power_of_two());
+        debug_assert!(SIZE % ALIGN == 0);
+
+        // Unwrap - if this fails, it'll be *VERY* obvious lol
+        // Does not depend on runtime info, so it'll always fail or succeed on the first allocation attempt.
+        std::alloc::Layout::from_size_align(SIZE, ALIGN).unwrap()
     }
 }
 // Safety - the pointer refers to heap mem, and can be transferred.

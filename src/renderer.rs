@@ -11,11 +11,11 @@ struct PerDocumentData {
 }
 #[derive(thiserror::Error, Debug)]
 enum IncrementalDrawErr {
-    #[error("{0}")]
-    Anyhow(anyhow::Error),
+    #[error(transparent)]
+    Anyhow(#[from] anyhow::Error),
     /// State was not usable for incremental draw.
     /// Draw from scratch instead!
-    #[error("State mismatch")]
+    #[error("state mismatch")]
     StateMismatch,
 }
 enum CachedImage<'data> {

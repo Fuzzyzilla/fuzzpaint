@@ -319,7 +319,7 @@ pub struct KeysToActions(std::collections::HashMap<AnyHotkey, super::Action>);
 pub enum KeysToActionsError {
     /// A single key was bound to multiple actions.
     /// Only the first two encountered (in arbitrary order) are reported.
-    #[error("Hotkey {key:?} used for more than one action: {actions:?}")]
+    #[error("hotkey {key:?} used for more than one action: {actions:?}")]
     DuplicateBinding {
         key: AnyHotkey,
         actions: [super::Action; 2],
