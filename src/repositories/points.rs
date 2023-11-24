@@ -503,11 +503,13 @@ impl PointRepository {
 struct PointSlab {
     /// a non-null pointer to array of slab_SIZE points.
     points: *mut crate::StrokePoint,
+    /// Write access guard.
+    write_access: parking_lot::Mutex<()>,
     /// Current past-the-end index for the allocator.
-    /// Indices before this are considered immutable, after are considered mutable.
-    // TODO: This can be replaced by a atomicUsize and an access token, allowing similtaneous lockless reading
-    // and lockful writing to the two halves.
-    bump_free_idx: parking_lot::Mutex<usize>,
+    /// Indices < this are considered immutable, >= considered mutable.
+    ///
+    /// ***It is a logic error to write to this without holding a lock!***
+    bump_position: std::sync::atomic::AtomicUsize,
 }
 const SLAB_SIZE_POINTS: usize = 1024 * 1024;
 const SLAB_SIZE_BYTES: usize = SLAB_SIZE_POINTS * std::mem::size_of::<crate::StrokePoint>();
@@ -518,7 +520,8 @@ struct BumpTooLargeError;
 struct SlabGuard<'a> {
     /// a non-null pointer to array of slab_SIZE points.
     points: *mut crate::StrokePoint,
-    bump_free_idx: parking_lot::MutexGuard<'a, usize>,
+    _write_access_lock: parking_lot::MutexGuard<'a, ()>,
+    bump_position: &'a std::sync::atomic::AtomicUsize,
 }
 impl<'a> SlabGuard<'a> {
     /// How many more points can fit?
@@ -526,39 +529,49 @@ impl<'a> SlabGuard<'a> {
         SLAB_SIZE_POINTS.saturating_sub(self.position())
     }
     /// Get a mutable reference to the unfilled portion of the slab.
-    /// Be sure to mark any consumed space as used!
+    /// Be sure to mark any consumed space as used with `self::bump`!
     fn unfilled<'s>(&'s mut self) -> &'s mut [crate::StrokePoint] {
+        let position = self.position();
+        let remaining = SLAB_SIZE_POINTS.saturating_sub(position);
         // Invariant should be upheld by everone else.
-        assert!(*self.bump_free_idx <= SLAB_SIZE_POINTS);
+        assert!(position <= SLAB_SIZE_POINTS);
         debug_assert!(SLAB_SIZE_POINTS != 0); // -w- completeness
 
         // Safety - must remain inside the alloc'd object
         // We checked with assert!
-        let ptr_start = unsafe { self.points.add(*self.bump_free_idx) };
+        let ptr_start = unsafe { self.points.add(position) };
 
         // Safety - self has exclusive access to the Slab's writable portion.
         // We then hold self mutably while accessing.
-        unsafe {
-            std::slice::from_raw_parts_mut::<'s, crate::StrokePoint>(ptr_start, self.remaining())
-        }
+        unsafe { std::slice::from_raw_parts_mut::<'s, crate::StrokePoint>(ptr_start, remaining) }
     }
     /// Bump the inner slab by this number of points. The points become frozen
     /// and cannot be modified if this call returns Ok().
     ///
     /// Returns Err and makes no changes if `num_points > remaining`.
     fn bump(&mut self, num_points: usize) -> Result<(), BumpTooLargeError> {
-        if num_points > self.remaining() {
-            Err(BumpTooLargeError)
-        } else {
-            *self.bump_free_idx += num_points;
+        // We perform a relaxed load here. This is fine, no races can occur - invariant is
+        // that we have exclusive store access to this atomic.
+        let position = self.position();
+        if position
+            .checked_add(num_points)
+            .is_some_and(|end| end <= SLAB_SIZE_POINTS)
+        {
+            // Release - we must finish all prior ops (could be writes!) before the store occurs.
+            self.bump_position
+                .store(position + num_points, std::sync::atomic::Ordering::Release);
             Ok(())
+        } else {
+            Err(BumpTooLargeError)
         }
     }
     /// Returns the position of the bump index.
     /// This is the first index in the slab that is available for mutation, everything
     /// before this index is frozen and immutable.
     fn position(&self) -> usize {
-        *self.bump_free_idx
+        // Relaxed is fine. This thread is the only writer.
+        self.bump_position
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 impl PointSlab {
@@ -568,13 +581,28 @@ impl PointSlab {
     fn lock<'a>(&'a self) -> SlabGuard<'a> {
         SlabGuard {
             points: self.points,
-            bump_free_idx: self.bump_free_idx.lock(),
+            bump_position: &self.bump_position,
+            _write_access_lock: self.write_access.lock(),
         }
     }
     /// Try to allocate and write a contiguous section of points, returning the start idx of where it was written.
+    ///
+    /// If `Some(idx)` is returned, the data can be retrieved via `self::try_read(idx, data.len())`
+    ///
     /// If not enough space, the `self` is left unchanged and None is returned.
     fn try_bump_write(&self, data: &[crate::StrokePoint]) -> Option<usize> {
         if data.len() <= SLAB_SIZE_POINTS {
+            // Eager check for space before waiting on the lock.
+            // Could still fail afterwards!
+            if data.len()
+                > SLAB_SIZE_POINTS.saturating_sub(
+                    self.bump_position
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                )
+            {
+                return None;
+            }
+            // *might* fit. Try to lock and write.
             let mut lock = self.lock();
             let start = lock.position();
 
@@ -603,7 +631,14 @@ impl PointSlab {
         // Check if this whole region is within the allocated, read-only section.
         if start
             .checked_add(len)
-            .is_some_and(|past_end| past_end <= *self.bump_free_idx.lock())
+            // Check it is within the readable range.
+            // Acquire, since operations after this rely on the mem guarded by this load.
+            .is_some_and(|past_end| {
+                past_end
+                    <= self
+                        .bump_position
+                        .load(std::sync::atomic::Ordering::Acquire)
+            })
         {
             // Safety: no shared mutable access, as mutation never happens before the bump idx
             Some(unsafe { std::slice::from_raw_parts(self.points.add(start), len) })
@@ -611,9 +646,11 @@ impl PointSlab {
             None
         }
     }
-    // Get the number of points currently in use.
+    /// Get the number of points currently in use.
+    /// This is a hint, and not intended to be used for safety!
     fn usage(&self) -> usize {
-        *self.bump_free_idx.lock()
+        self.bump_position
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
     /// Allocate a new slab of SLAB_SIZE points.
     ///
@@ -640,7 +677,8 @@ impl PointSlab {
         } else {
             Some(Self {
                 points,
-                bump_free_idx: 0.into(),
+                write_access: Default::default(),
+                bump_position: 0.into(),
             })
         }
     }
