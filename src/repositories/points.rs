@@ -419,11 +419,11 @@ impl PointRepository {
 
         // Strategy: because we cannot trust the length of `unstructured` nor the reported size of the metas
         // we cannot simply read all the data blindly. Instead:
-        // * Pop the first meta
-        // * Find an existing slab that'll fit it, or allocate if None (limit 16MiB)
-        // * Pop all remaining metas that can *also* fit into that chunk
-        // * Bulk read.
-        // * Repeat until all metas are loaded.
+        //   * Pop the first meta
+        //   * Find an existing slab that'll fit it, or allocate if None (limit 16MiB)
+        //   * Pop all remaining metas that can *also* fit into that chunk
+        //   * Bulk read.
+        //  * Repeat until all metas are loaded.
         // * If we allocated and it failed, we can de-allocate.
         // Limitations: Can't yet de-allocate from existing slabs so failures leak mem,
         // + concurrent loading will over-commit on new blocks.
@@ -434,25 +434,101 @@ impl PointRepository {
         let mut infos = Vec::<PointCollectionAllocInfo>::with_capacity(metas.len());
 
         let mut try_read_points = || -> Result<(), IOError> {
-            // Get next - or finished!
-            let Some(next) = metas.pop() else {
-                return Ok(());
-            };
-            // Find a block that fits it
-            let blocks = self.slabs.read();
-            todo!();
+            while let Some(first_meta) = metas.pop() {
+                // This is pseudocode at this point lol
+                todo!();
+                // Find a block that fits it
+                let slabs = self.slabs.read();
+                let slab_lock = slabs.iter().find_map(|slab| {
+                    // FIXME - bytes vs points, too lazy
+                    // Check if it *might* fit (can still fail)
+                    if slab.remaining() >= first_meta.1.len as usize {
+                        let lock = slab.lock();
+                        // Check if it actually fits
+                        if lock.remaining() >= first_meta.1.len as usize {
+                            Some(lock)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
 
-            // Collect all subsequent ones that will also fit
-            // (allows overlapping blocks) (todo: alignment issues?)
+                // If no block has enough space, make a new one and lock that one instead.
+                let slab_lock = slab_lock.unwrap_or_else(|| {
+                    new_blocks.push(PointSlab::new());
+                    new_blocks.last().unwrap().lock()
+                });
 
-            // Read into
+                // Collect all subsequent ones that will also fit
+                // (allows overlapping blocks) (todo: alignment issues?)
 
-            // Create infos
+                /// Collect a slice while `pred` returns true.
+                ///
+                /// Inverse of the unstable [T]::split_once but it's unstable anyway.
+                /// Similar to group_by, split, split_once ect...... hmmst
+                fn take_while<T, Pred>(slice: &[T], mut pred: Pred) -> &[T]
+                where
+                    Pred: FnMut(&T) -> bool,
+                {
+                    if let Some(pos) = slice.iter().position(|t| !pred(t)) {
+                        &slice[..pos]
+                    } else {
+                        slice
+                    }
+                }
 
+                // Immutable - they're sorted, so the start point never needs to move.
+                let range_start = first_meta.1.offset;
+                let mut range_past_end = range_start + first_meta.1.len;
+                // TODO: bytes -> points
+                let mut remaining_len = slab_lock.remaining() - first_meta.1.len as usize;
+                let also_fit = take_while(&metas, |meta| {
+                    // Discontiguous!
+                    // (dont need to check < start, they're sorted!)
+                    if meta.1.offset > range_past_end {
+                        return false;
+                    }
+                    // Unaligned!
+                    if (meta.1.offset - range_start) % 4 != 0 {
+                        return false;
+                    }
+                    // Fits?
+                    if meta.1.len as usize <= remaining_len {
+                        remaining_len -= meta.1.len as usize;
+                        // Push forward, if needed
+                        range_past_end = range_past_end.max(meta.1.offset + meta.1.len);
+                        true
+                    } else {
+                        false
+                    }
+                });
+
+                // TODO: bytes -> points
+                let count = (range_past_end - range_start) as usize;
+
+                // Read!
+                // todo: seek
+                unstructured
+                    .read_exact(bytemuck::cast_slice_mut(&mut slab_lock.unfilled()[..count]))?;
+                // todo: postprocess
+                // TODO: bytes -> points;
+                slab_lock.bump(count).unwrap();
+                // unlock asap
+                drop(slab_lock);
+
+                // todo: Summarize, Create alloc infos
+
+                // Pop all that we handled this iteration
+                metas.drain(..also_fit.len());
+            }
+
+            // Fellthrough - we successfully read all points!
             Ok(())
         };
 
-        // Failed to read. Free any blocks we allocated for this task.
+        // Failed to read. Free any blocks we allocated for this task and diverge.
         if let Err(e) = try_read_points() {
             for block in new_blocks.into_iter() {
                 // Safety - we took no references to this data.
@@ -460,7 +536,11 @@ impl PointRepository {
             }
             return Err(e);
         }
+        // Read successful! Share our new blocks with the class
+        self.slabs.write().extend(new_blocks.into_iter());
+        // Share new allocs (todo)
 
+        // Report back the FileID->FuzzID mapping
         Ok(ids)
     }
     /// Get a [CollectionSummary] for the given collection, reporting certain key aspects of a stroke without
@@ -511,7 +591,8 @@ struct PointSlab {
     /// ***It is a logic error to write to this without holding a lock!***
     bump_position: std::sync::atomic::AtomicUsize,
 }
-const SLAB_SIZE_POINTS: usize = 1024 * 1024;
+/// 2MiB
+const SLAB_SIZE_POINTS: usize = 128 * 1024;
 const SLAB_SIZE_BYTES: usize = SLAB_SIZE_POINTS * std::mem::size_of::<crate::StrokePoint>();
 
 #[derive(thiserror::Error, Debug, Clone, Copy)]
@@ -524,7 +605,8 @@ struct SlabGuard<'a> {
     bump_position: &'a std::sync::atomic::AtomicUsize,
 }
 impl<'a> SlabGuard<'a> {
-    /// How many more points can fit?
+    /// How many more points can fit? Note that, unlike `PointSlab::remaining`,
+    /// this is the true capacity rather than just a hint.
     fn remaining(&self) -> usize {
         SLAB_SIZE_POINTS.saturating_sub(self.position())
     }
@@ -647,10 +729,20 @@ impl PointSlab {
         }
     }
     /// Get the number of points currently in use.
-    /// This is a hint, and not intended to be used for safety!
+    /// This is a hint - it may become immediately out-of-date and is not suitable for use in safety preconditions!
     fn usage(&self) -> usize {
         self.bump_position
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// Get the number of points available for writing.
+    /// This is a hint - it may become immediately out-of-date and is not suitable for use in safety preconditions!
+    ///
+    /// Use `self.lock().remaining()` for a true result.
+    fn remaining(&self) -> usize {
+        SLAB_SIZE_POINTS.saturating_sub(
+            self.bump_position
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
     /// Allocate a new slab of SLAB_SIZE points.
     ///
