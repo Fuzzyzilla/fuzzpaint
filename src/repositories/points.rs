@@ -111,7 +111,7 @@ impl PointRepository {
         let capacity = num_slabs.saturating_mul(ElementSlab::size_bytes());
         let usage = read
             .iter()
-            .map(|slab| slab.usage_bytes())
+            .map(|slab| slab.hint_usage_bytes())
             .fold(0, usize::saturating_add);
         (usage, capacity)
     }
@@ -125,7 +125,7 @@ impl PointRepository {
             if let Some((slab_id, start)) = slab_reads
                 .iter()
                 .enumerate()
-                .find_map(|(idx, slab)| Some((idx, slab.try_bump_write(elements)?)))
+                .find_map(|(idx, slab)| Some((idx, slab.shared_bump_write(elements)?)))
             {
                 // We don't need this lock anymore!
                 drop(slab_reads);
@@ -144,7 +144,7 @@ impl PointRepository {
                 // No slabs were found with space to bump. Make a new one
                 let new_slab = ElementSlab::new();
                 // Unwrap is infallible - we checked the size requirement, so there's certainly room!
-                let start = new_slab.try_bump_write(elements).unwrap();
+                let start = new_slab.shared_bump_write(elements).unwrap();
                 // put the slab into self, getting it's index
                 let slab_id = {
                     let mut write = parking_lot::RwLockUpgradableReadGuard::upgrade(slab_reads);

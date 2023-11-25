@@ -169,4 +169,7 @@ impl<T: std::any::Any> ProcessLocalInterner<T> {
     pub fn insert(&mut self, id: FileLocalID<T>) {
         self.get_or_insert(id);
     }
+    pub fn iter(&self) -> impl Iterator<Item = (&FileLocalID<T>, &FuzzID<T>)> {
+        self.map.iter()
+    }
 }

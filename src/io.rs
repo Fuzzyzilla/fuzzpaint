@@ -171,6 +171,8 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
         return Err(std::io::Error::other("bad file magic"))?;
     }
 
+    let mut point_lists = None;
+
     root.try_for_each(|subchunk| match subchunk.id() {
         ChunkID::LIST => {
             let subchunk = subchunk.into_subchunks()?;
@@ -180,7 +182,9 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
                     ChunkID::DICT => {
                         let dict = obj.into_dict()?;
                         match dict.subtype_id() {
-                            ChunkID::PTLS => point_repository.read_dict(dict).map(|_| ()),
+                            ChunkID::PTLS => point_repository.read_dict(dict).map(|lists| {
+                                point_lists = Some(lists);
+                            }),
                             ChunkID::BRSH => Ok(()),
                             other => Err(IOError::other(anyhow::anyhow!(
                                 "Unrecognized dict \"{other}\""
@@ -205,6 +209,49 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
             "Unrecognized chunk \"{other}\""
         ))),
     })?;
+    let strokes = match point_lists {
+        Some(ref l) => l
+            .iter()
+            .map(|(_, f)| f)
+            .map(
+                |collection| crate::state::stroke_collection::ImmutableStroke {
+                    point_collection: *collection,
+                    id: Default::default(),
+                    brush: crate::state::StrokeBrushSettings {
+                        brush: crate::brush::todo_brush().id(),
+                        color_modulate: [1.0; 4],
+                        size_mul: 5.0,
+                        is_eraser: false,
+                        spacing_px: 1.0,
+                    },
+                },
+            )
+            .collect(),
+        None => Vec::new(),
+    };
+
+    let mut stroke_state = crate::state::stroke_collection::StrokeCollectionState::default();
+    let my_collection = Default::default();
+    stroke_state.0.insert(
+        my_collection,
+        crate::state::stroke_collection::StrokeCollection {
+            strokes_active: bitvec::bitvec![1; strokes.len()],
+            strokes,
+            active: true,
+        },
+    );
+    let my_node = crate::state::graph::LeafType::StrokeLayer {
+        blend: Default::default(),
+        collection: my_collection,
+    };
+    let mut my_graph = crate::state::graph::BlendGraph::default();
+    my_graph
+        .add_leaf(
+            crate::state::graph::Location::IndexIntoRoot(0),
+            "UwU".into(),
+            my_node,
+        )
+        .unwrap();
 
     let document_info = crate::state::Document {
         // File stem (without ext) if available, else the whole path.
@@ -217,7 +264,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
     };
     Ok(crate::commands::queue::DocumentCommandQueue::from_state(
         document_info,
-        Default::default(),
-        Default::default(),
+        my_graph,
+        stroke_state,
     ))
 }

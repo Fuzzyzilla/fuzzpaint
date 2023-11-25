@@ -23,27 +23,46 @@ pub struct SlabGuard<'a, T: bytemuck::Pod, const N: usize> {
     _write_access_lock: parking_lot::MutexGuard<'a, ()>,
     bump_position: &'a std::sync::atomic::AtomicUsize,
 }
+// This is the exact same impl on Slab itself, but using atomic ops. Code duplication icky!
 impl<'a, T: bytemuck::Pod, const N: usize> SlabGuard<'a, T, N> {
     /// How many more items can fit? Note that, unlike `Slab::remaining`,
     /// this is the true capacity rather than just a hint.
     pub fn remaining(&self) -> usize {
         N.saturating_sub(self.position())
     }
-    /// Get a mutable reference to the unfilled portion of the slab.
+    /// Get a references to the immutable and mutable parts of the allocator.
     /// Be sure to mark any consumed space as used with `self::bump`!
-    pub fn unfilled<'s>(&'s mut self) -> &'s mut [T] {
+    ///
+    /// Note that even while this exclusive lock is held, there may still be readers accessing
+    /// the immutable section at any time!
+    ///
+    /// Items written here will *never* be dropped!
+    pub fn parts_mut<'s>(&'s mut self) -> (&'s [T], &'s mut [T]) {
         let position = self.position();
-        let remaining = N.saturating_sub(position);
+        let mutable_size = N.saturating_sub(position);
         // Invariant should be upheld by everone else.
         assert!(position <= N);
 
-        // Safety - must remain inside the alloc'd object
-        // We checked with assert!
-        let ptr_start = unsafe { self.array.add(position) };
+        let mutable_start = if mutable_size != 0 {
+            // Safety - must remain inside the alloc'd object
+            // We checked with guard!
+            unsafe { self.array.add(position) }
+        } else {
+            // Can't use Add for this, as we'd go farther than one-byte past-the-end!
+            // Write access for zero bytes
+            // slice::from_raw_parts_mut explicitly says this is OK!
+            std::ptr::NonNull::dangling().as_ptr()
+        };
 
-        // Safety - self has exclusive access to the Slab's writable portion.
-        // We then hold self mutably while accessing.
-        unsafe { std::slice::from_raw_parts_mut::<'s, T>(ptr_start, remaining) }
+        unsafe {
+            (
+                // immutable: position is guarded to be <= allocated length. Ok even if position == 0
+                std::slice::from_raw_parts::<'s, T>(self.array, position),
+                // mutable: self has exclusive access to the Slab's writable portion.
+                //       We then hold self mutably while accessing.
+                std::slice::from_raw_parts_mut::<'s, T>(mutable_start, mutable_size),
+            )
+        }
     }
     /// Bump the inner slab by this number of items. The items become frozen
     /// and cannot be modified if this call returns Ok().
@@ -87,12 +106,76 @@ impl<T: bytemuck::Pod, const N: usize> Slab<T, N> {
             _write_access_lock: self.write_access.lock(),
         }
     }
+    /// Locklessly get the current bump position. Indices < this are immutable,
+    /// >= are mutable and unallocated.
+    ///
+    /// Requires `&mut self` and thus exclusive access. `Use self::lock` for shared access
+    pub fn position(&mut self) -> usize {
+        *self.bump_position.get_mut()
+    }
+    /// Locklessly get the number of available indices.
+    ///
+    /// Requires `&mut self` and thus exclusive access. `Use self::lock` for shared access
+    pub fn remaining(&mut self) -> usize {
+        N.saturating_sub(self.position())
+    }
+    /// Locklessly bump the allocator position forward some number of elements.
+    /// On success, `num_elements` that used to be in the mutable section are now in the immutable section.
+    ///
+    /// Requires `&mut self` and thus exclusive access. `Use self::lock` for shared access
+    pub fn bump(&mut self, num_elements: usize) -> Result<(), BumpTooLargeError> {
+        let position = self.position();
+        let new_position = position
+            .checked_add(num_elements)
+            .ok_or(BumpTooLargeError)?;
+        if new_position > N {
+            Err(BumpTooLargeError)
+        } else {
+            *self.bump_position.get_mut() = new_position;
+            Ok(())
+        }
+    }
+    /// Locklessly access immutable and mutable sections of the allocator.
+    /// Note that even while exclusive access is held, readers may still have access to the immutable
+    /// section!
+    ///
+    /// After writing, be sure to call `self::bump` to freeze the written data
+    ///
+    /// Requires `&mut self` and thus exclusive access. `Use self::lock` for shared access
+    pub fn parts_mut<'s>(&'s mut self) -> (&'s [T], &'s mut [T]) {
+        let position = self.position();
+        let mutable_size = N.saturating_sub(position);
+        // Invariant should be upheld by everone else.
+        assert!(position <= N);
+
+        let mutable_start = if mutable_size != 0 {
+            // Safety - must remain inside the alloc'd object
+            // We checked with guard!
+            unsafe { self.array.add(position) }
+        } else {
+            // Can't use Add for this, as we'd go farther than one-byte past-the-end!
+            // Write access for zero bytes
+            // slice::from_raw_parts_mut explicitly says this is OK!
+            std::ptr::NonNull::dangling().as_ptr()
+        };
+
+        unsafe {
+            (
+                // immutable: position is guarded to be <= allocated length. Ok even if position == 0
+                std::slice::from_raw_parts::<'s, T>(self.array, position),
+                // mutable: self has exclusive access to the Slab's writable portion.
+                //       We then hold self mutably while accessing.
+                std::slice::from_raw_parts_mut::<'s, T>(mutable_start, mutable_size),
+            )
+        }
+    }
     /// Try to allocate and write a contiguous slice, returning the start idx of where it was written.
+    /// Items written here will *never* be dropped!
     ///
     /// If `Some(idx)` is returned, the data can be retrieved via `self::try_read(idx, data.len())`
     ///
     /// If not enough space, the `self` is left unchanged and None is returned.
-    pub fn try_bump_write(&self, data: &[T]) -> Option<usize> {
+    pub fn shared_bump_write(&self, data: &[T]) -> Option<usize> {
         if data.len() <= N {
             // Eager check for space before waiting on the lock.
             // Could still fail afterwards!
@@ -108,7 +191,7 @@ impl<T: bytemuck::Pod, const N: usize> Slab<T, N> {
             let mut lock = self.lock();
             let start = lock.position();
 
-            let unfilled = lock.unfilled();
+            let (_, unfilled) = lock.parts_mut();
             // Not enough space
             if unfilled.len() < data.len() {
                 return None;
@@ -150,13 +233,13 @@ impl<T: bytemuck::Pod, const N: usize> Slab<T, N> {
     }
     /// Get the number of indices currently in use.
     /// This is a hint - it may become immediately out-of-date and is not suitable for use in safety preconditions!
-    pub fn usage(&self) -> usize {
+    pub fn hint_usage(&self) -> usize {
         self.bump_position
             .load(std::sync::atomic::Ordering::Relaxed)
     }
     /// Get the number of bytes currently in use.
     /// This is a hint - it may become immediately out-of-date and is not suitable for use in safety preconditions!
-    pub fn usage_bytes(&self) -> usize {
+    pub fn hint_usage_bytes(&self) -> usize {
         self.bump_position
             .load(std::sync::atomic::Ordering::Relaxed)
             .saturating_mul(std::mem::size_of::<T>())
@@ -165,7 +248,7 @@ impl<T: bytemuck::Pod, const N: usize> Slab<T, N> {
     /// This is a hint - it may become immediately out-of-date and is not suitable for use in safety preconditions!
     ///
     /// Use `self.lock().remaining()` for a true result.
-    pub fn remaining(&self) -> usize {
+    pub fn hint_remaining(&self) -> usize {
         N.saturating_sub(
             self.bump_position
                 .load(std::sync::atomic::Ordering::Relaxed),
