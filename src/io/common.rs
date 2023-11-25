@@ -1,6 +1,60 @@
 use az::{CheckedAs, SaturatingAs};
 use std::io::{BufRead, Error as IOError, Read, Result as IOResult, Seek, SeekFrom, Write};
 
+pub trait LayeredSeek: Seek {
+    /// Faster seek implementation that doesn't support absolute positioning and doesn't
+    /// return the current position. Similar to `io::Seek`, behavior is implementation defined when attempting
+    /// to seek past the start or past the end.
+    ///
+    /// If this type is a wrapper around an inner stream, the inner stream is not necessarily seeked.
+    /// Use `io::Seek` for that purpose.
+    fn layered_seek(&mut self, by: i64) -> IOResult<()>;
+}
+impl<R: Seek + ?Sized> LayeredSeek for std::io::BufReader<R> {
+    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+        self.seek_relative(by)
+    }
+}
+// It would be great to blanket impl over R: Seek but we can't because of the bufread impl!
+impl LayeredSeek for &std::fs::File {
+    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+        self.seek(SeekFrom::Current(by)).map(|_| ())
+    }
+}
+impl LayeredSeek for std::fs::File {
+    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+        (&*self).layered_seek(by)
+    }
+}
+// Blankets:
+impl<T: ?Sized> LayeredSeek for std::sync::Arc<T>
+where
+    for<'a> &'a T: LayeredSeek,
+    std::sync::Arc<T>: Seek,
+{
+    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+        self.as_ref().layered_seek(by)
+    }
+}
+impl<T: LayeredSeek + ?Sized> LayeredSeek for &mut T {
+    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+        (*self).layered_seek(by)
+    }
+}
+impl<T: LayeredSeek + ?Sized> LayeredSeek for Box<T> {
+    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+        self.as_mut().layered_seek(by)
+    }
+}
+impl<T> LayeredSeek for std::io::Cursor<T>
+where
+    std::io::Cursor<T>: Seek,
+{
+    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+        self.seek(SeekFrom::Current(by)).map(|_| ())
+    }
+}
+
 /// std::io::Take, except it's Seek when S:Seek. Not sure why std's isn't D:
 ///
 /// Works with readers, writers, BufReaders, all three, whatever!
@@ -113,6 +167,37 @@ impl<S: Seek> MyTake<S> {
         }
 
         Ok(stream)
+    }
+}
+impl<R> LayeredSeek for MyTake<R>
+where
+    R: LayeredSeek,
+{
+    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+        if by < 0 {
+            let back_by = by.unsigned_abs();
+            // set cursor back or error if past start
+            self.cursor = self
+                .cursor
+                .checked_sub(back_by)
+                .ok_or_else(|| IOError::other(anyhow::anyhow!("seek past-the-start")))?;
+
+            self.stream.layered_seek(by)
+        } else {
+            // Forward
+            let forward_by = by as u64;
+            // Clamp to end
+            let new_cursor = self
+                .cursor
+                .checked_add(forward_by)
+                .map(|new_cursor| new_cursor.min(self.len))
+                .unwrap_or(self.len);
+
+            let delta = new_cursor - self.cursor;
+            self.cursor = new_cursor;
+            // As ok - will be <= forward_by which was i64 to begin with
+            self.stream.layered_seek(-(delta as i64))
+        }
     }
 }
 impl<R: Read> Read for MyTake<R> {

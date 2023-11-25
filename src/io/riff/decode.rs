@@ -2,7 +2,9 @@ use super::ChunkID;
 use crate::io::common::MyTake;
 use az::SaturatingAs;
 
+use crate::io::common::LayeredSeek;
 use std::io::{BufRead, Error as IOError, Read, Result as IOResult, Seek, SeekFrom};
+
 // read an ID, size
 fn read_chunk_header(r: &mut impl Read) -> IOResult<(ChunkID, u32)> {
     let mut data = [0; 8];
@@ -37,6 +39,14 @@ where
     }
     fn read_to_string(&mut self, buf: &mut String) -> IOResult<usize> {
         self.reader.read_to_string(buf)
+    }
+}
+impl<R> LayeredSeek for BinaryChunkReader<R>
+where
+    MyTake<R>: LayeredSeek,
+{
+    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+        self.reader.layered_seek(by)
     }
 }
 impl<R> BufRead for BinaryChunkReader<R>

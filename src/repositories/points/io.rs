@@ -145,11 +145,11 @@ impl super::PointRepository {
         mut dict: crate::io::riff::decode::DictReader<R>,
     ) -> std::io::Result<crate::io::id::ProcessLocalInterner<PointCollectionIDMarker>>
     where
-        R: std::io::Read + std::io::Seek,
+        R: std::io::Read + crate::io::common::LayeredSeek + std::io::Seek,
     {
-        use crate::io::{id::ProcessLocalInterner, Version};
+        use crate::io::{common::LayeredSeek, id::ProcessLocalInterner, Version};
         use az::CheckedAs;
-        use std::io::{Error as IOError, Read};
+        use std::io::{Error as IOError, Read, Seek};
         if dict.version() != Version::CURRENT {
             // TODO lol
             return Err(IOError::other(anyhow::anyhow!("bad ver")));
@@ -186,7 +186,10 @@ impl super::PointRepository {
             m.1.len
                 .checked_add(m.1.offset)
                 .is_some_and(|end| end <= reported_len as u32)
+                // Check small enough to even fit in a slab
                 && m.1.len as usize <= SLAB_ELEMENT_COUNT * std::mem::size_of::<f32>()
+                // Check is StrokePoint (relax this when other types available)
+                && m.1.len as usize % std::mem::size_of::<crate::StrokePoint>() == 0
         }) {
             return Err(IOError::other(anyhow::anyhow!("point list data too long")));
         }
@@ -217,24 +220,24 @@ impl super::PointRepository {
         // + concurrent loading will over-commit on new blocks.
 
         // Blocks that were newly allocated for reading. May be freed if an error occurs.
-        let mut new_blocks = smallvec::SmallVec::<[ElementSlab; 2]>::new();
+        let mut new_blocks = smallvec::SmallVec::<[ElementSlab; 1]>::new();
         // We can trust metas.len, as we were successfully able to read that many.
         let mut infos = Vec::<PointCollectionAllocInfo>::with_capacity(metas.len());
 
         let mut try_read_points = || -> Result<(), IOError> {
             while let Some(first_meta) = metas.pop() {
-                // This is pseudocode at this point lol
-                todo!();
                 // Find a block that fits it
                 let slabs = self.slabs.read();
-                let slab_lock = slabs.iter().find_map(|slab| {
-                    // FIXME - bytes vs points, too lazy
+                let slab_id_past_end = slabs.len();
+                let slab_info = slabs.iter().enumerate().find_map(|(idx, slab)| {
                     // Check if it *might* fit (can still fail)
-                    if slab.remaining() >= first_meta.1.len as usize {
+                    // bytes -> elements
+                    if slab.remaining() >= first_meta.1.len as usize / 4 {
                         let lock = slab.lock();
                         // Check if it actually fits
-                        if lock.remaining() >= first_meta.1.len as usize {
-                            Some(lock)
+                        // bytes -> elements
+                        if lock.remaining() >= first_meta.1.len as usize / 4 {
+                            Some((idx, lock))
                         } else {
                             None
                         }
@@ -244,9 +247,9 @@ impl super::PointRepository {
                 });
 
                 // If no block has enough space, make a new one and lock that one instead.
-                let slab_lock = slab_lock.unwrap_or_else(|| {
+                let (slab_id, mut slab_lock) = slab_info.unwrap_or_else(|| {
                     new_blocks.push(Slab::new());
-                    new_blocks.last().unwrap().lock()
+                    (slab_id_past_end, new_blocks.last().unwrap().lock())
                 });
 
                 // Collect all subsequent ones that will also fit
@@ -268,45 +271,79 @@ impl super::PointRepository {
                 }
 
                 // Immutable - they're sorted, so the start point never needs to move.
-                let range_start = first_meta.1.offset;
-                let mut range_past_end = range_start + first_meta.1.len;
-                // TODO: bytes -> points
-                let mut remaining_len = slab_lock.remaining() - first_meta.1.len as usize;
+                let range_start_bytes = first_meta.1.offset;
+                let mut range_past_end_bytes = range_start_bytes + first_meta.1.len;
+
+                // Keep track of free space
+                let mut remaining_elements = slab_lock.remaining() - first_meta.1.len as usize / 4;
+                // First element we're writing into
+                let start_element = slab_lock.position();
+
                 let also_fit = take_while(&metas, |meta| {
                     // Discontiguous!
                     // (dont need to check < start, they're sorted!)
-                    if meta.1.offset > range_past_end {
+                    if meta.1.offset > range_past_end_bytes {
                         return false;
                     }
                     // Unaligned!
-                    if (meta.1.offset - range_start) % 4 != 0 {
+                    if (meta.1.offset - range_start_bytes) % 4 != 0 {
                         return false;
                     }
                     // Fits?
-                    if meta.1.len as usize <= remaining_len {
-                        remaining_len -= meta.1.len as usize;
+                    if meta.1.len as usize / 4 <= remaining_elements {
+                        remaining_elements -= meta.1.len as usize / 4;
                         // Push forward, if needed
-                        range_past_end = range_past_end.max(meta.1.offset + meta.1.len);
+                        range_past_end_bytes = range_past_end_bytes.max(meta.1.offset + meta.1.len);
                         true
                     } else {
                         false
                     }
                 });
 
-                // TODO: bytes -> points
-                let count = (range_past_end - range_start) as usize;
+                let count_bytes = (range_past_end_bytes - range_start_bytes) as usize;
+                // Should be divisible exactly. We check that everything is aligned to fours.
+                assert!(count_bytes % 4 == 0);
+                let count_elements = count_bytes / 4;
+
+                // Seek, if necessary
+                // We only ever need to move forwards
+                // In theory we shouldn't even need to seek, but we cannot assume that.
+                let cur = unstructured.stream_position()?;
+                let forward_dist = (range_start_bytes as u64)
+                    .checked_sub(cur)
+                    // debug assert lol
+                    .expect("seek back");
+                // we don't care if underlying reader is seeked
+                unstructured.layered_seek(forward_dist as i64)?;
 
                 // Read!
-                // todo: seek
-                unstructured
-                    .read_exact(bytemuck::cast_slice_mut(&mut slab_lock.unfilled()[..count]))?;
-                // todo: postprocess
-                // TODO: bytes -> points;
-                slab_lock.bump(count).unwrap();
-                // unlock asap
+                unstructured.read_exact(bytemuck::cast_slice_mut(
+                    &mut slab_lock.unfilled()[..count_elements],
+                ))?;
+                // todo: postprocess (endian swap, calculating derived elements like arclength, ect)
+                slab_lock.bump(count_elements).unwrap();
+                // unlock asap, especially before locking info (dont wanna deadlock!)
                 drop(slab_lock);
 
+                let mut info_lock = self.allocs.write();
                 // todo: Summarize, Create alloc infos
+                std::iter::once(&first_meta)
+                    .chain(also_fit.into_iter())
+                    .for_each(|(id, meta)| {
+                        let alloc_info = PointCollectionAllocInfo {
+                            slab_id: todo!(),
+                            // Exact div. We checked they were aligned to fours!
+                            start: start_element + (meta.offset - range_start_bytes) as usize / 4,
+                            // Exact div. We checked length was OK in pre-sort.
+                            summary: CollectionSummary {
+                                archetype: crate::StrokePoint::archetype(),
+                                len: meta.len as usize / std::mem::size_of::<crate::StrokePoint>(),
+                                arc_length: None.into(),
+                            },
+                        };
+                        // unwrap ok - we assigned ids earlier.
+                        info_lock.insert(id.unwrap(), alloc_info);
+                    });
 
                 // Pop all that we handled this iteration
                 metas.drain(..also_fit.len());
@@ -319,7 +356,8 @@ impl super::PointRepository {
         // Failed to read. Free any blocks we allocated for this task and diverge.
         if let Err(e) = try_read_points() {
             for block in new_blocks.into_iter() {
-                // Safety - we took no references to this data.
+                // Safety - we only took short-lived references to this data for
+                // generating the summaries, and they've since been dropped.
                 unsafe { block.free() }
             }
             return Err(e);
