@@ -390,11 +390,54 @@ impl super::PointRepository {
                 let (_, unfilled) = slab.parts_mut();
                 unstructured
                     .read_exact(bytemuck::cast_slice_mut(&mut unfilled[..count_elements]))?;
-                // todo: postprocess (endian swap, calculating derived elements like arclength, ect)
+
+                // todo: postprocess (endian swap + interleaving derived attribs)
                 slab.bump(count_elements).unwrap();
+                // Summarize (we could lower to read-only access on the slab but lifetimes are nightmare)
+                let summaries: Vec<CollectionSummary> = std::iter::once(&first_meta)
+                    .chain(also_fit.iter())
+                    .map(|(_, meta)| {
+                        let last_point = if meta.len == 0 {
+                            None
+                        } else {
+                            let (immutable, _) = slab.parts_mut();
+                            // Find where the first element is mapped to in the slab
+                            let start_idx =
+                                start_element + (meta.offset - range_start_bytes) as usize / 4;
+                            // Find where the past-the-end point in the slab
+                            let past_the_end = start_idx + meta.len as usize / 4;
+                            // Step back one point
+                            let last_point_start = past_the_end - meta.arch.elements();
+                            // Make sure we didn't step back past the start
+                            if last_point_start >= start_idx {
+                                // Try to read elements+cast to point
+                                let opt_last_point = immutable
+                                    .get(last_point_start..last_point_start + meta.arch.elements())
+                                    .and_then(|slice| {
+                                        bytemuck::try_cast_slice::<_, crate::StrokePoint>(slice)
+                                            .ok()
+                                    })
+                                    .and_then(|slice| slice.get(0));
+                                opt_last_point
+                            } else {
+                                None
+                            }
+                        };
+                        CollectionSummary {
+                            archetype: meta.arch,
+                            len: meta.len as usize / std::mem::size_of::<crate::StrokePoint>(),
+                            // Option into Optional panics on none? silly dubious
+                            // Some if available and non-nan, None otherwise.
+                            arc_length: last_point
+                                .map(|l| l.dist)
+                                .map(optional::wrap)
+                                .unwrap_or(optional::none()),
+                        }
+                    })
+                    .collect();
+
                 // Finished with the slab. Now we need to write alloc infos, so collect the idx
                 // of the slab we just wrote.
-
                 let slab_id = match slab {
                     SlabSrc::Shared { idx, .. } => LazyID::Shared(idx),
                     SlabSrc::Owned(o) => {
@@ -404,26 +447,17 @@ impl super::PointRepository {
                 };
 
                 let mut info_lock = self.allocs.write();
-                // Summarize, Create alloc infos
+                // Create alloc infos
                 std::iter::once(&first_meta)
                     .chain(also_fit.into_iter())
-                    .for_each(|(id, meta)| {
+                    .zip(summaries.into_iter())
+                    .for_each(|((id, meta), summary)| {
                         let alloc_info = LazyPointCollectionAllocInfo {
                             slab_id,
                             // Exact div. We checked they were aligned to fours!
                             start: start_element + (meta.offset - range_start_bytes) as usize / 4,
                             // Exact div. We checked length was OK in pre-sort.
-                            summary: CollectionSummary {
-                                archetype: crate::StrokePoint::archetype(),
-                                len: meta.len as usize / std::mem::size_of::<crate::StrokePoint>(),
-                                // I thought i could escape.
-                                // I was wrong. This is wrong.
-                                arc_length: if meta.len == 0 {
-                                    None.into()
-                                } else {
-                                    50.0.into()
-                                },
-                            },
+                            summary,
                         };
                         // unwrap ok - we assigned ids earlier.
                         allocs.push((id.unwrap(), alloc_info));

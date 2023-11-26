@@ -182,6 +182,13 @@ impl MainUI {
                                             let id = doc.id();
                                             if provider.insert(doc).is_ok() {
                                                 recent_success = Some(id);
+                                                self.documents.push(PerDocumentData {
+                                                    id,
+                                                    graph_focused_subtree: None,
+                                                    graph_selection: None,
+                                                    yanked_node: None,
+                                                    name: "Unknown".into(),
+                                                });
                                             }
                                         }
                                         Err(e) => log::error!("Failed to load: {e:#}"),
@@ -189,13 +196,6 @@ impl MainUI {
                                 }
                                 // Select last one, if any succeeded.
                                 if let Some(new_doc) = recent_success {
-                                    self.documents.push(PerDocumentData {
-                                        id: new_doc,
-                                        graph_focused_subtree: None,
-                                        graph_selection: None,
-                                        yanked_node: None,
-                                        name: "Unknown".into(),
-                                    });
                                     self.cur_document = Some(new_doc);
                                 }
                             }

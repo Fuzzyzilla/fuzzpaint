@@ -122,10 +122,10 @@ where
             let mut info = BinaryChunkWriter::new_subtype(&mut root, ChunkID::LIST, ChunkID::INFO)?;
             SizedBinaryChunkWriter::write_buf(&mut info, ChunkID(*b"ISFT"), b"fuzzpaint\0")?;
         }
-        {
+        /*{
             const TEST_QOI: &'static [u8] = include_bytes!("../test-data/test image.qoi");
             SizedBinaryChunkWriter::write_buf(&mut root, ChunkID::THMB, TEST_QOI)?;
-        }
+        }*/
         SizedBinaryChunkWriter::write_buf(&mut root, ChunkID::DOCV, &[])?;
         {
             let mut objs = BinaryChunkWriter::new_subtype(&mut root, ChunkID::LIST, ChunkID::OBJS)?;
@@ -163,7 +163,10 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
     use riff::{decode::*, ChunkID};
     use std::io::{Error as IOError, Read};
     let path_buf = path.into();
-    let r = std::io::BufReader::new(std::fs::File::open(&path_buf)?);
+    let file = std::fs::File::open(&path_buf)?;
+    let size = file.metadata().map(|meta| meta.len()).ok();
+    let start_time = std::time::Instant::now();
+    let r = std::io::BufReader::new(file);
     // Dont need to check magic before extracting subchunks. If extracting fails, it
     // must've been bad anyway!
     let root = BinaryChunkReader::new(r)?.into_subchunks()?;
@@ -218,11 +221,11 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
                     point_collection: *collection,
                     id: Default::default(),
                     brush: crate::state::StrokeBrushSettings {
-                        brush: crate::brush::todo_brush().id(),
-                        color_modulate: [1.0; 4],
-                        size_mul: 5.0,
                         is_eraser: false,
-                        spacing_px: 1.0,
+                        brush: crate::brush::todo_brush().id(),
+                        color_modulate: [0.0, 0.0, 0.0, 1.0],
+                        size_mul: 10.0,
+                        spacing_px: 0.5,
                     },
                 },
             )
@@ -262,6 +265,16 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
             .to_string(),
         path: Some(path_buf),
     };
+    if let Some(size) = size {
+        let duration = std::time::Instant::now() - start_time;
+        let duration_micros = duration.as_micros();
+        log::info!(
+            "Read {} in {}us ({}/s)",
+            human_bytes::human_bytes(size as f64),
+            duration_micros,
+            human_bytes::human_bytes(size as f64 / duration.as_secs_f64())
+        );
+    }
     Ok(crate::commands::queue::DocumentCommandQueue::from_state(
         document_info,
         my_graph,

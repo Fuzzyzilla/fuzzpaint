@@ -34,14 +34,17 @@ impl InMemoryDocumentProvider {
         &self,
         mut queue: super::DocumentCommandQueue,
     ) -> Result<(), super::DocumentCommandQueue> {
-        match self.documents.write().entry(queue.id()) {
-            hashbrown::hash_map::Entry::Occupied(_) => Err(queue),
+        let id = queue.id();
+        match self.documents.write().entry(id) {
+            hashbrown::hash_map::Entry::Occupied(_) => return Err(queue),
             hashbrown::hash_map::Entry::Vacant(v) => {
                 queue.send_on_change(self.notifier.clone());
                 v.insert(queue);
-                Ok(())
             }
         }
+        // Fellthrough. Must've been ok and writelock has been dropped, we can now advertise new doc!
+        let _ = self.notifier.send(ProviderMessage::Opened(id));
+        Ok(())
     }
     /// Call the given closure on the document queue with the given ID, if found.
     pub fn inspect<F, T>(&self, id: crate::state::DocumentID, f: F) -> Option<T>
