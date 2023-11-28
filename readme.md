@@ -1,4 +1,4 @@
-# <a href="#" onclick="return false;"><img src="https://raw.githubusercontent.com/googlefonts/noto-emoji/main/svg/emoji_u1f411.svg" alt="Baa" title="Baa" style="position:relative;bottom: -0.2em;width:1em;"/></a> fuzzpaint-vk
+# <a href="#" onclick="return false;"><img src="https://raw.githubusercontent.com/googlefonts/noto-emoji/main/svg/emoji_u1f411.svg" alt="Baa" title="Baa" style="position:relative;bottom: -0.2em;width:1em;"/></a> Fuzzpaint
 
 Graphics accelerated vector-based paint program for people who like compositing software :3
 
@@ -13,7 +13,7 @@ Requires the [most recent Rust nightly toolchain](https://www.rust-lang.org/tool
 |-------------------|-------------|-------------|---------------------------------------------------------|
 | Windows (Ink)     |None         |None         |                                                         |
 | Unix (Xorg)       |Pressure only|None         |`WINIT_UNIX_BACKEND=x11` to activate using xwayland      |
-| ~~Unix (Wayland)~~|None         |None         |No universally supported tablet API. [Currently disabled!](https://github.com/Fuzzyzilla/fuzzpaint-vk/issues/21#issue-1953431137)|
+| ~~Unix (Wayland)~~|None         |None         |No universally supported tablet API. [Currently disabled!](https://github.com/Fuzzyzilla/fuzzpaint/issues/21#issue-1953431137)|
 | Windows (wintab)  |None         |None         |Documentation tough to come accross                      |
 
 # Road to **0.2.0**

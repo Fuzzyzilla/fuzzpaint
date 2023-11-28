@@ -854,7 +854,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fuzzpaint-vk"
+name = "fuzzpaint"
 version = "0.1.0"
 dependencies = [
  "ahash",

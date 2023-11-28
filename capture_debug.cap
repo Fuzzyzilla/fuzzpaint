@@ -11,7 +11,7 @@
                 "variable": "WINIT_UNIX_BACKEND"
             }
         ],
-        "executable": "/home/aspen/Documents/Code/Rust/fuzzpaint-vk/target/debug/fuzzpaint-vk",
+        "executable": "/home/aspen/Documents/Code/Rust/fuzzpaint/target/debug/fuzzpaint",
         "inject": false,
         "numQueuedFrames": 0,
         "options": {
