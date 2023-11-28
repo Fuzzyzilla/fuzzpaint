@@ -37,8 +37,8 @@ Chunks may refer to arbitrary data structures within its own or its children's b
      - [`DICT`](#dict) [`"strk"`](#strk)
      - [`DICT`](#dict) [`"ptls"`](#ptls)
      - [`DICT`](#dict) [`"brsh"`](#brsh)
-     - [`grph`](#grph)
-   - [`hist`](#hist)
+     - [`GRPH`](#grph) [`"blnd"`](#blnd)
+   - [`GRPH`](#grph) [`"hist"`](#hist)
 
 ### `thmb`
 An optional thumbnail-sized image (usually longest edge length 128 or 256 pixels, at user's preference) in [QOI format](https://qoiformat.org/) showing the merged document from the primary viewport at the moment of writing. If included, it must come second (or first, if `LIST "INFO"` is omitted) in the top-level chunk list. Writers should only populate this field if such an image is readily available at the time of writing, otherwise requiring a specific request from the user. Failure to decode or encode the thumbnail should not be a fatal error.
@@ -53,17 +53,27 @@ A chunk schema which provides a number of ordered entities, a table of staticall
 A reader may discard any spillover data which is not referenced by any entry. It may also duplicate overlapping spillover data into separate regions.
 | Type                        | Meaning                                                                  |
 |-----------------------------|--------------------------------------------------------------------------|
-| `ChunkID`                   | Subtype                                                                  | 
-| `VersionedChunkHeader`      | -                                                                        |
+| `ChunkID`                   | Subtype                                                                  |
+| `VersionedChunkHeader`      | Version and handling information for the metadatas and spillover data    |
 | `u32`                       | Number of entries in the metadata table                                  |
 | `u32`                       | sizeof MetadataTy                                                        |
 | `[MetadataTy; num_entries]` | Entries                                                                  |
 | `[u8]`                      | Dynamic sized spillover area, taking up remainder of this chunk's length |
+### `GRPH`
+Consists of many nodes of potentially heterogeneous type joined together into a graph structure.
+Much like standard `LIST`, it lists a subtype before a series of subchunks:
+* Zero or more [`node`](#node) with unique subtypes within this graph, each describing a type of node and listing zero or more such nodes.
+* Exactly one [`conn`](#conn), describing how these nodes are linked together to form a tree, graph, etc.
+### `node`
+| Type                   | Meaning                                                                     |
+|------------------------|-----------------------------------------------------------------------------|
+| `ChunkID`              | Node type identifier (unique within the GRPH parent).                       |
+| `VersionedChunkHeader` | Version and handling information, specific to each node type.               |
+| ...                    | Todo                                                                        |
+### `conn`
+Describes the connection between many nodes within the parent `GRPH` chunk, each Node referred to by the unique combination of `{node_ty: ChunkID, idx: u32}`. Additionally, the special node `{"root", 0}` may be used as an implicit empty root node even if no such node type was declared.
 ### `docv`
 Information about document viewport layouts, including positions, sizes, resolutions, background colors, ect. of viewports within the document.
-### `grph`
-Contains zero or more blend nodes and their relationships, specifying how items are to be rendered and composited down into a single image.
-Corresponds with `fuzzpaint_vk::state::graph`.
 ### `strk`
 A `DICT` Subtype. Contains lists of brush strokes. Each brush stroke contains a reference id to a point list (ptls), brush settings, ect. needed to place the stroke on the page.
 ### `ptls`
