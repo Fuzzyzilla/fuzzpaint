@@ -11,11 +11,11 @@ struct PerDocumentData {
 }
 #[derive(thiserror::Error, Debug)]
 enum IncrementalDrawErr {
-    #[error("{0}")]
-    Anyhow(anyhow::Error),
+    #[error(transparent)]
+    Anyhow(#[from] anyhow::Error),
     /// State was not usable for incremental draw.
     /// Draw from scratch instead!
-    #[error("State mismatch")]
+    #[error("state mismatch")]
     StateMismatch,
 }
 enum CachedImage<'data> {
@@ -300,7 +300,7 @@ impl Renderer {
         let top_level_blend = top_level_blend.build();
 
         // Wait for every fence. Terrible, but vulkano semaphores don't seem to be working currently.
-        // Note to self: see commit fuzzpaint-vk @ d435ca7c29cf045be413c9849be928693a2de458 for a time when this worked.
+        // Note to self: see commit fuzzpaint @ d435ca7c29cf045be413c9849be928693a2de458 for a time when this worked.
         // Iunno what changed :<
         for fence in fences.into_iter() {
             fence.wait(None)?;

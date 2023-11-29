@@ -6,12 +6,40 @@
 //! however, the API is constructed to allow for smart in-memory compression or dumping old
 //! data to disk in the future.
 
+pub mod archetype;
+pub use archetype::PointArchetype;
+pub mod io;
+
+mod slab;
+use slab::Slab;
+
 /// Get the shared global instance of the point repository.
 pub fn global() -> &'static PointRepository {
     static REPO: std::sync::OnceLock<PointRepository> = std::sync::OnceLock::new();
     REPO.get_or_init(PointRepository::new)
 }
 
+#[derive(Copy, Clone)]
+pub struct CollectionSummary {
+    /// The archetype of the points of the collection.
+    pub archetype: PointArchetype,
+    /// Count of points within the collection
+    pub len: usize,
+    /// final arc length of the collected points, available if the archetype includes PointArchetype::ARC_LENGTH bit.
+    ///
+    /// Non-null.
+    pub arc_length: optional::Optioned<f32>,
+}
+
+impl From<&[crate::StrokePoint]> for CollectionSummary {
+    fn from(value: &[crate::StrokePoint]) -> Self {
+        CollectionSummary {
+            archetype: crate::StrokePoint::archetype(),
+            len: value.len(),
+            arc_length: value.last().map(|point| point.dist).unwrap_or(0.0).into(),
+        }
+    }
+}
 pub struct PointCollectionIDMarker;
 pub type PointCollectionID = crate::FuzzID<PointCollectionIDMarker>;
 
@@ -36,18 +64,36 @@ impl std::ops::Deref for PointCollectionReadLock {
     }
 }
 
-#[derive(Clone)]
+#[derive(thiserror::Error, Debug)]
+pub enum WriteError {
+    #[error("point collection {} is unknown", .0)]
+    UnknownID(PointCollectionID),
+    #[error("too much data")]
+    TooLong,
+    #[error("too many entries")]
+    TooManyEntries,
+    #[error(transparent)]
+    IOError(#[from] std::io::Error),
+}
+#[derive(Copy, Clone)]
 struct PointCollectionAllocInfo {
     /// Which PointSlab is it in?
     /// (currently an index)
     slab_id: usize,
-    /// What point index into that slab does it start?
+    /// What *element* index into that slab does it start?
+    ///
+    /// Note that summary.len is in units of points, not elements.
     start: usize,
-    /// How many points long?
-    len: usize,
+    /// A summary of the data within, that can be queried even if the bulk
+    /// data is non-resident.
+    summary: CollectionSummary,
 }
+// 4MiB of floats
+pub const SLAB_ELEMENT_COUNT: usize = 1024 * 1024;
+type ElementSlab = slab::Slab<f32, SLAB_ELEMENT_COUNT>;
+
 pub struct PointRepository {
-    slabs: parking_lot::RwLock<Vec<PointSlab>>,
+    slabs: parking_lot::RwLock<Vec<ElementSlab>>,
     allocs: parking_lot::RwLock<hashbrown::HashMap<PointCollectionID, PointCollectionAllocInfo>>,
 }
 impl PointRepository {
@@ -62,34 +108,32 @@ impl PointRepository {
     pub fn resident_usage(&self) -> (usize, usize) {
         let read = self.slabs.read();
         let num_slabs = read.len();
-        let capacity = num_slabs
-            .saturating_mul(SLAB_SIZE)
-            .saturating_mul(std::mem::size_of::<crate::StrokePoint>());
+        let capacity = num_slabs.saturating_mul(ElementSlab::size_bytes());
         let usage = read
             .iter()
-            .map(|slab| slab.usage())
-            .fold(0, usize::saturating_add)
-            .saturating_mul(std::mem::size_of::<crate::StrokePoint>());
+            .map(|slab| slab.hint_usage_bytes())
+            .fold(0, usize::saturating_add);
         (usage, capacity)
     }
     /// Insert the collection into the repository, yielding a unique ID.
-    /// Fails if the length of the collection is > 0x10_00_00
+    /// Fails if the length of the collection caintains > [SLAB_ELEMENT_COUNT] f32 elements
     pub fn insert(&self, collection: &[crate::StrokePoint]) -> Option<PointCollectionID> {
-        if collection.len() <= SLAB_SIZE {
-            // Find a slab where `try_bump` succeeds.
+        let elements = bytemuck::cast_slice(collection);
+        if elements.len() <= SLAB_ELEMENT_COUNT {
             let slab_reads = self.slabs.upgradable_read();
+            // Find a slab where `try_bump_write` succeeds.
             if let Some((slab_id, start)) = slab_reads
                 .iter()
                 .enumerate()
-                .find_map(|(idx, slab)| Some((idx, slab.try_bump_write(collection)?)))
+                .find_map(|(idx, slab)| Some((idx, slab.shared_bump_write(elements)?)))
             {
                 // We don't need this lock anymore!
                 drop(slab_reads);
 
                 // populate info
                 let info = PointCollectionAllocInfo {
-                    len: collection.len(),
-                    slab_id: slab_id,
+                    summary: collection.into(),
+                    slab_id,
                     start,
                 };
                 // generate a new id and write metadata
@@ -98,9 +142,9 @@ impl PointRepository {
                 Some(id)
             } else {
                 // No slabs were found with space to bump. Make a new one
-                let new_slab = PointSlab::new();
+                let new_slab = ElementSlab::new();
                 // Unwrap is infallible - we checked the size requirement, so there's certainly room!
-                let start = new_slab.try_bump_write(collection).unwrap();
+                let start = new_slab.shared_bump_write(elements).unwrap();
                 // put the slab into self, getting it's index
                 let slab_id = {
                     let mut write = parking_lot::RwLockUpgradableReadGuard::upgrade(slab_reads);
@@ -109,7 +153,7 @@ impl PointRepository {
                 };
                 // populate info
                 let info = PointCollectionAllocInfo {
-                    len: collection.len(),
+                    summary: collection.into(),
                     slab_id,
                     start,
                 };
@@ -122,24 +166,23 @@ impl PointRepository {
             None
         }
     }
-    /// Get the number of points in the given point collection, or None if the ID is not known
+
+    /// Get a [CollectionSummary] for the given collection, reporting certain key aspects of a stroke without
+    /// it needing to be loaded into resident memory. None if the ID is not known
     /// to this repository.
-    ///
-    /// Provides the ability to fetch the number of points in a collection even if the data is not resident.
-    /// If you need the data afterwards, prefer try_get() followed by PointCollectionReadLock::len()
-    pub fn len_of(&self, id: PointCollectionID) -> Option<usize> {
-        self.allocs.read().get(&id).map(|info| info.len)
+    pub fn summary_of(&self, id: PointCollectionID) -> Option<CollectionSummary> {
+        self.alloc_of(id).map(|alloc| alloc.summary)
+    }
+    fn alloc_of(&self, id: PointCollectionID) -> Option<PointCollectionAllocInfo> {
+        self.allocs.read().get(&id).cloned()
     }
     pub fn try_get(
         &self,
         id: PointCollectionID,
     ) -> Result<PointCollectionReadLock, super::TryRepositoryError> {
         let alloc = self
-            .allocs
-            .read()
-            .get(&id)
-            .ok_or(super::TryRepositoryError::NotFound)?
-            .clone();
+            .alloc_of(id)
+            .ok_or(super::TryRepositoryError::NotFound)?;
         let slabs_read = self.slabs.read();
         let Some(slab) = slabs_read.get(alloc.slab_id) else {
             // Implementation bug!
@@ -147,97 +190,24 @@ impl PointRepository {
             return Err(super::TryRepositoryError::NotFound);
         };
         // Check the alloc range is reasonable
-        debug_assert!(alloc
-            .start
-            .checked_add(alloc.len)
-            .is_some_and(|last| last <= SLAB_SIZE));
+        assert!(alloc
+            .summary
+            .len
+            .checked_mul(alloc.summary.archetype.elements())
+            .and_then(|elem_len| elem_len.checked_add(alloc.start))
+            .is_some_and(|last| last <= SLAB_ELEMENT_COUNT));
 
-        let Some(slice) = slab.try_read(alloc.start, alloc.len) else {
+        let Some(slice) = slab.try_read(
+            alloc.start,
+            // won't overflow, already checked!
+            alloc.summary.len * alloc.summary.archetype.elements(),
+        ) else {
             // Implementation bug!
             log::debug!("{id} allocation found, but out of bounds within it's slab!");
             return Err(super::TryRepositoryError::NotFound);
         };
-        Ok(PointCollectionReadLock { points: slice })
+        Ok(PointCollectionReadLock {
+            points: bytemuck::cast_slice(slice),
+        })
     }
 }
-// A large collection of continguous points on the heap
-struct PointSlab {
-    /// a non-null pointer to array of slab_SIZE points.
-    points: *mut crate::StrokePoint,
-    /// Current past-the-end index for the allocator.
-    /// Indices before this are considered immutable, after are considered mutable.
-    bump_free_idx: parking_lot::Mutex<usize>,
-}
-const SLAB_SIZE: usize = 1024 * 1024;
-impl PointSlab {
-    /// Try to allocate and write a contiguous section of points, returning the start idx of where it was written.
-    /// If not enough space, the `self` is left unchanged and None is returned.
-    fn try_bump_write(&self, data: &[crate::StrokePoint]) -> Option<usize> {
-        if data.len() <= SLAB_SIZE {
-            let mut free_idx = self.bump_free_idx.lock();
-            let old_idx = *free_idx;
-            let new_idx = old_idx.checked_add(data.len())?;
-            if new_idx > SLAB_SIZE {
-                None
-            } else {
-                // Safety - No shared mutable or immutable access can occur here,
-                // since we own the mutex. Todo: could cause much pointless waiting for before the idx!
-                let slice: &'static mut [crate::StrokePoint] =
-                    unsafe { std::slice::from_raw_parts_mut(self.points.add(old_idx), data.len()) };
-                slice
-                    .iter_mut()
-                    .zip(data.iter())
-                    .for_each(|(into, from)| *into = *from);
-                *free_idx = new_idx;
-                Some(old_idx)
-            }
-        } else {
-            None
-        }
-    }
-    /// Try to read some continuous section of strokes. returns None if the region is outside the span
-    /// of the currently allocated memory.
-    ///
-    /// Performs no check that the given start and length correspond to a single allocation!
-    fn try_read(&self, start: usize, len: usize) -> Option<&'static [crate::StrokePoint]> {
-        // Check if this whole region is within the allocated, read-only section.
-        if start
-            .checked_add(len)
-            .is_some_and(|past_end| past_end <= *self.bump_free_idx.lock())
-        {
-            // Safety: no shared mutable access, as mutation never happens before the bump idx
-            Some(unsafe { std::slice::from_raw_parts(self.points.add(start), len) })
-        } else {
-            None
-        }
-    }
-    // Get the number of points currently in use.
-    fn usage(&self) -> usize {
-        *self.bump_free_idx.lock()
-    }
-    fn new() -> Self {
-        let size = std::mem::size_of::<crate::StrokePoint>() * SLAB_SIZE;
-        let align = std::mem::align_of::<crate::StrokePoint>();
-        debug_assert!(size != 0);
-        debug_assert!(align != 0 && align.is_power_of_two());
-
-        // Safety: Size and align constraints ensured by debug asserts and unwraps.
-        // (is there a better way to get a large zeroed heap array?)
-        let points = unsafe {
-            std::alloc::alloc_zeroed(std::alloc::Layout::from_size_align(size, align).unwrap())
-                .cast::<crate::StrokePoint>()
-        };
-        assert!(!points.is_null());
-        // We do not dealloc points at any point.
-        // The slabs will be re-used for the lifetime of the program.
-        Self {
-            points,
-            bump_free_idx: 0.into(),
-        }
-    }
-}
-// Safety - the pointer refers to heap mem, and can be transferred.
-unsafe impl Send for PointSlab {}
-
-// Safety - The mutex prevents similtaneous mutable and immutable access.
-unsafe impl Sync for PointSlab {}

@@ -18,7 +18,7 @@ pub struct ImmutableStroke {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ImmutableStrokeError {
-    #[error("The source stroke contains too many points to upload")]
+    #[error("source stroke contains too many points to upload")]
     TooLarge,
 }
 impl TryFrom<crate::Stroke> for ImmutableStroke {

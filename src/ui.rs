@@ -25,6 +25,7 @@ struct PerDocumentData {
     graph_focused_subtree: Option<crate::state::graph::NodeID>,
     /// Yanked node during a reparent operation
     yanked_node: Option<crate::state::graph::AnyID>,
+    name: String,
 }
 pub struct MainUI {
     // Could totally be static dispatch, but for simplicity:
@@ -44,11 +45,22 @@ impl MainUI {
         requests_send: requests::RequestSender,
         action_listener: crate::actions::ActionListener,
     ) -> Self {
+        let documents = crate::default_provider().document_iter();
+        let documents: Vec<_> = documents
+            .map(|id| PerDocumentData {
+                id,
+                graph_focused_subtree: None,
+                graph_selection: None,
+                yanked_node: None,
+                name: "Unknown".into(),
+            })
+            .collect();
+        let cur_document = documents.last().map(|doc| doc.id);
         Self {
             modals: vec![],
             inlays: vec![],
-            documents: vec![],
-            cur_document: None,
+            documents,
+            cur_document,
             requests_send,
             action_listener,
         }
@@ -94,12 +106,16 @@ impl MainUI {
                             ui.add(button)
                         };
                         if add_button(ui, "New", Some("Ctrl+N")).clicked() {
-                            let new_id = crate::default_provider().insert_new();
+                            let new_doc = crate::commands::queue::DocumentCommandQueue::new();
+                            let new_id = new_doc.id();
+                            // Can't fail
+                            let _ = crate::default_provider().insert(new_doc);
                             let interface = PerDocumentData {
                                 id: new_id,
                                 graph_focused_subtree: None,
                                 graph_selection: None,
                                 yanked_node: None,
+                                name: "Unknown".into(),
                             };
                             let _ = self.requests_send.send(requests::UiRequest::Document {
                                 target: new_id,
@@ -108,9 +124,82 @@ impl MainUI {
                             self.cur_document = Some(new_id);
                             self.documents.push(interface);
                         };
-                        let _ = add_button(ui, "Save", Some("Ctrl+S"));
+                        if add_button(ui, "Save", Some("Ctrl+S")).clicked() {
+                            // Dirty testing implementation!
+                            if let Some(current) = self.cur_document {
+                                std::thread::spawn(move || -> () {
+                                    if let Some(reader) = crate::default_provider()
+                                        .inspect(current, |doc| doc.peek_clone_state())
+                                    {
+                                        let repo = crate::repositories::points::global();
+
+                                        let try_block = || -> anyhow::Result<()> {
+                                            let mut path = dirs::document_dir().unwrap();
+                                            path.push("temp.fzp");
+                                            let file = std::fs::File::create(path)?;
+
+                                            let start = std::time::Instant::now();
+                                            crate::io::write_into(reader, repo, &file)?;
+                                            let duration = std::time::Instant::now() - start;
+
+                                            file.sync_all()?;
+                                            if let Some(size) =
+                                                file.metadata().ok().map(|meta| meta.len())
+                                            {
+                                                let size = size as f64;
+                                                let speed = size / duration.as_secs_f64();
+                                                log::info!(
+                                                    "Wrote {} in {}us ({}/s)",
+                                                    human_bytes::human_bytes(size),
+                                                    duration.as_micros(),
+                                                    human_bytes::human_bytes(speed)
+                                                );
+                                            } else {
+                                                log::info!("Wrote in {}us", duration.as_micros());
+                                            }
+                                            Ok(())
+                                        };
+
+                                        if let Err(e) = try_block() {
+                                            log::error!("Failed to write document: {e:?}");
+                                        }
+                                    }
+                                });
+                            }
+                        }
                         let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
-                        let _ = add_button(ui, "Open", Some("Ctrl+O"));
+                        if add_button(ui, "Open", Some("Ctrl+O")).clicked() {
+                            // Synchronous and bad just for testing.
+                            if let Some(files) = rfd::FileDialog::new().pick_files() {
+                                let point_repository = crate::repositories::points::global();
+                                let provider = crate::default_provider();
+
+                                // Keep track of the last successful loaded id
+                                let mut recent_success = None;
+                                for file in files.into_iter() {
+                                    match crate::io::read_path(file, point_repository) {
+                                        Ok(doc) => {
+                                            let id = doc.id();
+                                            if provider.insert(doc).is_ok() {
+                                                recent_success = Some(id);
+                                                self.documents.push(PerDocumentData {
+                                                    id,
+                                                    graph_focused_subtree: None,
+                                                    graph_selection: None,
+                                                    yanked_node: None,
+                                                    name: "Unknown".into(),
+                                                });
+                                            }
+                                        }
+                                        Err(e) => log::error!("Failed to load: {e:#}"),
+                                    }
+                                }
+                                // Select last one, if any succeeded.
+                                if let Some(new_doc) = recent_success {
+                                    self.cur_document = Some(new_doc);
+                                }
+                            }
+                        }
                         let _ = add_button(ui, "Open as new", None);
                         let _ = add_button(ui, "Export", None);
                     });
@@ -628,11 +717,11 @@ impl MainUI {
                 ui.horizontal(|ui| {
                     let mut deleted_ids =
                         smallvec::SmallVec::<[crate::state::DocumentID; 1]>::new();
-                    for document_id in self.documents.iter().map(|interface| interface.id) {
+                    for PerDocumentData { id, name, .. } in self.documents.iter() {
                         egui::containers::Frame::group(ui.style())
                             .outer_margin(egui::Margin::symmetric(0.0, 0.0))
                             .inner_margin(egui::Margin::symmetric(0.0, 0.0))
-                            .multiply_with_opacity(if self.cur_document == Some(document_id) {
+                            .multiply_with_opacity(if self.cur_document == Some(*id) {
                                 1.0
                             } else {
                                 0.0
@@ -643,22 +732,18 @@ impl MainUI {
                                 ..0.0.into()
                             })
                             .show(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.cur_document,
-                                    Some(document_id),
-                                    "UwU", //&document.name,
-                                );
+                                ui.selectable_value(&mut self.cur_document, Some(*id), name);
                                 if ui.small_button("✖").clicked() {
-                                    deleted_ids.push(document_id);
+                                    deleted_ids.push(*id);
                                     //Disselect if deleted.
-                                    if self.cur_document == Some(document_id) {
+                                    if self.cur_document == Some(*id) {
                                         self.cur_document = None;
                                     }
                                 }
                             })
                             .response
                             .on_hover_ui(|ui| {
-                                ui.label(format!("{}", document_id));
+                                ui.label(format!("{}", id));
                             });
                     }
                     self.documents

@@ -3,16 +3,10 @@ use crate::commands::queue::writer::CommandWrite;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CommandError<Err: std::error::Error> {
-    #[error("{}", .0)]
-    Inner(Err),
-    /// The command cannot be applied to the current state.
-    #[error("The command cannot be applied to the current state")]
+    #[error(transparent)]
+    Inner(#[from] Err),
+    #[error("command cannot be applied to the current state")]
     MismatchedState,
-}
-impl<Err: std::error::Error> From<Err> for CommandError<Err> {
-    fn from(value: Err) -> Self {
-        Self::Inner(value)
-    }
 }
 
 type Result<T, Err> = std::result::Result<T, CommandError<Err>>;

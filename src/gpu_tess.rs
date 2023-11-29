@@ -143,7 +143,11 @@ impl GpuStampTess {
         let point_repo = crate::repositories::points::global();
         let count = strokes
             .iter()
-            .map(|stroke| point_repo.len_of(stroke.point_collection))
+            .map(|stroke| {
+                point_repo
+                    .summary_of(stroke.point_collection)
+                    .map(|summary| summary.len)
+            })
             .try_fold(0, |fold, optional_length| {
                 optional_length.and_then(|length| u64::checked_add(length as u64, fold))
             });
@@ -221,12 +225,12 @@ impl GpuStampTess {
                 let density = stroke.brush.spacing_px;
                 let (num_expected_stamps, num_points) = {
                     // If not found, ignore by claiming 0 stamps.
-                    if let Ok(points) = point_repo.try_get(stroke.point_collection) {
-                        let dist = points
-                            .last()
-                            .map(|last| (last.dist / density).ceil() as u32)
+                    if let Some(summary) = point_repo.summary_of(stroke.point_collection) {
+                        let dist = summary
+                            .arc_length
+                            .map(|dist| (dist / density).ceil() as u32)
                             .unwrap_or(0);
-                        let num_points = points.len() as u32;
+                        let num_points = summary.len as u32;
 
                         (dist, num_points)
                     } else {

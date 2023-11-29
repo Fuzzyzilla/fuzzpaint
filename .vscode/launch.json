@@ -7,15 +7,15 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'fuzzpaint-vk'",
+            "name": "Debug executable 'fuzzpaint'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=fuzzpaint-vk",
-                    "--package=fuzzpaint-vk"
+                    "--bin=fuzzpaint",
+                    "--package=fuzzpaint"
                 ],
                 "filter": {
-                    "name": "fuzzpaint-vk",
+                    "name": "fuzzpaint",
                     "kind": "bin"
                 }
             },
@@ -25,16 +25,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'fuzzpaint-vk'",
+            "name": "Debug unit tests in executable 'fuzzpaint'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
-                    "--bin=fuzzpaint-vk",
-                    "--package=fuzzpaint-vk"
+                    "--bin=fuzzpaint",
+                    "--package=fuzzpaint"
                 ],
                 "filter": {
-                    "name": "fuzzpaint-vk",
+                    "name": "fuzzpaint",
                     "kind": "bin"
                 }
             },

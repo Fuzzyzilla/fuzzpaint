@@ -11,9 +11,9 @@ use crate::state;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CommandError {
-    #[error("The state this command was constructed for does not match the true state.")]
+    #[error("command constructed for a state that does not match the current state")]
     MismatchedState,
-    #[error("A resource ID referenced by the command is not known.")]
+    #[error("resource referenced by the command is not found")]
     UnknownResource,
 }
 pub trait CommandConsumer<C> {
