@@ -55,14 +55,14 @@ impl InMemoryDocumentProvider {
     }
     /// Iterate over all the open documents, by ID.
     pub fn document_iter(&self) -> impl Iterator<Item = crate::state::DocumentID> {
-        let ids: Vec<_> = self.documents.read().keys().cloned().collect();
+        let ids: Vec<_> = self.documents.read().keys().copied().collect();
         ids.into_iter()
     }
     /// Get a receiver for messages about change in state for all documents.
     pub fn change_notifier(&self) -> tokio::sync::broadcast::Receiver<ProviderMessage> {
         self.notifier.subscribe()
     }
-    /// Broadcast a ProviderMessage::Modified with the given ID to any change listeners.
+    /// Broadcast a `ProviderMessage::Modified` with the given ID to any change listeners.
     /// Ensures the ID is valid before sending.
     pub fn touch(&self, id: crate::state::DocumentID) {
         // If valid:
@@ -76,7 +76,7 @@ impl Default for InMemoryDocumentProvider {
     fn default() -> Self {
         let (send, _) = tokio::sync::broadcast::channel(64);
         Self {
-            documents: Default::default(),
+            documents: parking_lot::RwLock::default(),
             notifier: send,
         }
     }
@@ -93,6 +93,7 @@ pub enum ProviderMessage {
 }
 impl ProviderMessage {
     /// Gets the document this message refers to.
+    #[must_use]
     pub fn id(&self) -> crate::state::DocumentID {
         match self {
             Self::Closed(id) | Self::Modified(id) | Self::Opened(id) => *id,

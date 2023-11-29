@@ -36,7 +36,7 @@ impl From<&[crate::StrokePoint]> for CollectionSummary {
         CollectionSummary {
             archetype: crate::StrokePoint::archetype(),
             len: value.len(),
-            arc_length: value.last().map(|point| point.dist).unwrap_or(0.0).into(),
+            arc_length: value.last().map_or(0.0, |point| point.dist).into(),
         }
     }
 }
@@ -52,14 +52,14 @@ pub struct PointCollectionReadLock {
 }
 impl AsRef<[crate::StrokePoint]> for PointCollectionReadLock {
     // seal the detail that this is secretly 'static (shhhh...)
-    fn as_ref<'a>(&'a self) -> &'a [crate::StrokePoint] {
+    fn as_ref(&'_ self) -> &'_ [crate::StrokePoint] {
         self.points
     }
 }
 impl std::ops::Deref for PointCollectionReadLock {
     type Target = [crate::StrokePoint];
     // seal the detail that this is secretly 'static (shhhh...)
-    fn deref<'a>(&'a self) -> &'a Self::Target {
+    fn deref(&'_ self) -> &'_ Self::Target {
         self.points
     }
 }
@@ -100,23 +100,25 @@ impl PointRepository {
     fn new() -> Self {
         // Self doesn't impl Default as we don't want any ctors to be public.
         Self {
-            slabs: Default::default(),
-            allocs: Default::default(),
+            slabs: parking_lot::RwLock::default(),
+            allocs: parking_lot::RwLock::default(),
         }
     }
     /// Get the memory usage of resident data (uncompressed in RAM), in bytes, and the capacity.
+    #[must_use]
     pub fn resident_usage(&self) -> (usize, usize) {
         let read = self.slabs.read();
         let num_slabs = read.len();
         let capacity = num_slabs.saturating_mul(ElementSlab::size_bytes());
         let usage = read
             .iter()
-            .map(|slab| slab.hint_usage_bytes())
+            .map(Slab::hint_usage_bytes)
             .fold(0, usize::saturating_add);
         (usage, capacity)
     }
     /// Insert the collection into the repository, yielding a unique ID.
-    /// Fails if the length of the collection caintains > [SLAB_ELEMENT_COUNT] f32 elements
+    /// Fails if the length of the collection caintains > [`SLAB_ELEMENT_COUNT`] f32 elements
+    #[must_use = "the returned ID is needed to fetch the data in the future"]
     pub fn insert(&self, collection: &[crate::StrokePoint]) -> Option<PointCollectionID> {
         let elements = bytemuck::cast_slice(collection);
         if elements.len() <= SLAB_ELEMENT_COUNT {
@@ -167,14 +169,14 @@ impl PointRepository {
         }
     }
 
-    /// Get a [CollectionSummary] for the given collection, reporting certain key aspects of a stroke without
+    /// Get a [`CollectionSummary`] for the given collection, reporting certain key aspects of a stroke without
     /// it needing to be loaded into resident memory. None if the ID is not known
     /// to this repository.
     pub fn summary_of(&self, id: PointCollectionID) -> Option<CollectionSummary> {
         self.alloc_of(id).map(|alloc| alloc.summary)
     }
     fn alloc_of(&self, id: PointCollectionID) -> Option<PointCollectionAllocInfo> {
-        self.allocs.read().get(&id).cloned()
+        self.allocs.read().get(&id).copied()
     }
     pub fn try_get(
         &self,

@@ -24,7 +24,7 @@ egui = { version = "0.23.0", features = ["bytemuck"] }
 egui-winit = "0.23.0"
 either = "1.9.0"
 env_logger = "0.10.0"
-hashbrown = "0.14.0"
+hashbrown = { version = "0.14.0", features = ["serde"] }
 human_bytes = "0.4.3"
 id_tree = "1.8.0"
 image = "0.24.6"

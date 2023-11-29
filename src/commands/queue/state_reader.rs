@@ -10,7 +10,7 @@ pub trait CommandQueueStateReader {
     fn stroke_layer(&self, id: state::StrokeLayerID) -> Option<&state::StrokeLayer> {
         self.stroke_layers().iter().find(|layer| layer.id == id)
     }*/
-    fn changes<'s>(&'s self) -> impl Iterator<Item = DoUndo<'s, Command>> + 's;
+    fn changes(&'_ self) -> impl Iterator<Item = DoUndo<'_, Command>> + '_;
     fn has_changes(&self) -> bool;
 }
 
@@ -68,6 +68,7 @@ impl CommandQueueCloneLock {
     /// Can be used as a hint to cancel a long operation, if it's found to be invalidated by new changes.
     ///
     /// Immutably locks the queue during the query.
+    #[must_use]
     pub fn stale(&self) -> Stale {
         let Some(inner) = self.inner.upgrade() else {
             return Stale::Dropped;

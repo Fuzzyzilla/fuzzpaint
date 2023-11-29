@@ -16,7 +16,7 @@ impl<W> SizedBinaryChunkWriter<W>
 where
     W: Write,
 {
-    /// Convenience fn to place a whole buffer as a SizedBinaryChunk
+    /// Convenience fn to place a whole buffer as a `SizedBinaryChunk`
     pub fn write_buf(mut writer: W, id: ChunkID, data: &[u8]) -> IOResult<()> {
         let len: u32 = data
             .len()
@@ -37,7 +37,7 @@ where
 
         writer.write_all_vectored(&mut slices)
     }
-    /// Convenience fn to place a whole buffer as a SizedBinaryChunk subtype
+    /// Convenience fn to place a whole buffer as a `SizedBinaryChunk` subtype
     pub fn write_buf_subtype(
         mut writer: W,
         id: ChunkID,
@@ -81,7 +81,7 @@ where
 
         Ok(Self {
             id,
-            writer: MyTake::new(writer, len as u64),
+            writer: MyTake::new(writer, u64::from(len)),
         })
     }
     /// Make a new chunk with a subtype header included. subtype is automatically added and not to be included in `len`
@@ -230,12 +230,12 @@ impl<W: Write + Seek> BinaryChunkWriter<W> {
     pub fn id(&self) -> ChunkID {
         self.id
     }
-    /// Flush the len field of this chunk. Prefer this over Self::drop, as it will report errors.
+    /// Flush the len field of this chunk. Prefer this over `Self::drop`, as it will report errors.
     /// In the event of an error, the status of the inner writer is unknown.
     pub fn update_len(&mut self) -> IOResult<()> {
         // Seek to -4, in local address. that's where the len field is!
         // -u32::MAX - 4 will always fit in i64
-        let length_offs = self.cursor as i64;
+        let length_offs = i64::from(self.cursor);
         self.writer.seek(SeekFrom::Current(-length_offs - 4))?;
         // Write len
         self.writer.write_all(&self.len.to_le_bytes())?;
@@ -297,8 +297,8 @@ impl<W: Write + Seek> Seek for BinaryChunkWriter<W> {
         let add_with_overflow = || IOError::other(anyhow::anyhow!("seek with overflow"));
         // Simpler impl than MyTake's, due to the fact that the cursor is u32.
         let new_cursor: i64 = match pos {
-            SeekFrom::End(delta) => (self.len as i64).checked_add(delta),
-            SeekFrom::Current(delta) => (self.cursor as i64).checked_add(delta),
+            SeekFrom::End(delta) => i64::from(self.len).checked_add(delta),
+            SeekFrom::Current(delta) => i64::from(self.cursor).checked_add(delta),
             SeekFrom::Start(delta) => {
                 // Overflow with None if too large to fit
                 delta.checked_as()
@@ -313,13 +313,13 @@ impl<W: Write + Seek> Seek for BinaryChunkWriter<W> {
             return Err(add_with_overflow())?;
         };
 
-        let delta = new_cursor as i64 - self.cursor as i64;
+        let delta = i64::from(new_cursor) - i64::from(self.cursor);
         self.writer.seek(SeekFrom::Current(delta))?;
 
         self.cursor = new_cursor;
-        Ok(self.cursor as u64)
+        Ok(u64::from(self.cursor))
     }
     fn stream_position(&mut self) -> IOResult<u64> {
-        Ok(self.cursor as u64)
+        Ok(u64::from(self.cursor))
     }
 }

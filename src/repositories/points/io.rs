@@ -40,7 +40,7 @@ impl super::PointRepository {
 
         const PTLS_WRITE_VERSION: Version = Version(0, 0, 0);
 
-        let mut file_ids = crate::io::id::FileLocalInterner::new();
+        let mut file_ids = crate::io::id::FileLocalInterner::default();
         // Collect all uniqe entries and allocs.
         let allocation_entries: Result<Vec<_>, WriteError> = ids
             .filter_map(|id| match file_ids.insert(id) {
@@ -250,7 +250,7 @@ impl super::PointRepository {
         enum SlabSrc<'a, T: bytemuck::Pod, const N: usize> {
             Shared {
                 idx: usize,
-                lock: slab::SlabGuard<'a, T, N>,
+                lock: slab::Guard<'a, T, N>,
             },
             Owned(slab::Slab<T, N>),
         }

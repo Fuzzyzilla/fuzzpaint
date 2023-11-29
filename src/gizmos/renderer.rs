@@ -181,7 +181,7 @@ impl GizmoRenderer {
             ]);
         };
         // construct circle
-        let circle = (0..Self::CIRCLE_RES).into_iter().flat_map(|idx| {
+        let circle = (0..Self::CIRCLE_RES).flat_map(|idx| {
             let proportion = std::f32::consts::TAU * (idx as f32) / (Self::CIRCLE_RES as f32);
             let proportion_next =
                 std::f32::consts::TAU * ((idx + 1) as f32) / (Self::CIRCLE_RES as f32);

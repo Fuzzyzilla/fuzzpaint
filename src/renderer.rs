@@ -46,7 +46,7 @@ impl Renderer {
     fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
         Ok(Self {
             context: context.clone(),
-            blend_engine: crate::blend::BlendEngine::new(context.device().clone())?,
+            blend_engine: crate::blend::BlendEngine::new(context.device())?,
             stroke_renderer: stroke_renderer::StrokeLayerRenderer::new(context)?,
             data: Default::default(),
         })
