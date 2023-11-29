@@ -1,57 +1,84 @@
 use az::{CheckedAs, SaturatingAs};
 use std::io::{BufRead, Error as IOError, Read, Result as IOResult, Seek, SeekFrom, Write};
 
-pub trait LayeredSeek: Seek {
-    /// Faster seek implementation that doesn't support absolute positioning and doesn't
-    /// return the current position. Similar to `io::Seek`, behavior is implementation defined when attempting
+pub trait SoftSeek: Seek {
+    /// Faster seek that doesn't support absolute positioning and doesn't return the current position.
+    /// Similar to `io::Seek`, behavior is implementation defined when attempting
     /// to seek past the start or past the end.
     ///
-    /// If this type is a wrapper around an inner stream, the inner stream is not necessarily seeked.
-    /// Use `io::Seek` for that purpose.
-    fn layered_seek(&mut self, by: i64) -> IOResult<()>;
+    /// If the type provides an inner cursor, this should act on that directly without necessarily needing a syscall.
+    ///
+    /// `self.seek(Current(by)).map(|_| ())` is a valid implementation.
+    fn soft_seek(&mut self, by: i64) -> IOResult<()>;
+    /// Faster stream_position for streams with internal cursors that does not necessarily query the underlying stream.
+    /// The reported position is not necessarily the same as the underlying stream would report.
+    ///
+    /// `self.stream_position()` is a valid implementation.
+    fn soft_position(&mut self) -> IOResult<u64>;
 }
-impl<R: Seek + ?Sized> LayeredSeek for std::io::BufReader<R> {
-    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+impl<R: Seek + ?Sized> SoftSeek for std::io::BufReader<R> {
+    fn soft_seek(&mut self, by: i64) -> IOResult<()> {
         self.seek_relative(by)
+    }
+    fn soft_position(&mut self) -> IOResult<u64> {
+        self.stream_position()
     }
 }
 // It would be great to blanket impl over R: Seek but we can't because of the bufread impl!
-impl LayeredSeek for &std::fs::File {
-    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+impl SoftSeek for &std::fs::File {
+    fn soft_seek(&mut self, by: i64) -> IOResult<()> {
         self.seek(SeekFrom::Current(by)).map(|_| ())
     }
+    fn soft_position(&mut self) -> IOResult<u64> {
+        self.stream_position()
+    }
 }
-impl LayeredSeek for std::fs::File {
-    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
-        (&*self).layered_seek(by)
+impl SoftSeek for std::fs::File {
+    fn soft_seek(&mut self, by: i64) -> IOResult<()> {
+        (&*self).soft_seek(by)
+    }
+    fn soft_position(&mut self) -> IOResult<u64> {
+        (&*self).soft_position()
     }
 }
 // Blankets:
-impl<T: ?Sized> LayeredSeek for std::sync::Arc<T>
+impl<T: ?Sized> SoftSeek for std::sync::Arc<T>
 where
-    for<'a> &'a T: LayeredSeek,
+    for<'a> &'a T: SoftSeek,
     std::sync::Arc<T>: Seek,
 {
-    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
-        self.as_ref().layered_seek(by)
+    fn soft_seek(&mut self, by: i64) -> IOResult<()> {
+        self.as_ref().soft_seek(by)
+    }
+    fn soft_position(&mut self) -> IOResult<u64> {
+        self.as_ref().soft_position()
     }
 }
-impl<T: LayeredSeek + ?Sized> LayeredSeek for &mut T {
-    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
-        (*self).layered_seek(by)
+impl<T: SoftSeek + ?Sized> SoftSeek for &mut T {
+    fn soft_seek(&mut self, by: i64) -> IOResult<()> {
+        (*self).soft_seek(by)
+    }
+    fn soft_position(&mut self) -> IOResult<u64> {
+        (*self).soft_position()
     }
 }
-impl<T: LayeredSeek + ?Sized> LayeredSeek for Box<T> {
-    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
-        self.as_mut().layered_seek(by)
+impl<T: SoftSeek + ?Sized> SoftSeek for Box<T> {
+    fn soft_seek(&mut self, by: i64) -> IOResult<()> {
+        self.as_mut().soft_seek(by)
+    }
+    fn soft_position(&mut self) -> IOResult<u64> {
+        self.as_mut().soft_position()
     }
 }
-impl<T> LayeredSeek for std::io::Cursor<T>
+impl<T> SoftSeek for std::io::Cursor<T>
 where
     std::io::Cursor<T>: Seek,
 {
-    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+    fn soft_seek(&mut self, by: i64) -> IOResult<()> {
         self.seek(SeekFrom::Current(by)).map(|_| ())
+    }
+    fn soft_position(&mut self) -> IOResult<u64> {
+        self.stream_position()
     }
 }
 
@@ -169,11 +196,11 @@ impl<S: Seek> MyTake<S> {
         Ok(stream)
     }
 }
-impl<R> LayeredSeek for MyTake<R>
+impl<R> SoftSeek for MyTake<R>
 where
-    R: LayeredSeek,
+    R: SoftSeek,
 {
-    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
+    fn soft_seek(&mut self, by: i64) -> IOResult<()> {
         if by < 0 {
             let back_by = by.unsigned_abs();
             // set cursor back or error if past start
@@ -182,7 +209,7 @@ where
                 .checked_sub(back_by)
                 .ok_or_else(|| IOError::other(anyhow::anyhow!("seek past-the-start")))?;
 
-            self.stream.layered_seek(by)
+            self.stream.soft_seek(by)
         } else {
             // Forward
             let forward_by = by as u64;
@@ -196,8 +223,11 @@ where
             let delta = new_cursor - self.cursor;
             self.cursor = new_cursor;
             // As ok - will be <= forward_by which was i64 to begin with
-            self.stream.layered_seek(-(delta as i64))
+            self.stream.soft_seek(delta as i64)
         }
+    }
+    fn soft_position(&mut self) -> IOResult<u64> {
+        Ok(self.cursor)
     }
 }
 impl<R: Read> Read for MyTake<R> {

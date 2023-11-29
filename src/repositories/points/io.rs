@@ -170,11 +170,11 @@ impl super::PointRepository {
         mut dict: crate::io::riff::decode::DictReader<R>,
     ) -> std::io::Result<crate::io::id::ProcessLocalInterner<PointCollectionIDMarker>>
     where
-        R: std::io::Read + crate::io::common::LayeredSeek + std::io::Seek,
+        R: std::io::Read + crate::io::common::SoftSeek,
     {
-        use crate::io::{common::LayeredSeek, id::ProcessLocalInterner, Version};
+        use crate::io::{common::SoftSeek, id::ProcessLocalInterner, Version};
         use az::CheckedAs;
-        use std::io::{Error as IOError, Read, Seek};
+        use std::io::{Error as IOError, Read};
         if dict.version() != Version::CURRENT {
             // TODO lol
             return Err(IOError::other(anyhow::anyhow!("bad ver")));
@@ -234,7 +234,6 @@ impl super::PointRepository {
         metas
             .make_contiguous()
             .sort_unstable_by_key(|meta| meta.1.offset);
-        println!("{metas:#?}");
 
         // Strategy: because we cannot trust the length of `unstructured` nor the reported size of the metas
         // we cannot simply read all the data blindly. Instead:
@@ -378,13 +377,13 @@ impl super::PointRepository {
                 // Seek, if necessary
                 // We only ever need to move forwards
                 // In theory we shouldn't even need to seek, but we cannot assume that.
-                let cur = unstructured.stream_position()?;
+                let cur = unstructured.soft_position()?;
                 let forward_dist = (range_start_bytes as u64)
                     .checked_sub(cur)
                     // debug assert lol
                     .expect("seek back");
                 // we don't care if underlying reader is seeked
-                unstructured.layered_seek(forward_dist as i64)?;
+                unstructured.soft_seek(forward_dist as i64)?;
 
                 // Read!
                 let (_, unfilled) = slab.parts_mut();

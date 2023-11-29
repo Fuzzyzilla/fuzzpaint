@@ -1,8 +1,8 @@
 use super::ChunkID;
 use crate::io::common::MyTake;
-use az::SaturatingAs;
+use az::{CheckedAs, SaturatingAs};
 
-use crate::io::common::LayeredSeek;
+use crate::io::common::SoftSeek;
 use std::io::{BufRead, Error as IOError, Read, Result as IOResult, Seek, SeekFrom};
 
 // read an ID, size
@@ -41,12 +41,15 @@ where
         self.reader.read_to_string(buf)
     }
 }
-impl<R> LayeredSeek for BinaryChunkReader<R>
+impl<R> SoftSeek for BinaryChunkReader<R>
 where
-    MyTake<R>: LayeredSeek,
+    MyTake<R>: SoftSeek,
 {
-    fn layered_seek(&mut self, by: i64) -> IOResult<()> {
-        self.reader.layered_seek(by)
+    fn soft_seek(&mut self, by: i64) -> IOResult<()> {
+        self.reader.soft_seek(by)
+    }
+    fn soft_position(&mut self) -> IOResult<u64> {
+        self.reader.soft_position()
     }
 }
 impl<R> BufRead for BinaryChunkReader<R>
@@ -184,7 +187,7 @@ pub struct SubchunkReader<R> {
 }
 impl<R> SubchunkReader<R>
 where
-    MyTake<R>: Seek + Read,
+    MyTake<R>: SoftSeek + Read,
 {
     /// Visit each subchunk with a closure that returns an IO Result.
     /// Bails if the closure errors or an internal IO error occurs.
@@ -196,18 +199,24 @@ where
         F: FnMut(BinaryChunkReader<&mut MyTake<R>>) -> IOResult<()>,
     {
         while self.reader.remaining() > 0 {
-            let cur_position = self.reader.cursor();
+            let start_pos = self.reader.soft_position()?;
             let read = BinaryChunkReader::new(&mut self.reader)?;
             // We can't guaruntee the user will read all the data.
             // Seek to the end of the chunk afterwards.
-            let cursor_after = cur_position
+            let pos_after = start_pos
                 .checked_add(read.self_len_unsanitized() as u64)
                 .ok_or_else(|| {
                     IOError::other(anyhow::anyhow!("chunk too long, overflows cursor"))
                 })?;
             f(read)?;
-            // Seek to end.
-            self.reader.seek(SeekFrom::Start(cursor_after))?;
+            // Seek to end. May be a nop!
+            let forward_by = pos_after
+                .checked_sub(self.reader.soft_position()?)
+                .and_then(CheckedAs::checked_as)
+                .ok_or_else(|| {
+                    IOError::other(anyhow::anyhow!("subchunk reader went past-the-end"))
+                })?;
+            self.reader.soft_seek(forward_by)?;
         }
         Ok(())
     }
@@ -296,7 +305,7 @@ impl<R> DictReader<R> {
 }
 impl<R> DictReader<R>
 where
-    MyTake<R>: Read + Seek,
+    MyTake<R>: Read + SoftSeek,
 {
     /// Consume the binary of each metadata. On successful reading of every meta,
     /// a BinaryChunkReader is returned to refer to the unstructured spillover area.
@@ -310,17 +319,22 @@ where
         F: FnMut(MyTake<&mut MyTake<R>>) -> IOResult<()>,
     {
         for _ in 0..self.meta_count {
-            let cursor_after = self
-                .reader
-                .cursor()
+            let start_pos = self.reader.soft_position()?;
+            let pos_after = start_pos
                 .checked_add(self.meta_stride as u64)
                 .ok_or_else(|| {
                     IOError::other(anyhow::anyhow!("metadata too long, overflows cursor"))
                 })?;
             let subtake = MyTake::new(&mut self.reader, self.meta_stride as u64);
             f(subtake)?;
-            // Consume untaken bytes.
-            self.reader.seek(SeekFrom::Start(cursor_after))?;
+            // Seek to end. May be a nop!
+            let forward_by = pos_after
+                .checked_sub(self.reader.soft_position()?)
+                .and_then(CheckedAs::checked_as)
+                .ok_or_else(|| {
+                    IOError::other(anyhow::anyhow!("metadata reader went past-the-end"))
+                })?;
+            self.reader.soft_seek(forward_by)?;
         }
 
         Ok(BinaryChunkReader {

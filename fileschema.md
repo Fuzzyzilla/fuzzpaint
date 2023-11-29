@@ -34,10 +34,10 @@ Chunks may refer to arbitrary data structures within its own or its children's b
    May come in any order:
    - [`docv`](#docv)
    - `LIST` `"objs"` Document object tables
-     - [`DICT`](#dict) [`"strk"`](#strk)
-     - [`DICT`](#dict) [`"ptls"`](#ptls)
-     - [`DICT`](#dict) [`"brsh"`](#brsh)
-     - [`GRPH`](#grph) [`"blnd"`](#blnd)
+      - [`DICT`](#dict) [`"strk"`](#strk)
+      - [`DICT`](#dict) [`"ptls"`](#ptls)
+      - [`DICT`](#dict) [`"brsh"`](#brsh)
+      - [`GRPH`](#grph) [`"blnd"`](#blnd)
    - [`GRPH`](#grph) [`"hist"`](#hist)
 
 ### `thmb`
@@ -71,7 +71,14 @@ Much like standard `LIST`, it lists a subtype before a series of subchunks:
 | `VersionedChunkHeader` | Version and handling information, specific to each node type.               |
 | ...                    | Todo                                                                        |
 ### `conn`
-Describes the connection between many nodes within the parent `GRPH` chunk, each Node referred to by the unique combination of `{node_ty: ChunkID, idx: u32}`. Additionally, the special node `{"root", 0}` may be used as an implicit empty root node even if no such node type was declared.
+Describes the connection between many nodes within the parent `GRPH` chunk, each Node referred to by the unique combination of `{node_ty: ChunkID, idx: u32}` (`NodeID`). Additionally, the special node `{"root", 0}` may be used as an implicit empty root node even if no such node type was declared.
+
+Much todo here lol. This is pretty crude.
+Need to balance between shallow+wide (blend graph) and deep+narrow (history) sizes.
+Also, may need the connections to carry data too...
+| Type                           | Meaning                |
+|--------------------------------|------------------------|
+| `[{from: NodeID, to: NodeID}]` | List of connections    |
 ### `docv`
 Information about document viewport layouts, including positions, sizes, resolutions, background colors, ect. of viewports within the document.
 ### `strk`

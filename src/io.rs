@@ -167,6 +167,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
     let size = file.metadata().map(|meta| meta.len()).ok();
     let start_time = std::time::Instant::now();
     let r = std::io::BufReader::new(file);
+
     // Dont need to check magic before extracting subchunks. If extracting fails, it
     // must've been bad anyway!
     let root = BinaryChunkReader::new(r)?.into_subchunks()?;

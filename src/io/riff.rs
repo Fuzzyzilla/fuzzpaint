@@ -10,20 +10,26 @@ pub mod encode;
 #[repr(transparent)]
 pub struct ChunkID(pub [u8; 4]);
 impl ChunkID {
-    // RIFF standard chunks
     pub const RIFF: Self = ChunkID(*b"RIFF");
-    pub const INFO: Self = ChunkID(*b"INFO");
+    // LISTs
     pub const LIST: Self = ChunkID(*b"LIST");
-    // fuzzpaint custom chunks
-    pub const DICT: Self = ChunkID(*b"DICT");
-    pub const FZP_: Self = ChunkID(*b"fzp ");
+    pub const INFO: Self = ChunkID(*b"INFO");
     pub const OBJS: Self = ChunkID(*b"objs");
+    // fuzzpaint custom chunks
+    pub const FZP_: Self = ChunkID(*b"fzp ");
     pub const THMB: Self = ChunkID(*b"thmb");
     pub const DOCV: Self = ChunkID(*b"docv");
-    pub const GRPH: Self = ChunkID(*b"grph");
-    pub const PTLS: Self = ChunkID(*b"ptls");
-    pub const HIST: Self = ChunkID(*b"hist");
+    // DICT items
+    pub const DICT: Self = ChunkID(*b"DICT");
     pub const BRSH: Self = ChunkID(*b"brsh");
+    pub const PTLS: Self = ChunkID(*b"ptls");
+    pub const STRK: Self = ChunkID(*b"strk");
+    // GRPH items
+    pub const GRPH: Self = ChunkID(*b"GRPH");
+    pub const NODE: Self = ChunkID(*b"node");
+    pub const CONN: Self = ChunkID(*b"conn");
+    pub const BLND: Self = ChunkID(*b"blnd");
+    pub const HIST: Self = ChunkID(*b"hist");
     pub fn id_str(&self) -> Option<&str> {
         std::str::from_utf8(&self.0).ok()
     }
