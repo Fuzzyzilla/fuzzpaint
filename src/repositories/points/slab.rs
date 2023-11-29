@@ -43,16 +43,9 @@ impl<'a, T: bytemuck::Pod, const N: usize> SlabGuard<'a, T, N> {
         // Invariant should be upheld by everone else.
         assert!(position <= N);
 
-        let mutable_start = if mutable_size != 0 {
-            // Safety - must remain inside the alloc'd object
-            // We checked with guard!
-            unsafe { self.array.add(position) }
-        } else {
-            // Can't use Add for this, as we'd go farther than one-byte past-the-end!
-            // Write access for zero bytes
-            // slice::from_raw_parts_mut explicitly says this is OK!
-            std::ptr::NonNull::dangling().as_ptr()
-        };
+        // Safety - must remain inside or one past-the-end of the alloc'd object
+        // We checked with assert guard!
+        let mutable_start = unsafe { self.array.add(position) };
 
         unsafe {
             (
@@ -148,16 +141,9 @@ impl<T: bytemuck::Pod, const N: usize> Slab<T, N> {
         // Invariant should be upheld by everone else.
         assert!(position <= N);
 
-        let mutable_start = if mutable_size != 0 {
-            // Safety - must remain inside the alloc'd object
-            // We checked with guard!
-            unsafe { self.array.add(position) }
-        } else {
-            // Can't use Add for this, as we'd go farther than one-byte past-the-end!
-            // Write access for zero bytes
-            // slice::from_raw_parts_mut explicitly says this is OK!
-            std::ptr::NonNull::dangling().as_ptr()
-        };
+        // Safety - must remain inside or one past-the-end the alloc'd object
+        // We checked with guard!
+        let mutable_start = unsafe { self.array.add(position) };
 
         unsafe {
             (
