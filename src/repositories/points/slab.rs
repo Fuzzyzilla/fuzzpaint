@@ -226,9 +226,7 @@ impl<T: bytemuck::Pod, const N: usize> Slab<T, N> {
     /// Get the number of bytes currently in use.
     /// This is a hint - it may become immediately out-of-date and is not suitable for use in safety preconditions!
     pub fn hint_usage_bytes(&self) -> usize {
-        self.bump_position
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .saturating_mul(std::mem::size_of::<T>())
+        self.hint_usage().saturating_mul(std::mem::size_of::<T>())
     }
     /// Get the number of indices available for writing.
     /// This is a hint - it may become immediately out-of-date and is not suitable for use in safety preconditions!

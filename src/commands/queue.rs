@@ -198,10 +198,12 @@ impl DocumentCommandQueue {
             start != end
         };
         // Report change (if any) only after the write lock is dropped.
-        let _ = self
-            .on_change_channel
-            .as_ref()
-            .map(|c| c.send(provider::ProviderMessage::Modified(self.id())));
+        if changed {
+            let _ = self
+                .on_change_channel
+                .as_ref()
+                .map(|c| c.send(provider::ProviderMessage::Modified(self.id())));
+        }
     }
     /// Create a listener that starts at the beginning of history.
     pub fn listen_from_start(&self) -> DocumentCommandListener {
@@ -248,10 +250,7 @@ impl DocumentCommandListener {
     pub fn forward_lock_state(
         &mut self,
     ) -> Result<state_reader::CommandQueueReadLock, ListenerError> {
-        let state = self.peek_lock_state()?;
-        // update foward cursor
-        todo!();
-        Ok(state)
+        todo!()
     }
     /// Locks or clones the shared state, without forwarding this listener's point in time.
     /// See [state_reader::CommandQueueCloneLock]

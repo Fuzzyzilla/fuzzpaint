@@ -1,35 +1,7 @@
 use crate::brush;
 use rayon::prelude::*;
 pub struct RayonTessellator;
-pub struct RayonStreamTessellator<'data> {
-    cur_stroke: usize,
-    cur_point: usize,
-    cur_progress: f32,
-    strokes: &'data [crate::Stroke],
-}
-impl<'data> RayonStreamTessellator<'data> {
-    fn new(strokes: &'data [crate::Stroke]) -> Self {
-        Self {
-            cur_stroke: 0,
-            cur_point: 0,
-            cur_progress: 0.0,
-            strokes,
-        }
-    }
-}
-impl<'data> StreamStrokeTessellator<'data> for RayonStreamTessellator<'data> {
-    fn tessellate(
-        &mut self,
-        vertices: &mut [TessellatedStrokeVertex],
-        infos: &mut [super::TessellatedStrokeInfo],
-    ) -> super::StreamStatus {
-        todo!()
-    }
-}
-
-use super::{
-    StreamStrokeTessellator, TessellatedStrokeInfo, TessellatedStrokeVertex, TessellationError,
-};
+use super::{TessellatedStrokeVertex, TessellationError};
 use crate::{state::StrokeBrushSettings, StrokePoint};
 
 impl RayonTessellator {
@@ -72,10 +44,6 @@ impl RayonTessellator {
     }
 }
 impl super::StrokeTessellator for RayonTessellator {
-    type Stream<'a> = RayonStreamTessellator<'a>;
-    fn stream<'a>(&self, strokes: &'a [crate::Stroke]) -> Self::Stream<'a> {
-        RayonStreamTessellator::new(strokes)
-    }
     fn tessellate(
         &self,
         strokes: &[crate::Stroke],

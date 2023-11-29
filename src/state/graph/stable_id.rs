@@ -67,14 +67,6 @@ impl TryFrom<AnyID> for NodeID {
         }
     }
 }
-impl AnyID {
-    fn into_raw(self) -> FuzzNodeID {
-        match self {
-            AnyID::Leaf(LeafID(id)) => id,
-            AnyID::Node(NodeID(id)) => id,
-        }
-    }
-}
 pub(super) struct StableIDMap {
     fuzz_to_id: hashbrown::HashMap<FuzzNodeID, id_tree::NodeId>,
     id_to_fuzz: hashbrown::HashMap<id_tree::NodeId, FuzzNodeID>,
@@ -103,6 +95,7 @@ impl StableIDMap {
     pub fn tree_id_from_node<'s>(&'s self, node: &'_ NodeID) -> Option<&'s id_tree::NodeId> {
         self.fuzz_to_id.get(node.as_ref())
     }
+    #[allow(dead_code)]
     pub fn tree_id_from_leaf<'s>(&'s self, leaf: &'_ LeafID) -> Option<&'s id_tree::NodeId> {
         self.fuzz_to_id.get(leaf.as_ref())
     }
@@ -127,6 +120,7 @@ impl StableIDMap {
         self.fuzz_to_id.insert(fuzz.clone(), tree.clone());
         self.id_to_fuzz.insert(tree, fuzz);
     }
+    #[allow(dead_code)]
     pub fn erase_tree_id(&mut self, tree: &id_tree::NodeId) {
         if let Some(id) = self.id_to_fuzz.remove(tree) {
             let _ = self.fuzz_to_id.remove(&id);

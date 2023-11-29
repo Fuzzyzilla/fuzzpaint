@@ -203,8 +203,8 @@ impl super::PenTool for GizmoManipulator {
         &mut self,
         view_info: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
-        actions: &crate::actions::ActionFrame,
-        tool_output: &mut super::ToolStateOutput,
+        _actions: &crate::actions::ActionFrame,
+        _tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
         let collection = self.shared_collection.get_or_insert_with(|| {

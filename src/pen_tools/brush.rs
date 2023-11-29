@@ -1,6 +1,5 @@
 pub struct Brush {
     in_progress_stroke: Option<crate::Stroke>,
-    last_document: Option<crate::state::DocumentID>,
 }
 
 impl super::MakePenTool for Brush {
@@ -9,7 +8,6 @@ impl super::MakePenTool for Brush {
     ) -> anyhow::Result<Box<dyn super::PenTool>> {
         Ok(Box::new(Brush {
             in_progress_stroke: None,
-            last_document: None,
         }))
     }
 }
@@ -24,7 +22,7 @@ impl super::PenTool for Brush {
         view_info: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
-        tool_output: &mut super::ToolStateOutput,
+        _tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
         // destructure the selections. Otherwise, bail.

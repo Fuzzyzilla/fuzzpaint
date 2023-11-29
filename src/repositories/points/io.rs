@@ -167,7 +167,7 @@ impl super::PointRepository {
     /// IDs.
     pub fn read_dict<R>(
         &self,
-        mut dict: crate::io::riff::decode::DictReader<R>,
+        dict: crate::io::riff::decode::DictReader<R>,
     ) -> std::io::Result<crate::io::id::ProcessLocalInterner<PointCollectionIDMarker>>
     where
         R: std::io::Read + crate::io::common::SoftSeek,
@@ -247,7 +247,6 @@ impl super::PointRepository {
         // + concurrent loading will over-commit on new blocks.
 
         // We can trust metas.len, as we were successfully able to read that many.
-        let mut infos = Vec::<PointCollectionAllocInfo>::with_capacity(metas.len());
         enum SlabSrc<'a, T: bytemuck::Pod, const N: usize> {
             Shared {
                 idx: usize,
@@ -283,7 +282,9 @@ impl super::PointRepository {
         }
         // Blocks that were newly allocated for reading. May be freed if an error occurs.
         let mut new_slabs: smallvec::SmallVec<[ElementSlab; 2]> = Default::default();
-        let mut allocs = Vec::<(PointCollectionID, LazyPointCollectionAllocInfo)>::new();
+        // We can trust the length of metas now, since we were successfully able to read that many.
+        let mut allocs =
+            Vec::<(PointCollectionID, LazyPointCollectionAllocInfo)>::with_capacity(metas.len());
 
         // This is an absolute disaster, readability and perf wise.
         // Any attempt to simplify it results in inscrutable lifetime errors D:
@@ -445,7 +446,6 @@ impl super::PointRepository {
                     }
                 };
 
-                let mut info_lock = self.allocs.write();
                 // Create alloc infos
                 std::iter::once(&first_meta)
                     .chain(also_fit.into_iter())

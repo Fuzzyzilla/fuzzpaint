@@ -292,39 +292,6 @@ impl BlendGraph {
             }
         }))
     }
-    /// Iterate the children of this raw ID. A helper method for all various iters!
-    fn iter_mut_children_of_raw(
-        &'_ mut self,
-        node_id: &id_tree::NodeId,
-    ) -> Option<impl Iterator<Item = (AnyID, &'_ mut NodeData)> + '_> {
-        // uh oh, impossible with this lib!
-        /*
-        Some(self.tree.children_ids(node_id).ok()?.map(|node_id| {
-            let node = self.tree.get_mut(node_id).unwrap().data_mut();
-            let id = match node.ty {
-                NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(node_id.clone())),
-                NodeDataTy::Node(_) => AnyID::Node(NodeID(node_id.clone())),
-                // Invalid tree state.
-                _ => panic!("Root encountered during iteration!"),
-            };
-            (id, node)
-        }))*/
-
-        /* //Also doesn't work??
-        let ids: Vec<_> = self.tree.children_ids(node_id).ok()?.cloned().collect();
-
-        Some(ids.into_iter().map(|node_id| -> (AnyID, &'_ mut NodeData) {
-            let node = self.tree.get_mut(&node_id).unwrap().data_mut();
-            let id = match node.ty {
-                NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(node_id.clone())),
-                NodeDataTy::Node(_) => AnyID::Node(NodeID(node_id.clone())),
-                // Invalid tree state.
-                _ => panic!("Root encountered during iteration!"),
-            };
-            (id, node)
-        }))*/
-        Some(std::iter::empty())
-    }
     /// Convert a location to a parent and child idx
     /// Ok result implies the node is both present and not deleted.
     fn find_location<'a>(
@@ -624,8 +591,8 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
             DoUndo::Do(GraphCommand::NodeCreated {
                 target,
                 ty,
-                child_idx,
-                destination,
+                child_idx: _, // FIXME!
+                destination: _,
             }) => {
                 // This case only reachable with undo then redo.
                 // Clear the deleted flag!
@@ -644,8 +611,8 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
             DoUndo::Undo(GraphCommand::NodeCreated {
                 target,
                 ty,
-                child_idx,
-                destination,
+                child_idx: _, // FIXME!
+                destination: _,
             }) => {
                 let Some(node) = self.get_mut(*target) else {
                     return Err(CommandError::UnknownResource);
@@ -662,8 +629,8 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
             DoUndo::Do(GraphCommand::LeafCreated {
                 target,
                 ty,
-                child_idx,
-                destination,
+                child_idx: _, // FIXME!
+                destination: _,
             }) => {
                 // This case only reachable with undo then redo.
                 // Clear the deleted flag!
@@ -682,8 +649,8 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
             DoUndo::Undo(GraphCommand::LeafCreated {
                 target,
                 ty,
-                child_idx,
-                destination,
+                child_idx: _, // FIXME!
+                destination: _,
             }) => {
                 let Some(node) = self.get_mut(*target) else {
                     return Err(CommandError::UnknownResource);
@@ -702,14 +669,14 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 new_parent,
                 new_child_idx,
                 old_parent,
-                old_child_idx,
+                old_child_idx: _, // FIXME!
             })
             | DoUndo::Undo(GraphCommand::Reparent {
                 target,
                 old_parent: new_parent,
                 old_child_idx: new_child_idx,
                 new_parent: old_parent,
-                new_child_idx: old_child_idx,
+                new_child_idx: _, // FIXME!
             }) => {
                 // Get the expected current parent's nodeId, or none if root is parent.
                 let old_parent_tree_id = match old_parent.map(|p| self.ids.tree_id_from_node(&p)) {

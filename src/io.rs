@@ -15,25 +15,25 @@ pub struct Residual {
     // whatever, it will still fall into one of these buckets and the whole
     // structure will get dumped into a single ResidualChunk.
     /// Chunks from the top level RIFF
-    riff: Vec<ResidualChunk>,
+    _riff: Vec<ResidualChunk>,
     /// Chunks from RIFF > LIST OBJS
-    riff_list_objs: Vec<ResidualChunk>,
+    _riff_list_objs: Vec<ResidualChunk>,
 }
 impl Residual {
     /// No residual data.
     pub fn empty() -> Self {
         Self {
-            riff: vec![],
-            riff_list_objs: vec![],
+            _riff: vec![],
+            _riff_list_objs: vec![],
         }
     }
 }
 struct ResidualChunk {
-    id: riff::ChunkID,
-    header: VersionedChunkHeader,
+    _id: riff::ChunkID,
+    _header: VersionedChunkHeader,
     /// chunk length is implicit from this vec's length.
     /// bytes include the header, but not the id - just as RIFF does.
-    data: Vec<u8>,
+    _data: Vec<u8>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -115,7 +115,6 @@ where
     Writer: std::io::Write + std::io::Seek,
 {
     use riff::{encode::*, ChunkID};
-    use std::io::Write;
     let mut root = BinaryChunkWriter::new_subtype(writer, ChunkID::RIFF, ChunkID::FZP_)?;
     {
         {
@@ -161,7 +160,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
     point_repository: &crate::repositories::points::PointRepository,
 ) -> Result<crate::commands::queue::DocumentCommandQueue, std::io::Error> {
     use riff::{decode::*, ChunkID};
-    use std::io::{Error as IOError, Read};
+    use std::io::Error as IOError;
     let path_buf = path.into();
     let file = std::fs::File::open(&path_buf)?;
     let size = file.metadata().map(|meta| meta.len()).ok();

@@ -155,7 +155,6 @@ impl<Future: GpuFuture> SwapAfter<Future> {
 /// the main struct.
 struct ProxySurfaceData {
     context: Arc<crate::render_device::RenderContext>,
-    render_pass: Arc<vk::RenderPass>,
     pipeline: Arc<vk::GraphicsPipeline>,
     framebuffers: Box<[Arc<vk::Framebuffer>]>,
     document_image_bindings: [Arc<vk::PersistentDescriptorSet>; 2],
@@ -209,7 +208,6 @@ impl ProxySurfaceData {
         Self {
             context,
             pipeline,
-            render_pass,
             surface_dimensions: render_surface.extent(),
 
             prerecorded_command_buffers,

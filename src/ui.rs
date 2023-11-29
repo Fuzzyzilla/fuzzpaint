@@ -1,5 +1,3 @@
-use crate::commands::queue::state_reader::CommandQueueStateReader;
-
 pub mod requests;
 
 const STROKE_LAYER_ICON: &'static str = "✏";
@@ -90,7 +88,7 @@ impl MainUI {
     fn main_ui(
         &mut self,
         ctx: &egui::Context,
-        is_background: bool,
+        _is_background: bool,
     ) -> (ultraviolet::Vec2, ultraviolet::Vec2) {
         egui::TopBottomPanel::top("file").show(&ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -226,7 +224,7 @@ impl MainUI {
                 };
 
                 // Find the document's interface
-                let Some(interface) = self
+                let Some(_interface) = self
                     .documents
                     .iter()
                     .find(|interface| interface.id == document)
@@ -797,6 +795,7 @@ mod latch {
     }
     impl<State: 'static> LatchResponse<'_, State> {
         /// Stop the interaction, preventing it from reporting Finished in the future.
+        #[allow(dead_code)]
         pub fn cancel(self) {
             // Delete egui's persisted state
             self.ui

@@ -73,9 +73,9 @@ impl ViewportManipulateBase {
                         );
                         new_transform = Some(new);
 
-                        let xformed_point = view_info.transform.unproject(cgmath::Point2 { x: event.pos.0, y: event.pos.1 });
+                        /*let xformed_point = view_info.transform.unproject(cgmath::Point2 { x: event.pos.0, y: event.pos.1 });
 
-                        /*render_output.render_as = super::RenderAs::InlineGizmos(
+                        render_output.render_as = super::RenderAs::InlineGizmos(
                             [crate::gizmos::Gizmo {
                                 visual: crate::gizmos::GizmoVisual::Shape {
                                     shape: crate::gizmos::RenderShape::Rectangle {

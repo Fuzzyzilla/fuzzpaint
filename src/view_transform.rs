@@ -33,9 +33,9 @@ impl ViewTransform {
     }
     /// Flip the view horizontally about this center in viewspace such that the x-coordinate of the center
     /// remains in the same spot in the viewport after rotating.
-    pub fn flip_x_about(&mut self, view_center: cgmath::Point2<f32>) {
-        let local_center = self.unproject(view_center);
+    pub fn flip_x_about(&mut self, _view_center: cgmath::Point2<f32>) {
         todo!()
+        // let local_center = self.unproject(view_center);
         // transform such that center is at 0,0
         // flip
         // transform back

@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use crate::{state::graph, vulkano_prelude::*};
-
-type AnySemaphoreFuture = vk::sync::future::SemaphoreSignalFuture<Box<dyn GpuFuture>>;
+use crate::vulkano_prelude::*;
 
 struct PerDocumentData {
     listener: crate::commands::queue::DocumentCommandListener,
@@ -18,6 +16,7 @@ enum IncrementalDrawErr {
     #[error("state mismatch")]
     StateMismatch,
 }
+#[allow(dead_code)]
 enum CachedImage<'data> {
     /// The data is ready for use immediately.
     Ready(&'data RenderData),
@@ -29,6 +28,7 @@ enum CachedImage<'data> {
     },
 }
 impl<'data> CachedImage<'data> {
+    #[allow(dead_code)]
     fn data(&self) -> &'data RenderData {
         match self {
             CachedImage::Ready(data) => data,

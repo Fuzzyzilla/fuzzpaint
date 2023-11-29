@@ -136,7 +136,7 @@ impl WindowRenderer {
         let event_loop = self.event_loop.take().unwrap();
         self.window().request_redraw();
 
-        event_loop.run(move |event, target, control_flow| {
+        event_loop.run(move |event, _, control_flow| {
             use winit::event::{Event, WindowEvent};
             match event {
                 Event::WindowEvent { event, .. } => {

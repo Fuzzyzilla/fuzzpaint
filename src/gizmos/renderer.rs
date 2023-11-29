@@ -89,7 +89,7 @@ pub struct GizmoRenderer {
     // Premade, static vertex buffers for common shapes.
     triangulated_shapes: vk::Subbuffer<[GizmoVertex]>,
     triangulated_square: vk::Subbuffer<[GizmoVertex]>,
-    triangulated_circle: vk::Subbuffer<[GizmoVertex]>,
+    _triangulated_circle: vk::Subbuffer<[GizmoVertex]>,
 }
 impl GizmoRenderer {
     const CIRCLE_RES: usize = 32;
@@ -303,7 +303,7 @@ impl GizmoRenderer {
             untextured_pipeline,
 
             triangulated_shapes: shapes,
-            triangulated_circle: circle,
+            _triangulated_circle: circle,
             triangulated_square: square,
         })
     }

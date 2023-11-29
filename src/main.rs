@@ -317,7 +317,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
             let _profiler = _profiler;
 
             let result: Result<((), ()), anyhow::Error> = 'block: {
-                let mut tools = match pen_tools::ToolState::new_from_renderer(&render_context) {
+                let tools = match pen_tools::ToolState::new_from_renderer(&render_context) {
                     Ok(tools) => tools,
                     Err(e) => break 'block Err(e),
                 };

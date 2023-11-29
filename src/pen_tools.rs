@@ -52,10 +52,12 @@ struct ToolStateOutput {
 impl ToolStateOutput {
     /// Tell the tool state to read the actions and decide for itself what tool to transition
     /// to do, if any. Will happen regardless if no [ToolStateOutput::with_transition] is asserted.
+    #[allow(dead_code)]
     pub fn with_default_behavior(&mut self) {
         self.transition = None
     }
     /// Tell the tool state to perform this transition.
+    #[allow(dead_code)]
     pub fn with_transition(&mut self, transition: Transition) {
         self.transition = Some(transition)
     }

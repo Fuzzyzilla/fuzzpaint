@@ -1,5 +1,5 @@
 use crate::vulkano_prelude::*;
-use std::{default, fmt::Debug, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 
 #[derive(
     strum::AsRefStr,
@@ -452,16 +452,13 @@ impl BlendEngine {
 
         // now, layers should be filled, from back to front, with commands in the order they must be
         // executed for proper blending.
-
-        let mut after = vk::sync::now(context.device().clone()).boxed();
-
         for buffers in layers.into_iter().rev() {
             // `buffers` may all be executed in parallel without sync.
             // After all of these, the next iteration can proceed following a semaphore.
             // continue thusly until all is consumed, then return that future!
 
             let mut chunks = buffers.chunks(3);
-            after = chunks.try_fold(
+            let after = chunks.try_fold(
                 vk::sync::now(context.device().clone()).boxed(),
                 |after, buffers| -> anyhow::Result<_> {
                     match buffers {
