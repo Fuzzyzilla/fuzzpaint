@@ -1,7 +1,7 @@
 /// A large collection of continguous items on the heap, where concurrent immutable and mutable access are
 /// allowed on opposite sides of the partition.
 ///
-/// T::drop will *never* be run for items in this collection.
+/// `T::drop` will *never* be run for items in this collection.
 pub struct Slab<T: bytemuck::Pod, const N: usize> {
     /// a non-null pointer to array of slab_SIZE points.
     array: *mut T,
@@ -17,14 +17,14 @@ pub struct Slab<T: bytemuck::Pod, const N: usize> {
 #[derive(thiserror::Error, Debug, Clone, Copy)]
 #[error("bump exceeds capacity")]
 pub struct BumpTooLargeError;
-pub struct SlabGuard<'a, T: bytemuck::Pod, const N: usize> {
+pub struct Guard<'a, T: bytemuck::Pod, const N: usize> {
     /// a non-null pointer to [T; N].
     array: *mut T,
     _write_access_lock: parking_lot::MutexGuard<'a, ()>,
     bump_position: &'a std::sync::atomic::AtomicUsize,
 }
 // This is the exact same impl on Slab itself, but using atomic ops. Code duplication icky!
-impl<'a, T: bytemuck::Pod, const N: usize> SlabGuard<'a, T, N> {
+impl<'a, T: bytemuck::Pod, const N: usize> Guard<'a, T, N> {
     /// How many more items can fit? Note that, unlike `Slab::remaining`,
     /// this is the true capacity rather than just a hint.
     pub fn remaining(&self) -> usize {
@@ -92,8 +92,8 @@ impl<T: bytemuck::Pod, const N: usize> Slab<T, N> {
     /// Lock the slab for exclusive low-level writing access.
     ///
     /// *Reads are still free to occur to any point before the bump index even while this lock is held.*
-    pub fn lock<'a>(&'a self) -> SlabGuard<'a, T, N> {
-        SlabGuard {
+    pub fn lock(&'_ self) -> Guard<'_, T, N> {
+        Guard {
             array: self.array,
             bump_position: &self.bump_position,
             _write_access_lock: self.write_access.lock(),
@@ -226,9 +226,7 @@ impl<T: bytemuck::Pod, const N: usize> Slab<T, N> {
     /// Get the number of bytes currently in use.
     /// This is a hint - it may become immediately out-of-date and is not suitable for use in safety preconditions!
     pub fn hint_usage_bytes(&self) -> usize {
-        self.bump_position
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .saturating_mul(std::mem::size_of::<T>())
+        self.hint_usage().saturating_mul(std::mem::size_of::<T>())
     }
     /// Get the number of indices available for writing.
     /// This is a hint - it may become immediately out-of-date and is not suitable for use in safety preconditions!
@@ -256,7 +254,7 @@ impl<T: bytemuck::Pod, const N: usize> Slab<T, N> {
     /// Allocate a new slab of [T; N].
     ///
     /// Returns None if the allocation failed. To fail on this condition,
-    /// prefer [std::alloc::handle_alloc_error] over a panic.
+    /// prefer [`std::alloc::handle_alloc_error`] over a panic.
     ///
     /// There is no guaruntee that this won't terminate the process on failure instead of returning None.
     pub fn try_new() -> Option<Self> {
@@ -286,7 +284,7 @@ impl<T: bytemuck::Pod, const N: usize> Slab<T, N> {
     pub unsafe fn free(self) {
         // Safety - using same layout as used to create it.
         // Use-after-free forwarded to this fn's safety contract.
-        unsafe { std::alloc::dealloc(self.array as *mut _, Self::layout()) }
+        unsafe { std::alloc::dealloc(self.array.cast(), Self::layout()) }
     }
     const fn layout() -> std::alloc::Layout {
         std::alloc::Layout::new::<[T; N]>()

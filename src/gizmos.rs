@@ -9,7 +9,7 @@
 
 pub mod renderer;
 pub mod transform;
-use transform::*;
+use transform::GizmoTransform;
 
 pub enum GizmoMeshMode {
     Triangles,
@@ -85,7 +85,7 @@ pub enum GizmoInteraction {
 }
 
 /// The shape of a gizmo's hit window.
-/// In local coordinates, determined by GizmoTransformPinning
+/// In local coordinates, determined by `GizmoTransformPinning`
 pub enum GizmoShape {
     /// Hollow ring - can be used for circles when inner=0
     Ring {
@@ -99,6 +99,7 @@ pub enum GizmoShape {
     None,
 }
 impl GizmoShape {
+    #[must_use]
     pub fn hit(&self, local: [f32; 2]) -> bool {
         match self {
             Self::None => false,
@@ -128,7 +129,7 @@ pub trait GizmoVisitor<T> {
     fn end_collection(&mut self, gizmo: &Collection) -> ControlFlow<T>;
 }
 
-/// [GizmoVisitor] except it accesses the Gizmos as mutable references.
+/// [`GizmoVisitor`] except it accesses the Gizmos as mutable references.
 pub trait MutableGizmoVisitor<T> {
     /// Visit a [Gizmo]. Return Some to short circuit, None to continue.
     fn visit_gizmo_mut(&mut self, gizmo: &mut Gizmo) -> ControlFlow<T>;
@@ -170,6 +171,7 @@ pub struct Collection {
     children: Vec<AnyGizmo>,
 }
 impl Collection {
+    #[must_use]
     pub fn new(transform: GizmoTransform) -> Self {
         Self {
             transform,
@@ -185,7 +187,7 @@ impl Collection {
 }
 
 // mem inefficient, implementation detail uwu
-/// must be public for Into\<AnyGizmo\> in Collections interface but don't use >:(
+/// must be public for `Into<AnyGizmo>` in Collections interface but don't use >:(
 pub enum AnyGizmo {
     Gizmo(Gizmo),
     Collection(Collection),
@@ -209,7 +211,7 @@ pub enum CursorOrInvisible {
     Invisible,
 }
 
-/// A tree that can be visited (in several modes) by a [GizmoVisitor].
+/// A tree that can be visited (in several modes) by a [`GizmoVisitor`].
 pub trait GizmoTree {
     /// Pass the visitor to self and all children!
     /// Should visit in painters order, back-to-front.
@@ -270,7 +272,7 @@ impl GizmoTree for Collection {
         visitor.visit_collection(self)?;
 
         // In hit order- don't reverse the children
-        for child in self.children.iter() {
+        for child in &self.children {
             child.visit_hit(visitor)?;
         }
 
@@ -296,7 +298,7 @@ impl MutGizmoTree for Collection {
         visitor.visit_collection_mut(self)?;
 
         // In hit order- don't reverse the children
-        for child in self.children.iter_mut() {
+        for child in &mut self.children {
             child.visit_hit_mut(visitor)?;
         }
 

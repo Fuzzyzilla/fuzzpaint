@@ -16,9 +16,9 @@ pub struct State {
 impl State {
     pub fn new(root: slab_tree::NodeId) -> Self {
         Self {
-            document: Default::default(),
-            graph: Default::default(),
-            stroke_state: Default::default(),
+            document: state::Document::default(),
+            graph: state::graph::BlendGraph::default(),
+            stroke_state: state::stroke_collection::StrokeCollectionState::default(),
             present: root,
         }
     }
@@ -30,7 +30,7 @@ impl State {
             document: self.document.clone(),
             graph: self.graph.clone(),
             stroke_state: self.stroke_state.clone(),
-            present: self.present.clone(),
+            present: self.present,
         }
     }
 }

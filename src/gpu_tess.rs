@@ -123,10 +123,10 @@ impl GpuStampTess {
 
         Ok(Self {
             context,
-            layout,
             pipeline,
             input_descriptor,
             output_descriptor,
+            layout,
             work_size,
         })
     }
@@ -176,7 +176,7 @@ impl GpuStampTess {
         {
             let mut write = packed_points.write()?;
             let mut cursor = 0;
-            for stroke in strokes.iter() {
+            for stroke in strokes {
                 let points = point_repo.try_get(stroke.point_collection)?;
                 write[cursor..(cursor + points.len())]
                     .iter_mut()
@@ -280,7 +280,7 @@ impl GpuStampTess {
                 memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            group_index_counter as u64,
+            u64::from(group_index_counter),
         )?;
         let mut current_idx = 0u32;
         input_map
@@ -319,7 +319,7 @@ impl GpuStampTess {
                 memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
                 ..Default::default()
             },
-            vertex_output_index_counter as u64,
+            u64::from(vertex_output_index_counter),
         )?;
 
         let input_descriptor = vk::PersistentDescriptorSet::new(

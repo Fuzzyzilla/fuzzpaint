@@ -1,35 +1,7 @@
 use crate::brush;
 use rayon::prelude::*;
 pub struct RayonTessellator;
-pub struct RayonStreamTessellator<'data> {
-    cur_stroke: usize,
-    cur_point: usize,
-    cur_progress: f32,
-    strokes: &'data [crate::Stroke],
-}
-impl<'data> RayonStreamTessellator<'data> {
-    fn new(strokes: &'data [crate::Stroke]) -> Self {
-        Self {
-            cur_stroke: 0,
-            cur_point: 0,
-            cur_progress: 0.0,
-            strokes,
-        }
-    }
-}
-impl<'data> StreamStrokeTessellator<'data> for RayonStreamTessellator<'data> {
-    fn tessellate(
-        &mut self,
-        vertices: &mut [TessellatedStrokeVertex],
-        infos: &mut [super::TessellatedStrokeInfo],
-    ) -> super::StreamStatus {
-        todo!()
-    }
-}
-
-use super::{
-    StreamStrokeTessellator, TessellatedStrokeInfo, TessellatedStrokeVertex, TessellationError,
-};
+use super::{TessellatedStrokeVertex, TessellationError};
 use crate::{state::StrokeBrushSettings, StrokePoint};
 
 impl RayonTessellator {
@@ -68,14 +40,10 @@ impl RayonTessellator {
             color,
         };
 
-        [tl, tr.clone(), bl.clone(), bl, tr, br]
+        [tl, tr, bl, bl, tr, br]
     }
 }
 impl super::StrokeTessellator for RayonTessellator {
-    type Stream<'a> = RayonStreamTessellator<'a>;
-    fn stream<'a>(&self, strokes: &'a [crate::Stroke]) -> Self::Stream<'a> {
-        RayonStreamTessellator::new(strokes)
-    }
     fn tessellate(
         &self,
         strokes: &[crate::Stroke],
@@ -87,7 +55,7 @@ impl super::StrokeTessellator for RayonTessellator {
             Err(e) => return Err(TessellationError::Anyhow(e.into())),
         };
 
-        for stroke in strokes.iter() {
+        for stroke in strokes {
             let brush = brush::todo_brush();
 
             // Perform tessellation!
@@ -104,7 +72,7 @@ impl super::StrokeTessellator for RayonTessellator {
 
                             // Sanity check - avoid division by zero and other weirdness.
                             if b.dist - a.dist <= 0.0 {
-                                return Default::default();
+                                return smallvec::SmallVec::new();
                             }
 
                             // Offset of first stamp into this segment.
@@ -162,14 +130,10 @@ impl super::StrokeTessellator for RayonTessellator {
                     // Sanity check.
                     0
                 } else {
-                    stroke
-                        .points
-                        .last()
-                        .map(|last| {
-                            let num_stamps = (last.dist / spacing).floor();
-                            num_stamps as usize * 6
-                        })
-                        .unwrap_or(0usize)
+                    stroke.points.last().map_or(0, |last| {
+                        let num_stamps = (last.dist / spacing).floor();
+                        num_stamps as usize * 6
+                    })
                 }
             }
         }

@@ -12,12 +12,14 @@ pub enum BrushStyle {
     Rolled,
 }
 impl BrushStyle {
+    #[must_use]
     pub fn default_for(brush_kind: BrushKind) -> Self {
         match brush_kind {
             BrushKind::Stamped => Self::Stamped { spacing: 2.0 },
             BrushKind::Rolled => Self::Rolled,
         }
     }
+    #[must_use]
     pub fn brush_kind(&self) -> BrushKind {
         match self {
             Self::Stamped { .. } => BrushKind::Stamped,
@@ -41,18 +43,22 @@ pub struct Brush {
     universal_id: uuid::Uuid,
 }
 impl Brush {
+    #[must_use]
     pub fn style(&self) -> &BrushStyle {
         &self.style
     }
     pub fn style_mut(&mut self) -> &mut BrushStyle {
         &mut self.style
     }
+    #[must_use]
     pub fn id(&self) -> BrushID {
         self.id
     }
+    #[must_use]
     pub fn universal_id(&self) -> &uuid::Uuid {
         &self.universal_id
     }
+    #[must_use]
     pub fn name_mut(&mut self) -> &mut String {
         &mut self.name
     }
@@ -62,7 +68,7 @@ impl Default for Brush {
         let id = crate::FuzzID::default();
         Self {
             name: format!("Brush {}", id.id()),
-            style: Default::default(),
+            style: BrushStyle::default(),
             id,
             universal_id: uuid::Uuid::new_v4(),
         }
@@ -73,7 +79,7 @@ pub fn todo_brush() -> Brush {
     static TODO_ID: std::sync::OnceLock<BrushID> = std::sync::OnceLock::new();
     Brush {
         name: "Todo".into(),
-        style: Default::default(),
+        style: BrushStyle::default(),
         id: *TODO_ID.get_or_init(Default::default),
         // Example UUID from wikipedia lol
         universal_id: uuid::uuid!("123e4567-e89b-12d3-a456-426614174000"),

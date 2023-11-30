@@ -3,7 +3,7 @@
 //! which generates unique IDs namespaced by the type T. Order of IDs is not guaranteed.
 //!
 //! To get a process unique ID, simply use `FuzzID<YourNamespaceTy>`'s `Default` impl. To eargerly acquire many ids,
-//! use FuzzID::many.
+//! use `FuzzID::many`.
 
 // Collection of pending IDs by type.
 // Type name mess, but a RWLock'd BTreeMap from typeID to next available FuzzID
@@ -40,18 +40,19 @@ unsafe impl<T: std::any::Any> Send for FuzzID<T> {}
 unsafe impl<T: std::any::Any> Sync for FuzzID<T> {}
 
 impl<T: std::any::Any> std::hash::Hash for FuzzID<T> {
-    /// A note on hashes - this relies on the internal representation of TypeID,
+    /// A note on hashes - this relies on the internal representation of `TypeID`,
     /// which is unstable between compilations. Do NOT serialize or otherwise rely on
     /// comparisons between hashes from different executions of the program.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::any::TypeId::of::<T>().hash(state);
-        self.id.hash(state)
+        self.id.hash(state);
     }
 }
 
 impl<T: std::any::Any> FuzzID<T> {
     /// Get the raw numeric value of this ID.
     /// IDs from differing namespaces may share the same numeric ID!
+    #[must_use]
     pub fn id(&self) -> u64 {
         self.id.get()
     }
@@ -92,6 +93,7 @@ impl<T: std::any::Any> FuzzID<T> {
         // Overflow occured! Todo: next alloc will succeed, should I latch to failure? Current impl
         // results in a situation where the next thread *could* alloc non-unique
         // IDs during the delay from detecting and logging the error.
+        #[allow(clippy::manual_assert)]
         if (start_id.wrapping_add(count_u64)) <= count_u64 {
             // In builds, terminate. In testing, panic, so that tests for overflow may be implemented.
             #[cfg(not(test))]
@@ -109,12 +111,12 @@ impl<T: std::any::Any> FuzzID<T> {
 
         // Must use `usize` indices for ExactSizeIterator, as absolute values of the IDs would
         // overflow a 32-bit system's usize
-        (0..count).into_iter().map(move |idx| {
+        (0..count).map(move |idx| {
             let id = idx as u64 + start_id;
             FuzzID {
                 // Non-zero-ness checked by overflow catching logic.
                 id: std::num::NonZeroU64::new(id).unwrap(),
-                _phantom: Default::default(),
+                _phantom: std::marker::PhantomData,
             }
         })
     }
@@ -178,7 +180,7 @@ mod test {
         let mut v: Vec<_> = TestID::many(count).collect();
 
         // Don't do this!!
-        v.sort_unstable_by(|a, b| a.id().cmp(&b.id()));
+        v.sort_unstable_by_key(FuzzID::id);
         let length_before = v.len();
         v.dedup();
         let length_after = v.len();
@@ -202,7 +204,7 @@ mod test {
     // Test only makes sense if we can fit u64::MAX in a usize
     #[cfg(target_pointer_width = "64")]
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "ID overflow")]
     fn overflow() {
         // Local namespace for testing.
         struct Namespace;

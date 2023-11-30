@@ -1,4 +1,4 @@
-//! Glue between FuzzID's and id_tree::NodeId's in order to make IDs stable across clones. This is a baaaad
+//! Glue between `FuzzID`'s and `id_tree::NodeId`'s in order to make IDs stable across clones. This is a baaaad
 //! solution, but it is necessary with the current graph impl. I need to write my own!
 
 // Private id type! (public to super)
@@ -18,7 +18,7 @@ impl std::hash::Hash for AnyID {
     // Forego including type in the hash, as we assume the invariant that a
     // Leaf and Node may not have the same ID.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_ref().hash(state)
+        self.as_ref().hash(state);
     }
 }
 impl AsRef<FuzzNodeID> for LeafID {
@@ -34,8 +34,7 @@ impl AsRef<FuzzNodeID> for NodeID {
 impl AsRef<FuzzNodeID> for AnyID {
     fn as_ref(&self) -> &FuzzNodeID {
         match self {
-            AnyID::Leaf(LeafID(id)) => id,
-            AnyID::Node(NodeID(id)) => id,
+            AnyID::Leaf(LeafID(id)) | AnyID::Node(NodeID(id)) => id,
         }
     }
 }
@@ -67,25 +66,10 @@ impl TryFrom<AnyID> for NodeID {
         }
     }
 }
-impl AnyID {
-    fn into_raw(self) -> FuzzNodeID {
-        match self {
-            AnyID::Leaf(LeafID(id)) => id,
-            AnyID::Node(NodeID(id)) => id,
-        }
-    }
-}
+#[derive(Default)]
 pub(super) struct StableIDMap {
     fuzz_to_id: hashbrown::HashMap<FuzzNodeID, id_tree::NodeId>,
     id_to_fuzz: hashbrown::HashMap<id_tree::NodeId, FuzzNodeID>,
-}
-impl Default for StableIDMap {
-    fn default() -> Self {
-        Self {
-            fuzz_to_id: Default::default(),
-            id_to_fuzz: Default::default(),
-        }
-    }
 }
 impl StableIDMap {
     pub fn with_capacity(capacity: usize) -> Self {
@@ -97,26 +81,27 @@ impl StableIDMap {
     pub fn capacity(&self) -> usize {
         self.fuzz_to_id.capacity().max(self.id_to_fuzz.capacity())
     }
-    pub fn tree_id_from_any<'s>(&'s self, any: &'_ AnyID) -> Option<&'s id_tree::NodeId> {
+    pub fn tree_id_from_any(&self, any: AnyID) -> Option<&id_tree::NodeId> {
         self.fuzz_to_id.get(any.as_ref())
     }
-    pub fn tree_id_from_node<'s>(&'s self, node: &'_ NodeID) -> Option<&'s id_tree::NodeId> {
+    pub fn tree_id_from_node(&self, node: NodeID) -> Option<&id_tree::NodeId> {
         self.fuzz_to_id.get(node.as_ref())
     }
-    pub fn tree_id_from_leaf<'s>(&'s self, leaf: &'_ LeafID) -> Option<&'s id_tree::NodeId> {
+    #[allow(dead_code)]
+    pub fn tree_id_from_leaf(&self, leaf: LeafID) -> Option<&id_tree::NodeId> {
         self.fuzz_to_id.get(leaf.as_ref())
     }
     /// Returns a raw ID, as node type is not stored.
     pub fn fuzz_id_from<'s>(&'s self, tree: &'_ id_tree::NodeId) -> Option<&'s FuzzNodeID> {
         self.id_to_fuzz.get(tree)
     }
-    pub fn get_or_insert_tree_id<'s>(&'s mut self, tree: id_tree::NodeId) -> &'s FuzzNodeID {
+    pub fn get_or_insert_tree_id(&mut self, tree: id_tree::NodeId) -> &FuzzNodeID {
         let entry = self.id_to_fuzz.entry(tree.clone());
         match entry {
             hashbrown::hash_map::Entry::Occupied(o) => &*o.into_mut(),
             hashbrown::hash_map::Entry::Vacant(v) => {
                 // Allocate a new id, update other map, and return.
-                let new = v.insert(Default::default());
+                let new = v.insert(FuzzNodeID::default());
                 self.fuzz_to_id.insert(*new, tree);
                 new
             }
@@ -124,9 +109,10 @@ impl StableIDMap {
     }
     /// Insert a specific correlation between tree id and fuzz id
     pub fn insert_pair(&mut self, tree: id_tree::NodeId, fuzz: FuzzNodeID) {
-        self.fuzz_to_id.insert(fuzz.clone(), tree.clone());
+        self.fuzz_to_id.insert(fuzz, tree.clone());
         self.id_to_fuzz.insert(tree, fuzz);
     }
+    #[allow(dead_code)]
     pub fn erase_tree_id(&mut self, tree: &id_tree::NodeId) {
         if let Some(id) = self.id_to_fuzz.remove(tree) {
             let _ = self.fuzz_to_id.remove(&id);

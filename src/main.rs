@@ -1,6 +1,7 @@
 #![feature(portable_simd)]
 #![feature(once_cell_try)]
 #![feature(write_all_vectored)]
+#![warn(clippy::pedantic)]
 use std::sync::Arc;
 pub mod commands;
 mod egui_impl;
@@ -44,6 +45,7 @@ const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 use anyhow::Result as AnyResult;
 
+#[must_use]
 pub fn preferences_dir() -> Option<std::path::PathBuf> {
     let mut base_dir = dirs::preference_dir()?;
     base_dir.push(env!("CARGO_PKG_NAME"));
@@ -59,6 +61,7 @@ impl GlobalHotkeys {
     const FILENAME: &'static str = "hotkeys.ron";
     /// Shared global hotkeys, saved and loaded from user preferences.
     /// (Or defaulted, if unavailable for some reason)
+    #[must_use]
     pub fn get() -> &'static Self {
         static GLOBAL_HOTKEYS: std::sync::OnceLock<GlobalHotkeys> = std::sync::OnceLock::new();
 
@@ -68,14 +71,15 @@ impl GlobalHotkeys {
                 None => Self::no_path(),
                 Some(dir) => {
                     dir.push(Self::FILENAME);
-                    Self::load_or_default(&dir)
+                    Self::load_or_default(dir)
                 }
             }
         })
     }
+    #[must_use]
     pub fn no_path() -> Self {
+        use actions::hotkeys::ActionsToKeys;
         log::warn!("Hotkeys weren't available, defaulting.");
-        use actions::hotkeys::*;
         let default = ActionsToKeys::default();
         // Default action map is reversable - this is assured by the default impl when debugging.
         let reverse = (&default).try_into().unwrap();
@@ -86,8 +90,9 @@ impl GlobalHotkeys {
             actions_to_keys: default,
         }
     }
+    #[must_use]
     fn load_or_default(path: &std::path::Path) -> Self {
-        use actions::hotkeys::*;
+        use actions::hotkeys::{ActionsToKeys, KeysToActions};
         let mappings: anyhow::Result<(ActionsToKeys, KeysToActions)> = try_block::try_block! {
             let string = std::fs::read_to_string(path)?;
             let actions_to_keys : ActionsToKeys = ron::from_str(&string)?;
@@ -107,6 +112,7 @@ impl GlobalHotkeys {
     }
     /// Return true if loading user's settings failed. This can be useful for
     /// displaying a warning.
+    #[must_use]
     pub fn did_fail_to_load(&self) -> bool {
         self.failed_to_load
     }
@@ -122,7 +128,7 @@ impl GlobalHotkeys {
         Ok(ron::ser::to_writer_pretty(
             writer,
             &self.actions_to_keys,
-            Default::default(),
+            ron::ser::PrettyConfig::default(),
         )?)
     }
 }
@@ -136,12 +142,14 @@ pub struct AdHocGlobals {
     pub node: Option<state::graph::AnyID>,
 }
 impl AdHocGlobals {
+    #[must_use]
     pub fn get() -> &'static parking_lot::RwLock<Option<AdHocGlobals>> {
         static ONCE: std::sync::OnceLock<parking_lot::RwLock<Option<AdHocGlobals>>> =
             std::sync::OnceLock::new();
 
-        ONCE.get_or_init(|| Default::default())
+        ONCE.get_or_init(parking_lot::RwLock::default)
     }
+    #[must_use]
     pub fn read_clone() -> Option<Self> {
         Self::get().read().clone()
     }
@@ -157,6 +165,7 @@ pub struct StrokePoint {
 }
 
 impl StrokePoint {
+    #[must_use]
     pub const fn archetype() -> repositories::points::PointArchetype {
         use repositories::points::PointArchetype;
         // | isn't const except for on the bits type! x3
@@ -170,6 +179,7 @@ impl StrokePoint {
             None => unreachable!(),
         }
     }
+    #[must_use]
     pub fn lerp(&self, other: &Self, factor: f32) -> Self {
         let inv_factor = 1.0 - factor;
 
@@ -268,7 +278,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
 
             match try_block() {
                 Err(e) => {
-                    log::error!("failed to open file {path:?}: {e:#}")
+                    log::error!("failed to open file {path:?}: {e:#}");
                 }
                 Ok(queue) => {
                     // We don't care when it's stored, so long as it gets there eventually.
@@ -317,7 +327,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
             let _profiler = _profiler;
 
             let result: Result<((), ()), anyhow::Error> = 'block: {
-                let mut tools = match pen_tools::ToolState::new_from_renderer(&render_context) {
+                let tools = match pen_tools::ToolState::new_from_renderer(&render_context) {
                     Ok(tools) => tools,
                     Err(e) => break 'block Err(e),
                 };
@@ -350,7 +360,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
                 })
             };
             if let Err(e) = result {
-                log::error!("Helper task exited with err, runtime terminated:\n{e:?}")
+                log::error!("Helper task exited with err, runtime terminated:\n{e:?}");
             }
         })
         .unwrap();

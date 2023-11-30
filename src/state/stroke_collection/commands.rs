@@ -10,7 +10,7 @@ impl StrokeCollectionCommand {
     pub(super) fn stroke(&self) -> Option<&StrokeCommand> {
         match self {
             Self::Stroke { command, .. } => Some(command),
-            _ => None,
+            StrokeCollectionCommand::Created(_) => None,
         }
     }
 }

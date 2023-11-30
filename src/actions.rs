@@ -55,7 +55,7 @@ pub enum ActionEvent {
     Unshadowed,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct ActionStates {
     /// Which action keys are pressed?
     held: std::collections::HashSet<Action>,
@@ -64,19 +64,10 @@ struct ActionStates {
     /// Which action keys have ever been shadowed in their lifetimes?
     was_ever_shadowed: std::collections::HashSet<Action>,
 }
-impl Default for ActionStates {
-    fn default() -> Self {
-        Self {
-            held: Default::default(),
-            shadowed: Default::default(),
-            was_ever_shadowed: Default::default(),
-        }
-    }
-}
 impl ActionStates {
     fn push(&mut self, event: ActionEvent, action: Action) {
         match event {
-            ActionEvent::Press => {
+            ActionEvent::Press | ActionEvent::Repeat => {
                 self.held.insert(action);
             }
             ActionEvent::Release => {
@@ -84,10 +75,6 @@ impl ActionStates {
                 self.held.remove(&action);
                 self.shadowed.remove(&action);
                 self.was_ever_shadowed.remove(&action);
-            }
-            ActionEvent::Repeat => {
-                // Shouldn't be necessary, but just in case!
-                self.held.insert(action);
             }
             ActionEvent::Shadowed => {
                 self.shadowed.insert(action);
@@ -102,12 +89,13 @@ impl ActionStates {
 }
 
 /// Create a send/recieve pair. The recieve side can have as many listeners as it wants spawned via
-/// ActionStream::listen, but sending is a unique duty.
+/// `ActionStream::listen`, but sending is a unique duty.
+#[must_use]
 pub fn create_action_stream() -> (ActionSender, ActionStream) {
     let (send, recv) = tokio::sync::broadcast::channel(32);
 
     let current_state = (ActionStates::default(), recv);
-    let current_state: std::sync::RwLock<_> = current_state.into();
+    let current_state: parking_lot::RwLock<_> = current_state.into();
     let current_state = Arc::new(current_state);
 
     (
@@ -119,15 +107,16 @@ pub fn create_action_stream() -> (ActionSender, ActionStream) {
     )
 }
 
+/// Holds the internal state of an action channel
+type SenderStateLock = parking_lot::RwLock<(
+    ActionStates,
+    tokio::sync::broadcast::Receiver<(ActionEvent, Action)>,
+)>;
+
 pub struct ActionSender {
     // Weak, as we can stop carrying/updating this info when it stops being possible to create listeners
     // (ie, when the holder of the Arc is dropped)
-    current_state: std::sync::Weak<
-        std::sync::RwLock<(
-            ActionStates,
-            tokio::sync::broadcast::Receiver<(ActionEvent, Action)>,
-        )>,
-    >,
+    current_state: std::sync::Weak<SenderStateLock>,
     send: tokio::sync::broadcast::Sender<(ActionEvent, Action)>,
 }
 impl ActionSender {
@@ -149,7 +138,7 @@ impl ActionSender {
     fn push(&self, event: ActionEvent, action: Action) {
         match self.current_state.upgrade() {
             Some(rw) => {
-                let mut write = rw.write().unwrap();
+                let mut write = rw.write();
                 write.0.push(event, action);
                 // Returns err if no listeners.
                 let _ = self.send.send((event, action));
@@ -169,14 +158,10 @@ impl ActionSender {
 }
 
 pub struct ActionStream {
-    current_state: Arc<
-        std::sync::RwLock<(
-            ActionStates,
-            tokio::sync::broadcast::Receiver<(ActionEvent, Action)>,
-        )>,
-    >,
+    current_state: Arc<SenderStateLock>,
 }
 impl ActionStream {
+    #[must_use]
     pub fn listen(&self) -> ActionListener {
         // All is locked behind RwLock to prevent subtle race condition:
         // recv and current state are deeply intertwined, and
@@ -184,7 +169,7 @@ impl ActionStream {
         // `current_state` is captured from. Thus, we lock the current state,
         // and make the reciever while it's locked to ensure it hasn't been changed.
 
-        let lock = self.current_state.read().unwrap();
+        let lock = self.current_state.read();
         let current_state = lock.0.clone();
         let recv = lock.1.resubscribe();
 
@@ -215,6 +200,8 @@ impl ActionListener {
     /// In the case where None is returned, this listener is poisoned and will always return None -
     /// it must be re-acquired from the main `ActionStream` to repair.
     pub fn frame(&mut self) -> Result<ActionFrame, ListenError> {
+        use tokio::sync::broadcast::error::TryRecvError;
+
         if self.poisoned {
             Err(ListenError::Poisoned)
         } else {
@@ -225,7 +212,6 @@ impl ActionListener {
             loop {
                 let recv = self.recv.try_recv();
 
-                use tokio::sync::broadcast::error::TryRecvError;
                 match recv {
                     Ok(action) => actions.push(action),
                     Err(TryRecvError::Closed | TryRecvError::Empty) => break,
@@ -250,6 +236,9 @@ impl ActionListener {
     /// Same as frame, but will wait for data to arrive instead of returning an empty
     /// frame. Cancel safe.
     pub async fn wait_frame(&mut self) -> Result<ActionFrame, ListenError> {
+        use tokio::sync::broadcast::error::RecvError;
+        use tokio::sync::broadcast::error::TryRecvError;
+
         if self.poisoned {
             Err(ListenError::Poisoned)
         } else {
@@ -259,7 +248,6 @@ impl ActionListener {
             // and fail if lagged.
 
             // First, asynchronously read, stalling until data available.
-            use tokio::sync::broadcast::error::RecvError;
             let recv = self.recv.recv().await;
             match recv {
                 Ok(action) => actions.push(action),
@@ -274,7 +262,6 @@ impl ActionListener {
             loop {
                 let recv = self.recv.try_recv();
 
-                use tokio::sync::broadcast::error::TryRecvError;
                 match recv {
                     Ok(action) => actions.push(action),
                     Err(TryRecvError::Closed | TryRecvError::Empty) => break,
@@ -296,17 +283,6 @@ impl ActionListener {
             Ok(action_frame)
         }
     }
-    /// Return the action state immediately, without waiting for new actions.
-    /// None if poisoned (though, this function will never cause it to become poisoned.)
-    /// Can only be used to check if an action is currently held, not if an action has been
-    /// pressed or released. use `ActionListener::frame` for that!
-    pub fn now(&self) -> Option<()> {
-        if self.poisoned {
-            None
-        } else {
-            todo!()
-        }
-    }
 }
 pub struct ActionFrame {
     base_state: ActionStates,
@@ -319,6 +295,7 @@ impl ActionFrame {
     ///
     /// If the action has ever became shadowed in it's lifetime, it will stop
     /// counting triggers permanently until released and repressed.
+    #[must_use]
     pub fn action_trigger_count(&self, action: Action) -> usize {
         let mut count = 0;
 
@@ -327,7 +304,7 @@ impl ActionFrame {
         // as it could have been released and then pressed again during later actions.
         let mut is_ever_shadowed = self.base_state.was_ever_shadowed.contains(&action);
 
-        for event in self.actions.iter() {
+        for event in &self.actions {
             // Skip unrelated events
             if event.1 != action {
                 continue;
@@ -343,8 +320,7 @@ impl ActionFrame {
             } else {
                 // Not shadowed - count up release and repeat events.
                 match event.0 {
-                    ActionEvent::Repeat => count += 1,
-                    ActionEvent::Release => count += 1,
+                    ActionEvent::Repeat | ActionEvent::Release => count += 1,
                     // Begin shadowing
                     ActionEvent::Shadowed => is_ever_shadowed = true,
                     _ => (),
@@ -354,8 +330,9 @@ impl ActionFrame {
 
         count
     }
-    /// Query whether anything happened this frame. ActionListener::frame will return
+    /// Query whether anything happened this frame. `ActionListener::frame` will return
     /// a frame with no events if queried before anything new comes in.
+    #[must_use]
     pub fn changed(&self) -> bool {
         !self.actions.is_empty()
     }
@@ -363,20 +340,20 @@ impl ActionFrame {
     /// if this action is still held by the end of the frame.
     /// Shadowed actions return false, but will resume returning true
     /// once they are unshadowed if they are still held.
+    #[must_use]
     pub fn is_action_held(&self, action: Action) -> bool {
         let mut is_shadowed = self.base_state.shadowed.contains(&action);
         let mut is_held = self.base_state.held.contains(&action);
 
-        for event in self.actions.iter() {
+        for event in &self.actions {
             // skip unrelated events
             if event.1 != action {
                 continue;
             }
 
             match event.0 {
-                ActionEvent::Press => is_held = true,
+                ActionEvent::Press | ActionEvent::Repeat => is_held = true,
                 ActionEvent::Release => is_held = false,
-                ActionEvent::Repeat => is_held = true,
                 ActionEvent::Shadowed => is_shadowed = true,
                 ActionEvent::Unshadowed => is_shadowed = false,
             }
@@ -387,10 +364,7 @@ impl ActionFrame {
     /// Accumulate actions into a new state representing the end of this frame.
     fn fast_forward(&self) -> ActionStates {
         let mut future = self.base_state.clone();
-        for (event, action) in self.actions.iter() {
-            if *event != ActionEvent::Repeat {
-                log::trace!("Action {action:?} {event:?}")
-            };
+        for (event, action) in &self.actions {
             future.push(*event, *action);
         }
 

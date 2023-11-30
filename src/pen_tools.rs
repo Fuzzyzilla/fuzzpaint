@@ -4,13 +4,13 @@
 //! gizmo interactions, are all examples of pen tools.
 //!
 //! Implemented as a statemachine transitioning based on Actions. For example, brush will transition to viewpan
-//! when DocumentPan action is activated. When DocumentPan is released, it will transition back to brush.
+//! when `DocumentPan` action is activated. When `DocumentPan` is released, it will transition back to brush.
 //!
 //! Of course, users also must be able to use tools without holding an action down for accessibility as well as
 //! conviniece for certain tasks.
 
 /// A trait for the visual components of tools. Completely optional!
-/// Register in [StateLayer::make_renderer]
+/// Register in [`StateLayer::make_renderer`]
 // This will box the future. It's totally possible for this to be
 // static dispatch, but i was getting way caught up in the weeds trying to implement
 // that and there's really no need :'P
@@ -51,13 +51,15 @@ struct ToolStateOutput {
 }
 impl ToolStateOutput {
     /// Tell the tool state to read the actions and decide for itself what tool to transition
-    /// to do, if any. Will happen regardless if no [ToolStateOutput::with_transition] is asserted.
+    /// to do, if any. Will happen regardless if no [`ToolStateOutput::with_transition`] is asserted.
+    #[allow(dead_code)]
     pub fn with_default_behavior(&mut self) {
-        self.transition = None
+        self.transition = None;
     }
     /// Tell the tool state to perform this transition.
+    #[allow(dead_code)]
     pub fn with_transition(&mut self, transition: Transition) {
-        self.transition = Some(transition)
+        self.transition = Some(transition);
     }
     /// Compute default transition for the given actions.
     /// Does not have access to the current state on purpose, as custom
@@ -107,6 +109,7 @@ pub enum StateLayer {
     ViewportRotate,
     Gizmos,
 }
+#[derive(Clone, Copy)]
 enum Transition {
     /// Layer this state on top the base. Note that states may not modify what
     /// state the base is!
@@ -203,6 +206,7 @@ impl ToolState {
     pub fn set_base_state(&mut self, state: StateLayer) {
         self.base = state;
     }
+    #[must_use]
     pub fn get_current_state(&self) -> StateLayer {
         self.layer.unwrap_or(self.base)
     }

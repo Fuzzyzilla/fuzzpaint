@@ -30,6 +30,7 @@ impl ChunkID {
     pub const CONN: Self = ChunkID(*b"conn");
     pub const BLND: Self = ChunkID(*b"blnd");
     pub const HIST: Self = ChunkID(*b"hist");
+    #[must_use]
     pub fn id_str(&self) -> Option<&str> {
         std::str::from_utf8(&self.0).ok()
     }
@@ -61,7 +62,7 @@ mod test {
     use super::*;
     use super::{decode::*, encode::*};
     use std::io::{Cursor, Read};
-    const EMPTY_FZP: &'static [u8] =
+    const EMPTY_FZP: &[u8] =
         include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/test-data/empty.fzp"));
     /// Test that a handwritten fzp document can be parsed, NOT that a document can be assembled from the data.
     #[test]
@@ -130,7 +131,7 @@ mod test {
             }
         }
 
-        assert_eq!(&file, EMPTY_FZP)
+        assert_eq!(&file, EMPTY_FZP);
     }
     /// Read a handwritten RIFF file containing a DICT full of test structures.
     #[test]
@@ -190,6 +191,6 @@ mod test {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(chunks_remaining, 0)
+        assert_eq!(chunks_remaining, 0);
     }
 }

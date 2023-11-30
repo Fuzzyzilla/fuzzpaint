@@ -1,5 +1,8 @@
-use super::*;
-use crate::commands::queue::writer::*;
+use super::{
+    commands, ImmutableStroke, ImmutableStrokeID, StrokeCollection, StrokeCollectionID,
+    StrokeCollectionState,
+};
+use crate::commands::queue::writer::CommandWrite;
 
 pub struct StrokeCollectionWriter<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>> {
     id: StrokeCollectionID,
@@ -25,7 +28,7 @@ impl<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>>
         brush: crate::state::StrokeBrushSettings,
         points: crate::repositories::points::PointCollectionID,
     ) -> ImmutableStrokeID {
-        let id = Default::default();
+        let id = ImmutableStrokeID::default();
         let stroke = ImmutableStroke {
             brush: brush.clone(),
             id,
@@ -65,10 +68,10 @@ impl<'s, Write: CommandWrite<commands::StrokeCollectionCommand>>
     pub fn new(writer: Write, state: &'s mut StrokeCollectionState) -> Self {
         Self { state, writer }
     }
-    pub fn get_mut<'this>(
-        &'this mut self,
+    pub fn get_mut(
+        &mut self,
         id: StrokeCollectionID,
-    ) -> Option<StrokeCollectionWriter<'this, &mut Write>> {
+    ) -> Option<StrokeCollectionWriter<'_, &mut Write>> {
         let collection = self.state.get_mut(id)?;
 
         Some(StrokeCollectionWriter {

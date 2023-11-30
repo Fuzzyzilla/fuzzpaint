@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use crate::{state::graph, vulkano_prelude::*};
-
-type AnySemaphoreFuture = vk::sync::future::SemaphoreSignalFuture<Box<dyn GpuFuture>>;
+use crate::vulkano_prelude::*;
 
 struct PerDocumentData {
     listener: crate::commands::queue::DocumentCommandListener,
@@ -18,6 +16,7 @@ enum IncrementalDrawErr {
     #[error("state mismatch")]
     StateMismatch,
 }
+#[allow(dead_code)]
 enum CachedImage<'data> {
     /// The data is ready for use immediately.
     Ready(&'data RenderData),
@@ -29,6 +28,7 @@ enum CachedImage<'data> {
     },
 }
 impl<'data> CachedImage<'data> {
+    #[allow(dead_code)]
     fn data(&self) -> &'data RenderData {
         match self {
             CachedImage::Ready(data) => data,
@@ -46,24 +46,25 @@ impl Renderer {
     fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
         Ok(Self {
             context: context.clone(),
-            blend_engine: crate::blend::BlendEngine::new(context.device().clone())?,
+            blend_engine: crate::blend::BlendEngine::new(context.device())?,
             stroke_renderer: stroke_renderer::StrokeLayerRenderer::new(context)?,
-            data: Default::default(),
+            data: hashbrown::HashMap::new(),
         })
     }
     fn render_one(
         &mut self,
         id: crate::state::DocumentID,
-        into: Arc<vk::ImageView>,
+        into: &Arc<vk::ImageView>,
     ) -> anyhow::Result<()> {
         let data = self.data.entry(id);
         // Get the document data, and a flag for if we need to initialize that data.
         let (is_new, data) = match data {
             hashbrown::hash_map::Entry::Occupied(o) => (false, o.into_mut()),
             hashbrown::hash_map::Entry::Vacant(v) => {
-                let Some(listener) =
-                    crate::default_provider().inspect(id, |queue| queue.listen_from_now())
-                else {
+                let Some(listener) = crate::default_provider().inspect(
+                    id,
+                    crate::commands::queue::DocumentCommandQueue::listen_from_now,
+                ) else {
                     // Deleted before we could do anything.
                     anyhow::bail!("Document deleted before render worker reached it");
                 };
@@ -71,7 +72,7 @@ impl Renderer {
                     true,
                     v.insert(PerDocumentData {
                         listener,
-                        graph_render_data: Default::default(),
+                        graph_render_data: hashbrown::HashMap::new(),
                     }),
                 )
             }
@@ -106,7 +107,7 @@ impl Renderer {
                 &self.stroke_renderer,
                 data,
                 &changes,
-                into.clone(),
+                into,
             ) {
                 Err(IncrementalDrawErr::StateMismatch) => {
                     log::info!("Incremental draw failed! Retrying from scratch...");
@@ -132,56 +133,9 @@ impl Renderer {
         renderer: &stroke_renderer::StrokeLayerRenderer,
         document_data: &mut PerDocumentData,
         state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
-        into: Arc<vk::ImageView>,
+        into: &Arc<vk::ImageView>,
     ) -> anyhow::Result<()> {
         use crate::state::graph::{LeafType, NodeID, NodeType};
-        // Create/discard images
-        Self::allocate_prune_graph(
-            &renderer,
-            &mut document_data.graph_render_data,
-            state.graph(),
-        )?;
-
-        let mut fences = Vec::<vk::FenceSignalFuture<Box<dyn GpuFuture>>>::new();
-
-        // Walk the tree in arbitrary order, rendering all as needed and collecting their futures.
-        for (id, data) in state.graph().iter() {
-            match data.leaf() {
-                Some(LeafType::SolidColor { source, .. }) => {
-                    let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Expected image to be created by allocate_prune_graph for {id:?}"
-                        )
-                    })?;
-                    // Fill image, store semaphore.
-                    fences.push(Self::render_color(context.as_ref(), image, *source)?);
-                }
-                // Render stroke image
-                Some(LeafType::StrokeLayer { collection, .. }) => {
-                    let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Expected image to be created by allocate_prune_graph for {id:?}"
-                        )
-                    })?;
-                    let strokes = state.stroke_collections().get(*collection).ok_or_else(|| {
-                        anyhow::anyhow!("Missing stroke collection {collection:?}")
-                    })?;
-                    let strokes: Vec<_> = strokes.iter_active().collect();
-                    if strokes.is_empty() {
-                        //FIXME: Renderer doesn't know how to handle zero strokes.
-                        fences.push(Self::render_color(
-                            context.as_ref(),
-                            image,
-                            [0.0, 0.0, 0.0, 0.0],
-                        )?);
-                    } else {
-                        fences.push(renderer.draw(strokes.as_ref(), image, true)?);
-                    }
-                }
-                Some(LeafType::Note) => (),
-                None => (),
-            }
-        }
 
         /// Insert a single node (possibly recursing) into the builder.
         fn insert_blend(
@@ -250,7 +204,7 @@ impl Renderer {
             node: NodeID,
         ) -> anyhow::Result<()> {
             let iter = graph
-                .iter_node(&node)
+                .iter_node(node)
                 .ok_or_else(|| anyhow::anyhow!("Passthrough node not found"))?;
             for (id, data) in iter {
                 insert_blend(blend_engine, builder, document_data, graph, id, data)?;
@@ -269,7 +223,7 @@ impl Renderer {
             clear_image: bool,
         ) -> anyhow::Result<crate::blend::BlendInvocationHandle> {
             let iter = graph
-                .iter_node(&node)
+                .iter_node(node)
                 .ok_or_else(|| anyhow::anyhow!("Node not found"))?;
             let mut builder = blend_engine.start(into_image, clear_image);
 
@@ -281,8 +235,54 @@ impl Renderer {
             builder.reverse();
             Ok(builder.build())
         }
+        // Create/discard images
+        Self::allocate_prune_graph(
+            renderer,
+            &mut document_data.graph_render_data,
+            state.graph(),
+        )?;
 
-        let mut top_level_blend = blend_engine.start(into, true);
+        let mut fences = Vec::<vk::FenceSignalFuture<Box<dyn GpuFuture>>>::new();
+
+        // Walk the tree in arbitrary order, rendering all as needed and collecting their futures.
+        for (id, data) in state.graph().iter() {
+            match data.leaf() {
+                Some(LeafType::SolidColor { source, .. }) => {
+                    let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Expected image to be created by allocate_prune_graph for {id:?}"
+                        )
+                    })?;
+                    // Fill image, store semaphore.
+                    fences.push(Self::render_color(context.as_ref(), image, *source)?);
+                }
+                // Render stroke image
+                Some(LeafType::StrokeLayer { collection, .. }) => {
+                    let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Expected image to be created by allocate_prune_graph for {id:?}"
+                        )
+                    })?;
+                    let strokes = state.stroke_collections().get(*collection).ok_or_else(|| {
+                        anyhow::anyhow!("Missing stroke collection {collection:?}")
+                    })?;
+                    let strokes: Vec<_> = strokes.iter_active().collect();
+                    if strokes.is_empty() {
+                        //FIXME: Renderer doesn't know how to handle zero strokes.
+                        fences.push(Self::render_color(
+                            context.as_ref(),
+                            image,
+                            [0.0, 0.0, 0.0, 0.0],
+                        )?);
+                    } else {
+                        fences.push(renderer.draw(strokes.as_ref(), image, true)?);
+                    }
+                }
+                Some(LeafType::Note) | None => (),
+            }
+        }
+
+        let mut top_level_blend = blend_engine.start(into.clone(), true);
         let graph = state.graph();
         // Walk the tree in tree-order, building up a blend operation.
         for (id, data) in graph.iter_top_level() {
@@ -302,21 +302,21 @@ impl Renderer {
         // Wait for every fence. Terrible, but vulkano semaphores don't seem to be working currently.
         // Note to self: see commit fuzzpaint @ d435ca7c29cf045be413c9849be928693a2de458 for a time when this worked.
         // Iunno what changed :<
-        for fence in fences.into_iter() {
+        for fence in fences {
             fence.wait(None)?;
         }
 
         // Execute blend after the images are ready
         blend_engine.submit(context.as_ref(), top_level_blend)
     }
-    /// Assumes the existence of a previous draw_from_scratch, applying only the diff.
+    /// Assumes the existence of a previous `draw_from_scratch`, applying only the diff.
     fn draw_incremental(
         _context: &Arc<crate::render_device::RenderContext>,
         _blend_engine: &crate::blend::BlendEngine,
         _renderer: &stroke_renderer::StrokeLayerRenderer,
         _document_data: &mut PerDocumentData,
         state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
-        _into: Arc<vk::ImageView>,
+        _into: &Arc<vk::ImageView>,
     ) -> Result<(), IncrementalDrawErr> {
         if state.has_changes() {
             // State is dirty!
@@ -362,6 +362,7 @@ impl Renderer {
     ) -> anyhow::Result<()> {
         let mut retain_data = hashbrown::HashSet::new();
         for (id, node) in graph.iter() {
+            #[allow(clippy::match_same_arms)]
             let has_graphics = match (node.leaf(), node.node()) {
                 // We expect it to be a node xor leaf!
                 // This is an api issue ;w;
@@ -384,11 +385,8 @@ impl Renderer {
                 // Mark this data as needed
                 retain_data.insert(id);
                 // Allocate new image, if none allocated already.
-                match graph_render_data.entry(id) {
-                    hashbrown::hash_map::Entry::Vacant(v) => {
-                        v.insert(renderer.uninit_render_data()?);
-                    }
-                    _ => (),
+                if let hashbrown::hash_map::Entry::Vacant(v) = graph_render_data.entry(id) {
+                    v.insert(renderer.uninit_render_data()?);
                 }
             }
         }
@@ -431,7 +429,7 @@ pub async fn render_worker(
                 // Rerender, if requested
                 if changed.contains(&selections.document) {
                     let write = document_preview.write().await;
-                    renderer.render_one(selections.document, (*write).clone())?;
+                    renderer.render_one(selections.document, &write)?;
                     // We sync with renderer, oofs :V
                     write.submit_now();
                 }
@@ -524,7 +522,8 @@ mod stroke_renderer {
                         memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                         ..Default::default()
                     },
-                    brush_image.width() as vk::DeviceSize * brush_image.height() as vk::DeviceSize,
+                    vk::DeviceSize::from(brush_image.width())
+                        * vk::DeviceSize::from(brush_image.height()),
                 )?;
                 // Write image into buffer
                 {
@@ -662,7 +661,7 @@ mod stroke_renderer {
                         primitive_restart_enable: false,
                         ..Default::default()
                     }),
-                    multisample_state: Some(Default::default()),
+                    multisample_state: Some(vk::MultisampleState::default()),
                     rasterization_state: Some(vk::RasterizationState {
                         cull_mode: vk::CullMode::None,
                         ..Default::default()
@@ -689,24 +688,6 @@ mod stroke_renderer {
                     ..vk::GraphicsPipelineCreateInfo::layout(layout)
                 },
             )?;
-            /*start()
-            .fragment_shader(frag, ())
-            .vertex_shader(vert, ())
-            .vertex_input_state(crate::gpu_tess::interface::OutputStrokeVertex::per_vertex())
-            .input_assembly_state(vk::InputAssemblyState::new()) //Triangle list, no prim restart
-            .color_blend_state(premul_dyn_constants)
-            .rasterization_state(vk::RasterizationState::new()) // No cull
-            .viewport_state(vk::ViewportState::viewport_fixed_scissor_irrelevant([
-                vk::Viewport {
-                    depth_range: 0.0..1.0,
-                    dimensions: [crate::DOCUMENT_DIMENSION as f32; 2],
-                    origin: [0.0; 2],
-                },
-            ]))
-            .render_pass(
-            )
-            .build(context.device().clone())?;*/
-
             let descriptor_set = vk::PersistentDescriptorSet::new(
                 context.allocators().descriptor_set(),
                 pipeline.layout().set_layouts()[0].clone(),
@@ -725,8 +706,10 @@ mod stroke_renderer {
                 texture_descriptor: descriptor_set,
             })
         }
-        /// Allocate a new RenderData object. Initial contents are undefined!
+        /// Allocate a new `RenderData` object. Initial contents are undefined!
         pub fn uninit_render_data(&self) -> anyhow::Result<super::RenderData> {
+            use vulkano::VulkanObject;
+
             let image = vk::Image::new(
                 self.context.allocators().memory().clone(),
                 vk::ImageCreateInfo {
@@ -751,7 +734,6 @@ mod stroke_renderer {
             )?;
             let view = vk::ImageView::new_default(image.clone())?;
 
-            use vulkano::VulkanObject;
             log::info!("Made render data at id{:?}", view.handle());
 
             Ok(super::RenderData { image, view })

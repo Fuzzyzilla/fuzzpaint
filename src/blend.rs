@@ -1,5 +1,5 @@
 use crate::vulkano_prelude::*;
-use std::{default, fmt::Debug, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 
 #[derive(
     strum::AsRefStr,
@@ -37,7 +37,7 @@ pub struct Blend {
 impl Default for Blend {
     fn default() -> Self {
         Self {
-            mode: Default::default(),
+            mode: BlendMode::default(),
             opacity: 1.0,
             alpha_clip: false,
         }
@@ -56,7 +56,7 @@ mod shaders {
         pub x: u32,
         pub y: u32,
     }
-    /// The push constants to customize blending. Corresponds to fields in super::Blend.
+    /// The push constants to customize blending. Corresponds to fields in `super::Blend`.
     /// Every blend shader must accept this struct format!
     // Noteably, NOT AnyBitPattern nor Pod, bool32 has invalid states
     #[derive(bytemuck::Zeroable, vulkano::buffer::BufferContents, Clone, Copy, PartialEq)]
@@ -70,7 +70,7 @@ mod shaders {
         pub fn new(opacity: f32, clip: bool) -> Self {
             Self {
                 opacity,
-                clip: if clip { 1 } else { 0 },
+                clip: u32::from(clip),
             }
         }
     }
@@ -164,35 +164,36 @@ impl BlendImageSource {
     }
 }
 
-/// Checks if `src`` requires access to the same subresource as `dest`.
+/// Checks if `src` requires access to the same subresource as `dest`.
 fn does_alias(dest: &vk::ImageView, src: &BlendImageSource) -> bool {
+    // The simplest programming problems make my brain overheat
+    /// Checks if two ranges contain any elements in common.
+    fn ranges_intersect<T: Ord>(a: std::ops::Range<T>, b: std::ops::Range<T>) -> bool {
+        // these ranges are provided by vulkano, so we hope it upholds this invariant.
+        debug_assert!(a.start <= a.end);
+        debug_assert!(b.start <= b.end);
+        // Either range empty == never intersects
+        !(a.is_empty() || b.is_empty()) &&
+                // Check a inside b
+                    (a.start >= b.start && a.start < b.end
+                    || a.end > b.start && a.end <= b.end
+                // Or, check b inside a
+                    || b.start >= a.start && b.start < a.end
+                    || b.end > a.start && b.end <= a.end)
+    }
+
     let src = src.view();
-    if dest.image() != src.image() {
-        false
-    } else {
+    if dest.image() == src.image() {
         // Compare subresources
         let dest = dest.subresource_range();
         let src = src.subresource_range();
-
-        // The simplest programming problems make my brain overheat
-        fn ranges_intersect<T: Ord>(a: std::ops::Range<T>, b: std::ops::Range<T>) -> bool {
-            // these ranges are provided by vulkano, so we hope it upholds this invariant.
-            debug_assert!(a.start <= a.end);
-            debug_assert!(b.start <= b.end);
-            // Either range empty == never intersects
-            !(a.is_empty() || b.is_empty()) &&
-                    // Check a inside b
-                        (a.start >= b.start && a.start < b.end
-                        || a.end > b.start && a.end <= b.end
-                    // Or, check b inside a
-                        || b.start >= a.start && b.start < a.end
-                        || b.end > a.start && b.end <= a.end)
-        }
 
         // Array overlaps, mips overlap, AND aspect overlaps? then aliases!
         ranges_intersect(dest.array_layers.clone(), src.array_layers.clone())
             && ranges_intersect(dest.mip_levels.clone(), src.mip_levels.clone())
             && dest.aspects.intersects(src.aspects)
+    } else {
+        false
     }
 }
 
@@ -224,14 +225,14 @@ impl BlendInvocationBuilder {
     /// Reverse the order of the blend operations. The background will remain the background.
     /// Handles are treated as one blend unit, and their contents are not reversed in this operation.
     pub fn reverse(&mut self) {
-        self.operations.reverse()
+        self.operations.reverse();
     }
     /// Build the invocation. This handle can be used in other blend invocations as a source,
-    /// or it may be provided to [BlendEngine::submit] to begin device execution of the blend operation.
+    /// or it may be provided to [`BlendEngine::submit`] to begin device execution of the blend operation.
     ///
     /// If instead this result is discarded, it is safe to assume the resources described in this operation
     /// are never accessed.
-    #[must_use = "The blend handle must be submitted to the engine for blending to occur"]
+    #[must_use = "blend handle must be submitted to the engine for blending to occur"]
     pub fn build(self) -> BlendInvocationHandle {
         BlendInvocationHandle {
             operations: self.operations,
@@ -253,7 +254,7 @@ impl BlendEngine {
         device: Arc<vk::Device>,
         layout: Arc<vk::PipelineLayout>,
         size: shaders::WorkgroupSizeConstants,
-        entry_point: Arc<vulkano::shader::ShaderModule>,
+        entry_point: &Arc<vulkano::shader::ShaderModule>,
     ) -> anyhow::Result<Arc<vk::ComputePipeline>> {
         let mut specialization =
             ahash::HashMap::<u32, vk::SpecializationConstant>::with_capacity_and_hasher(
@@ -277,12 +278,12 @@ impl BlendEngine {
         )?;
         Ok(pipeline)
     }
-    pub fn new(device: Arc<vk::Device>) -> anyhow::Result<Self> {
+    pub fn new(device: &Arc<vk::Device>) -> anyhow::Result<Self> {
         // compute the workgroup size, specified as specialization constants
         let properties = device.physical_device().properties();
         let workgroup_size = {
             // Todo: better alg for this lol
-            let largest_square = (properties.max_compute_work_group_invocations as f64)
+            let largest_square = f64::from(properties.max_compute_work_group_invocations)
                 .sqrt()
                 .floor() as u32;
             let largest_square = largest_square
@@ -313,7 +314,7 @@ impl BlendEngine {
             0,
             vk::DescriptorSetLayoutBinding {
                 descriptor_count: 1,
-                immutable_samplers: Default::default(),
+                immutable_samplers: Vec::default(),
                 stages: vk::ShaderStages::COMPUTE,
                 ..vk::DescriptorSetLayoutBinding::descriptor_type(vk::DescriptorType::StorageImage)
             },
@@ -363,7 +364,7 @@ impl BlendEngine {
                         device.clone(),
                         shader_layout.clone(),
                         size,
-                        shaders::$namespace::load(device.clone())?,
+                        &shaders::$namespace::load(device.clone())?,
                     )?,
                 );
                 assert!(
@@ -388,6 +389,7 @@ impl BlendEngine {
     }
     /// Begin a blend operation with the engine.
     /// The destination image must be available at the time of calling `submit`.
+    #[must_use = "use the result to build an operation"]
     pub fn start(
         &self,
         destination_image: Arc<vk::ImageView>,
@@ -396,7 +398,7 @@ impl BlendEngine {
         BlendInvocationBuilder {
             clear_destination,
             destination_image,
-            operations: Default::default(),
+            operations: Vec::new(),
         }
     }
     /// Submits the work of one (or several composite) blend operations.
@@ -417,14 +419,14 @@ impl BlendEngine {
 
         // Array of Arrays of buffers. Each subsequent array is the next level of the tree, and will be
         // submitted from back to front with semaphores between.
-        let mut layers: Vec<Vec<Arc<vk::PrimaryAutoCommandBuffer>>> = Default::default();
+        let mut layers: Vec<Vec<Arc<vk::PrimaryAutoCommandBuffer>>> = Vec::new();
         // After the current walkthrough, which tasks to walk through next?
         let mut next_layer: Vec<BlendInvocationHandle> = vec![handle];
 
         while !next_layer.is_empty() {
-            let mut this_layer: Vec<Arc<vk::PrimaryAutoCommandBuffer>> = Default::default();
+            let mut this_layer: Vec<Arc<vk::PrimaryAutoCommandBuffer>> = Vec::new();
             // Take all the next tasks, and build them. Any subtasks referenced will be added back to the queue.
-            for task in std::mem::take(&mut next_layer).into_iter() {
+            for task in std::mem::take(&mut next_layer) {
                 // Build and push the commands for this operation
                 // (commands can be build prior to images being ready)
                 let cb = self.make_blend_commands(
@@ -442,7 +444,7 @@ impl BlendEngine {
                         .into_iter()
                         .filter_map(|(image, _)| match image {
                             BlendImageSource::BlendInvocation(inv) => Some(inv),
-                            _ => None,
+                            BlendImageSource::Immediate(_) => None,
                         }),
                 );
             }
@@ -452,16 +454,13 @@ impl BlendEngine {
 
         // now, layers should be filled, from back to front, with commands in the order they must be
         // executed for proper blending.
-
-        let mut after = vk::sync::now(context.device().clone()).boxed();
-
         for buffers in layers.into_iter().rev() {
             // `buffers` may all be executed in parallel without sync.
             // After all of these, the next iteration can proceed following a semaphore.
             // continue thusly until all is consumed, then return that future!
 
             let mut chunks = buffers.chunks(3);
-            after = chunks.try_fold(
+            let after = chunks.try_fold(
                 vk::sync::now(context.device().clone()).boxed(),
                 |after, buffers| -> anyhow::Result<_> {
                     match buffers {
@@ -492,7 +491,7 @@ impl BlendEngine {
     /// Layers will be blended, from front to back of the slice, into a mutable background.
     /// `background` must not be aliased by any image view of `layers` (will it panic or error?)
     ///
-    /// Any [BlendImageSource::BlendInvocation] items are assumed to have been rendered already, thus
+    /// Any [`BlendImageSource::BlendInvocation`] items are assumed to have been rendered already, thus
     /// only their destination images are taken into account.
     fn make_blend_commands(
         &self,
@@ -540,10 +539,7 @@ impl BlendEngine {
         let output_set = vk::PersistentDescriptorSet::new(
             context.allocators().descriptor_set(),
             self.shader_layout.set_layouts()[shaders::OUTPUT_IMAGE_SET as usize].clone(),
-            [vk::WriteDescriptorSet::image_view(
-                0,
-                destination_image.clone(),
-            )],
+            [vk::WriteDescriptorSet::image_view(0, destination_image)],
             [],
         )?;
         commands.bind_descriptor_sets(

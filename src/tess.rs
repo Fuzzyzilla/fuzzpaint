@@ -1,8 +1,8 @@
 //! # Tessellator
+//!
 //! The tessellator is the component responsible for converting formatted stroke data into a GPU-renderable mesh.
-//! This is done via the `StrokeTessellator` trait. Currently, this is implemented in Rayon, however preparations
-//! have been made to do more efficient tessellation on the GPU directly. This pipeline may also be skipped by
-//! EXT_mesh_shader.
+//! This is done via the `StrokeTessellator` trait. Currently, this is unused in favor of a GPU-side implementation,
+//! but may make a comeback when streaming stylus strokes from the user/network and rendering them a little at a time.
 pub mod rayon;
 
 #[derive(Debug)]
@@ -12,7 +12,6 @@ pub enum TessellationError {
 }
 
 pub trait StrokeTessellator {
-    type Stream<'a>: StreamStrokeTessellator<'a>;
     /// Tessellate all the strokes into the given subbuffer.
     fn tessellate(
         &self,
@@ -20,11 +19,6 @@ pub trait StrokeTessellator {
         vertices_into: crate::vk::Subbuffer<[TessellatedStrokeVertex]>,
         base_vertex: usize,
     ) -> ::std::result::Result<(), TessellationError>;
-    /// Construct a stream tessellator, which can tessellate many strokes into a
-    /// smaller buffer. Repeatedly call `StreamStrokeTessellator::tessellate` to continuously fill new buffers
-    // Stream does not borrow self. This makes sense in rayon and vulkano, where the
-    // stream maintains all the internals within itself.
-    fn stream<'s, 'a>(&'s self, strokes: &'a [crate::Stroke]) -> Self::Stream<'a>;
     /// Exact number of vertices to allocate and draw for this stroke.
     /// No method for estimates for now.
     fn num_vertices_of(&self, stroke: &crate::Stroke) -> usize;
@@ -36,7 +30,7 @@ pub trait StrokeTessellator {
 
 pub trait StreamStrokeTessellator<'a> {
     /// Tessellate many vertices into a buffer.
-    /// Must be a whole number of primitives! (Eg. TRIANGLE_LIST must have a multiple of 3 verts)
+    /// Must be a whole number of primitives! (Eg. `TRIANGLE_LIST` must have a multiple of 3 verts)
     /// Returns a status - which buffer was exhausted, or it completed successfully.
     /// Repeated calls to tessellate will continue to make forward progress.
     /// Some overhead is expected for a tessellation pass, so call with a large-ish buffer!
@@ -56,6 +50,7 @@ pub struct TessellatedStrokeInfo {
     pub vertices: u32,
 }
 impl TessellatedStrokeInfo {
+    #[must_use]
     pub fn empty() -> Self {
         Self {
             source: None,

@@ -1,5 +1,3 @@
-use crate::commands::*;
-
 /// Any type which can sink commands.
 pub trait CommandWrite<Command> {
     /// Inserts a command.
@@ -11,7 +9,7 @@ where
 {
     fn write(&mut self, command: Command) {
         // This isn't a recurse... right?
-        (**self).write(command)
+        (**self).write(command);
     }
 }
 pub struct CommandQueueWriter<'a> {
@@ -25,11 +23,11 @@ pub struct CommandQueueWriter<'a> {
 // Obviously not great, but sound at least.
 impl Drop for CommandQueueWriter<'_> {
     fn drop(&mut self) {
+        use crate::commands;
         // Skip if nothing to write.
         if self.commands.is_empty() {
             return;
         }
-        use crate::commands;
 
         // We always write exactly one command - bundle into one if more!
         // If panic exit, write as a panic scope (even if the scope is just one command long)
@@ -70,6 +68,7 @@ impl Drop for CommandQueueWriter<'_> {
     }
 }
 impl CommandQueueWriter<'_> {
+    #[must_use]
     pub fn changed(&self) -> bool {
         !self.commands.is_empty()
     }
@@ -99,13 +98,12 @@ impl CommandQueueWriter<'_> {
 
 // Any subcommand that can be wrapped in Command can be written into any
 // smallvec of Command.
-// This could be even more generic: Any subcommand can be written into any CommandWrite<Command>
 impl<Subcommand, Array> CommandWrite<Subcommand> for smallvec::SmallVec<Array>
 where
     Subcommand: Into<crate::commands::Command>,
     Array: smallvec::Array<Item = super::super::Command>,
 {
     fn write(&mut self, command: Subcommand) {
-        self.push(command.into())
+        self.push(command.into());
     }
 }

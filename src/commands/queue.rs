@@ -9,7 +9,7 @@
 //!
 //! There exists one command queue per document, accessed through [provider]s
 
-use std::{ops::DerefMut, sync::Arc};
+use std::sync::Arc;
 
 use super::CommandConsumer;
 pub mod provider;
@@ -35,8 +35,8 @@ pub struct DocumentCommandQueue {
     /// Can't think of a better way rn.
     on_change_channel: Option<tokio::sync::broadcast::Sender<provider::ProviderMessage>>,
 }
-impl DocumentCommandQueue {
-    pub fn new() -> Self {
+impl Default for DocumentCommandQueue {
+    fn default() -> Self {
         let command_tree = slab_tree::TreeBuilder::new()
             .with_root(super::Command::Dummy)
             .build();
@@ -50,11 +50,18 @@ impl DocumentCommandQueue {
                 }
                 .into(),
             ),
-            document: Default::default(),
+            document: crate::FuzzID::default(),
             on_change_channel: None,
         }
     }
+}
+impl DocumentCommandQueue {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
     // Create a queue from data, without a history.
+    #[must_use]
     pub fn from_state(
         document: crate::state::Document,
         blend_graph: crate::state::graph::BlendGraph,
@@ -78,7 +85,7 @@ impl DocumentCommandQueue {
                 }
                 .into(),
             ),
-            document: Default::default(),
+            document: crate::FuzzID::default(),
             on_change_channel: None,
         }
     }
@@ -87,8 +94,9 @@ impl DocumentCommandQueue {
         &mut self,
         send: tokio::sync::broadcast::Sender<provider::ProviderMessage>,
     ) {
-        self.on_change_channel = Some(send)
+        self.on_change_channel = Some(send);
     }
+    #[must_use]
     pub fn id(&self) -> crate::state::DocumentID {
         self.document
     }
@@ -102,7 +110,7 @@ impl DocumentCommandQueue {
             let lock = self.inner.write();
             let mut writer = writer::CommandQueueWriter {
                 lock,
-                commands: Default::default(),
+                commands: smallvec::SmallVec::new(),
             };
             // Panic safe - `writer::CommandQueueWriter`'s Drop impl will do the cleanup ensuring the queue's commands and state are synchronized.
             // However, changes will not be notified.
@@ -119,6 +127,7 @@ impl DocumentCommandQueue {
         result
     }
     /// A helper method to view the state as it is at this moment as a clone.
+    #[must_use]
     pub fn peek_clone_state(&self) -> state_reader::CommandQueueCloneLock {
         // Unwrap OK - ref to self means queue is alive valid during this method,
         // and we don't anticipate a broken command graph ofc...
@@ -133,7 +142,7 @@ impl DocumentCommandQueue {
                 command_tree,
                 root,
                 state,
-            } = lock.deref_mut();
+            } = &mut *lock;
             let start = state.present;
             let Some(ancestors) = command_tree.get(state.present).map(|this| this.ancestors())
             else {
@@ -145,10 +154,10 @@ impl DocumentCommandQueue {
                 );
             };
             let new_cursor = ancestors.take(num).last();
-            state.present = new_cursor.map(|node| node.node_id()).unwrap_or(*root);
+            state.present = new_cursor.map_or(*root, |node| node.node_id());
             let end = state.present;
             // Apply state changes from the commands:
-            for command in traverse(&command_tree, start, end).unwrap() {
+            for command in traverse(command_tree, start, end).unwrap() {
                 state.apply(command).unwrap();
             }
 
@@ -172,7 +181,7 @@ impl DocumentCommandQueue {
                 command_tree,
                 state,
                 ..
-            } = lock.deref_mut();
+            } = &mut *lock;
             let start = state.present;
             for _ in 0..num {
                 let Some(this) = command_tree.get(state.present) else {
@@ -191,19 +200,22 @@ impl DocumentCommandQueue {
             }
             let end = state.present;
             // Apply state changes from the commands:
-            for command in traverse(&command_tree, start, end).unwrap() {
+            for command in traverse(command_tree, start, end).unwrap() {
                 state.apply(command).unwrap();
             }
             // Changed if we ended up in a different spot!
             start != end
         };
         // Report change (if any) only after the write lock is dropped.
-        let _ = self
-            .on_change_channel
-            .as_ref()
-            .map(|c| c.send(provider::ProviderMessage::Modified(self.id())));
+        if changed {
+            let _ = self
+                .on_change_channel
+                .as_ref()
+                .map(|c| c.send(provider::ProviderMessage::Modified(self.id())));
+        }
     }
     /// Create a listener that starts at the beginning of history.
+    #[must_use]
     pub fn listen_from_start(&self) -> DocumentCommandListener {
         let start = self.inner.read().root;
         DocumentCommandListener {
@@ -213,6 +225,7 @@ impl DocumentCommandQueue {
         }
     }
     /// Create a listener that will only see new activity
+    #[must_use]
     pub fn listen_from_now(&self) -> DocumentCommandListener {
         let start = self.inner.read().state.present;
         DocumentCommandListener {
@@ -239,22 +252,19 @@ pub struct DocumentCommandListener {
 }
 impl DocumentCommandListener {
     /// Locks the shared state, without forwarding this listener's point in time.
-    /// See [state_reader::CommandQueueLock]
+    /// See [`state_reader::CommandQueueLock`]
     pub fn peek_lock_state(&self) -> Result<state_reader::CommandQueueReadLock, ListenerError> {
         todo!()
     }
     /// Locks the shared state, bringing this listener up-to-date in the process.
-    /// See [state_reader::CommandQueueLock]
+    /// See [`state_reader::CommandQueueLock`]
     pub fn forward_lock_state(
         &mut self,
     ) -> Result<state_reader::CommandQueueReadLock, ListenerError> {
-        let state = self.peek_lock_state()?;
-        // update foward cursor
-        todo!();
-        Ok(state)
+        todo!()
     }
     /// Locks or clones the shared state, without forwarding this listener's point in time.
-    /// See [state_reader::CommandQueueCloneLock]
+    /// See [`state_reader::CommandQueueCloneLock`]
     pub fn peek_clone_state(
         &'_ self,
     ) -> Result<state_reader::CommandQueueCloneLock, ListenerError> {
@@ -263,7 +273,7 @@ impl DocumentCommandListener {
         // Eagerly collect command traversal.
         let commands: Vec<state_reader::OwnedDoUndo<_>> =
             traverse(&lock.command_tree, self.cursor, lock.state.present)
-                .map_err(|traverse| ListenerError::TreeMalformed(traverse))?
+                .map_err(ListenerError::TreeMalformed)?
                 .map(Into::into)
                 .collect();
 
@@ -277,7 +287,7 @@ impl DocumentCommandListener {
         })
     }
     /// Locks or clones the shared state, bringing this listener up-to-date in the process.
-    /// See [state_reader::CommandQueueCloneLock]
+    /// See [`state_reader::CommandQueueCloneLock`]
     pub fn forward_clone_state(
         &'_ mut self,
     ) -> Result<state_reader::CommandQueueCloneLock, ListenerError> {
@@ -334,7 +344,7 @@ impl<'t, T> Iterator for TreeTraverser<'t, T> {
             // Kinda a logic mess lol
             // Last item will be next path to go down. Only consume it if the node id matches,
             // Otherwise default to first child.
-            let child_idx = if let Some((node_id, child_idx)) = self.path_down.last().cloned() {
+            let child_idx = if let Some((node_id, child_idx)) = self.path_down.last().copied() {
                 if node_id == self.cur.node_id() {
                     // Consume path, return
                     self.path_down.pop();
@@ -391,11 +401,11 @@ pub enum TraverseError {
 }
 /// Create an iterator that traverses the shortest path between start and end nodes, or None if the start
 /// and end nodes are not from the same tree.
-fn traverse<'t, T>(
-    tree: &'t slab_tree::Tree<T>,
+fn traverse<T>(
+    tree: &slab_tree::Tree<T>,
     start: slab_tree::NodeId,
     end: slab_tree::NodeId,
-) -> Result<TreeTraverser<'t, T>, TraverseError> {
+) -> Result<TreeTraverser<'_, T>, TraverseError> {
     let ancestor = nearest_ancestor(tree, start, end)?;
 
     // Find the path from the ancestor to the end.

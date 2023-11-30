@@ -1,7 +1,7 @@
 //! # Commands
 //!
 //! Commands are the way the shared state of the document are modified. Every (nontrivial, like renaming a layer) change
-//! is recorded automatically as a command by a [queue::writer].
+//! is recorded automatically as a command by a [`queue::writer`].
 
 pub mod queue;
 pub use state::graph::commands::GraphCommand;
@@ -67,24 +67,28 @@ impl From<StrokeCollectionCommand> for Command {
     }
 }
 impl Command {
+    #[must_use]
     pub fn meta(&self) -> Option<&MetaCommand> {
         match self {
             Self::Meta(m) => Some(m),
             _ => None,
         }
     }
+    #[must_use]
     pub fn stroke_collection(&self) -> Option<&StrokeCollectionCommand> {
         match self {
             Self::StrokeCollection(m) => Some(m),
             _ => None,
         }
     }
+    #[must_use]
     pub fn graph(&self) -> Option<&GraphCommand> {
         match self {
             Self::Graph(m) => Some(m),
             _ => None,
         }
     }
+    #[must_use]
     pub fn dummy(&self) -> Option<()> {
         match self {
             Self::Dummy => Some(()),

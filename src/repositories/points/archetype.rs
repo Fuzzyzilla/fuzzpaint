@@ -40,6 +40,7 @@ bitflags::bitflags! {
 }
 impl PointArchetype {
     /// How many elements (f32) does a point of this archetype occupy?
+    #[must_use]
     pub const fn elements(self) -> usize {
         // Formerly Self::iter based but the codegen was un-scrumptious
 
@@ -48,6 +49,7 @@ impl PointArchetype {
         // These fields specify two elements, count them again
             + (self.bits() & Self::HAS_TWO_FIELDS.bits()).count_ones() as usize
     }
+    #[must_use]
     pub const fn len_bytes(self) -> usize {
         self.elements() * std::mem::size_of::<f32>()
     }

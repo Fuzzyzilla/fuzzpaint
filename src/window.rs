@@ -21,7 +21,7 @@ impl WindowSurface {
             .build(&event_loop)?;
 
         Ok(Self {
-            event_loop: event_loop,
+            event_loop,
             win: Arc::new(win),
         })
     }
@@ -55,7 +55,7 @@ impl WindowSurface {
             action_collector:
                 crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
             action_stream: stream,
-            stylus_events: Default::default(),
+            stylus_events: crate::stylus_events::WinitStylusEventCollector::default(),
         })
     }
 }
@@ -93,7 +93,7 @@ impl WindowRenderer {
     }
     pub fn render_surface(&self) -> &render_device::RenderSurface {
         //this will ALWAYS be Some. The option is for taking from a mutable reference for recreation.
-        &self.render_surface.as_ref().unwrap()
+        self.render_surface.as_ref().unwrap()
     }
     /// Recreate surface after loss or out-of-date. Todo: This only handles out-of-date and resize.
     pub fn recreate_surface(&mut self) -> AnyResult<()> {
@@ -136,7 +136,7 @@ impl WindowRenderer {
         let event_loop = self.event_loop.take().unwrap();
         self.window().request_redraw();
 
-        event_loop.run(move |event, target, control_flow| {
+        event_loop.run(move |event, _, control_flow| {
             use winit::event::{Event, WindowEvent};
             match event {
                 Event::WindowEvent { event, .. } => {
@@ -147,7 +147,6 @@ impl WindowRenderer {
                     match event {
                         WindowEvent::CloseRequested => {
                             *control_flow = winit::event_loop::ControlFlow::Exit;
-                            return;
                         }
                         WindowEvent::Resized(..) => {
                             self.recreate_surface().expect("Failed to rebuild surface");
@@ -167,33 +166,32 @@ impl WindowRenderer {
                             if pressed {
                                 // Only take if egui doesn't want it!
                                 if !consumed {
-                                    self.stylus_events.set_mouse_pressed(true)
+                                    self.stylus_events.set_mouse_pressed(true);
                                 }
                             } else {
-                                self.stylus_events.set_mouse_pressed(false)
+                                self.stylus_events.set_mouse_pressed(false);
                             }
                         }
                         _ => (),
                     }
                 }
-                Event::DeviceEvent { event, .. } => {
-                    match event {
-                        //Pressure out of 65535
-                        winit::event::DeviceEvent::Motion { axis: 2, value } => {
-                            self.stylus_events.set_pressure(value as f32 / 65535.0)
-                        }
-                        _ => (),
-                    }
+                Event::DeviceEvent {
+                    event: winit::event::DeviceEvent::Motion { axis: 2, value },
+                    ..
+                } => {
+                    //Pressure out of 65535
+                    self.stylus_events.set_pressure(value as f32 / 65535.0);
+                    // Other axes (undocumented and X11 only)
                     // 0 -> x in display space
                     // 1 -> y in display space
                     // 2 -> pressure out of 65535, 0 if not pressed
                     // 3 -> Tilt X, degrees from vertical, + to the right
                     // 4 -> Tilt Y, degrees from vertical, + towards user
-                    // 5 -> unknown, always zero (rotation?)
+                    // 5 -> unknown, always zero (barrel rotation?)
                 }
                 Event::RedrawRequested(..) => {
                     if let Err(e) = self.paint() {
-                        log::error!("{e:?}")
+                        log::error!("{e:?}");
                     };
                 }
                 Event::MainEventsCleared => {
@@ -203,7 +201,7 @@ impl WindowRenderer {
 
                     // Request draw if either the UI or document want it
                     if self.egui_ctx.needs_redraw() || self.preview_renderer.has_update() {
-                        self.window().request_redraw()
+                        self.window().request_redraw();
                     }
 
                     // End frame
@@ -245,7 +243,7 @@ impl WindowRenderer {
         // After we present, recreate if suboptimal.
         defer::defer(|| {
             if suboptimal {
-                self.recreate_surface().unwrap()
+                self.recreate_surface().unwrap();
             }
         });
         let commands = self.egui_ctx.build_commands(idx);
@@ -263,7 +261,7 @@ impl WindowRenderer {
             Ok(commands) => commands,
             Err(e) => {
                 log::warn!("Failed to build preview commands {e:?}");
-                Default::default()
+                smallvec::SmallVec::new()
             }
         };
 
@@ -287,7 +285,7 @@ impl WindowRenderer {
 
                 let mut future = image_future.boxed();
 
-                for buffer in preview_commands.into_iter() {
+                for buffer in preview_commands {
                     future = future
                         .then_execute(
                             self.render_context.queues().graphics().queue().clone(),
@@ -306,7 +304,7 @@ impl WindowRenderer {
             Some((None, draw)) => {
                 let mut future = image_future.boxed();
 
-                for buffer in preview_commands.into_iter() {
+                for buffer in preview_commands {
                     future = future
                         .then_execute(
                             self.render_context.queues().graphics().queue().clone(),

@@ -2,7 +2,7 @@ use az::{CheckedAs, SaturatingAs};
 use std::io::{BufRead, Error as IOError, Read, Result as IOResult, Seek, SeekFrom, Write};
 
 pub trait SoftSeek: Seek {
-    /// Faster seek that doesn't support absolute positioning and doesn't return the current position.
+    /// Faster `seek` that doesn't support absolute positioning and doesn't return the current position.
     /// Similar to `io::Seek`, behavior is implementation defined when attempting
     /// to seek past the start or past the end.
     ///
@@ -10,7 +10,7 @@ pub trait SoftSeek: Seek {
     ///
     /// `self.seek(Current(by)).map(|_| ())` is a valid implementation.
     fn soft_seek(&mut self, by: i64) -> IOResult<()>;
-    /// Faster stream_position for streams with internal cursors that does not necessarily query the underlying stream.
+    /// Faster `stream_position` for streams with internal cursors that does not necessarily query the underlying stream.
     /// The reported position is not necessarily the same as the underlying stream would report.
     ///
     /// `self.stream_position()` is a valid implementation.
@@ -82,15 +82,15 @@ where
     }
 }
 
-/// std::io::Take, except it's Seek when S:Seek. Not sure why std's isn't D:
+/// `std::io::Take`, except it's Seek when S:Seek. Not sure why std's isn't D:
 ///
-/// Works with readers, writers, BufReaders, all three, whatever!
+/// Works with readers, writers, `BufReaders`, all three, whatever!
 ///
-/// If the base reader is Seek, it shifts the basis of it
-/// such that the position at the time of MyTake's construction is the start,
+/// If the base reader is `Seek`, it shifts the basis of it
+/// such that the position at the time of `MyTake`'s construction is the start,
 /// and that position + len is the end. Seeks past-the-end are clamped to the end.
 ///
-/// There are numerous ways to jailbreak this (for example, since Read + Write are safe traits, they may report incorrect
+/// There are numerous ways to jailbreak this (for example, since `Read` + `Write` are safe traits, they may report incorrect
 /// return values for read/write allowing the cursor to drift out-of-bounds), being 100% watertight is a non-goal
 /// and it's instead implemented on a best-effort basis.
 pub struct MyTake<S> {
@@ -110,6 +110,7 @@ impl<S> MyTake<S> {
         }
     }
     /// How many bytes remain
+    #[must_use]
     pub fn remaining(&self) -> u64 {
         self.len
             .checked_sub(self.cursor)
@@ -118,25 +119,31 @@ impl<S> MyTake<S> {
     }
     /// Consume the Take, returning the inner stream. The cursor is not touched.
     ///
-    /// To instead consume and jump to the end, use MyTake::skip.
+    /// To instead consume and jump to the end, use `MyTake::skip`.
     pub fn into_inner(self) -> S {
         self.stream
     }
-    /// Returns the current stream position, in bytes since the point where the MyTake was constructed.
+    /// Returns the current stream position, in bytes since the point where the `MyTake` was constructed.
     pub fn cursor(&self) -> u64 {
         self.cursor
     }
     /// Returns the total length of the stream, exactly as passed into `new` regardless of stream position.
     ///
     /// For length remaining, use `remaining`.
+    #[must_use]
     pub fn len(&self) -> u64 {
         self.len
+    }
+    /// Returns `true` if there are no more bytes remaining at the current cursor in the stream.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.remaining() == 0
     }
     /// Consumes this take, returning a smaller one from the current position.
     /// Fails and returns ownership of self if the requested length is longer than the remaining length.
     ///
-    /// The resulting MyTake is faster than constructing a new MyTake around `self`
-    /// as it reduces the recursion needed for stream operations, with the limitation that the original MyTake
+    /// The resulting `MyTake` is faster than constructing a new `MyTake` around `self`
+    /// as it reduces the recursion needed for stream operations, with the limitation that the original `MyTake`
     /// cannot be recovered.
     pub fn retake(self, len: u64) -> Result<MyTake<S>, Self> {
         if len > self.remaining() {
@@ -150,6 +157,7 @@ impl<S> MyTake<S> {
         }
     }
     /// Create a new take from the current position up to the end of this take.
+    #[must_use]
     pub fn retake_remaining(self) -> Self {
         Self {
             len: self.remaining(),
@@ -172,7 +180,7 @@ impl<W: Write> MyTake<W> {
 }
 impl<S: Seek> MyTake<S> {
     /// Advance the cursor to the end, returning the stream.
-    /// If remaining > i64::MAX, will require two seeks.
+    /// If remaining > `i64::MAX`, will require two seeks.
     ///
     /// In case of an error, stream state is left undefined and is lost.
     pub fn skip(self) -> IOResult<S> {
@@ -182,15 +190,15 @@ impl<S: Seek> MyTake<S> {
             return Ok(self.stream);
         }
         let mut stream = self.stream;
-        let iremaining: i64 = remaining.saturating_as();
+        let signed_remaining: i64 = remaining.saturating_as();
 
         // Seek from current by a u64.
         // Seek takes i64, so we might have to do two seeks to reach u64::MAX
-        stream.seek(SeekFrom::Current(iremaining))?;
-        if (iremaining as u64) < remaining {
+        stream.seek(SeekFrom::Current(signed_remaining))?;
+        if (signed_remaining as u64) < remaining {
             // Have to seek again :V
-            let iremaining = (remaining.saturating_sub(i64::MAX as u64)).saturating_as();
-            stream.seek(SeekFrom::Current(iremaining))?;
+            let signed_remaining = (remaining.saturating_sub(i64::MAX as u64)).saturating_as();
+            stream.seek(SeekFrom::Current(signed_remaining))?;
         }
 
         Ok(stream)
@@ -217,8 +225,7 @@ where
             let new_cursor = self
                 .cursor
                 .checked_add(forward_by)
-                .map(|new_cursor| new_cursor.min(self.len))
-                .unwrap_or(self.len);
+                .map_or(self.len, |new_cursor| new_cursor.min(self.len));
 
             let delta = new_cursor - self.cursor;
             self.cursor = new_cursor;
@@ -281,7 +288,7 @@ impl<R: BufRead> BufRead for MyTake<R> {
         debug_assert!(self.cursor <= self.len);
 
         let trimmed_amt: usize = trimmed_amt.saturating_as();
-        self.stream.consume(trimmed_amt)
+        self.stream.consume(trimmed_amt);
     }
     fn fill_buf(&mut self) -> IOResult<&[u8]> {
         // Early call. Borrow weirdness.
@@ -403,7 +410,7 @@ fn trim_buf_mut<T>(buf: &mut [T], len: u64) -> &mut [T] {
     let len = buf.len().min(len.saturating_as());
     &mut buf[..len]
 }
-/// Trims the IoSlices down to be no more than `len` bytes cumulative bytes.
+/// Trims the `IoSlice`s down to be no more than `len` bytes cumulative bytes.
 /// Returns the total len, and a new slice.
 fn trim_ioslices<'a>(
     bufs: &'a [std::io::IoSlice<'a>],
@@ -414,7 +421,7 @@ fn trim_ioslices<'a>(
     let mut trimmed_slices = smallvec::smallvec![];
     let mut total_len: u64 = 0;
 
-    for buf in bufs.iter() {
+    for buf in bufs {
         // Won't overflow
         let size_left = len - total_len;
 
@@ -437,7 +444,7 @@ fn trim_ioslices<'a>(
     (total_len, trimmed_slices)
 }
 
-/// Trims the IoSlices down to be no more than `len` bytes cumulative bytes.
+/// Trims the `IoSliceMut`s down to be no more than `len` bytes cumulative bytes.
 /// Returns the total len, and a new slice.
 // Can happen in-place?
 fn trim_ioslices_mut<'slice, 'data: 'slice>(
@@ -479,16 +486,19 @@ fn trim_ioslices_mut<'slice, 'data: 'slice>(
 fn pad_writer(mut w: impl Write, num_bytes: u64) -> IOResult<()> {
     use std::io::IoSlice;
 
+    // How many zeros per sice?
     const NUM_ZEROS: usize = 512;
+    // The slice:
     // Does this contribute to final binary size, or is it put into BSS?
-    const ZEROS: &'static [u8] = &[0; NUM_ZEROS];
+    const ZEROS: &[u8] = &[0; NUM_ZEROS];
+    // How many refs to slices of zeros do we keep on the stack?
+    const MAX_STACK_ARRAY_SIZE: usize = 8;
 
     // How many full slices of ZEROS doe we need?
     let num_full_slices = num_bytes / NUM_ZEROS as u64;
     // How many bytes left over?
     let residual_bytes = num_bytes % NUM_ZEROS as u64;
 
-    const MAX_STACK_ARRAY_SIZE: usize = 8;
     // How many packed arrays of slices?
     let num_full_arrays = num_full_slices / MAX_STACK_ARRAY_SIZE as u64;
     // How many partial arrays?

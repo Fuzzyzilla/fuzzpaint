@@ -1,6 +1,69 @@
 use std::collections::VecDeque;
 
+// More of an #include situation than a module situation lol
+#[allow(clippy::wildcard_imports)]
 use super::*;
+
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C, packed)]
+struct DictMetadata {
+    offset: u32,
+    len: u32,
+    arch: PointArchetype,
+}
+
+// Collect all subsequent ones that will also fit
+// (allows overlapping blocks)
+
+/// Collect a slice while `pred` returns true.
+///
+/// Inverse of the unstable `[T]::split_once` but it's unstable anyway.
+/// Similar to `group_by`, `split`, `split_once` ect...... hmmst
+fn take_while<T, Pred>(slice: &[T], mut pred: Pred) -> &[T]
+where
+    Pred: FnMut(&T) -> bool,
+{
+    if let Some(pos) = slice.iter().position(|t| !pred(t)) {
+        &slice[..pos]
+    } else {
+        slice
+    }
+}
+
+/// For a slab that's either locked or owned
+enum SlabSrc<'a, T: bytemuck::Pod, const N: usize> {
+    Shared {
+        idx: usize,
+        lock: slab::Guard<'a, T, N>,
+    },
+    Owned(slab::Slab<T, N>),
+}
+impl<'a, T: bytemuck::Pod, const N: usize> SlabSrc<'a, T, N> {
+    fn position(&mut self) -> usize {
+        match self {
+            Self::Shared { lock, .. } => lock.position(),
+            Self::Owned(slab) => slab.position(),
+        }
+    }
+    fn remaining(&mut self) -> usize {
+        match self {
+            Self::Shared { lock, .. } => lock.remaining(),
+            Self::Owned(slab) => slab.remaining(),
+        }
+    }
+    fn parts_mut(&mut self) -> (&[T], &mut [T]) {
+        match self {
+            Self::Shared { lock, .. } => lock.parts_mut(),
+            Self::Owned(slab) => slab.parts_mut(),
+        }
+    }
+    fn bump(&mut self, amount: usize) -> Result<(), slab::BumpTooLargeError> {
+        match self {
+            Self::Shared { lock, .. } => lock.bump(amount),
+            Self::Owned(slab) => slab.bump(amount),
+        }
+    }
+}
 
 #[derive(Copy, Clone)]
 enum LazyID {
@@ -25,7 +88,7 @@ struct LazyPointCollectionAllocInfo {
 
 impl super::PointRepository {
     /// Given an iterator of collection IDs, encodes them directly (in order) into the given Write stream in a `DICT ptls` chunk.
-    /// On success, returns a map between PointCollectionID and file local id as written.
+    /// On success, returns a map between `PointCollectionID` and file local id as written.
     pub fn write_dict_into(
         &self,
         ids: impl Iterator<Item = PointCollectionID>,
@@ -40,7 +103,7 @@ impl super::PointRepository {
 
         const PTLS_WRITE_VERSION: Version = Version(0, 0, 0);
 
-        let mut file_ids = crate::io::id::FileLocalInterner::new();
+        let mut file_ids = crate::io::id::FileLocalInterner::default();
         // Collect all uniqe entries and allocs.
         let allocation_entries: Result<Vec<_>, WriteError> = ids
             .filter_map(|id| match file_ids.insert(id) {
@@ -56,14 +119,6 @@ impl super::PointRepository {
             .collect();
         let allocation_entries = allocation_entries?;
 
-        #[derive(Clone, Copy, bytemuck::NoUninit)]
-        #[repr(C, packed)]
-        struct DictMetadata {
-            offset: u32,
-            len: u32,
-            arch: PointArchetype,
-        }
-
         let mut total_data_bytes = 0u32;
         let meta_entries: Result<Vec<DictMetadata>, WriteError> = allocation_entries
             .iter()
@@ -73,7 +128,7 @@ impl super::PointRepository {
                 let len = summary
                     .len
                     .checked_mul(summary.archetype.len_bytes())
-                    .and_then(|len| len.checked_as())
+                    .and_then(usize::checked_as)
                     .ok_or(WriteError::TooLong)?;
                 let meta = DictMetadata {
                     offset: total_data_bytes,
@@ -167,7 +222,7 @@ impl super::PointRepository {
     /// IDs.
     pub fn read_dict<R>(
         &self,
-        mut dict: crate::io::riff::decode::DictReader<R>,
+        dict: crate::io::riff::decode::DictReader<R>,
     ) -> std::io::Result<crate::io::id::ProcessLocalInterner<PointCollectionIDMarker>>
     where
         R: std::io::Read + crate::io::common::SoftSeek,
@@ -188,13 +243,6 @@ impl super::PointRepository {
             return Err(IOError::other(anyhow::anyhow!("bad metadata len")));
         }
 
-        #[derive(Clone, Copy, bytemuck::AnyBitPattern, Debug)]
-        #[repr(C, packed)]
-        struct DictMetadata {
-            offset: u32,
-            len: u32,
-            arch: PointArchetype,
-        }
         let mut metas = VecDeque::<(Option<PointCollectionID>, DictMetadata)>::new();
         let mut unstructured = dict.try_for_each(|mut meta_read| {
             let mut bytes = [0; std::mem::size_of::<DictMetadata>()];
@@ -219,14 +267,14 @@ impl super::PointRepository {
             return Err(IOError::other(anyhow::anyhow!("point list data too long")));
         }
         // Allocate many ids, and disperse them
-        let ids = {
+        let file_ids = {
             let count = metas
                 .len()
                 .checked_as::<u32>()
                 .ok_or_else(|| IOError::other(anyhow::anyhow!("Too many elements")))?;
             let mut ids = ProcessLocalInterner::many_sequential(count as usize).unwrap();
-            for (file_id, meta) in (0..count).into_iter().zip(metas.iter_mut()) {
-                meta.0 = Some(ids.get_or_insert(file_id.into()))
+            for (file_id, meta) in (0..count).zip(metas.iter_mut()) {
+                meta.0 = Some(ids.get_or_insert(file_id.into()));
             }
             ids
         };
@@ -246,44 +294,11 @@ impl super::PointRepository {
         // Limitations: Can't yet de-allocate from existing slabs so failures leak mem,
         // + concurrent loading will over-commit on new blocks.
 
-        // We can trust metas.len, as we were successfully able to read that many.
-        let mut infos = Vec::<PointCollectionAllocInfo>::with_capacity(metas.len());
-        enum SlabSrc<'a, T: bytemuck::Pod, const N: usize> {
-            Shared {
-                idx: usize,
-                lock: slab::SlabGuard<'a, T, N>,
-            },
-            Owned(slab::Slab<T, N>),
-        }
-        impl<'a, T: bytemuck::Pod, const N: usize> SlabSrc<'a, T, N> {
-            fn position(&mut self) -> usize {
-                match self {
-                    Self::Shared { lock, .. } => lock.position(),
-                    Self::Owned(slab) => slab.position(),
-                }
-            }
-            fn remaining(&mut self) -> usize {
-                match self {
-                    Self::Shared { lock, .. } => lock.remaining(),
-                    Self::Owned(slab) => slab.remaining(),
-                }
-            }
-            fn parts_mut<'s>(&'s mut self) -> (&'s [T], &'s mut [T]) {
-                match self {
-                    Self::Shared { lock, .. } => lock.parts_mut(),
-                    Self::Owned(slab) => slab.parts_mut(),
-                }
-            }
-            fn bump<'s>(&'s mut self, amount: usize) -> Result<(), slab::BumpTooLargeError> {
-                match self {
-                    Self::Shared { lock, .. } => lock.bump(amount),
-                    Self::Owned(slab) => slab.bump(amount),
-                }
-            }
-        }
         // Blocks that were newly allocated for reading. May be freed if an error occurs.
-        let mut new_slabs: smallvec::SmallVec<[ElementSlab; 2]> = Default::default();
-        let mut allocs = Vec::<(PointCollectionID, LazyPointCollectionAllocInfo)>::new();
+        let mut new_slabs: smallvec::SmallVec<[ElementSlab; 2]> = smallvec::SmallVec::new();
+        // We can trust the length of metas now, since we were successfully able to read that many.
+        let mut allocs =
+            Vec::<(PointCollectionID, LazyPointCollectionAllocInfo)>::with_capacity(metas.len());
 
         // This is an absolute disaster, readability and perf wise.
         // Any attempt to simplify it results in inscrutable lifetime errors D:
@@ -319,24 +334,6 @@ impl super::PointRepository {
                         None => SlabSrc::Owned(Slab::new()),
                     }
                 };
-
-                // Collect all subsequent ones that will also fit
-                // (allows overlapping blocks)
-
-                /// Collect a slice while `pred` returns true.
-                ///
-                /// Inverse of the unstable \[T\]::split_once but it's unstable anyway.
-                /// Similar to group_by, split, split_once ect...... hmmst
-                fn take_while<T, Pred>(slice: &[T], mut pred: Pred) -> &[T]
-                where
-                    Pred: FnMut(&T) -> bool,
-                {
-                    if let Some(pos) = slice.iter().position(|t| !pred(t)) {
-                        &slice[..pos]
-                    } else {
-                        slice
-                    }
-                }
 
                 // Immutable - they're sorted, so the start point never needs to move.
                 let range_start_bytes = first_meta.1.offset;
@@ -378,7 +375,7 @@ impl super::PointRepository {
                 // We only ever need to move forwards
                 // In theory we shouldn't even need to seek, but we cannot assume that.
                 let cur = unstructured.soft_position()?;
-                let forward_dist = (range_start_bytes as u64)
+                let forward_dist = u64::from(range_start_bytes)
                     .checked_sub(cur)
                     // debug assert lol
                     .expect("seek back");
@@ -429,8 +426,7 @@ impl super::PointRepository {
                             // Some if available and non-nan, None otherwise.
                             arc_length: last_point
                                 .map(|l| l.dist)
-                                .map(optional::wrap)
-                                .unwrap_or(optional::none()),
+                                .map_or_else(optional::none, optional::wrap),
                         }
                     })
                     .collect();
@@ -445,10 +441,9 @@ impl super::PointRepository {
                     }
                 };
 
-                let mut info_lock = self.allocs.write();
                 // Create alloc infos
                 std::iter::once(&first_meta)
-                    .chain(also_fit.into_iter())
+                    .chain(also_fit.iter())
                     .zip(summaries.into_iter())
                     .for_each(|((id, meta), summary)| {
                         let alloc_info = LazyPointCollectionAllocInfo {
@@ -472,7 +467,7 @@ impl super::PointRepository {
 
         // Failed to read. Free any blocks we allocated for this task and diverge.
         if let Err(e) = try_read_points() {
-            for block in new_slabs.into_iter() {
+            for block in new_slabs {
                 // Safety - we only took short-lived references to this data for
                 // generating the summaries, and they've since been dropped.
                 unsafe { block.free() }
@@ -485,11 +480,11 @@ impl super::PointRepository {
             let start_idx = {
                 let mut write = self.slabs.write();
                 let start_idx = write.len();
-                write.extend(new_slabs.into_iter());
+                write.extend(new_slabs);
                 start_idx
             };
             // We now have a mapping of New -> Shared ids
-            for alloc in allocs.iter_mut() {
+            for alloc in &mut allocs {
                 if let LazyID::Local(local) = alloc.1.slab_id {
                     alloc.1.slab_id = LazyID::Shared(local + start_idx);
                 }
@@ -498,7 +493,7 @@ impl super::PointRepository {
         // At this point ever alloc should be in Shared state.
         {
             let mut write = self.allocs.write();
-            for (id, alloc) in allocs.into_iter() {
+            for (id, alloc) in allocs {
                 let slab_id = match alloc.slab_id {
                     LazyID::Shared(id) => id,
                     // Impl error!
@@ -515,6 +510,6 @@ impl super::PointRepository {
             }
         }
         // Report back the FileID->FuzzID mapping
-        Ok(ids)
+        Ok(file_ids)
     }
 }

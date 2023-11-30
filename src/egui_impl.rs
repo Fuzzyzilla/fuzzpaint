@@ -1,4 +1,4 @@
-use crate::render_device::*;
+use crate::render_device::RenderSurface;
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
 
@@ -8,13 +8,13 @@ pub fn prepend_textures_delta(into: &mut egui::TexturesDelta, mut from: egui::Te
     //Append into's data onto from, then copy the data back.
     //There is no convinient way to efficiently prepend a chunk of data, so this'll do :3
     from.free.reserve(into.free.len());
-    from.free.extend(std::mem::take(&mut into.free).into_iter());
+    from.free.extend(std::mem::take(&mut into.free));
     into.free = std::mem::take(&mut from.free);
 
     //Maybe duplicates work. Could optimize to discard redundant updates, but this probably
     //wont happen frequently
     from.set.reserve(into.set.len());
-    from.set.extend(std::mem::take(&mut into.set).into_iter());
+    from.set.extend(std::mem::take(&mut into.set));
     into.set = std::mem::take(&mut from.set);
 }
 
@@ -32,7 +32,7 @@ impl EguiCtx {
         render_surface: &RenderSurface,
     ) -> anyhow::Result<Self> {
         let mut renderer = EguiRenderer::new(render_surface.context(), render_surface.format())?;
-        renderer.gen_framebuffers(&render_surface)?;
+        renderer.gen_framebuffers(render_surface)?;
 
         let mut state = egui_winit::State::new(&window);
         state.set_pixels_per_point(egui_winit::native_pixels_per_point(window));
@@ -41,7 +41,7 @@ impl EguiCtx {
         state.set_max_texture_side(max_size as usize);
 
         Ok(Self {
-            ctx: Default::default(),
+            ctx: egui::Context::default(),
             state,
             renderer,
             redraw_requested: true,
@@ -64,11 +64,7 @@ impl EguiCtx {
         }
         response
     }
-    pub fn update(
-        &'_ mut self,
-        window: &winit::window::Window,
-        f: impl FnOnce(&'_ egui::Context) -> (),
-    ) {
+    pub fn update(&'_ mut self, window: &winit::window::Window, f: impl FnOnce(&'_ egui::Context)) {
         //Call into user code to draw
         self.ctx.begin_frame(self.state.take_egui_input(window));
         f(&self.ctx);
@@ -217,7 +213,7 @@ struct EguiTexture {
 }
 struct EguiRenderer {
     remove_next_frame: Vec<egui::TextureId>,
-    images: std::collections::HashMap<egui::TextureId, EguiTexture>,
+    images: hashbrown::HashMap<egui::TextureId, EguiTexture>,
     render_context: Arc<crate::render_device::RenderContext>,
 
     render_pass: Arc<vk::RenderPass>,
@@ -314,7 +310,7 @@ impl EguiRenderer {
                     primitive_restart_enable: false,
                     ..Default::default()
                 }),
-                multisample_state: Some(Default::default()),
+                multisample_state: Some(vk::MultisampleState::default()),
                 rasterization_state: Some(vk::RasterizationState {
                     cull_mode: vk::CullMode::None,
                     ..Default::default()
@@ -323,7 +319,7 @@ impl EguiRenderer {
                     EguiVertex::per_vertex().definition(&vertex_entry.info().input_interface)?,
                 ),
                 // One dynamic viewport and scissor
-                viewport_state: Some(Default::default()),
+                viewport_state: Some(vk::ViewportState::default()),
                 dynamic_state: [vk::DynamicState::Viewport, vk::DynamicState::Scissor]
                     .into_iter()
                     .collect(),
@@ -335,7 +331,7 @@ impl EguiRenderer {
 
         Ok(Self {
             remove_next_frame: Vec::new(),
-            images: Default::default(),
+            images: hashbrown::HashMap::default(),
             render_pass: renderpass,
             pipeline,
             render_context: render_context.clone(),
@@ -401,7 +397,7 @@ impl EguiRenderer {
 
         for clipped in tesselated_geom {
             if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
-                vertex_vec.extend(mesh.vertices.iter().cloned().map(EguiVertex::from));
+                vertex_vec.extend(mesh.vertices.iter().copied().map(EguiVertex::from));
                 index_vec.extend_from_slice(&mesh.indices);
             }
         }
@@ -459,7 +455,7 @@ impl EguiRenderer {
                     clear_values: vec![None],
                     ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
                 },
-                Default::default(),
+                vk::SubpassBeginInfo::default(),
             )?
             .bind_pipeline_graphics(self.pipeline.clone())?
             .bind_vertex_buffers(0, [vertices])?
@@ -518,12 +514,12 @@ impl EguiRenderer {
             }
         }
 
-        command_buffer_builder.end_render_pass(Default::default())?;
+        command_buffer_builder.end_render_pass(vk::SubpassEndInfo::default())?;
         let command_buffer = command_buffer_builder.build()?;
 
         Ok(command_buffer)
     }
-    ///Get the descriptor set layout for the texture uniform. (set_idx, layout)
+    ///Get the descriptor set layout for the texture uniform. `(set_idx, layout)`
     fn texture_set_layout(&self) -> (u32, Arc<vk::DescriptorSetLayout>) {
         let pipe_layout = self.pipeline.layout();
         let layout = pipe_layout
@@ -575,7 +571,7 @@ impl EguiRenderer {
             total_delta_size += match &delta.image {
                 egui::ImageData::Color(color) => color.width() * color.height() * 4,
                 //We'll covert to 8bpp on upload
-                egui::ImageData::Font(grey) => grey.width() * grey.height() * 1,
+                egui::ImageData::Font(grey) => grey.width() * grey.height(),
             };
         }
 
@@ -620,11 +616,11 @@ impl EguiRenderer {
         let (texture_set_idx, texture_set_layout) = self.texture_set_layout();
 
         let mut current_base_offset = 0;
-        for (id, delta) in &deltas.set {
-            let entry = self.images.entry(*id);
+        for (id, delta) in deltas.set {
+            let entry = self.images.entry(id);
             //Generate if non-existent yet!
             let image: anyhow::Result<_> = match entry {
-                std::collections::hash_map::Entry::Vacant(vacant) => {
+                hashbrown::hash_map::Entry::Vacant(v) => {
                     let format = match delta.image {
                         egui::ImageData::Color(_) => vk::Format::R8G8B8A8_UNORM,
                         egui::ImageData::Font(_) => vk::Format::R8_UNORM,
@@ -699,23 +695,20 @@ impl EguiRenderer {
                         )],
                         [],
                     )?;
-                    Ok(vacant
-                        .insert(EguiTexture {
-                            image,
-                            descriptor_set,
-                        })
-                        .image
-                        .clone())
+                    Ok(v.insert(EguiTexture {
+                        image,
+                        descriptor_set,
+                    })
+                    .image
+                    .clone())
                 }
-                std::collections::hash_map::Entry::Occupied(occupied) => {
-                    Ok(occupied.get().image.clone())
-                }
+                hashbrown::hash_map::Entry::Occupied(o) => Ok(o.get().image.clone()),
             };
             let image = image?;
 
             let size = match &delta.image {
                 egui::ImageData::Color(color) => color.width() * color.height() * 4,
-                egui::ImageData::Font(grey) => grey.width() * grey.height() * 1,
+                egui::ImageData::Font(grey) => grey.width() * grey.height(),
             };
             let start_offset = current_base_offset as u64;
             current_base_offset += size;

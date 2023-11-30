@@ -61,7 +61,7 @@ where
         self.reader.fill_buf()
     }
     fn consume(&mut self, amt: usize) {
-        self.reader.consume(amt)
+        self.reader.consume(amt);
     }
     fn read_line(&mut self, buf: &mut String) -> IOResult<usize> {
         self.reader.read_line(buf)
@@ -95,7 +95,7 @@ impl<R: Read> BinaryChunkReader<R> {
 
         Ok(Self {
             id,
-            reader: MyTake::new(read, len as u64),
+            reader: MyTake::new(read, u64::from(len)),
         })
     }
 }
@@ -122,18 +122,19 @@ where
         let mut data = [0; 16];
         self.reader.read_exact(&mut data)?;
         // All unwraps infallible.
-        let inner_id = ChunkID(data[0..4].try_into().unwrap());
-        let version: [u8; 4] = data[4..8].try_into().unwrap();
+        let inner_id = ChunkID(data[0..4].try_into().unwrap_or_else(|_| unreachable!()));
+        let version: [u8; 4] = data[4..8].try_into().unwrap_or_else(|_| unreachable!());
         let version = crate::io::VersionedChunkHeader::try_from(version)
-            .map_err(|_| IOError::other(anyhow::anyhow!("malformed chunk version header")))?;
-        let meta_count = u32::from_le_bytes(data[8..12].try_into().unwrap());
-        let meta_stride = u32::from_le_bytes(data[12..16].try_into().unwrap());
+            .map_err(|()| IOError::other(anyhow::anyhow!("malformed chunk version header")))?;
+        let meta_count =
+            u32::from_le_bytes(data[8..12].try_into().unwrap_or_else(|_| unreachable!()));
+        let meta_stride =
+            u32::from_le_bytes(data[12..16].try_into().unwrap_or_else(|_| unreachable!()));
 
         // Is there actually enough data present for the reported amount of metadata?
         let overflows_chunk_size = meta_stride
             .checked_mul(meta_count)
-            .map(|size| size as u64 > self.reader.remaining())
-            .unwrap_or(true);
+            .map_or(true, |size| u64::from(size) > self.reader.remaining());
         // Temporary hack to prevent DOS
         if overflows_chunk_size || meta_stride.saturating_as::<usize>() > MAX_METADATA_SIZE {
             return Err(IOError::other("dict metadata too large"));
@@ -230,7 +231,7 @@ impl<R> SubchunkReader<R> {
     }
 }
 /// The maximum allowable size of a metadata field, a hacky impermanent way to prevent a DOS attack
-/// from a maliciously crafted `DICT` chunk. Given that MetadataTy is supposed to be a short descriptor
+/// from a maliciously crafted `DICT` chunk. Given that `MetadataTy` is supposed to be a short descriptor
 /// of the larger, free-form spillover data, this is perfectly reasonable to limit to even 100 bytes. Alas...
 pub const MAX_METADATA_SIZE: usize = 1024 * 1024;
 /// Reader of a `DICT` chunk, as specified in the `.fzp` schema.
@@ -298,7 +299,7 @@ impl<R> DictReader<R> {
         self.version.0
     }
     /// Get the orphan mode of the chunk header. If the version is no recognized,
-    /// it is up to the user of this API to respect the OrphanMode!
+    /// it is up to the user of this API to respect the `OrphanMode`!
     pub fn orphan_mode(&self) -> crate::io::OrphanMode {
         self.version.1
     }
@@ -308,7 +309,7 @@ where
     MyTake<R>: Read + SoftSeek,
 {
     /// Consume the binary of each metadata. On successful reading of every meta,
-    /// a BinaryChunkReader is returned to refer to the unstructured spillover area.
+    /// a `BinaryChunkReader` is returned to refer to the unstructured spillover area.
     ///
     /// If there are no metadatas, this method is infallible.
     ///
@@ -321,11 +322,11 @@ where
         for _ in 0..self.meta_count {
             let start_pos = self.reader.soft_position()?;
             let pos_after = start_pos
-                .checked_add(self.meta_stride as u64)
+                .checked_add(u64::from(self.meta_stride))
                 .ok_or_else(|| {
                     IOError::other(anyhow::anyhow!("metadata too long, overflows cursor"))
                 })?;
-            let subtake = MyTake::new(&mut self.reader, self.meta_stride as u64);
+            let subtake = MyTake::new(&mut self.reader, u64::from(self.meta_stride));
             f(subtake)?;
             // Seek to end. May be a nop!
             let forward_by = pos_after

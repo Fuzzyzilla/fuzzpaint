@@ -2,8 +2,8 @@ use super::hotkeys::HotkeyShadow;
 
 pub struct WinitKeyboardActionCollector {
     /// Maps keys to the number of times they are shadowed.
-    current_hotkeys: std::collections::HashMap<super::hotkeys::KeyboardHotkey, usize>,
-    currently_pressed: std::collections::HashSet<winit::event::VirtualKeyCode>,
+    current_hotkeys: hashbrown::HashMap<super::hotkeys::KeyboardHotkey, usize>,
+    currently_pressed: hashbrown::HashSet<winit::event::VirtualKeyCode>,
     ctrl: bool,
     shift: bool,
     alt: bool,
@@ -11,21 +11,22 @@ pub struct WinitKeyboardActionCollector {
     sender: super::ActionSender,
 }
 impl WinitKeyboardActionCollector {
+    #[must_use]
     pub fn new(sender: super::ActionSender) -> Self {
         Self {
             ctrl: false,
             alt: false,
             shift: false,
-            current_hotkeys: Default::default(),
-            currently_pressed: Default::default(),
+            current_hotkeys: hashbrown::HashMap::default(),
+            currently_pressed: hashbrown::HashSet::default(),
 
             sender,
         }
     }
-    pub fn push_event<'a>(&mut self, event: &winit::event::WindowEvent) {
-        let hotkeys = crate::GlobalHotkeys::get();
-
+    pub fn push_event(&mut self, event: &winit::event::WindowEvent) {
         use winit::event::WindowEvent;
+
+        let hotkeys = crate::GlobalHotkeys::get();
         match event {
             WindowEvent::KeyboardInput { input, .. } => {
                 let Some(code) = input.virtual_keycode else {
@@ -50,8 +51,8 @@ impl WinitKeyboardActionCollector {
                 let ctrl = self.ctrl;
                 let shift = self.shift;
                 let alt = self.alt;
-                let possible_keys = (0u8..(1 << (ctrl as u8 + shift as u8 + alt as u8)))
-                    .into_iter()
+                let possible_keys = (0u8..(1
+                    << (u8::from(ctrl) + u8::from(shift) + u8::from(alt))))
                     .map(|mut bits| {
                         // Generates all unique combos of each flag where self.<flag> is set.
                         // Or false if not set.
@@ -73,13 +74,13 @@ impl WinitKeyboardActionCollector {
                     })
                     .filter_map(|key| {
                         // find the action of each key, or skip if none.
-                        Some((hotkeys.keys_to_actions.action_of(key.clone())?, key))
+                        Some((hotkeys.keys_to_actions.action_of(key)?, key))
                     });
 
                 match (was_pressed, is_pressed) {
                     // Just pressed
                     (false, true) => {
-                        possible_keys.for_each(|(action, key)| self.push_key(action, key))
+                        possible_keys.for_each(|(action, key)| self.push_key(action, key));
                     }
                     // OS key repeat
                     (true, true) => possible_keys.for_each(|(action, _)| {
@@ -87,7 +88,9 @@ impl WinitKeyboardActionCollector {
                         self.sender.repeat(action);
                     }),
                     // Just released
-                    (_, false) => possible_keys.for_each(|(action, key)| self.pop_key(action, key)),
+                    (_, false) => {
+                        possible_keys.for_each(|(action, key)| self.pop_key(action, key));
+                    }
                 }
 
                 // Shouldn't need to happen but it's not working and i'm getting tired of debugging TwT
@@ -117,20 +120,20 @@ impl WinitKeyboardActionCollector {
     fn cull(&mut self) {
         let mut to_remove = Vec::<super::hotkeys::KeyboardHotkey>::new();
 
-        for (hotkey, _) in self.current_hotkeys.iter() {
+        for (hotkey, _) in &self.current_hotkeys {
             let no_longer_applies = (hotkey.alt && !self.alt)
                 || (hotkey.shift && !self.shift)
                 || (hotkey.ctrl && !self.ctrl)
                 || !self.currently_pressed.contains(&hotkey.key);
 
             if no_longer_applies {
-                to_remove.push(hotkey.clone())
+                to_remove.push(*hotkey);
             }
         }
 
         let hotkeys = crate::GlobalHotkeys::get();
-        for hotkey in to_remove.into_iter() {
-            if let Some(action) = hotkeys.keys_to_actions.action_of(hotkey.clone()) {
+        for hotkey in to_remove {
+            if let Some(action) = hotkeys.keys_to_actions.action_of(hotkey) {
                 self.pop_key(action, hotkey);
             }
         }
@@ -147,10 +150,10 @@ impl WinitKeyboardActionCollector {
         let hotkeys = crate::GlobalHotkeys::get();
 
         let mut shadows_on_new = 0;
-        for (old_key, shadows) in self.current_hotkeys.iter_mut() {
+        for (old_key, shadows) in &mut self.current_hotkeys {
             if new.shadows(old_key) {
                 if *shadows == 0 {
-                    if let Some(old_action) = hotkeys.keys_to_actions.action_of(old_key.clone()) {
+                    if let Some(old_action) = hotkeys.keys_to_actions.action_of(*old_key) {
                         self.sender.shadow(old_action);
                     }
                 }
@@ -167,7 +170,7 @@ impl WinitKeyboardActionCollector {
             self.sender.shadow(action);
         }
 
-        self.current_hotkeys.insert(new.clone(), shadows_on_new);
+        self.current_hotkeys.insert(new, shadows_on_new);
     }
     /// A hotkey was ended, discard it. Will go through and unshadow any
     /// hotkeys this one overrode, provided they are not shadowed by another.
@@ -180,7 +183,7 @@ impl WinitKeyboardActionCollector {
         self.sender.release(action);
 
         let hotkeys = crate::GlobalHotkeys::get();
-        for (old_key, shadows) in self.current_hotkeys.iter_mut() {
+        for (old_key, shadows) in &mut self.current_hotkeys {
             if remove.shadows(old_key) {
                 *shadows = shadows.checked_sub(1).unwrap_or_else(|| {
                     // Not confident that this isn't possible - and if it happens all hotkeys will
@@ -192,7 +195,7 @@ impl WinitKeyboardActionCollector {
                 });
                 if *shadows == 0 {
                     // <emit unshadow>
-                    if let Some(old_action) = hotkeys.keys_to_actions.action_of(old_key.clone()) {
+                    if let Some(old_action) = hotkeys.keys_to_actions.action_of(*old_key) {
                         self.sender.unshadow(old_action);
                     }
                 }

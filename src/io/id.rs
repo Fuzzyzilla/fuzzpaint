@@ -15,17 +15,14 @@ unsafe impl<T: std::any::Any> Send for FileLocalID<T> {}
 unsafe impl<T: std::any::Any> Sync for FileLocalID<T> {}
 impl<T: std::any::Any> Clone for FileLocalID<T> {
     fn clone(&self) -> Self {
-        Self {
-            id: self.id,
-            _phantom: Default::default(),
-        }
+        *self
     }
 }
 impl<T: std::any::Any> Copy for FileLocalID<T> {}
 impl<T: std::any::Any> std::hash::Hash for FileLocalID<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         state.write_u32(self.id);
-        std::any::TypeId::of::<T>().hash(state)
+        std::any::TypeId::of::<T>().hash(state);
     }
 }
 impl<T: std::any::Any> PartialEq for FileLocalID<T> {
@@ -38,7 +35,7 @@ impl<T: std::any::Any> From<u32> for FileLocalID<T> {
     fn from(value: u32) -> Self {
         Self {
             id: value,
-            _phantom: Default::default(),
+            _phantom: std::marker::PhantomData,
         }
     }
 }
@@ -48,10 +45,10 @@ pub enum InternError {
     #[error("too many entries")]
     TooManyEntries,
 }
-/// Given many FuzzIDs, normalizes them into sequential file-local ids on a
+/// Given many `FuzzID`s, normalizes them into sequential file-local ids on a
 /// first-come-first-serve basis.
 ///
-/// Reverse of [ProcessLocalInterner].
+/// Reverse of [`ProcessLocalInterner`].
 pub struct FileLocalInterner<T: std::any::Any> {
     // We can use a fast hasher without care for DOS prevention,
     // as the user cannot influence FuzzID<T> values.
@@ -71,15 +68,20 @@ fn checked_postfix_increment(val: &mut Option<u32>) -> Option<u32> {
         None => None,
     }
 }
-impl<T: std::any::Any> FileLocalInterner<T> {
-    /// Create an empty interner.
-    pub fn new() -> Self {
+impl<T: std::any::Any> Default for FileLocalInterner<T> {
+    fn default() -> Self {
         Self {
-            map: Default::default(),
+            map: hashbrown::HashMap::new(),
             next_id: Some(0),
         }
     }
-    /// Gets or creates a file-local id for the given FuzzID
+}
+impl<T: std::any::Any> FileLocalInterner<T> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Gets or creates a file-local id for the given `FuzzID`
     pub fn get_or_insert(&mut self, id: FuzzID<T>) -> Result<FileLocalID<T>, InternError> {
         match self.map.entry(id) {
             hashbrown::hash_map::Entry::Occupied(o) => Ok(*o.get()),
@@ -94,8 +96,9 @@ impl<T: std::any::Any> FileLocalInterner<T> {
         }
     }
     /// Get a file-local id without creating it if it's not present.
+    #[must_use]
     pub fn get(&self, id: FuzzID<T>) -> Option<FileLocalID<T>> {
-        self.map.get(&id).cloned()
+        self.map.get(&id).copied()
     }
     /// Insert an id. Returns Ok(true) if the id was new.
     pub fn insert(&mut self, id: FuzzID<T>) -> Result<bool, InternError> {
@@ -113,22 +116,27 @@ impl<T: std::any::Any> FileLocalInterner<T> {
     }
 }
 
-/// Given many FileLocalIDs, convert them to arbitrary process-local FuzzIDs.
+/// Given many `FileLocalID`s, convert them to arbitrary process-local `FuzzID`s.
 /// The insert methods are all infallible - process ID overflow is not currently
 /// a recoverable condition, and will lead to unclean process termination.
 ///
-/// Reverse of [FileLocalInterner].
+/// Reverse of [`FileLocalInterner`].
 pub struct ProcessLocalInterner<T: std::any::Any> {
     map: hashbrown::HashMap<FileLocalID<T>, FuzzID<T>>,
 }
-impl<T: std::any::Any> ProcessLocalInterner<T> {
-    /// Create an empty interner.
-    pub fn new() -> Self {
+impl<T: std::any::Any> Default for ProcessLocalInterner<T> {
+    fn default() -> Self {
         Self {
-            map: Default::default(),
+            map: hashbrown::HashMap::new(),
         }
     }
-    /// From many sequential FileLocalIDs from zero up to count, allocate IDs.
+}
+impl<T: std::any::Any> ProcessLocalInterner<T> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// From many sequential `FileLocalID`s from zero up to count, allocate IDs.
     /// Much more efficient than allocating one-by-one.
     pub fn many_sequential(count: usize) -> Result<Self, InternError> {
         use az::CheckedAs;
@@ -136,7 +144,7 @@ impl<T: std::any::Any> ProcessLocalInterner<T> {
         let mut map =
             hashbrown::HashMap::<FileLocalID<T>, FuzzID<T>>::with_capacity(count as usize);
         // Allocate ids.
-        let file_local_ids = (0..count).into_iter();
+        let file_local_ids = 0..count;
         let process_local_ids = FuzzID::many(count as usize);
 
         // Extend with pairs of sequential file id, bulk allocated process ID.
@@ -151,7 +159,7 @@ impl<T: std::any::Any> ProcessLocalInterner<T> {
 
         Ok(Self { map })
     }
-    /// Gets or creates a FuzzID id for the given file-local
+    /// Gets or creates a `FuzzID` id for the given `FileLocalID`
     pub fn get_or_insert(&mut self, id: FileLocalID<T>) -> FuzzID<T> {
         match self.map.entry(id) {
             hashbrown::hash_map::Entry::Occupied(o) => *o.get(),
@@ -162,10 +170,11 @@ impl<T: std::any::Any> ProcessLocalInterner<T> {
             }
         }
     }
+    #[must_use]
     pub fn get(&self, id: FileLocalID<T>) -> Option<FuzzID<T>> {
-        self.map.get(&id).cloned()
+        self.map.get(&id).copied()
     }
-    /// Insert an id. Convenience fn for get_or_insert while discarding the result.
+    /// Insert an id. Convenience fn for `get_or_insert` while discarding the result.
     pub fn insert(&mut self, id: FileLocalID<T>) {
         self.get_or_insert(id);
     }
