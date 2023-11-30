@@ -31,6 +31,7 @@ pub struct Queues {
     compute_queue: QueueSrc,
 }
 impl Queues {
+    #[must_use]
     pub fn present(&self) -> Option<&Queue> {
         match &self.present_queue {
             None => None,
@@ -38,9 +39,11 @@ impl Queues {
             Some(QueueSrc::Queue(q)) => Some(q),
         }
     }
+    #[must_use]
     pub fn graphics(&self) -> &Queue {
         &self.graphics_queue
     }
+    #[must_use]
     pub fn compute(&self) -> &Queue {
         match &self.compute_queue {
             QueueSrc::UseGraphics => self.graphics(),
@@ -48,9 +51,11 @@ impl Queues {
         }
     }
     //No transfer queues yet, just use Graphics.
+    #[must_use]
     pub fn transfer(&self) -> &Queue {
         self.graphics()
     }
+    #[must_use]
     pub fn has_unique_compute(&self) -> bool {
         match &self.compute_queue {
             QueueSrc::UseGraphics => false,
@@ -68,18 +73,23 @@ pub struct RenderSurface {
     swapchain_create_info: vk::SwapchainCreateInfo,
 }
 impl RenderSurface {
+    #[must_use]
     pub fn extent(&self) -> [u32; 2] {
         self.swapchain_create_info.image_extent
     }
+    #[must_use]
     pub fn format(&self) -> vk::Format {
         self.swapchain_create_info.image_format
     }
+    #[must_use]
     pub fn swapchain(&self) -> &Arc<vk::Swapchain> {
         &self.swapchain
     }
+    #[must_use]
     pub fn swapchain_images(&self) -> &[Arc<vk::Image>] {
         &self.swapchain_images
     }
+    #[must_use]
     pub fn context(&self) -> &Arc<RenderContext> {
         &self.context
     }
@@ -104,10 +114,7 @@ impl RenderSurface {
         let present_mode = physical_device
             .surface_present_modes(&surface, Default::default())
             .map(|mut modes| {
-                if modes
-                    .find(|mode| *mode == vk::PresentMode::Mailbox)
-                    .is_some()
-                {
+                if modes.any(|mode| mode == vk::PresentMode::Mailbox) {
                     vk::PresentMode::Mailbox
                 } else {
                     vk::PresentMode::Fifo
@@ -144,7 +151,7 @@ impl RenderSurface {
         )?;
 
         Ok(Self {
-            context: context,
+            context,
             swapchain,
             _surface: surface.clone(),
             swapchain_images: images,
@@ -204,12 +211,12 @@ impl RenderContext {
     pub fn new_with_window_surface(
         win: &crate::window::WindowSurface,
     ) -> AnyResult<(Arc<Self>, RenderSurface)> {
+        use vulkano::instance::debug as vkDebug;
+
         let library = vk::VulkanLibrary::new()?;
 
         let mut required_instance_extensions = vk::Surface::required_extensions(win.event_loop());
         required_instance_extensions.ext_debug_utils = true;
-
-        use vulkano::instance::debug as vkDebug;
 
         let instance = vk::Instance::new(
             library.clone(),
@@ -249,6 +256,7 @@ impl RenderContext {
                     unsafe {
                         vulkano::instance::debug::DebugUtilsMessengerCallback::new(
                             |severity, ty, data| {
+                                #[allow(clippy::wildcard_in_or_patterns)]
                                 let level = match severity {
                                     vkDebug::DebugUtilsMessageSeverity::ERROR => log::Level::Error,
                                     vkDebug::DebugUtilsMessageSeverity::WARNING => log::Level::Warn,
@@ -285,7 +293,7 @@ impl RenderContext {
         let Some((physical_device, queue_indices)) = Self::choose_physical_device(
             instance.clone(),
             &required_device_extensions,
-            Some(surface.clone()),
+            Some(&surface),
         )?
         else {
             return Err(anyhow::anyhow!("Failed to find a suitable Vulkan device."));
@@ -465,7 +473,7 @@ impl RenderContext {
     fn choose_physical_device(
         instance: Arc<vk::Instance>,
         required_extensions: &vk::DeviceExtensions,
-        compatible_surface: Option<Arc<vk::Surface>>,
+        compatible_surface: Option<&Arc<vk::Surface>>,
     ) -> AnyResult<Option<(Arc<vk::PhysicalDevice>, QueueIndices)>> {
         //TODO: does not respect queue family max queue counts. This will need to be redone in some sort of
         //multi-pass shenanigan to properly find a good queue setup. Also requires that graphics and compute queues be transfer as well.
@@ -475,14 +483,14 @@ impl RenderContext {
                 use vk::QueueFlags;
 
                 //Make sure it has what we need
-                if !device.supported_extensions().contains(&required_extensions) {
+                if !device.supported_extensions().contains(required_extensions) {
                     return None;
                 }
 
                 let families = device.queue_family_properties();
 
                 //Find a queue that supports the requested surface, if any
-                let present_queue = compatible_surface.clone().and_then(|surface| {
+                let present_queue = compatible_surface.and_then(|surface| {
                     families.iter().enumerate().find(|(family_idx, _)| {
                         //Assume error is false. Todo?
                         device

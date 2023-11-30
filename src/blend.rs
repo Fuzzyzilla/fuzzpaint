@@ -56,7 +56,7 @@ mod shaders {
         pub x: u32,
         pub y: u32,
     }
-    /// The push constants to customize blending. Corresponds to fields in super::Blend.
+    /// The push constants to customize blending. Corresponds to fields in `super::Blend`.
     /// Every blend shader must accept this struct format!
     // Noteably, NOT AnyBitPattern nor Pod, bool32 has invalid states
     #[derive(bytemuck::Zeroable, vulkano::buffer::BufferContents, Clone, Copy, PartialEq)]
@@ -254,7 +254,7 @@ impl BlendEngine {
         device: Arc<vk::Device>,
         layout: Arc<vk::PipelineLayout>,
         size: shaders::WorkgroupSizeConstants,
-        entry_point: Arc<vulkano::shader::ShaderModule>,
+        entry_point: &Arc<vulkano::shader::ShaderModule>,
     ) -> anyhow::Result<Arc<vk::ComputePipeline>> {
         let mut specialization =
             ahash::HashMap::<u32, vk::SpecializationConstant>::with_capacity_and_hasher(
@@ -283,7 +283,7 @@ impl BlendEngine {
         let properties = device.physical_device().properties();
         let workgroup_size = {
             // Todo: better alg for this lol
-            let largest_square = (properties.max_compute_work_group_invocations as f64)
+            let largest_square = f64::from(properties.max_compute_work_group_invocations)
                 .sqrt()
                 .floor() as u32;
             let largest_square = largest_square
@@ -364,7 +364,7 @@ impl BlendEngine {
                         device.clone(),
                         shader_layout.clone(),
                         size,
-                        shaders::$namespace::load(device.clone())?,
+                        &shaders::$namespace::load(device.clone())?,
                     )?,
                 );
                 assert!(

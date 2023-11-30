@@ -20,7 +20,7 @@ pub struct GraphWriter<'a, Write: CommandWrite<GraphCommand>> {
 impl<'a, Write: CommandWrite<GraphCommand>> std::ops::Deref for GraphWriter<'a, Write> {
     type Target = super::BlendGraph;
     fn deref(&self) -> &Self::Target {
-        &self.graph
+        self.graph
     }
 }
 impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
@@ -35,7 +35,7 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
     }
     /// Change the blend of any node or leaf. Does not insert a command
     /// if the blend is identical to what it was before!
-    /// Returns MismatchedState if the chosen node does not have a blend property to modify.
+    /// Returns `MismatchedState` if the chosen node does not have a blend property to modify.
     pub fn change_blend(
         &mut self,
         target: super::AnyID,

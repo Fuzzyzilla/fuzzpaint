@@ -34,6 +34,7 @@ pub mod vk {
             SecondaryAutoCommandBuffer,
             SubpassBeginInfo,
             SubpassContents,
+            SubpassEndInfo,
         },
         descriptor_set::{
             allocator::StandardDescriptorSetAllocator,

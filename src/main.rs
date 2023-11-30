@@ -2,8 +2,6 @@
 #![feature(once_cell_try)]
 #![feature(write_all_vectored)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::too_many_lines)]
 use std::sync::Arc;
 pub mod commands;
 mod egui_impl;

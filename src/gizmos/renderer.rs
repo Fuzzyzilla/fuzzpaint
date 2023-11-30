@@ -265,7 +265,7 @@ impl GizmoRenderer {
                 primitive_restart_enable: false,
                 ..Default::default()
             }),
-            multisample_state: Some(Default::default()),
+            multisample_state: Some(vk::MultisampleState::default()),
             rasterization_state: Some(vk::RasterizationState {
                 cull_mode: vk::CullMode::None,
                 ..Default::default()
@@ -274,7 +274,7 @@ impl GizmoRenderer {
                 GizmoVertex::per_vertex().definition(&vertex.info().input_interface)?,
             ),
             // One viewport and scissor, scissor irrelevant and viewport dynamic
-            viewport_state: Some(Default::default()),
+            viewport_state: Some(vk::ViewportState::default()),
             dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
             subpass: Some(render_pass),
             stages: smallvec::smallvec![vertex_stage.clone(), textured_fragment_stage],
@@ -308,13 +308,13 @@ impl GizmoRenderer {
         })
     }
     // Temporary api. passing around swapchain images and proj matrices like this feels dirty :P
-    pub fn render_visit<'s>(
-        &'s self,
+    pub fn render_visit(
+        &self,
         into_image: Arc<vk::Image>,
         image_size: [f32; 2],
         document_transform: crate::view_transform::ViewTransform,
         proj: cgmath::Matrix4<f32>,
-    ) -> anyhow::Result<RenderVisitor<'s>> {
+    ) -> anyhow::Result<RenderVisitor<'_>> {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             self.context.allocators().command_buffer(),
             self.context.queues().graphics().idx(),
@@ -457,10 +457,10 @@ impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
             let matrix = self.proj * matrix * shape_xform;
             let push_constants = shaders::PushConstants {
                 color: [
-                    color[0] as f32 / 255.0,
-                    color[1] as f32 / 255.0,
-                    color[2] as f32 / 255.0,
-                    color[3] as f32 / 255.0,
+                    f32::from(color[0]) / 255.0,
+                    f32::from(color[1]) / 255.0,
+                    f32::from(color[2]) / 255.0,
+                    f32::from(color[3]) / 255.0,
                 ],
                 transform: matrix.into(),
             };
@@ -490,7 +490,7 @@ impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
         }
     }
     fn end_collection(&mut self, _: &super::Collection) -> std::ops::ControlFlow<anyhow::Error> {
-        if let Some(_) = self.xform_stack.pop() {
+        if self.xform_stack.pop().is_some() {
             std::ops::ControlFlow::Continue(())
         } else {
             // would be a gizmo implementation error.

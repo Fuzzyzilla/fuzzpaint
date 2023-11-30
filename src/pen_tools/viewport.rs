@@ -34,7 +34,7 @@ impl ViewportManipulateBase {
         self.drag_start_pos = None;
         self.original_transform = None;
     }
-    async fn process(
+    fn process(
         &mut self,
         view_info: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
@@ -43,7 +43,7 @@ impl ViewportManipulateBase {
         render_output: &mut super::ToolRenderOutput<'_>,
     ) {
         let mut new_transform = None::<crate::view_transform::ViewTransform>;
-        for event in stylus_input.iter() {
+        for event in &*stylus_input {
             if event.pressed {
                 let initial_transform = self
                     .original_transform
@@ -156,7 +156,7 @@ impl super::MakePenTool for ViewportScrub {
 #[async_trait::async_trait]
 impl super::PenTool for ViewportScrub {
     fn exit(&mut self) {
-        self.manipulate.exit()
+        self.manipulate.exit();
     }
     /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
@@ -168,8 +168,7 @@ impl super::PenTool for ViewportScrub {
         render_output: &mut super::ToolRenderOutput,
     ) {
         self.manipulate
-            .process(view_info, stylus_input, actions, tool_output, render_output)
-            .await
+            .process(view_info, stylus_input, actions, tool_output, render_output);
     }
 }
 pub struct ViewportPan {
@@ -191,7 +190,7 @@ impl super::MakePenTool for ViewportPan {
 #[async_trait::async_trait]
 impl super::PenTool for ViewportPan {
     fn exit(&mut self) {
-        self.manipulate.exit()
+        self.manipulate.exit();
     }
     /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
@@ -203,8 +202,7 @@ impl super::PenTool for ViewportPan {
         render_output: &mut super::ToolRenderOutput,
     ) {
         self.manipulate
-            .process(view_info, stylus_input, actions, tool_output, render_output)
-            .await
+            .process(view_info, stylus_input, actions, tool_output, render_output);
     }
 }
 pub struct ViewportRotate {
@@ -226,7 +224,7 @@ impl super::MakePenTool for ViewportRotate {
 #[async_trait::async_trait]
 impl super::PenTool for ViewportRotate {
     fn exit(&mut self) {
-        self.manipulate.exit()
+        self.manipulate.exit();
     }
     /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
@@ -238,7 +236,6 @@ impl super::PenTool for ViewportRotate {
         render_output: &mut super::ToolRenderOutput,
     ) {
         self.manipulate
-            .process(view_info, stylus_input, actions, tool_output, render_output)
-            .await
+            .process(view_info, stylus_input, actions, tool_output, render_output);
     }
 }

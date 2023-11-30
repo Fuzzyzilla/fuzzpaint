@@ -40,7 +40,7 @@ impl RayonTessellator {
             color,
         };
 
-        [tl, tr.clone(), bl.clone(), bl, tr, br]
+        [tl, tr, bl, bl, tr, br]
     }
 }
 impl super::StrokeTessellator for RayonTessellator {
@@ -55,7 +55,7 @@ impl super::StrokeTessellator for RayonTessellator {
             Err(e) => return Err(TessellationError::Anyhow(e.into())),
         };
 
-        for stroke in strokes.iter() {
+        for stroke in strokes {
             let brush = brush::todo_brush();
 
             // Perform tessellation!
@@ -72,7 +72,7 @@ impl super::StrokeTessellator for RayonTessellator {
 
                             // Sanity check - avoid division by zero and other weirdness.
                             if b.dist - a.dist <= 0.0 {
-                                return Default::default();
+                                return smallvec::SmallVec::new();
                             }
 
                             // Offset of first stamp into this segment.
@@ -130,14 +130,10 @@ impl super::StrokeTessellator for RayonTessellator {
                     // Sanity check.
                     0
                 } else {
-                    stroke
-                        .points
-                        .last()
-                        .map(|last| {
-                            let num_stamps = (last.dist / spacing).floor();
-                            num_stamps as usize * 6
-                        })
-                        .unwrap_or(0usize)
+                    stroke.points.last().map_or(0, |last| {
+                        let num_stamps = (last.dist / spacing).floor();
+                        num_stamps as usize * 6
+                    })
                 }
             }
         }

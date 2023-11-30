@@ -1,4 +1,4 @@
-//! Glue between FuzzID's and id_tree::NodeId's in order to make IDs stable across clones. This is a baaaad
+//! Glue between `FuzzID`'s and `id_tree::NodeId`'s in order to make IDs stable across clones. This is a baaaad
 //! solution, but it is necessary with the current graph impl. I need to write my own!
 
 // Private id type! (public to super)
@@ -113,8 +113,8 @@ impl StableIDMap {
         self.id_to_fuzz.insert(tree, fuzz);
     }
     #[allow(dead_code)]
-    pub fn erase_tree_id(&mut self, tree: id_tree::NodeId) {
-        if let Some(id) = self.id_to_fuzz.remove(&tree) {
+    pub fn erase_tree_id(&mut self, tree: &id_tree::NodeId) {
+        if let Some(id) = self.id_to_fuzz.remove(tree) {
             let _ = self.fuzz_to_id.remove(&id);
         }
     }

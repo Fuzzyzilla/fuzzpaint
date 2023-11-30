@@ -4,7 +4,7 @@ pub mod id;
 pub mod riff;
 
 /// Fields read from a file that were not understood, either due to unrecognized
-/// chunkID or incompatible version, but the fields requested to be preserved through read/writes.
+/// `ChunkID` or incompatible version, but the fields requested to be preserved through read/writes.
 ///
 /// The data is not inspectible, as that would be an anti-pattern!
 /// Extend the reader instead. When I inevitably come back to add
@@ -21,6 +21,7 @@ pub struct Residual {
 }
 impl Residual {
     /// No residual data.
+    #[must_use]
     pub fn empty() -> Self {
         Self {
             _riff: vec![],
@@ -65,7 +66,7 @@ impl Version {
 #[repr(C)]
 pub struct VersionedChunkHeader(Version, OrphanMode);
 /// Try to create a versioned chunk header from four bytes.
-/// Returns an error only if the final byte is invalid as a [OrphanMode]
+/// Returns an error only if the final byte is invalid as a [`OrphanMode`]
 impl TryFrom<[u8; 4]> for VersionedChunkHeader {
     type Error = ();
     fn try_from(value: [u8; 4]) -> Result<Self, Self::Error> {
@@ -106,7 +107,7 @@ const EMPTY_DICT: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 /// From the given document state reader and repository handle, write a `.fzp` document into the given writer.
 pub fn write_into<Document, Writer>(
-    document: Document,
+    document: &Document,
     point_repository: &crate::repositories::points::PointRepository,
     writer: Writer,
 ) -> Result<(), WriteError>
@@ -114,7 +115,10 @@ where
     Document: crate::commands::queue::state_reader::CommandQueueStateReader,
     Writer: std::io::Write + std::io::Seek,
 {
-    use riff::{encode::*, ChunkID};
+    use riff::{
+        encode::{BinaryChunkWriter, SizedBinaryChunkWriter},
+        ChunkID,
+    };
     let mut root = BinaryChunkWriter::new_subtype(writer, ChunkID::RIFF, ChunkID::FZP_)?;
     {
         {
@@ -159,7 +163,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
     path: Path,
     point_repository: &crate::repositories::points::PointRepository,
 ) -> Result<crate::commands::queue::DocumentCommandQueue, std::io::Error> {
-    use riff::{decode::*, ChunkID};
+    use riff::{decode::BinaryChunkReader, ChunkID};
     use std::io::Error as IOError;
     let path_buf = path.into();
     let file = std::fs::File::open(&path_buf)?;
@@ -171,11 +175,12 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
     // must've been bad anyway!
     let root = BinaryChunkReader::new(r)?.into_subchunks()?;
     if root.id() != ChunkID::RIFF || root.subtype_id() != ChunkID::FZP_ {
-        return Err(std::io::Error::other("bad file magic"))?;
+        return Err(std::io::Error::other("bad file magic"));
     }
 
     let mut point_lists = None;
 
+    #[allow(clippy::match_same_arms)]
     root.try_for_each(|subchunk| match subchunk.id() {
         ChunkID::LIST => {
             let subchunk = subchunk.into_subchunks()?;
@@ -219,7 +224,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
             .map(
                 |collection| crate::state::stroke_collection::ImmutableStroke {
                     point_collection: *collection,
-                    id: Default::default(),
+                    id: crate::FuzzID::default(),
                     brush: crate::state::StrokeBrushSettings {
                         is_eraser: false,
                         brush: crate::brush::todo_brush().id(),
@@ -234,7 +239,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
     };
 
     let mut stroke_state = crate::state::stroke_collection::StrokeCollectionState::default();
-    let my_collection = Default::default();
+    let my_collection = crate::FuzzID::default();
     stroke_state.0.insert(
         my_collection,
         crate::state::stroke_collection::StrokeCollection {
@@ -244,7 +249,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
         },
     );
     let my_node = crate::state::graph::LeafType::StrokeLayer {
-        blend: Default::default(),
+        blend: crate::blend::Blend::default(),
         collection: my_collection,
     };
     let mut my_graph = crate::state::graph::BlendGraph::default();
@@ -260,19 +265,19 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
         // File stem (without ext) if available, else the whole path.
         name: path_buf
             .file_stem()
-            .map(|p| p.to_string_lossy().to_owned())
-            .unwrap_or_else(|| path_buf.to_string_lossy().to_owned())
-            .to_string(),
+            .map_or_else(|| path_buf.to_string_lossy(), |p| p.to_string_lossy())
+            .into_owned(),
         path: Some(path_buf),
     };
     if let Some(size) = size {
-        let duration = std::time::Instant::now() - start_time;
+        let duration = start_time.elapsed();
         let duration_micros = duration.as_micros();
+        let size = size as f64;
         log::info!(
             "Read {} in {}us ({}/s)",
-            human_bytes::human_bytes(size as f64),
+            human_bytes::human_bytes(size),
             duration_micros,
-            human_bytes::human_bytes(size as f64 / duration.as_secs_f64())
+            human_bytes::human_bytes(size / duration.as_secs_f64())
         );
     }
     Ok(crate::commands::queue::DocumentCommandQueue::from_state(

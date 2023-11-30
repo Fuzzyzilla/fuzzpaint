@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use crate::gizmos::{GizmoTree, MutGizmoTree};
-
 mod visitors {
-    use crate::gizmos::*;
+    use crate::gizmos::{Collection, CursorOrInvisible, Gizmo, GizmoInteraction};
     use std::ops::ControlFlow;
     pub struct CursorFindVisitor {
         pub viewport_cursor: ultraviolet::Vec2,
@@ -45,15 +43,9 @@ mod visitors {
     }
     /// A path to find a specific tree node.
     /// A series of indices. [nth parent, nth child, nth grandchild, ...nth node]
+    #[derive(Default)]
     pub struct VisitPath {
         indices: Vec<usize>,
-    }
-    impl Default for VisitPath {
-        fn default() -> Self {
-            Self {
-                indices: Default::default(),
-            }
-        }
     }
     pub struct ClickFindVisitor {
         pub viewport_cursor: ultraviolet::Vec2,
@@ -105,7 +97,7 @@ mod visitors {
         }
     }
     /// Drills down into the gizmo tree to the given path. If found, calls exec on the gizmo,
-    /// returning the results of F. Otherwise, may fallthrough with ControlFlow::continue or break with None.
+    /// returning the results of F. Otherwise, may fallthrough with `ControlFlow::continue` or break with None.
     pub struct MutatorVisitor<'p, T, F: FnOnce(&mut Gizmo) -> T> {
         pub dest_path: &'p VisitPath,
         pub current_path: VisitPath,
@@ -121,16 +113,16 @@ mod visitors {
                 .iter()
                 .zip(self.current_path.indices.iter())
             {
-                if dest < current {
+                match dest.cmp(current) {
                     // Everything matches before, then an index that's too small.
                     // Therefore, more work to do - not too far!
-                    return false;
-                } else if dest > current {
+                    std::cmp::Ordering::Less => return false,
                     // Everything matches before, then an index that's too large.
                     // We've gone too far!
-                    return true;
+                    std::cmp::Ordering::Greater => return true,
+                    // If eq, fall through and compare the next level deeper.
+                    std::cmp::Ordering::Equal => (),
                 }
-                // If eq, fall through and compare the next level deeper.
             }
             // uhm uh how did we get here o.O
             // dest or current would be empty, or they matched exactly (up until one ended, at least.)
@@ -207,8 +199,11 @@ impl super::PenTool for GizmoManipulator {
         _tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
+        use crate::gizmos::{
+            transform, Collection, CursorOrInvisible, Gizmo, GizmoInteraction, GizmoShape,
+            GizmoTree, GizmoVisual, MutGizmoTree, RenderShape,
+        };
         let collection = self.shared_collection.get_or_insert_with(|| {
-            use crate::gizmos::*;
             let mut collection = Collection::new(transform::GizmoTransform {
                 position: ultraviolet::Vec2 { x: 10.0, y: 10.0 },
                 origin_pinning: transform::GizmoOriginPinning::Document,
@@ -294,7 +289,7 @@ impl super::PenTool for GizmoManipulator {
                     };
                     let base_xform = view_info.transform.clone();
                     let mut visitor = visitors::ClickFindVisitor {
-                        path: Default::default(),
+                        path: visitors::VisitPath::default(),
                         viewport_cursor: point,
                         xform_stack: vec![base_xform],
                     };
@@ -309,10 +304,10 @@ impl super::PenTool for GizmoManipulator {
 
                 if let Some(path) = self.clicked_path.as_ref() {
                     let mut mutator_visitor = visitors::MutatorVisitor {
-                        current_path: Default::default(),
+                        current_path: visitors::VisitPath::default(),
                         dest_path: path,
                         exec: Some(|g: &mut crate::gizmos::Gizmo| {
-                            self.cursor_latch = Some(g.grab_cursor)
+                            self.cursor_latch = Some(g.grab_cursor);
                         }),
                     };
                     collection.visit_hit_mut(&mut mutator_visitor);

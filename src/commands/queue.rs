@@ -9,7 +9,7 @@
 //!
 //! There exists one command queue per document, accessed through [provider]s
 
-use std::{ops::DerefMut, sync::Arc};
+use std::sync::Arc;
 
 use super::CommandConsumer;
 pub mod provider;
@@ -157,7 +157,7 @@ impl DocumentCommandQueue {
             state.present = new_cursor.map_or(*root, |node| node.node_id());
             let end = state.present;
             // Apply state changes from the commands:
-            for command in traverse(&command_tree, start, end).unwrap() {
+            for command in traverse(command_tree, start, end).unwrap() {
                 state.apply(command).unwrap();
             }
 

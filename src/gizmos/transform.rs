@@ -32,7 +32,8 @@ pub struct GizmoTransform {
 }
 impl GizmoTransform {
     /// Apply this gizmo transform to the given document and parent gizmo transforms, returning a new transform representing
-    /// this gizmo transform's local space. For top level gizmos, it is valid for parent_transform to equal document_transform.
+    /// this gizmo transform's local space. For top level gizmos, it is valid for `parent_transform` to equal `document_transform`.
+    #[must_use]
     pub fn apply(
         &self,
         document_transform: &crate::view_transform::ViewTransform,
@@ -67,6 +68,7 @@ impl GizmoTransform {
             decomposed: cgmath::Decomposed { scale, rot, disp },
         }
     }
+    #[must_use]
     pub fn inherit_all() -> Self {
         Self {
             origin_pinning: GizmoOriginPinning::Inherit,

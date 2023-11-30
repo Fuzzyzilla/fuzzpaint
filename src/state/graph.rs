@@ -768,6 +768,6 @@ mod test {
             .unwrap();
 
         let clone = graph.clone();
-        assert_eq!(clone.get(soup_id).map(|node| node.name()), Some("Soup!"));
+        assert_eq!(clone.get(soup_id).map(NodeData::name), Some("Soup!"));
     }
 }

@@ -139,7 +139,7 @@ impl MainUI {
                                             let file = std::fs::File::create(path)?;
 
                                             let start = std::time::Instant::now();
-                                            crate::io::write_into(reader, repo, &file)?;
+                                            crate::io::write_into(&reader, repo, &file)?;
                                             let duration = start.elapsed();
 
                                             file.sync_all()?;

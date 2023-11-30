@@ -1,12 +1,12 @@
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
 
-use crate::{gizmos::GizmoTree, *};
+use crate::{gizmos::GizmoTree, pen_tools, render_device, view_transform, AnyResult};
 
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
 /// behind the Egui content.
 pub trait PreviewRenderProxy {
-    /// Create the render commands for this frame. Assume used resources are borrowed until a matching "render_complete" for this
+    /// Create the render commands for this frame. Assume used resources are borrowed until a matching "`render_complete`" for this
     /// frame idx is called.
     /// # Safety
     ///
@@ -105,7 +105,7 @@ impl DocumentViewportPreviewProxyImageGuard<'_> {
         self.is_submitted = true;
 
         // Place this fence within the proxy.
-        let mut write = self.proxy.swap_after.write().unwrap();
+        let mut write = self.proxy.swap_after.write();
         // This should not be possible - if this proxy exists, there should have been no
         // outstanding writes waiting.
         assert!(write.is_empty());
@@ -119,7 +119,7 @@ impl Drop for DocumentViewportPreviewProxyImageGuard<'_> {
         }
         self.is_submitted = true;
         // Place an immediate swap into the proxy.
-        let mut write = self.proxy.swap_after.write().unwrap();
+        let mut write = self.proxy.swap_after.write();
         // This should not be possible - if this proxy exists, there should have been no
         // outstanding writes waiting.
         assert!(write.is_empty());
@@ -140,10 +140,7 @@ enum SwapAfter<Future: GpuFuture> {
 }
 impl<Future: GpuFuture> SwapAfter<Future> {
     pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Empty => true,
-            _ => false,
-        }
+        matches!(self, Self::Empty)
     }
 }
 
@@ -221,7 +218,7 @@ impl ProxySurfaceData {
             transform: document_transform,
             view_pos: viewport_pos,
             view_size: viewport_size,
-            cached_matrix: Default::default(),
+            cached_matrix: std::sync::OnceLock::new(),
         }
     }
     fn get_commands(
@@ -328,7 +325,7 @@ impl ProxySurfaceData {
                 shaders::vertex::Matrix { mat: *matrix },
             )?
             .draw(4, 1, 0, 0)?
-            .end_render_pass(Default::default())?;
+            .end_render_pass(vk::SubpassEndInfo::default())?;
 
         let command_buffer = command_buffer.build()?;
 
@@ -345,7 +342,7 @@ impl ProxySurfaceData {
     }
     fn clear_cache(&mut self) {
         // Take and discard all cached command buffers
-        for [a, b] in self.prerecorded_command_buffers.iter_mut() {
+        for [a, b] in &mut self.prerecorded_command_buffers {
             a.take();
             b.take();
         }
@@ -360,7 +357,7 @@ impl ProxySurfaceData {
         self.view_size = size;
         // Only the fit transform needs to be recalc'd on viewport resize.
         if let crate::view_transform::DocumentTransform::Fit(..) = self.transform {
-            self.clear_cache()
+            self.clear_cache();
         }
     }
 }
@@ -383,7 +380,7 @@ pub struct DocumentViewportPreviewProxy {
     // Sync + Swap data ===========
     /// After this fence is completed, a swap occurs.
     /// If this is not none, it implies both buffers are in use.
-    swap_after: std::sync::RwLock<SwapAfter<Box<dyn GpuFuture + Send>>>,
+    swap_after: parking_lot::RwLock<SwapAfter<Box<dyn GpuFuture + Send>>>,
     /// A buffer is available for writing if this notify is set.
     write_ready_notify: tokio::sync::Notify,
     /// Which buffer is the swapchain reading from?
@@ -398,8 +395,8 @@ pub struct DocumentViewportPreviewProxy {
     surface_data: tokio::sync::RwLock<ProxySurfaceData>,
 
     // User render data ============
-    cursor: std::sync::RwLock<Option<crate::gizmos::CursorOrInvisible>>,
-    tool_render_as: std::sync::RwLock<crate::pen_tools::RenderAs>,
+    cursor: parking_lot::RwLock<Option<crate::gizmos::CursorOrInvisible>>,
+    tool_render_as: parking_lot::RwLock<crate::pen_tools::RenderAs>,
 }
 
 impl DocumentViewportPreviewProxy {
@@ -519,7 +516,10 @@ impl DocumentViewportPreviewProxy {
         let vertex_stage = vk::PipelineShaderStageCreateInfo::new(vertex_shader);
         let fragment_stage = vk::PipelineShaderStageCreateInfo::new(fragment_shader);
 
-        let no_blend = vk::ColorBlendState::with_attachment_states(1, Default::default());
+        let no_blend = vk::ColorBlendState::with_attachment_states(
+            1,
+            vk::ColorBlendAttachmentState::default(),
+        );
 
         let matrix_push_constant = vk::PushConstantRange {
             offset: 0,
@@ -561,17 +561,17 @@ impl DocumentViewportPreviewProxy {
                     primitive_restart_enable: false,
                     ..Default::default()
                 }),
-                multisample_state: Some(Default::default()),
+                multisample_state: Some(vk::MultisampleState::default()),
                 rasterization_state: Some(vk::RasterizationState {
                     cull_mode: vk::CullMode::None,
                     ..Default::default()
                 }),
                 vertex_input_state: Some(
                     // Vertices are generated in-shader from VertexIndex
-                    Default::default(),
+                    vk::VertexInputState::new(),
                 ),
                 // One viewport and scissor, scissor irrelevant and viewport dynamic
-                viewport_state: Some(Default::default()),
+                viewport_state: Some(vk::ViewportState::default()),
                 dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
                 subpass: Some(render_pass.clone().first_subpass().into()),
                 stages: smallvec::smallvec![vertex_stage, fragment_stage],
@@ -665,7 +665,7 @@ impl DocumentViewportPreviewProxy {
     ///
     /// A call to `read` implies any use of previously read image is complete. This must be synchronized externally!!
     pub unsafe fn read(&self) -> usize {
-        let mut lock = self.swap_after.write().unwrap();
+        let mut lock = self.swap_after.write();
         match &*lock {
             // Nothin to do
             SwapAfter::Empty => self.read_buf.load(std::sync::atomic::Ordering::SeqCst) as usize,
@@ -688,7 +688,7 @@ impl DocumentViewportPreviewProxy {
     /// Returns true if a new image was submitted that hasn't been
     /// acquired yet
     pub fn redraw_requested(&self) -> bool {
-        match &*self.swap_after.read().unwrap() {
+        match &*self.swap_after.read() {
             SwapAfter::Empty => false,
             SwapAfter::Now => true,
             SwapAfter::Fence(fence) => fence.is_signaled().unwrap(),
@@ -696,7 +696,7 @@ impl DocumentViewportPreviewProxy {
     }
     pub async fn write(&self) -> DocumentViewportPreviewProxyImageGuard<'_> {
         self.write_ready_notify.notified().await;
-        assert!(self.swap_after.read().unwrap().is_empty());
+        assert!(self.swap_after.read().is_empty());
         // We are now the sole writer. Hopefully. Return the proxy:
         DocumentViewportPreviewProxyImageGuard {
             // Return whichever image is *not* the read buf. Uhm uh ordering??
@@ -704,7 +704,7 @@ impl DocumentViewportPreviewProxy {
                 [(self.read_buf.load(std::sync::atomic::Ordering::SeqCst) ^ 1) as usize]
                 .clone(),
             is_submitted: false,
-            proxy: &self,
+            proxy: self,
         }
     }
     /// The area of the screen where the document is visible has changed
@@ -746,14 +746,10 @@ impl DocumentViewportPreviewProxy {
         })
     }
     pub fn insert_cursor(&self, new_cursor: Option<crate::gizmos::CursorOrInvisible>) {
-        if let Some(mut cursor) = self.cursor.write().ok() {
-            *cursor = new_cursor;
-        }
+        *self.cursor.write() = new_cursor;
     }
     pub fn insert_tool_render(&self, new_render_as: crate::pen_tools::RenderAs) {
-        if let Some(mut render_as) = self.tool_render_as.write().ok() {
-            *render_as = new_render_as;
-        }
+        *self.tool_render_as.write() = new_render_as;
     }
     pub fn get_view_transform_sync(&self) -> Option<crate::view_transform::ViewTransform> {
         // lock, clone, release asap
@@ -789,10 +785,7 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
         let commands = read.get_commands(swapchain_idx, image_idx)?;
 
         // Do we have anything to render?
-        let tool_render_as = self
-            .tool_render_as
-            .read()
-            .map_err(|_| anyhow::anyhow!("Poisoned"))?;
+        let tool_render_as = self.tool_render_as.read();
         let tool_buffer = if matches!(
             *tool_render_as,
             pen_tools::RenderAs::SharedGizmoCollection(..) | pen_tools::RenderAs::InlineGizmos(..)
@@ -821,7 +814,7 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
                     shared.blocking_read().visit_painter(&mut visitor);
                 }
                 pen_tools::RenderAs::InlineGizmos(gizmos) => {
-                    for gizmo in gizmos.iter() {
+                    for gizmo in gizmos {
                         gizmo.visit_painter(&mut visitor);
                     }
                 }
@@ -834,13 +827,13 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
         let mut vec = smallvec::SmallVec::with_capacity(2);
         vec.push(commands);
         if let Some(tool_buffer) = tool_buffer {
-            vec.push(tool_buffer.into());
+            vec.push(tool_buffer);
         }
 
         Ok(vec)
     }
     fn surface_changed(&self, render_surface: &render_device::RenderSurface) {
-        let viewport = self.viewport.read().clone();
+        let viewport = *self.viewport.read();
         let transform = self.document_transform.blocking_read().clone();
 
         let new = ProxySurfaceData::new(
@@ -876,6 +869,6 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
         self.redraw_requested()
     }
     fn cursor(&self) -> Option<crate::gizmos::CursorOrInvisible> {
-        self.cursor.read().ok().and_then(|read| *read)
+        *self.cursor.read()
     }
 }

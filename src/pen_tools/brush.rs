@@ -57,63 +57,54 @@ impl super::PenTool for Brush {
                 };
 
                 // Calc cumulative distance from the start, or 0.0 if this is the first point.
-                let dist = this_stroke
-                    .points
-                    .last()
-                    .map(|last| {
-                        let delta = [last.pos[0] - pos.x, last.pos[1] - pos.y];
-                        last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
-                    })
-                    .unwrap_or(0.0);
+                let dist = this_stroke.points.last().map_or(0.0, |last| {
+                    let delta = [last.pos[0] - pos.x, last.pos[1] - pos.y];
+                    last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
+                });
 
                 this_stroke.points.push(crate::StrokePoint {
                     pos: [pos.x, pos.y],
                     pressure: event.pressure.unwrap_or(1.0),
                     dist,
-                })
-            } else {
-                if let Some(stroke) = self.in_progress_stroke.take() {
-                    // Insert the stroke into the document.
-                    if let Some(Err(e)) = crate::default_provider().inspect(document, |queue| {
-                        queue.write_with(|write| {
-                            // Find the collection to insert into.
-                            let collection_id = {
-                                let graph = write.graph();
-                                let node = graph.get(node).and_then(|node| node.leaf());
-                                if let Some(crate::state::graph::LeafType::StrokeLayer {
-                                    collection,
-                                    ..
-                                }) = node
-                                {
-                                    *collection
-                                } else {
-                                    anyhow::bail!("Current layer is not a valid stroke layer.")
-                                }
-                            };
+                });
+            } else if let Some(stroke) = self.in_progress_stroke.take() {
+                // Insert the stroke into the document.
+                if let Some(Err(e)) = crate::default_provider().inspect(document, |queue| {
+                    queue.write_with(|write| {
+                        // Find the collection to insert into.
+                        let collection_id = {
+                            let graph = write.graph();
+                            let node = graph.get(node).and_then(|node| node.leaf());
+                            if let Some(crate::state::graph::LeafType::StrokeLayer {
+                                collection,
+                                ..
+                            }) = node
+                            {
+                                *collection
+                            } else {
+                                anyhow::bail!("Current layer is not a valid stroke layer.")
+                            }
+                        };
 
-                            // Get the collection
-                            let mut collections = write.stroke_collections();
-                            let Some(mut collection_writer) = collections.get_mut(collection_id)
-                            else {
-                                anyhow::bail!(
-                                    "Current layer references nonexistant stroke collection"
-                                )
-                            };
-                            // Huzzah, all is good! Upload stroke, and push it.
-                            let immutable = TryInto::<
-                                crate::state::stroke_collection::ImmutableStroke,
-                            >::try_into(stroke)?;
+                        // Get the collection
+                        let mut collections = write.stroke_collections();
+                        let Some(mut collection_writer) = collections.get_mut(collection_id) else {
+                            anyhow::bail!("Current layer references nonexistant stroke collection")
+                        };
+                        // Huzzah, all is good! Upload stroke, and push it.
+                        let immutable =
+                            TryInto::<crate::state::stroke_collection::ImmutableStroke>::try_into(
+                                stroke,
+                            )?;
 
-                            // Destructure immutable stroke and push it.
-                            // Invokes an extra ID allocation, weh
-                            collection_writer
-                                .push_back(immutable.brush, immutable.point_collection);
+                        // Destructure immutable stroke and push it.
+                        // Invokes an extra ID allocation, weh
+                        collection_writer.push_back(immutable.brush, immutable.point_collection);
 
-                            Ok(())
-                        })
-                    }) {
-                        log::warn!("Failed to insert stroke: {e:?}");
-                    }
+                        Ok(())
+                    })
+                }) {
+                    log::warn!("Failed to insert stroke: {e:?}");
                 }
             }
         }
