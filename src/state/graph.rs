@@ -25,17 +25,16 @@ pub enum LeafType {
     Note,
 }
 impl LeafType {
+    #[must_use]
     pub fn blend(&self) -> Option<crate::Blend> {
         match self {
-            Self::StrokeLayer { blend, .. } => Some(*blend),
-            Self::SolidColor { blend, .. } => Some(*blend),
+            Self::StrokeLayer { blend, .. } | Self::SolidColor { blend, .. } => Some(*blend),
             Self::Note => None,
         }
     }
     pub fn blend_mut(&mut self) -> Option<&mut crate::Blend> {
         match self {
-            Self::StrokeLayer { blend, .. } => Some(blend),
-            Self::SolidColor { blend, .. } => Some(blend),
+            Self::StrokeLayer { blend, .. } | Self::SolidColor { blend, .. } => Some(blend),
             Self::Note => None,
         }
     }
@@ -49,12 +48,14 @@ pub enum NodeType {
     GroupedBlend(crate::Blend),
 }
 impl NodeType {
+    #[must_use]
     pub fn blend(&self) -> Option<crate::Blend> {
         match self {
             Self::Passthrough => None,
             Self::GroupedBlend(blend) => Some(*blend),
         }
     }
+    #[must_use]
     pub fn blend_mut(&mut self) -> Option<&mut crate::Blend> {
         match self {
             Self::Passthrough => None,
@@ -71,16 +72,10 @@ enum NodeDataTy {
 }
 impl NodeDataTy {
     fn is_leaf(&self) -> bool {
-        match self {
-            Self::Leaf(..) => true,
-            _ => false,
-        }
+        matches!(self, Self::Leaf(..))
     }
     fn is_node(&self) -> bool {
-        match self {
-            Self::Node(..) => true,
-            _ => false,
-        }
+        matches!(self, Self::Node(..))
     }
     pub fn blend(&self) -> Option<crate::Blend> {
         match self {
@@ -107,15 +102,18 @@ pub struct NodeData {
     pub name: String,
 }
 impl NodeData {
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
     pub fn name_mut(&mut self) -> &mut String {
         &mut self.name
     }
+    #[must_use]
     pub fn is_leaf(&self) -> bool {
         self.ty.is_leaf()
     }
+    #[must_use]
     pub fn is_node(&self) -> bool {
         self.ty.is_node()
     }
@@ -127,6 +125,7 @@ impl NodeData {
             _ => Err(self),
         }
     }
+    #[must_use]
     pub fn leaf(&self) -> Option<&LeafType> {
         if let NodeDataTy::Leaf(l) = &self.ty {
             Some(l)
@@ -149,6 +148,7 @@ impl NodeData {
             _ => Err(self),
         }
     }
+    #[must_use]
     pub fn node(&self) -> Option<&NodeType> {
         if let NodeDataTy::Node(n) = &self.ty {
             Some(n)
@@ -163,6 +163,7 @@ impl NodeData {
             None
         }
     }
+    #[must_use]
     pub fn blend(&self) -> Option<crate::Blend> {
         self.ty.blend()
     }
@@ -189,6 +190,7 @@ pub enum ReparentError {
     WouldCycle,
 }
 
+#[derive(Copy, Clone)]
 pub enum Location<'a> {
     /// Calculate the index and parent, such that the location
     /// referenced is the sibling above this node.
@@ -217,7 +219,7 @@ impl Default for BlendGraph {
                     deleted: false,
                 }))
                 .build(),
-            ids: Default::default(),
+            ids: stable_id::StableIDMap::default(),
         }
     }
 }
@@ -228,14 +230,12 @@ impl BlendGraph {
             .unwrap()
     }
     /// Iterate the children of this node
-    pub fn iter_node<'s>(
-        &'s self,
-        node: &'_ NodeID,
-    ) -> Option<impl Iterator<Item = (AnyID, &'s NodeData)> + 's> {
+    #[must_use]
+    pub fn iter_node(&self, node: NodeID) -> Option<impl Iterator<Item = (AnyID, &NodeData)> + '_> {
         self.iter_children_of_raw(self.ids.tree_id_from_node(node)?)
     }
     /// Iterate all nodes, in arbitrary order.
-    pub fn iter<'s>(&'s self) -> impl Iterator<Item = (AnyID, &'s NodeData)> + 's {
+    pub fn iter(&self) -> impl Iterator<Item = (AnyID, &NodeData)> + '_ {
         self.tree
             .traverse_post_order_ids(self.tree.root_node_id().unwrap())
             .unwrap()
@@ -266,10 +266,10 @@ impl BlendGraph {
             })
     }
     /// Iterate the children of this raw ID. A helper method for all various iters!
-    fn iter_children_of_raw(
-        &'_ self,
+    fn iter_children_of_raw<'s>(
+        &'s self,
         node_id: &id_tree::NodeId,
-    ) -> Option<impl Iterator<Item = (AnyID, &'_ NodeData)> + '_> {
+    ) -> Option<impl Iterator<Item = (AnyID, &'s NodeData)> + 's> {
         Some(self.tree.children_ids(node_id).ok()?.filter_map(|node_id| {
             let node = self.tree.get(node_id).unwrap().data();
             // Skip children marked as deleted
@@ -286,7 +286,7 @@ impl BlendGraph {
                     NodeDataTy::Leaf(_) => AnyID::Leaf(LeafID(*fuz_id)),
                     NodeDataTy::Node(_) => AnyID::Node(NodeID(*fuz_id)),
                     // Invalid tree state.
-                    _ => panic!("Root encountered during iteration!"),
+                    NodeDataTy::Root => panic!("Root encountered during iteration!"),
                 };
                 Some((id, node))
             }
@@ -302,7 +302,7 @@ impl BlendGraph {
             Location::AboveSelection(selection) => {
                 let selection_tree_id = self
                     .ids
-                    .tree_id_from_any(selection)
+                    .tree_id_from_any(*selection)
                     .ok_or(TargetError::TargetNotFound)?;
                 let node = self
                     .tree
@@ -327,12 +327,12 @@ impl BlendGraph {
             Location::IndexIntoNode(node, idx) => {
                 let selection_tree_id = self
                     .ids
-                    .tree_id_from_node(node)
+                    .tree_id_from_node(*node)
                     .ok_or(TargetError::TargetNotFound)?;
 
                 let node_deleted = self
                     .tree
-                    .get(&selection_tree_id)
+                    .get(selection_tree_id)
                     .ok()
                     .map(|node| node.data().deleted);
 
@@ -347,13 +347,13 @@ impl BlendGraph {
     }
     pub fn get(&self, id: impl Into<AnyID>) -> Option<&NodeData> {
         let id = Into::<AnyID>::into(id);
-        let tree_id = self.ids.tree_id_from_any(&id)?;
-        self.tree.get(tree_id).ok().map(|node| node.data())
+        let tree_id = self.ids.tree_id_from_any(id)?;
+        self.tree.get(tree_id).ok().map(id_tree::Node::data)
     }
     pub fn get_mut(&mut self, id: impl Into<AnyID>) -> Option<&mut NodeData> {
         let id = Into::<AnyID>::into(id);
-        let tree_id = self.ids.tree_id_from_any(&id)?;
-        self.tree.get_mut(tree_id).ok().map(|node| node.data_mut())
+        let tree_id = self.ids.tree_id_from_any(id)?;
+        self.tree.get_mut(tree_id).ok().map(id_tree::Node::data_mut)
     }
     pub fn get_node_mut(&mut self, id: NodeID) -> Option<&mut NodeType> {
         self.get_mut(id).and_then(NodeData::node_mut)
@@ -415,7 +415,7 @@ impl BlendGraph {
     }
     // Get the (parent, idx) of the node. Parent is None if root is the parent.
     fn location_of(&self, id: impl Into<AnyID>) -> Option<(Option<NodeID>, usize)> {
-        let tree_id = self.ids.tree_id_from_any(&id.into())?;
+        let tree_id = self.ids.tree_id_from_any(id.into())?;
         let node = self.tree.get(tree_id).ok()?;
         // Should never return None - user shouldn't have access to root ID!
         let parent = node.parent().unwrap();
@@ -441,11 +441,11 @@ impl BlendGraph {
         let target_id = Into::<AnyID>::into(target);
         let target_tree_id = self
             .ids
-            .tree_id_from_any(&target_id)
+            .tree_id_from_any(target_id)
             .ok_or(ReparentError::TargetError(TargetError::TargetNotFound))?;
         let (destination_id, idx) = self
             .find_location(destination)
-            .map_err(|e| ReparentError::DestinationError(e))?;
+            .map_err(ReparentError::DestinationError)?;
         // Are we trying to reparent to one of this node's own children
         // or itself?
         if std::iter::once(destination_id)
@@ -469,7 +469,7 @@ impl BlendGraph {
             .map_err(|_| ReparentError::DestinationError(TargetError::TargetNotFound))?;
 
         // unwrap ok - move_node already checked presence of target.
-        self.tree.make_nth_sibling(&target_tree_id, idx).unwrap();
+        self.tree.make_nth_sibling(target_tree_id, idx).unwrap();
 
         Ok(())
     }
@@ -480,7 +480,7 @@ impl BlendGraph {
             .tree
             .get(
                 self.ids
-                    .tree_id_from_any(&target.into())
+                    .tree_id_from_any(target.into())
                     .ok_or(TargetError::TargetNotFound)?,
             )
             .map_err(|_| TargetError::TargetNotFound)?
@@ -526,7 +526,7 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
         &mut self,
         command: crate::commands::DoUndo<'_, crate::commands::GraphCommand>,
     ) -> Result<(), crate::commands::CommandError> {
-        use crate::commands::*;
+        use crate::commands::{CommandError, DoUndo, GraphCommand};
 
         match command {
             DoUndo::Do(GraphCommand::BlendChanged { from, to, target })
@@ -551,7 +551,7 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 if blend != from {
                     return Err(CommandError::MismatchedState);
                 }
-                *blend = to.clone();
+                *blend = *to;
                 Ok(())
             }
             DoUndo::Do(GraphCommand::LeafTyChanged { target, old_ty, ty })
@@ -679,7 +679,7 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 new_child_idx: _, // FIXME!
             }) => {
                 // Get the expected current parent's nodeId, or none if root is parent.
-                let old_parent_tree_id = match old_parent.map(|p| self.ids.tree_id_from_node(&p)) {
+                let old_parent_tree_id = match old_parent.map(|p| self.ids.tree_id_from_node(p)) {
                     Some(None) => return Err(CommandError::UnknownResource),
                     Some(Some(id)) => Some(id),
                     None => None,
@@ -690,7 +690,7 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                     .tree
                     .get(
                         self.ids
-                            .tree_id_from_any(target)
+                            .tree_id_from_any(*target)
                             .ok_or(CommandError::UnknownResource)?,
                     )
                     .map_err(|_| CommandError::UnknownResource)?
@@ -768,6 +768,6 @@ mod test {
             .unwrap();
 
         let clone = graph.clone();
-        assert_eq!(clone.get(soup_id).map(|node| node.name()), Some("Soup!"))
+        assert_eq!(clone.get(soup_id).map(|node| node.name()), Some("Soup!"));
     }
 }

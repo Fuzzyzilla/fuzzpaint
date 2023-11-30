@@ -24,6 +24,7 @@ pub struct StylusEvent {
     pub dist: Option<f32>,
 }
 impl StylusEvent {
+    #[must_use]
     pub fn empty() -> Self {
         Self {
             pos: (0.0, 0.0),
@@ -110,8 +111,8 @@ impl WinitStylusEventCollector {
     /// This frame is complete, and no more axis events will occur until next frame.
     /// Finish the current event.
     pub fn finish(&mut self) {
-        //Notify listeners
-        self.broadcast()
+        // Notify listeners
+        self.broadcast();
     }
     /// Consume the events for this frame, and broadcast them to all listeners.
     /// Events will be accumulated in the case of no listeners.
@@ -127,6 +128,7 @@ impl WinitStylusEventCollector {
             self.recover_frame(inner_frame);
         }
     }
+    #[must_use]
     pub fn frame_receiver(&self) -> tokio::sync::broadcast::Receiver<StylusEventFrame> {
         self.frame_channel.subscribe()
     }

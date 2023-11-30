@@ -250,7 +250,7 @@ impl Renderer {
             node: NodeID,
         ) -> anyhow::Result<()> {
             let iter = graph
-                .iter_node(&node)
+                .iter_node(node)
                 .ok_or_else(|| anyhow::anyhow!("Passthrough node not found"))?;
             for (id, data) in iter {
                 insert_blend(blend_engine, builder, document_data, graph, id, data)?;
@@ -269,7 +269,7 @@ impl Renderer {
             clear_image: bool,
         ) -> anyhow::Result<crate::blend::BlendInvocationHandle> {
             let iter = graph
-                .iter_node(&node)
+                .iter_node(node)
                 .ok_or_else(|| anyhow::anyhow!("Node not found"))?;
             let mut builder = blend_engine.start(into_image, clear_image);
 

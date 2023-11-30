@@ -1,10 +1,10 @@
 pub mod requests;
 
-const STROKE_LAYER_ICON: &'static str = "✏";
-const NOTE_LAYER_ICON: &'static str = "🖹";
-const FILL_LAYER_ICON: &'static str = "⬛";
-const GROUP_ICON: &'static str = "🗀";
-const SCISSOR_ICON: &'static str = "✂";
+const STROKE_LAYER_ICON: &str = "✏";
+const NOTE_LAYER_ICON: &str = "🖹";
+const FILL_LAYER_ICON: &str = "⬛";
+const GROUP_ICON: &str = "🗀";
+const SCISSOR_ICON: &str = "✂";
 
 trait UILayer {
     /// Perform UI operations. If `is_background`, a layer is open above this layer - display
@@ -39,6 +39,7 @@ pub struct MainUI {
     action_listener: crate::actions::ActionListener,
 }
 impl MainUI {
+    #[must_use]
     pub fn new(
         requests_send: requests::RequestSender,
         action_listener: crate::actions::ActionListener,
@@ -55,8 +56,8 @@ impl MainUI {
             .collect();
         let cur_document = documents.last().map(|doc| doc.id);
         Self {
-            modals: vec![],
-            inlays: vec![],
+            modals: Vec::new(),
+            inlays: Vec::new(),
             documents,
             cur_document,
             requests_send,
@@ -77,7 +78,7 @@ impl MainUI {
         // is_background set if at least one modal exists.
         let ret_value = self.main_ui(ctx, is_background);
         // Display windows after main. Egui will place the windows inside the free area
-        for inlay in self.inlays.iter_mut() {
+        for inlay in &mut self.inlays {
             // todo: handle dismiss
             let _ = inlay.do_ui(ctx, &mut self.requests_send, is_background);
         }
@@ -90,7 +91,7 @@ impl MainUI {
         ctx: &egui::Context,
         _is_background: bool,
     ) -> (ultraviolet::Vec2, ultraviolet::Vec2) {
-        egui::TopBottomPanel::top("file").show(&ctx, |ui| {
+        egui::TopBottomPanel::top("file").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
                     .on_hover_text("Baa");
@@ -125,10 +126,11 @@ impl MainUI {
                         if add_button(ui, "Save", Some("Ctrl+S")).clicked() {
                             // Dirty testing implementation!
                             if let Some(current) = self.cur_document {
-                                std::thread::spawn(move || -> () {
-                                    if let Some(reader) = crate::default_provider()
-                                        .inspect(current, |doc| doc.peek_clone_state())
-                                    {
+                                std::thread::spawn(move || {
+                                    if let Some(reader) = crate::default_provider().inspect(
+                                        current,
+                                        crate::commands::queue::DocumentCommandQueue::peek_clone_state,
+                                    ) {
                                         let repo = crate::repositories::points::global();
 
                                         let try_block = || -> anyhow::Result<()> {
@@ -138,7 +140,7 @@ impl MainUI {
 
                                             let start = std::time::Instant::now();
                                             crate::io::write_into(reader, repo, &file)?;
-                                            let duration = std::time::Instant::now() - start;
+                                            let duration = start.elapsed();
 
                                             file.sync_all()?;
                                             if let Some(size) =
@@ -174,7 +176,7 @@ impl MainUI {
 
                                 // Keep track of the last successful loaded id
                                 let mut recent_success = None;
-                                for file in files.into_iter() {
+                                for file in files {
                                     match crate::io::read_path(file, point_repository) {
                                         Ok(doc) => {
                                             let id = doc.id();
@@ -212,7 +214,7 @@ impl MainUI {
                 });
             });
         });
-        egui::TopBottomPanel::bottom("Nav").show(&ctx, |ui| {
+        egui::TopBottomPanel::bottom("Nav").show(ctx, |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Everything here is shown in reverse order!
 
@@ -292,10 +294,10 @@ impl MainUI {
                             ),
                         });
                     }
-                    if !rotation_response.dragged() {
-                        latch::Latch::None
-                    } else {
+                    if rotation_response.dragged() {
                         latch::Latch::Continue
+                    } else {
+                        latch::Latch::None
                     }
                 });
                 ui.add(egui::Separator::default().vertical());
@@ -318,10 +320,10 @@ impl MainUI {
                         .unwrap_or((0, 0));
                     // RTL - add in reverse :P
                     if ui.add(redo).clicked() {
-                        redos += 1
+                        redos += 1;
                     };
                     if ui.add(undo).clicked() {
-                        undos += 1
+                        undos += 1;
                     };
                     // Submit undo/redos as requested.
                     if redos != 0 {
@@ -340,7 +342,7 @@ impl MainUI {
             });
         });
 
-        egui::SidePanel::right("Layers").show(&ctx, |ui| {
+        egui::SidePanel::right("Layers").show(ctx, |ui| {
             ui.label("Layers");
             ui.separator();
             // if there is no current document, there is nothing for us to do here
@@ -444,8 +446,9 @@ impl MainUI {
                                                 writer
                                                     .stroke_collections()
                                                     .get(*collection)
-                                                    .map(|collection| collection.strokes.len())
-                                                    .unwrap_or(0),
+                                                    .map_or(0, |collection| collection
+                                                        .strokes
+                                                        .len()),
                                                 *collection,
                                             ))
                                             .italics()
@@ -497,7 +500,7 @@ impl MainUI {
                                 .graph()
                                 .add_leaf(
                                     crate::state::graph::LeafType::StrokeLayer {
-                                        blend: Default::default(),
+                                        blend: crate::blend::Blend::default(),
                                         collection: new_stroke_collection,
                                     },
                                     add_location!(),
@@ -530,7 +533,7 @@ impl MainUI {
                             interface.graph_selection = graph
                                 .add_leaf(
                                     crate::state::graph::LeafType::SolidColor {
-                                        blend: Default::default(),
+                                        blend: crate::blend::Blend::default(),
                                         source: [1.0; 4],
                                     },
                                     add_location!(),
@@ -613,9 +616,8 @@ impl MainUI {
                                     interface
                                         .graph_focused_subtree
                                         .as_ref()
-                                        .and_then(|subtree| graph.get(subtree.clone()))
-                                        .map(|data| data.name())
-                                        .unwrap_or("Unknown")
+                                        .and_then(|subtree| graph.get(*subtree))
+                                        .map_or("Unknown", |data| data.name())
                                 ))
                                 .italics(),
                             );
@@ -627,13 +629,13 @@ impl MainUI {
                             graph_edit_recurse(
                                 ui,
                                 &mut graph,
-                                interface.graph_focused_subtree.clone(),
+                                interface.graph_focused_subtree,
                                 &mut interface.graph_selection,
                                 &mut interface.graph_focused_subtree,
-                                &mut interface.yanked_node,
-                            )
+                                interface.yanked_node,
+                            );
                         });
-                })
+                });
             });
 
             // Update selections.
@@ -654,7 +656,7 @@ impl MainUI {
 
         egui::SidePanel::left("Inspector")
             .resizable(false)
-            .show(&ctx, |ui| {
+            .show(ctx, |ui| {
                 egui::TopBottomPanel::bottom("mem-usage")
                     .resizable(false)
                     .show_inside(ui, |ui| {
@@ -710,12 +712,12 @@ impl MainUI {
                 }
             });
 
-        egui::TopBottomPanel::top("documents").show(&ctx, |ui| {
+        egui::TopBottomPanel::top("documents").show(ctx, |ui| {
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let mut deleted_ids =
                         smallvec::SmallVec::<[crate::state::DocumentID; 1]>::new();
-                    for PerDocumentData { id, name, .. } in self.documents.iter() {
+                    for PerDocumentData { id, name, .. } in &self.documents {
                         egui::containers::Frame::group(ui.style())
                             .outer_margin(egui::Margin::symmetric(0.0, 0.0))
                             .inner_margin(egui::Margin::symmetric(0.0, 0.0))
@@ -741,7 +743,7 @@ impl MainUI {
                             })
                             .response
                             .on_hover_ui(|ui| {
-                                ui.label(format!("{}", id));
+                                ui.label(format!("{id}"));
                             });
                     }
                     self.documents
@@ -765,7 +767,7 @@ impl MainUI {
 
 fn icon_of_node(node: &crate::state::graph::NodeData) -> &'static str {
     use crate::state::graph::{LeafType, NodeType};
-    const UNKNOWN: &'static str = "？";
+    const UNKNOWN: &str = "？";
     match (node.leaf(), node.node()) {
         // Leaves
         (Some(LeafType::SolidColor { .. }), None) => FILL_LAYER_ICON,
@@ -799,7 +801,7 @@ mod latch {
         pub fn cancel(self) {
             // Delete egui's persisted state
             self.ui
-                .data_mut(|data| data.remove::<State>(self.persisted_id))
+                .data_mut(|data| data.remove::<State>(self.persisted_id));
         }
         /// Get the output. Returns Some only once when the operation has finished.
         pub fn result(self) -> Option<State> {
@@ -810,13 +812,13 @@ mod latch {
     /// only producing output when the interaction is fully finished.
     ///
     /// Takes a closure which inspects the mutable State, modifying it and reporting changes via
-    /// the [Latch] enum. By default, when no interaction is occuring, it should report [Latch::None]
-    pub fn latch<'ui, State, F>(
-        ui: &'ui mut egui::Ui,
+    /// the [Latch] enum. By default, when no interaction is occuring, it should report [`Latch::None`]
+    pub fn latch<State, F>(
+        ui: &mut egui::Ui,
         id_src: impl std::hash::Hash,
         state: State,
         f: F,
-    ) -> LatchResponse<'ui, State>
+    ) -> LatchResponse<'_, State>
     where
         F: FnOnce(&mut egui::Ui, &mut State) -> Latch,
         // bounds implied by insert_temp
@@ -989,16 +991,16 @@ fn graph_edit_recurse<
     root: Option<crate::state::graph::NodeID>,
     selected_node: &mut Option<crate::state::graph::AnyID>,
     focused_node: &mut Option<crate::state::graph::NodeID>,
-    yanked_node: &Option<crate::state::graph::AnyID>,
+    yanked_node: Option<crate::state::graph::AnyID>,
 ) {
     let node_ids: Vec<_> = match root {
-        Some(root) => graph.iter_node(&root).unwrap().map(|(id, _)| id).collect(),
+        Some(root) => graph.iter_node(root).unwrap().map(|(id, _)| id).collect(),
         None => graph.iter_top_level().map(|(id, _)| id).collect(),
     };
 
     let mut first = true;
     // Iterate!
-    for id in node_ids.into_iter() {
+    for id in node_ids {
         if !first {
             ui.separator();
         }
@@ -1007,7 +1009,7 @@ fn graph_edit_recurse<
             let data = graph.get(id).unwrap();
             // Choose an icon based on the type of the node:
             // Yanked (if any) gets a scissor icon.
-            let icon = if Some(id) == *yanked_node {
+            let icon = if Some(id) == yanked_node {
                 SCISSOR_ICON
             } else {
                 icon_of_node(data)
@@ -1031,7 +1033,7 @@ fn graph_edit_recurse<
             let name = graph.name_mut(id).unwrap();
 
             // Fetch from last frame - are we hovered?
-            let name_hovered_key = egui::Id::new((id.clone(), "name-hovered"));
+            let name_hovered_key = egui::Id::new((id, "name-hovered"));
             let hovered: Option<bool> = ui.data(|data| data.get_temp(name_hovered_key));
             let edit = egui::TextEdit::singleline(name).frame(hovered.unwrap_or(false));
             let name_response = ui.add(edit);
@@ -1060,13 +1062,13 @@ fn graph_edit_recurse<
             }
             (None, Some(n)) => {
                 // Unwrap nodeID:
-                let crate::state::graph::AnyID::Node(node_id) = id.clone() else {
+                let crate::state::graph::AnyID::Node(node_id) = id else {
                     panic!("Node data and ID mismatch!")
                 };
                 // Option to focus this subtree:
                 header_response.inner.context_menu(|ui| {
                     if ui.button("Focus Subtree").clicked() {
-                        *focused_node = Some(node_id.clone())
+                        *focused_node = Some(node_id);
                     }
                 });
                 // Display node type - passthrough or grouped blend
@@ -1084,13 +1086,13 @@ fn graph_edit_recurse<
                             // Type change - passthrough to grouped.
                             graph
                                 .set_node(node_id, crate::state::graph::NodeType::GroupedBlend(to))
-                                .unwrap()
+                                .unwrap();
                         }
                         (Some(_), None) => {
                             // Type change - grouped to passthrough
                             graph
                                 .set_node(node_id, crate::state::graph::NodeType::Passthrough)
-                                .unwrap()
+                                .unwrap();
                         }
                         _ => {
                             // No change
@@ -1100,7 +1102,7 @@ fn graph_edit_recurse<
 
                 // display children!
                 egui::CollapsingHeader::new(egui::RichText::new("Children").italics().weak())
-                    .id_source(&id)
+                    .id_source(id)
                     .default_open(true)
                     .show(ui, |ui| {
                         graph_edit_recurse(
@@ -1110,7 +1112,7 @@ fn graph_edit_recurse<
                             selected_node,
                             focused_node,
                             yanked_node,
-                        )
+                        );
                     });
             }
             (None, None) => (),

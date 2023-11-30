@@ -28,6 +28,7 @@ pub enum TransformError {
 impl ViewTransform {
     /// Is the view flipped (determinate negative)?
     /// Doesn't differentiate between horizontal and vertical flipping.
+    #[must_use]
     pub fn is_flipped(&self) -> bool {
         false //self.flip_x
     }
@@ -77,10 +78,12 @@ impl ViewTransform {
             .transform_point(view_point))
     }
     /// Convert this point in local space to view space
+    #[must_use]
     pub fn project(&self, local_point: cgmath::Point2<f32>) -> cgmath::Point2<f32> {
         self.decomposed.transform_point(local_point)
     }
-    /// Create a transform where the document's center is located at view_center
+    /// Create a transform where the document's center is located at `view_center`
+    #[must_use]
     pub fn center_on(
         view_center: cgmath::Point2<f32>,
         document_size: cgmath::Vector2<f32>,
@@ -91,7 +94,7 @@ impl ViewTransform {
         let disp = view_center.to_vec() - scale * rot.rotate_vector(document_size / 2.0);
 
         Self {
-            decomposed: Decomposed2 { rot, scale, disp },
+            decomposed: Decomposed2 { scale, rot, disp },
         }
     }
 }
@@ -143,6 +146,7 @@ pub struct DocumentFit {
 
 impl DocumentFit {
     /// Make a transform from the given document size and viewport rect (pos, size)
+    #[must_use]
     pub fn make_transform(
         &self,
         document_size: cgmath::Vector2<f32>,
@@ -222,6 +226,6 @@ pub enum DocumentTransform {
 }
 impl Default for DocumentTransform {
     fn default() -> Self {
-        Self::Fit(Default::default())
+        Self::Fit(DocumentFit::default())
     }
 }

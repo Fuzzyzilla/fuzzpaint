@@ -284,7 +284,7 @@ impl RenderContext {
 
         let Some((physical_device, queue_indices)) = Self::choose_physical_device(
             instance.clone(),
-            required_device_extensions,
+            &required_device_extensions,
             Some(surface.clone()),
         )?
         else {
@@ -455,8 +455,8 @@ impl RenderContext {
             device,
             Queues {
                 graphics_queue,
-                compute_queue,
                 present_queue,
+                compute_queue,
             },
         ))
     }
@@ -464,7 +464,7 @@ impl RenderContext {
     /// Horrible signature - Returns Ok(None) if no device found, Ok(Some((device, queue indices))) if suitable device found.
     fn choose_physical_device(
         instance: Arc<vk::Instance>,
-        required_extensions: vk::DeviceExtensions,
+        required_extensions: &vk::DeviceExtensions,
         compatible_surface: Option<Arc<vk::Surface>>,
     ) -> AnyResult<Option<(Arc<vk::PhysicalDevice>, QueueIndices)>> {
         //TODO: does not respect queue family max queue counts. This will need to be redone in some sort of

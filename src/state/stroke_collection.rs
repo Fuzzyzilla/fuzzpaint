@@ -24,13 +24,13 @@ pub enum ImmutableStrokeError {
 impl TryFrom<crate::Stroke> for ImmutableStroke {
     type Error = ImmutableStrokeError;
     /// Fails if the Stroke has too much data to fit in the repository.
-    /// See [crate::repositories::points::PointRepository::insert]
+    /// See [`crate::repositories::points::PointRepository::insert`]
     fn try_from(value: crate::Stroke) -> Result<Self, Self::Error> {
         let point_collection = crate::repositories::points::global()
             .insert(&value.points)
             .ok_or(ImmutableStrokeError::TooLarge)?;
         Ok(Self {
-            id: Default::default(),
+            id: crate::FuzzID::default(),
             brush: value.brush,
             point_collection,
         })
@@ -48,15 +48,15 @@ pub struct StrokeCollection {
 impl Default for StrokeCollection {
     fn default() -> Self {
         Self {
-            strokes: Default::default(),
-            strokes_active: Default::default(),
+            strokes: Vec::new(),
+            strokes_active: bitvec::vec::BitVec::new(),
             active: true,
         }
     }
 }
 // Public methods for client
 impl StrokeCollection {
-    pub fn iter_active<'s>(&'s self) -> impl Iterator<Item = &'s ImmutableStroke> + 's {
+    pub fn iter_active(&self) -> impl Iterator<Item = &ImmutableStroke> + '_ {
         // Could also achieve with a zip. really depends on how dense we expect
         // deleted strokes to be, I should bench!
         self.strokes_active
@@ -68,6 +68,7 @@ impl StrokeCollection {
     // Can't binary search over IDs, as they're not technically
     // required to be ordered, in preparation for network shenanigans.
     /// Get a stroke by the given ID. Returns None if it is not found, or has been deleted.
+    #[must_use]
     pub fn get(&self, id: ImmutableStrokeID) -> Option<&ImmutableStroke> {
         let (idx, stroke) = self
             .strokes
@@ -88,12 +89,13 @@ impl StrokeCollection {
         self.strokes_active.push(true);
     }
     /// Gets a mutable reference to a stroke, and it's activity status.
-    fn get_mut<'s>(
-        &'s mut self,
+    #[must_use]
+    fn get_mut(
+        &mut self,
         id: ImmutableStrokeID,
     ) -> Option<(
         &mut ImmutableStroke,
-        impl std::ops::DerefMut<Target = bool> + 's,
+        impl std::ops::DerefMut<Target = bool> + '_,
     )> {
         let (idx, stroke) = self
             .strokes
@@ -111,6 +113,7 @@ impl StrokeCollection {
 pub struct StrokeCollectionState(pub hashbrown::HashMap<StrokeCollectionID, StrokeCollection>);
 // Public methods for access by the client
 impl StrokeCollectionState {
+    #[must_use]
     pub fn get(&self, id: StrokeCollectionID) -> Option<&StrokeCollection> {
         let collection = self.0.get(&id)?;
 
@@ -120,12 +123,13 @@ impl StrokeCollectionState {
 }
 // Private methods for modification by the writer/command applier
 impl StrokeCollectionState {
+    #[must_use]
     fn get_mut(&mut self, id: StrokeCollectionID) -> Option<&mut StrokeCollection> {
         self.0.get_mut(&id)
     }
     fn insert(&mut self) -> StrokeCollectionID {
-        let id = Default::default();
-        self.0.insert(id, Default::default());
+        let id = crate::FuzzID::default();
+        self.0.insert(id, StrokeCollection::default());
         id
     }
 }
@@ -196,12 +200,12 @@ impl CommandConsumer<commands::StrokeCollectionCommand> for StrokeCollectionStat
             }
             DoUndo::Undo(commands::StrokeCollectionCommand::Created(id)) => {
                 let collection = self.get_mut(*id).ok_or(CommandError::UnknownResource)?;
-                if !collection.active {
-                    Err(CommandError::MismatchedState)
-                } else {
+                if collection.active {
                     collection.active = false;
 
                     Ok(())
+                } else {
+                    Err(CommandError::MismatchedState)
                 }
             }
             DoUndo::Do(commands::StrokeCollectionCommand::Stroke { target, .. })
