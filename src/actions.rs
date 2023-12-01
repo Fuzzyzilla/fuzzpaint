@@ -25,7 +25,12 @@ pub enum Action {
     ViewportFlipHorizontal,
 
     Gizmo,
+    Brush,
     Erase,
+    Lasso,
+
+    BrushSizeUp,
+    BrushSizeDown,
 
     LayerUp,
     LayerDown,
