@@ -17,6 +17,7 @@
 mod brush;
 mod dummy;
 mod gizmo;
+mod lasso;
 mod viewport;
 
 trait MakePenTool {
@@ -108,6 +109,7 @@ pub enum StateLayer {
     ViewportScrub,
     ViewportRotate,
     Gizmos,
+    Lasso,
 }
 #[derive(Clone, Copy)]
 enum Transition {
@@ -127,6 +129,7 @@ pub struct ToolState {
     document_scrub: Box<dyn PenTool>,
     document_rotate: Box<dyn PenTool>,
     gizmos: Box<dyn PenTool>,
+    lasso: Box<dyn PenTool>,
 }
 impl ToolState {
     pub fn new_from_renderer(
@@ -140,6 +143,7 @@ impl ToolState {
             document_scrub: viewport::ViewportScrub::new_from_renderer(context)?,
             document_rotate: viewport::ViewportRotate::new_from_renderer(context)?,
             gizmos: gizmo::GizmoManipulator::new_from_renderer(context)?,
+            lasso: lasso::Lasso::new_from_renderer(context)?,
         })
     }
     /// Allow the tool to process the given stylus data and actions, optionally returning preview render commands,
@@ -194,6 +198,7 @@ impl ToolState {
             StateLayer::ViewportScrub => self.document_scrub.as_mut(),
             StateLayer::ViewportRotate => self.document_rotate.as_mut(),
             StateLayer::Gizmos => self.gizmos.as_mut(),
+            StateLayer::Lasso => self.lasso.as_mut(),
         }
     }
     fn apply_state_transition(&mut self, transition: Transition) {

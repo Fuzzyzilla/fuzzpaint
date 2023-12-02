@@ -80,6 +80,24 @@ mod shaders {
             }"#
         }
     }
+    pub mod fragment_ant_trail {
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            src: r#"#version 460
+
+            layout(location = 0) in vec4 _0;
+            layout(location = 1) in vec2 _1;
+
+            layout(location = 0) out vec4 outColor;
+
+            void main() {
+                uint pos = uint(gl_FragCoord.x + gl_FragCoord.y);
+
+                float bright = ((pos & 0xF) < 8) ? 1.0: 0.0;
+                outColor = vec4(vec3(bright), 1.0) * outColor;
+            }"#
+        }
+    }
 }
 pub struct GizmoRenderer {
     context: Arc<crate::render_device::RenderContext>,

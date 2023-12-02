@@ -22,7 +22,7 @@ impl super::PenTool for Brush {
         view_info: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
-        _tool_output: &mut super::ToolStateOutput,
+        tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
         // destructure the selections. Otherwise, bail.
