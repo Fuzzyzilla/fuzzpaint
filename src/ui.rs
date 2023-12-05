@@ -8,6 +8,43 @@ const FILL_LAYER_ICON: &str = "⬛";
 const GROUP_ICON: &str = "🗀";
 const SCISSOR_ICON: &str = "✂";
 
+trait ResponseExt {
+    /// Emulate a primary click whenever this action is triggered.
+    fn or_action_clicked(
+        self,
+        frame: &crate::actions::ActionFrame,
+        action: crate::actions::Action,
+    ) -> Self;
+}
+impl ResponseExt for egui::Response {
+    fn or_action_clicked(
+        self,
+        frame: &crate::actions::ActionFrame,
+        action: crate::actions::Action,
+    ) -> Self {
+        if !self.enabled || !self.sense.click {
+            return self;
+        }
+        let triggered = frame.action_trigger_count(action) > 0;
+        let held = frame.is_action_held(action);
+        if held {
+            self.ctx.highlight_widget(self.id);
+        }
+        Self {
+            clicked: [
+                self.clicked[0] || triggered,
+                self.clicked[1],
+                self.clicked[2],
+                self.clicked[3],
+                self.clicked[4],
+            ],
+            is_pointer_button_down_on: self.is_pointer_button_down_on || triggered,
+            highlighted: self.highlighted || held,
+            ..self
+        }
+    }
+}
+
 trait UILayer {
     /// Perform UI operations. If `is_background`, a layer is open above this layer - display
     /// as greyed out and ignore input!
@@ -15,7 +52,7 @@ trait UILayer {
     fn do_ui(
         &mut self,
         ctx: &egui::Context,
-        requests_channel: &mut requests::RequestSender,
+        requests_channel: &mut crossbeam::channel::Sender<requests::UiRequest>,
         is_background: bool,
     ) -> bool;
 }
@@ -38,15 +75,13 @@ pub struct MainUI {
     documents: Vec<PerDocumentData>,
     cur_document: Option<crate::state::DocumentID>,
 
-    requests_send: requests::RequestSender,
+    requests_send: crossbeam::channel::Sender<requests::UiRequest>,
+    requests_recv: crossbeam::channel::Receiver<requests::UiRequest>,
     action_listener: crate::actions::ActionListener,
 }
 impl MainUI {
     #[must_use]
-    pub fn new(
-        requests_send: requests::RequestSender,
-        action_listener: crate::actions::ActionListener,
-    ) -> Self {
+    pub fn new(action_listener: crate::actions::ActionListener) -> Self {
         let documents = crate::default_provider().document_iter();
         let documents: Vec<_> = documents
             .map(|id| PerDocumentData {
@@ -58,14 +93,20 @@ impl MainUI {
             })
             .collect();
         let cur_document = documents.last().map(|doc| doc.id);
+
+        let (requests_send, requests_recv) = crossbeam::channel::unbounded();
         Self {
             modals: Vec::new(),
             inlays: Vec::new(),
             documents,
             cur_document,
             requests_send,
+            requests_recv,
             action_listener,
         }
+    }
+    pub fn listen_requests(&self) -> crossbeam::channel::Receiver<requests::UiRequest> {
+        self.requests_recv.clone()
     }
     /// Main UI and any modals, with the top bar, layers, brushes, color, etc. To be displayed in front of the document and it's gizmos.
     /// Returns the size of the document's viewport space - that is, the size of the rect not covered by any side/top/bottom panels.
@@ -145,15 +186,13 @@ impl MainUI {
         });
 
         egui::SidePanel::left("inspector")
-            .resizable(true)
+            .resizable(false)
             .show(ctx, |ui| {
-                // Statas at bottom
-                egui::TopBottomPanel::bottom("stats-panel")
-                    .resizable(false)
-                    .show_inside(ui, stats_panel);
+                // Stats at bottom
+                egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
+                // Toolbox above that
                 egui::TopBottomPanel::bottom("tools-panel")
-                    .resizable(false)
-                    .show_inside(ui, |ui| tools_panel(ui, &self.requests_send));
+                    .show_inside(ui, |ui| tools_panel(ui, &action_frame, &self.requests_send));
                 // Brush panel takes the rest
                 brush_panel(ui);
             });
@@ -330,7 +369,7 @@ impl MainUI {
     fn nav_bar(
         ui: &mut Ui,
         document: crate::state::DocumentID,
-        requests: &requests::RequestSender,
+        requests: &crossbeam::channel::Sender<requests::UiRequest>,
         frame: &crate::actions::ActionFrame,
     ) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -428,51 +467,76 @@ impl MainUI {
     }
 }
 /// For any tool, (icon string, tooltip, is_todo)
-fn tool_button_for(tool: crate::pen_tools::StateLayer) -> (&'static str, &'static str, bool) {
+fn tool_button_for(
+    tool: crate::pen_tools::StateLayer,
+) -> (&'static str, &'static str, Option<crate::actions::Action>) {
+    use crate::{actions::Action, pen_tools::StateLayer};
     match tool {
-        crate::pen_tools::StateLayer::Brush => (STROKE_LAYER_ICON, "Brush", true),
-        crate::pen_tools::StateLayer::Gizmos => ("⌖", "Gizmos", true),
-        crate::pen_tools::StateLayer::Lasso => ("?", "Lasso", true),
-        crate::pen_tools::StateLayer::ViewportPan => ("✋", "Pan View", true),
-        crate::pen_tools::StateLayer::ViewportRotate => ("🔃", "Rotate View", true),
-        crate::pen_tools::StateLayer::ViewportScrub => ("🔍", "Scrub View", true),
+        StateLayer::Brush => (STROKE_LAYER_ICON, "Brush", Some(Action::Brush)),
+        // NO action for this! pen_tools takes care of it without latching.
+        StateLayer::Eraser => ("?", "Eraser", None),
+        StateLayer::Gizmos => ("⌖", "Gizmos", Some(Action::Gizmo)),
+        StateLayer::Lasso => ("?", "Lasso", Some(Action::Lasso)),
+        // NO action for these! pen_tools takes care of it without latching.
+        StateLayer::ViewportPan => ("✋", "Pan View", None),
+        StateLayer::ViewportRotate => ("🔃", "Rotate View", None),
+        StateLayer::ViewportScrub => ("🔍", "Scrub View", None),
     }
 }
-fn tools_panel(ui: &mut Ui, requests: &requests::RequestSender) {
-    ui.horizontal_wrapped(|ui| {
-        // Todo: justify witdh to eat up all available width.
-        const BTN_SIZE: f32 = 20.0;
-        const BTN_SPACE: f32 = 5.0;
-        // How many buttons can we fit?
-        // The math was originally a bit more sophisticated to avoid margin fencposting,
-        // but it seems egui adds margin after even the last element so it's weird!
-        let avail_width = ui.available_width();
-        let num_buttons = (avail_width / (BTN_SIZE + BTN_SPACE)).floor();
-        assert!(num_buttons >= 1.0 && num_buttons.is_finite());
-        // Justify button width to exactly fit.
-        let just_width = (avail_width - (num_buttons * BTN_SPACE)) / num_buttons;
+fn tools_panel(
+    ui: &mut Ui,
+    action_frame: &crate::actions::ActionFrame,
+    requests: &crossbeam::channel::Sender<requests::UiRequest>,
+) {
+    use crate::pen_tools::StateLayer;
+    const TOOL_GROUPS: [&[StateLayer]; 3] = [
+        &[StateLayer::Brush, StateLayer::Eraser],
+        &[StateLayer::Lasso, StateLayer::Gizmos],
+        &[
+            StateLayer::ViewportPan,
+            StateLayer::ViewportRotate,
+            StateLayer::ViewportScrub,
+        ],
+    ];
+    // size, grows to justify
+    const BTN_SIZE: f32 = 20.0;
+    // Margin
+    const BTN_SPACE: f32 = 5.0;
 
-        // Adjust spacing accordingly
-        let spacing = ui.spacing_mut();
-        spacing.interact_size = egui::Vec2::splat(just_width);
-        spacing.item_spacing = egui::Vec2::splat(BTN_SPACE);
+    // How many buttons can we fit?
+    // The math was originally a bit more sophisticated to avoid margin fencposting,
+    // but it seems egui adds margin after even the last element so it's weird!
+    let avail_width = ui.available_width();
+    let num_buttons = (avail_width / (BTN_SIZE + BTN_SPACE)).floor();
+    assert!(num_buttons >= 1.0 && num_buttons.is_finite());
+    // Justify button width to exactly fit.
+    let just_width = (avail_width - (num_buttons * BTN_SPACE)) / num_buttons;
 
-        for tool in <crate::pen_tools::StateLayer as strum::IntoEnumIterator>::iter() {
-            let (icon, tooltip, is_todo) = tool_button_for(tool);
+    // Adjust spacing accordingly
+    let spacing = ui.spacing_mut();
+    spacing.interact_size = egui::Vec2::splat(just_width);
+    spacing.item_spacing = egui::Vec2::splat(BTN_SPACE);
 
-            let button = egui::Button::new(egui::RichText::new(icon).monospace())
-                .min_size(egui::Vec2::splat(just_width));
-            // add disabled if is todo
-            let reponse = ui
-                .add_enabled(!is_todo, button)
-                // :V same text
-                .on_hover_text(tooltip)
-                .on_disabled_hover_text(tooltip);
-            if reponse.clicked() {
-                let _ = requests.send(requests::UiRequest::SetBaseTool { tool });
+    for tool_group in TOOL_GROUPS {
+        ui.horizontal_wrapped(|ui| {
+            for &tool in tool_group {
+                let (icon, tooltip, opt_action) = tool_button_for(tool);
+
+                let button = egui::Button::new(egui::RichText::new(icon).monospace())
+                    .min_size(egui::Vec2::splat(just_width));
+                // Add button. Trigger if button clicked or action occured.
+                let response = ui.add(button).on_hover_text(tooltip);
+                let response = if let Some(action) = opt_action {
+                    response.or_action_clicked(action_frame, action)
+                } else {
+                    response
+                };
+                if response.clicked() {
+                    let _ = requests.send(requests::UiRequest::SetBaseTool { tool });
+                }
             }
-        }
-    });
+        });
+    }
 }
 /// Edit a leaf layer's data. If modifications were made that should be pushed to the queue,
 /// `true` is returned.
@@ -712,10 +776,10 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                                 &mut leaf,
                                 &writer.stroke_collections(),
                             ) {
-                                writer.graph().set_leaf(leaf_id, leaf);
+                                let _ = writer.graph().set_leaf(leaf_id, leaf);
                             }
                         }
-                        crate::state::graph::AnyID::Node(n) => {
+                        crate::state::graph::AnyID::Node(_n) => {
                             // Todo!
                         }
                     }

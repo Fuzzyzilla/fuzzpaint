@@ -201,6 +201,7 @@ pub struct Stroke {
 }
 async fn stylus_event_collector(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
+    ui_requests: crossbeam::channel::Receiver<ui::requests::UiRequest>,
     mut action_listener: actions::ActionListener,
     mut tools: pen_tools::ToolState,
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
@@ -225,7 +226,13 @@ async fn stylus_event_collector(
                 };
 
                 let render = tools
-                    .process(&transform, stylus_frame, &action_frame, &render_send)
+                    .process(
+                        &transform,
+                        stylus_frame,
+                        &action_frame,
+                        &render_send,
+                        &ui_requests,
+                    )
                     .await;
 
                 if let Some(transform) = render.set_view {
@@ -317,6 +324,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
 
     let event_stream = window_renderer.stylus_events();
     let action_listener = window_renderer.action_listener();
+    let ui_requests = window_renderer.ui_listener();
 
     std::thread::Builder::new()
         .name("Stylus+Render worker".to_owned())
@@ -351,6 +359,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
                         ),
                         stylus_event_collector(
                             event_stream,
+                            ui_requests,
                             action_listener,
                             tools,
                             document_view,

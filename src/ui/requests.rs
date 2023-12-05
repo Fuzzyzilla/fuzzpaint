@@ -48,5 +48,3 @@ pub enum DocumentRequest {
     /// Save the document to the given path
     SaveCopy(std::path::PathBuf),
 }
-
-pub type RequestSender = std::sync::mpsc::Sender<UiRequest>;

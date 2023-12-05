@@ -105,11 +105,12 @@ pub enum RenderAs {
 #[derive(Copy, Clone, strum::EnumIter, Hash, PartialEq, Eq, Debug)]
 pub enum StateLayer {
     Brush,
+    Eraser,
+    Gizmos,
+    Lasso,
     ViewportPan,
     ViewportScrub,
     ViewportRotate,
-    Gizmos,
-    Lasso,
 }
 #[derive(Clone, Copy)]
 enum Transition {
@@ -125,6 +126,7 @@ pub struct ToolState {
     layer: Option<StateLayer>,
 
     brush: Box<dyn PenTool>,
+    eraser: Box<dyn PenTool>,
     document_pan: Box<dyn PenTool>,
     document_scrub: Box<dyn PenTool>,
     document_rotate: Box<dyn PenTool>,
@@ -139,6 +141,7 @@ impl ToolState {
             base: StateLayer::Brush,
             layer: None,
             brush: brush::Brush::new_from_renderer(context)?,
+            eraser: brush::Eraser::new_from_renderer(context)?,
             document_pan: viewport::ViewportPan::new_from_renderer(context)?,
             document_scrub: viewport::ViewportScrub::new_from_renderer(context)?,
             document_rotate: viewport::ViewportRotate::new_from_renderer(context)?,
@@ -154,7 +157,20 @@ impl ToolState {
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         render_task_messages: &'r tokio::sync::mpsc::UnboundedSender<()>,
+        ui_requests: &crossbeam::channel::Receiver<crate::ui::requests::UiRequest>,
     ) -> ToolRenderOutput<'r> {
+        // Update base tool from ui requests
+        if let Some(tool) = ui_requests
+            .try_iter()
+            .filter_map(|req| match req {
+                crate::ui::requests::UiRequest::SetBaseTool { tool } => Some(tool),
+                _ => None,
+            })
+            .last()
+        {
+            self.base = tool;
+        }
+
         // Prepare output structs
         let mut tool_output = ToolStateOutput { transition: None };
         let mut render_output = ToolRenderOutput {
@@ -194,6 +210,7 @@ impl ToolState {
     fn tool_for_state(&mut self, state: StateLayer) -> &mut dyn PenTool {
         match state {
             StateLayer::Brush => self.brush.as_mut(),
+            StateLayer::Eraser => self.eraser.as_mut(),
             StateLayer::ViewportPan => self.document_pan.as_mut(),
             StateLayer::ViewportScrub => self.document_scrub.as_mut(),
             StateLayer::ViewportRotate => self.document_rotate.as_mut(),

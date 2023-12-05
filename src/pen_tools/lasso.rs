@@ -109,11 +109,11 @@ impl super::PenTool for Lasso {
     /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
-        view_info: &super::ViewInfo,
+        _view_info: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
-        actions: &crate::actions::ActionFrame,
+        _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
-        render_output: &mut super::ToolRenderOutput,
+        _render_output: &mut super::ToolRenderOutput,
     ) {
         let hoop = if stylus_input.is_empty() {
             if let Some(hoop) = self.in_progress_hoop.as_ref() {
