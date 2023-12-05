@@ -114,14 +114,14 @@ impl MainUI {
         };
         let interface = self.get_cur_interface().cloned();
 
-        egui::TopBottomPanel::top("Menu").show(ctx, |ui| self.menu_bar(ui));
-        egui::TopBottomPanel::bottom("Nav").show(ctx, |ui| {
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| self.menu_bar(ui));
+        egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
             if let Some(interface) = interface {
                 Self::nav_bar(ui, interface.id, &self.requests_send, &action_frame);
             }
         });
 
-        egui::SidePanel::right("Layers").show(ctx, |ui| {
+        egui::SidePanel::right("layers").show(ctx, |ui| {
             ui.label("Layers");
             ui.separator();
             if let Some(interface) = self.get_cur_interface() {
@@ -144,18 +144,21 @@ impl MainUI {
             }
         });
 
-        egui::SidePanel::left("Inspector")
-            .resizable(false)
+        egui::SidePanel::left("inspector")
+            .resizable(true)
             .show(ctx, |ui| {
                 // Statas at bottom
-                egui::TopBottomPanel::bottom("mem-usage")
+                egui::TopBottomPanel::bottom("stats-panel")
                     .resizable(false)
                     .show_inside(ui, stats_panel);
+                egui::TopBottomPanel::bottom("tools-panel")
+                    .resizable(false)
+                    .show_inside(ui, |ui| tools_panel(ui, &self.requests_send));
                 // Brush panel takes the rest
                 brush_panel(ui);
             });
 
-        egui::TopBottomPanel::top("documents").show(ctx, |ui| self.document_bar(ui));
+        egui::TopBottomPanel::top("document-bar").show(ctx, |ui| self.document_bar(ui));
 
         let viewport = ctx.available_rect();
         let pos = viewport.left_top();
@@ -423,6 +426,53 @@ impl MainUI {
             }
         });
     }
+}
+/// For any tool, (icon string, tooltip, is_todo)
+fn tool_button_for(tool: crate::pen_tools::StateLayer) -> (&'static str, &'static str, bool) {
+    match tool {
+        crate::pen_tools::StateLayer::Brush => (STROKE_LAYER_ICON, "Brush", true),
+        crate::pen_tools::StateLayer::Gizmos => ("⌖", "Gizmos", true),
+        crate::pen_tools::StateLayer::Lasso => ("?", "Lasso", true),
+        crate::pen_tools::StateLayer::ViewportPan => ("✋", "Pan View", true),
+        crate::pen_tools::StateLayer::ViewportRotate => ("🔃", "Rotate View", true),
+        crate::pen_tools::StateLayer::ViewportScrub => ("🔍", "Scrub View", true),
+    }
+}
+fn tools_panel(ui: &mut Ui, requests: &requests::RequestSender) {
+    ui.horizontal_wrapped(|ui| {
+        // Todo: justify witdh to eat up all available width.
+        const BTN_SIZE: f32 = 20.0;
+        const BTN_SPACE: f32 = 5.0;
+        // How many buttons can we fit?
+        // The math was originally a bit more sophisticated to avoid margin fencposting,
+        // but it seems egui adds margin after even the last element so it's weird!
+        let avail_width = ui.available_width();
+        let num_buttons = (avail_width / (BTN_SIZE + BTN_SPACE)).floor();
+        assert!(num_buttons >= 1.0 && num_buttons.is_finite());
+        // Justify button width to exactly fit.
+        let just_width = (avail_width - (num_buttons * BTN_SPACE)) / num_buttons;
+
+        // Adjust spacing accordingly
+        let spacing = ui.spacing_mut();
+        spacing.interact_size = egui::Vec2::splat(just_width);
+        spacing.item_spacing = egui::Vec2::splat(BTN_SPACE);
+
+        for tool in <crate::pen_tools::StateLayer as strum::IntoEnumIterator>::iter() {
+            let (icon, tooltip, is_todo) = tool_button_for(tool);
+
+            let button = egui::Button::new(egui::RichText::new(icon).monospace())
+                .min_size(egui::Vec2::splat(just_width));
+            // add disabled if is todo
+            let reponse = ui
+                .add_enabled(!is_todo, button)
+                // :V same text
+                .on_hover_text(tooltip)
+                .on_disabled_hover_text(tooltip);
+            if reponse.clicked() {
+                let _ = requests.send(requests::UiRequest::SetBaseTool { tool });
+            }
+        }
+    });
 }
 /// Edit a leaf layer's data. If modifications were made that should be pushed to the queue,
 /// `true` is returned.
