@@ -27,9 +27,7 @@ impl ResponseExt for egui::Response {
         }
         let triggered = frame.action_trigger_count(action) > 0;
         let held = frame.is_action_held(action);
-        if held {
-            self.ctx.highlight_widget(self.id);
-        }
+
         Self {
             clicked: [
                 self.clicked[0] || triggered,
@@ -38,9 +36,9 @@ impl ResponseExt for egui::Response {
                 self.clicked[3],
                 self.clicked[4],
             ],
-            is_pointer_button_down_on: self.is_pointer_button_down_on || triggered,
-            highlighted: self.highlighted || held,
-            ..self
+            is_pointer_button_down_on: self.is_pointer_button_down_on || held,
+
+            ..if held { self.highlight() } else { self }
         }
     }
 }
@@ -500,6 +498,7 @@ fn tools_panel(
     ];
     // size, grows to justify
     const BTN_SIZE: f32 = 20.0;
+    const ICON_SIZE: f32 = 15.0;
     // Margin
     const BTN_SPACE: f32 = 5.0;
 
@@ -516,13 +515,17 @@ fn tools_panel(
     let spacing = ui.spacing_mut();
     spacing.interact_size = egui::Vec2::splat(just_width);
     spacing.item_spacing = egui::Vec2::splat(BTN_SPACE);
+    spacing.button_padding = egui::Vec2::ZERO;
+
+    let font_height = ICON_SIZE / ui.ctx().pixels_per_point();
+    let font = egui::FontId::monospace(font_height);
 
     for tool_group in TOOL_GROUPS {
         ui.horizontal_wrapped(|ui| {
             for &tool in tool_group {
                 let (icon, tooltip, opt_action) = tool_button_for(tool);
 
-                let button = egui::Button::new(egui::RichText::new(icon).monospace())
+                let button = egui::Button::new(egui::RichText::new(icon).font(font.clone()))
                     .min_size(egui::Vec2::splat(just_width));
                 // Add button. Trigger if button clicked or action occured.
                 let response = ui.add(button).on_hover_text(tooltip);

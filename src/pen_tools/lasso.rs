@@ -115,16 +115,9 @@ impl super::PenTool for Lasso {
         _tool_output: &mut super::ToolStateOutput,
         _render_output: &mut super::ToolRenderOutput,
     ) {
-        let hoop = if stylus_input.is_empty() {
-            if let Some(hoop) = self.in_progress_hoop.as_ref() {
-                log::trace!("{} points", hoop.len());
-            }
-            self.in_progress_hoop = None;
-            return;
-        } else {
-            self.in_progress_hoop = Some(TolerantCurve::default());
-            self.in_progress_hoop.as_mut().unwrap()
-        };
+        let hoop = self
+            .in_progress_hoop
+            .get_or_insert_with(TolerantCurve::default);
 
         for input in stylus_input.iter() {
             hoop.push(ultraviolet::Vec2 {

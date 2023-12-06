@@ -45,7 +45,8 @@ mod shaders {
                 outUV = uv;
 
                 gl_Position = transform * vec4(pos, 0.0, 1.0);
-            }"#
+            }
+            "#
         }
     }
     pub mod fragment_textured {
@@ -62,7 +63,8 @@ mod shaders {
 
             void main() {
                 outColor = texture(tex, inUV) * inColor;
-            }"#
+            }
+            "#
         }
     }
     pub mod fragment_untextured {
@@ -77,7 +79,8 @@ mod shaders {
 
             void main() {
                 outColor = inColor;
-            }"#
+            }
+            "#
         }
     }
     pub mod fragment_ant_trail {
@@ -95,7 +98,143 @@ mod shaders {
 
                 float bright = ((pos & 0xF) < 8) ? 1.0: 0.0;
                 outColor = vec4(vec3(bright), 1.0) * outColor;
-            }"#
+            }
+            "#
+        }
+    }
+    pub mod thick_polyline {
+        pub mod vert {
+            vulkano_shaders::shader! {
+                ty: "vertex",
+                src: r#"#version 460
+                
+                layout(std430, push_constant) uniform Push {
+                    mat4 transform;
+                    vec4 gizmo_color;
+                };
+    
+                layout(location = 0) in vec2 pos;
+                layout(location = 1) in vec4 color;
+                // Polyline has a single-dimension UV, or just U (that would be confusing tho lol)
+                // Expands into UV in the widening geometry shader
+                layout(location = 2) in float tex_coord;
+                // Width, in transform units.
+                layout(location = 3) in float width;
+    
+                layout(location = 0) out vec4 out_color;
+                layout(location = 1) out float out_texcoord;
+                layout(location = 2) out float out_width;
+    
+                void main() {
+                    out_color = color * gizmo_color;
+                    out_texcoord = tex_coord;
+                    out_width = width;
+
+                    gl_Position = transform * vec4(pos, 0.0, 1.0);
+                }
+                "#
+            }
+        }
+        // Takes lines adjacency and turns each segment into a
+        // wide rectangle.
+        pub mod geom {
+            vulkano_shaders::shader! {
+                ty: "geometry",
+                src: r#"#version 460
+                layout(std430, push_constant) uniform Push {
+                    mat4 transform;
+                };
+
+                layout(lines_adjacency) in;
+                layout(triangle_strip, max_vertices = 4) out;
+    
+                layout(location = 0) in vec4 in_color[4];
+                layout(location = 1) in float in_texcoord[4];
+                layout(location = 2) in float in_width[4];
+    
+                // Output compatible with the other fragment shaders
+                layout(location = 0) out vec4 out_color;
+                layout(location = 1) out vec2 out_uv;
+
+                #define A 0
+                #define B 1
+                #define C 2
+                #define D 3
+                #define A_in gl_in[A]
+                #define B_in gl_in[B]
+                #define C_in gl_in[C]
+                #define D_in gl_in[D]
+
+                // positive if B is "to the left of" A.
+                // alternatively, sin of the counterclockwise angle between A and B, times A and B's lengths.
+                float cross2(in vec2 a, in vec2 b) {
+                    return a.x * b.y - a.y * b.x;
+                }
+
+                void main() {
+                    //         2\--------4
+                    //         |  \      |
+                    // A - - - B - -\- - C - - - D
+                    //         |      \  |
+                    //         1--------\3
+
+                    // --------- Calculate.....
+                    // Todo: what if smol delta?
+                    vec2 ba = normalize(A_in.gl_Position.xy - B_in.gl_Position.xy);
+                    vec2 bc = normalize(C_in.gl_Position.xy - B_in.gl_Position.xy);
+                    vec2 cd = normalize(D_in.gl_Position.xy - C_in.gl_Position.xy);
+                    vec2 cb = normalize(B_in.gl_Position.xy - C_in.gl_Position.xy);
+
+                    // If inner angle is acute, mirror it!
+                    // Makes sharp corners have a squared off appearance instead of a needle lol
+                    ba = dot(ba, bc) < 0 ? -ba : ba;
+                    cd = dot(cd, cb) < 0 ? -cd : cd;
+
+                    // Points from B to 1 or 2
+                    // Todo: what if smol normal?
+                    vec2 b_normal = normalize((bc - ba) / 2.0);
+                    // Make the cross positive, now points from B to 2
+                    b_normal = cross2(ba, b_normal) < 0.0 ? -b_normal : b_normal;
+
+                    // Points from C to 3 or 4
+                    vec2 c_normal = normalize((cb - cd) / 2.0);
+                    // Make the cross positive, now points from C to 4
+                    c_normal = cross2(cd, c_normal) < 0.0 ? -c_normal : c_normal;
+
+                    // Project normals (todo: is this right?)
+                    b_normal = (transform * vec4(b_normal, 0.0, 0.0)).xy;
+                    c_normal = (transform * vec4(c_normal, 0.0, 0.0)).xy;
+
+                    // --------- Do vertices!
+                    float b_half_width = abs(in_width[B] / 2.0);
+                    float c_half_width = abs(in_width[C] / 2.0);
+
+                    // 1
+                    gl_Position = B_in.gl_Position + vec4(b_normal * b_half_width, 0.0, 0.0);
+                    out_color = in_color[B];
+                    out_uv = vec2(in_texcoord[B], 0.0);
+                    EmitVertex();
+
+                    // 2
+                    gl_Position = B_in.gl_Position - vec4(b_normal * b_half_width, 0.0, 0.0);
+                    out_color = in_color[B];
+                    out_uv = vec2(in_texcoord[B], 1.0);
+                    EmitVertex();
+
+                    // 3
+                    gl_Position = C_in.gl_Position - vec4(c_normal * c_half_width, 0.0, 0.0);
+                    out_color = in_color[C];
+                    out_uv = vec2(in_texcoord[C], 1.0);
+                    EmitVertex();
+
+                    // 4
+                    gl_Position = C_in.gl_Position + vec4(c_normal * c_half_width, 0.0, 0.0);
+                    out_color = in_color[C];
+                    out_uv = vec2(in_texcoord[C], 0.0);
+                    EmitVertex();
+                }
+                "#
+            }
         }
     }
 }
