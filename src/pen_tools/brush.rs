@@ -94,8 +94,8 @@ fn brush(
         let size = stroke.brush.spacing_px * (1.0 - size) + stroke.brush.size_mul * size;
 
         let gizmo = crate::gizmos::Gizmo {
-            visual: crate::gizmos::GizmoVisual::Shape {
-                shape: crate::gizmos::RenderShape::Ellipse {
+            visual: crate::gizmos::Visual {
+                mesh: crate::gizmos::MeshMode::Shape(crate::gizmos::RenderShape::Ellipse {
                     origin: ultraviolet::Vec2 {
                         x: last.pos[0],
                         y: last.pos[1],
@@ -105,9 +105,8 @@ fn brush(
                         y: size / 2.0,
                     },
                     rotation: 0.0,
-                },
-                texture: None,
-                color: [0, 0, 0, 200],
+                }),
+                texture: crate::gizmos::TextureMode::Solid([0, 0, 0, 200]),
             },
             ..Default::default()
         };

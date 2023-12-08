@@ -11,10 +11,36 @@ pub mod renderer;
 pub mod transform;
 use transform::GizmoTransform;
 
-pub enum GizmoMeshMode {
+pub enum MeshMode {
     Triangles,
-    LineStrip,
+    WideLineStrip(std::sync::Arc<[renderer::WideLineVertex]>),
+    Shape(RenderShape),
+    None,
 }
+pub enum TextureMode {
+    /// Simple solid color
+    Solid([u8; 4]),
+    /// Use a texture. Will only ever be used for read operations,
+    /// but note that there is no current method to query when this resource
+    /// is done being used!
+    Texture {
+        view: std::sync::Arc<crate::vk::ImageView>,
+        modulate: [u8; 4],
+    },
+    /// Screenspace ant-trail effect.
+    AntTrail,
+}
+impl TextureMode {
+    #[must_use]
+    pub fn white() -> Self {
+        Self::Solid([255; 4])
+    }
+    #[must_use]
+    pub fn transparent() -> Self {
+        Self::Solid([0; 4])
+    }
+}
+#[derive(Copy, Clone)]
 pub enum RenderShape {
     Rectangle {
         position: ultraviolet::Vec2,
@@ -28,47 +54,18 @@ pub enum RenderShape {
     },
 }
 
-/// How is a gizmo displayed?
-/// For efficiency in rendering, the options are intentionally limited.
-/// For more complex visuals, combined several gizmos in a group.
-pub enum GizmoVisual {
-    Shape {
-        shape: RenderShape,
-        /// The descriptor of the texture. Should image should be immutable, as read usage
-        /// lifetime is not currently bounded.
-        ///
-        /// Set binding 0 should be the combined image sampler, which will be rendered with
-        /// standard alpha blending.
-        texture: Option<std::sync::Arc<crate::vk::PersistentDescriptorSet>>,
-        /// RGBA color to multiply the whole gizmo by, linear with straight blending.
-        color: [u8; 4],
-    },
-    /*
-    Mesh {
-        /// Interpret mesh as TriangleList or as a wide LineStrip?
-        /// Texturing is supported for lines.
-        style: GizmoMeshMode,
-        /// The descriptor of the texture. Should image should be immutable, as read usage
-        /// lifetime is not currently bounded.
-        ///
-        /// Set binding 0 should be the combined image sampler, which will be rendered with
-        /// standard alpha blending.
-        texture: Option<crate::vk::PersistentDescriptorSet>,
-        /// Color modulation of this gizmo. Can be changed at will, and will be respected by the renderer.
-        color: [f32; 4],
-        /// A mesh of [renderer::GizmoVertex], forming primitives determined by `mode`.
-        ///
-        /// Coordinates are in the gizmo's local coordinate system, as determined by GizmoTransformPinning.
-        ///
-        /// Color will be multiplied with the texture sampled at UV (or white if no texture), and
-        /// further multiplied by `Mesh::color`.
-        mesh: (),
-        /// Whether the mesh can mutate from frame-to-frame.
-        /// If true, it will be re-uploaded to the GPU every frame,
-        /// otherwise it may be cached and changes may be missed
-        mutable: bool,
-    },*/
-    None,
+pub struct Visual {
+    pub mesh: MeshMode,
+    pub texture: TextureMode,
+}
+impl Visual {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            mesh: MeshMode::None,
+            texture: TextureMode::transparent(),
+        }
+    }
 }
 
 /// How can a gizmo be interacted with by the mouse?
@@ -140,7 +137,7 @@ pub trait MutableGizmoVisitor<T> {
 }
 
 pub struct Gizmo {
-    pub visual: GizmoVisual,
+    pub visual: Visual,
 
     pub interaction: GizmoInteraction,
     pub hit_shape: GizmoShape,
@@ -153,7 +150,7 @@ pub struct Gizmo {
 impl Default for Gizmo {
     fn default() -> Self {
         Self {
-            visual: GizmoVisual::None,
+            visual: Visual::empty(),
             hit_shape: GizmoShape::None,
             grab_cursor: CursorOrInvisible::Icon(CursorIcon::Default),
             hover_cursor: CursorOrInvisible::Icon(CursorIcon::Default),

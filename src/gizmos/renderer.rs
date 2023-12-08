@@ -6,15 +6,69 @@ use std::sync::Arc;
 pub struct GizmoVertex {
     /// Position, in the gizmo's local coordinates.
     #[format(R32G32_SFLOAT)]
-    pos: [f32; 2],
+    pub pos: [f32; 2],
     /// Straight, linear RGBA color
     #[format(R8G8B8A8_UNORM)]
-    color: [u8; 4],
+    pub color: [u8; 4],
     #[format(R32G32_SFLOAT)]
-    uv: [f32; 2],
+    pub uv: [f32; 2],
+}
+
+#[derive(Clone, Copy, crate::vk::Vertex, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct WideLineVertex {
+    /// X,Y in coordinate space determined by `GizmoTransform`
+    #[format(R32G32_SFLOAT)]
+    pub pos: [f32; 2],
+    /// Multiplied by the texture and gizmo color. Non-pre-multiplied linear.
+    #[format(R8G8B8A8_UNORM)]
+    pub color: [u8; 4],
+    /// One-dimensional texture coordinate. Corresponds to the U component in the output
+    /// wide-line, where V increases from zero to one from "right" to "left" (relative to the line's forward vector)
+    #[format(R32_SFLOAT)]
+    pub tex_coord: f32,
+    /// Diameter of the line, in the same unit as `pos`
+    /// TODO: would be nice to have a separate coordinate space for this :V
+    #[format(R32_SFLOAT)]
+    pub width: f32,
+}
+
+#[derive(PartialEq, Eq)]
+enum VertexBuffer {
+    WideLines(vk::Subbuffer<[WideLineVertex]>),
+    Normal(vk::Subbuffer<[GizmoVertex]>),
 }
 
 mod shaders {
+    #[derive(Copy, Clone, Eq, PartialEq, Hash, strum::EnumCount)]
+    pub enum VertexProcessing {
+        Normal,
+        WideLine,
+    }
+    #[derive(Copy, Clone, Eq, PartialEq, Hash, strum::EnumCount)]
+    pub enum FragmentProcessing {
+        Solid,
+        Textured,
+        AntTrail,
+    }
+
+    pub fn processing_of(
+        visual: &super::super::Visual,
+    ) -> Option<(VertexProcessing, FragmentProcessing)> {
+        use super::super::{MeshMode, TextureMode};
+        let vertex = match visual.mesh {
+            MeshMode::None => return None,
+            MeshMode::Shape(..) | MeshMode::Triangles => VertexProcessing::Normal,
+            MeshMode::WideLineStrip(..) => VertexProcessing::WideLine,
+        };
+        let fragment = match visual.texture {
+            TextureMode::AntTrail => FragmentProcessing::AntTrail,
+            TextureMode::Solid(..) => FragmentProcessing::Solid,
+            TextureMode::Texture { .. } => FragmentProcessing::Textured,
+        };
+
+        Some((vertex, fragment))
+    }
     #[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
     #[repr(C)]
     pub struct PushConstants {
@@ -88,16 +142,27 @@ mod shaders {
             ty: "fragment",
             src: r#"#version 460
 
-            layout(location = 0) in vec4 _0;
+            // Arbitrary looping time, [0, 1).
+            layout(location = 0) in vec4 inTime;
             layout(location = 1) in vec2 _1;
 
             layout(location = 0) out vec4 outColor;
+            const uint PERIOD = 16;
 
             void main() {
-                uint pos = uint(gl_FragCoord.x + gl_FragCoord.y);
+                // We could get a positive/negative color effect by configuring the blend hardware to:
+                // SRC_COLOR * ONE + DST_COLOR * SRC_ALPHA and using [0, 0, 0, 1] for positive, [1, 1, 1, -1] for negative.
+                // However, on grey this wouldn't be visible. We can use RGB in this situation to add some other color constant?
+                // ISSUE: drawing directly into the swapchain image, which is UNORM. no negative alpha allowed :,<
+                
+                // For now, just black/white stripe.
 
-                float bright = ((pos & 0xF) < 8) ? 1.0: 0.0;
-                outColor = vec4(vec3(bright), 1.0) * outColor;
+                uint pos = uint(gl_FragCoord.x + gl_FragCoord.y);
+                // Over the course of a loop, move a whole period.
+                pos += uint(inTime * float(PERIOD));
+
+                bool stripe = (pos % PERIOD) < (PERIOD/2);
+                outColor = vec4(vec3(float(stripe)), 0.75);
             }
             "#
         }
@@ -193,7 +258,7 @@ mod shaders {
                     // Points from B to 1 or 2
                     // Todo: what if smol normal?
                     vec2 b_normal = normalize((bc - ba) / 2.0);
-                    // Make the cross positive, now points from B to 2
+                    // Make the cross positive, now points from B to 1
                     b_normal = cross2(ba, b_normal) < 0.0 ? -b_normal : b_normal;
 
                     // Points from C to 3 or 4
@@ -238,67 +303,106 @@ mod shaders {
         }
     }
 }
+
+mod arc_tools {
+    use std::{
+        cmp::{Eq, PartialEq},
+        sync::{Arc, Weak},
+    };
+    /// Arc wrapper that implements `Hash`, `Eq`, based on pointers instead of contents.
+    ///
+    /// In order for this to be sound, `T` should not be interior mutable or `dyn`.
+    #[repr(transparent)]
+    pub struct ArcByPtr<T: ?Sized>(pub Arc<T>);
+    impl<T: ?Sized> std::hash::Hash for ArcByPtr<T> {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            state.write_usize(Arc::as_ptr(&self.0).cast::<()>() as usize);
+        }
+    }
+    impl<T: ?Sized> std::ops::Deref for ArcByPtr<T> {
+        type Target = Arc<T>;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    impl<T: ?Sized> PartialEq for ArcByPtr<T> {
+        fn eq(&self, other: &Self) -> bool {
+            Arc::ptr_eq(&self.0, &other.0)
+        }
+    }
+    impl<T: ?Sized> Eq for ArcByPtr<T> {}
+
+    impl<T: ?Sized> PartialEq<WeakByPtr<T>> for ArcByPtr<T> {
+        fn eq(&self, other: &WeakByPtr<T>) -> bool {
+            // Soundness - WeakByPtr is made from a real Arc, so it is mem backed and ptr is stable.
+            Arc::as_ptr(&self.0) == Weak::as_ptr(&other.0)
+        }
+    }
+
+    // this weak is NOT public.
+    // It is unsound to construct this with a Weak::new, it MUST come from Arc
+    /// Weak wrapper that implements `Hash`, `Eq`, based on pointers instead of contents.
+    /// Never dangling.
+    ///
+    /// In order for this to be sound, `T` should not be interior mutable or `dyn`.
+    #[repr(transparent)]
+    pub struct WeakByPtr<T: ?Sized>(Weak<T>);
+    impl<T: ?Sized> WeakByPtr<T> {
+        pub fn from_arc(from: &Arc<T>) -> Self {
+            Self(Arc::downgrade(from))
+        }
+    }
+    impl<T: ?Sized> std::ops::Deref for WeakByPtr<T> {
+        type Target = Weak<T>;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    impl<T: ?Sized> std::hash::Hash for WeakByPtr<T> {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            // Soundness - This weak is backed by heap mem, this ptr is stable!
+            state.write_usize(Weak::as_ptr(&self.0).cast::<()>() as usize);
+        }
+    }
+    impl<T: ?Sized> PartialEq for WeakByPtr<T> {
+        fn eq(&self, other: &Self) -> bool {
+            // Soundness - Both weaks are backed by heap mem, ptrs stable!
+            Weak::ptr_eq(&self.0, &other.0)
+        }
+    }
+    impl<T: ?Sized> Eq for WeakByPtr<T> {}
+    impl<T: ?Sized> PartialEq<ArcByPtr<T>> for WeakByPtr<T> {
+        fn eq(&self, other: &ArcByPtr<T>) -> bool {
+            other == self
+        }
+    }
+}
 pub struct GizmoRenderer {
     context: Arc<crate::render_device::RenderContext>,
-    textured_pipeline: Arc<vk::GraphicsPipeline>,
-    untextured_pipeline: Arc<vk::GraphicsPipeline>,
+    /// Map from processings -> compiled pipeline.
+    lazy_pipelines: parking_lot::RwLock<
+        hashbrown::HashMap<
+            (shaders::VertexProcessing, shaders::FragmentProcessing),
+            std::sync::Arc<vk::GraphicsPipeline>,
+        >,
+    >,
+    interned_widelines: parking_lot::Mutex<
+        hashbrown::HashMap<
+            // Soundness - [WideLineVertex] is neither interior mutable nor dyn.
+            // We CANNOT use *T for this, as that addr can be re-used if freed and allocated again.
+            // Weak will keep the alloc alive and stable.
+            arc_tools::WeakByPtr<[WideLineVertex]>,
+            vk::Subbuffer<[WideLineVertex]>,
+        >,
+    >,
 
     // Premade, static vertex buffers for common shapes.
     triangulated_shapes: vk::Subbuffer<[GizmoVertex]>,
     triangulated_square: vk::Subbuffer<[GizmoVertex]>,
-    _triangulated_circle: vk::Subbuffer<[GizmoVertex]>,
+    triangulated_circle: vk::Subbuffer<[GizmoVertex]>,
 }
 impl GizmoRenderer {
     const CIRCLE_RES: usize = 32;
-    /// Create the layouts for both the textured and untextured pipelines, sharing the same push constant layout.
-    fn layout(
-        context: &crate::render_device::RenderContext,
-    ) -> anyhow::Result<(Arc<vk::PipelineLayout>, Arc<vk::PipelineLayout>)> {
-        let push_constant_ranges = {
-            let matrix_color_range = vk::PushConstantRange {
-                offset: 0,
-                stages: vk::ShaderStages::VERTEX,
-                size: 4 * 4 * 4 + 4 * 4, //4x4 matrix of f32, + vec4 of f32
-            };
-            vec![matrix_color_range]
-        };
-        let mut texture_descriptor_set = std::collections::BTreeMap::new();
-        texture_descriptor_set.insert(
-            0,
-            vk::DescriptorSetLayoutBinding {
-                descriptor_count: 1,
-                stages: vk::ShaderStages::FRAGMENT,
-                ..vk::DescriptorSetLayoutBinding::descriptor_type(
-                    vk::DescriptorType::CombinedImageSampler,
-                )
-            },
-        );
-
-        let texture_descriptor_set = vk::DescriptorSetLayout::new(
-            context.device().clone(),
-            vk::DescriptorSetLayoutCreateInfo {
-                bindings: texture_descriptor_set,
-                ..Default::default()
-            },
-        )?;
-        let textured = vk::PipelineLayout::new(
-            context.device().clone(),
-            vk::PipelineLayoutCreateInfo {
-                set_layouts: vec![texture_descriptor_set],
-                push_constant_ranges: push_constant_ranges.clone(),
-                ..Default::default()
-            },
-        )?;
-        let untextured = vk::PipelineLayout::new(
-            context.device().clone(),
-            vk::PipelineLayoutCreateInfo {
-                set_layouts: Vec::new(),
-                push_constant_ranges,
-                ..Default::default()
-            },
-        )?;
-        Ok((textured, untextured))
-    }
     /// Make static shape buffers. (unit square origin at 0.0, unit circle origin at 0.0)
     fn make_shapes(
         context: &crate::render_device::RenderContext,
@@ -387,80 +491,265 @@ impl GizmoRenderer {
 
         Ok((triangulated_shapes, square, circle))
     }
-    pub fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
-        let vertex = shaders::vertex::load(context.device().clone())?;
-        let textured_fragment = shaders::fragment_textured::load(context.device().clone())?;
-        let untextured_fragment = shaders::fragment_untextured::load(context.device().clone())?;
-        let vertex = vertex.entry_point("main").unwrap();
-        let textured_fragment = textured_fragment.entry_point("main").unwrap();
-        let untextured_fragment = untextured_fragment.entry_point("main").unwrap();
-        let vertex_stage = vk::PipelineShaderStageCreateInfo::new(vertex.clone());
-        let textured_fragment_stage = vk::PipelineShaderStageCreateInfo::new(textured_fragment);
-        let untextured_fragment_stage = vk::PipelineShaderStageCreateInfo::new(untextured_fragment);
 
-        let (textured_pipeline_layout, untextured_pipeline_layout) =
-            Self::layout(context.as_ref())?;
-
-        let alpha_blend = {
-            let alpha_blend = vk::AttachmentBlend::alpha();
-            let blend_states = vk::ColorBlendAttachmentState {
-                blend: Some(alpha_blend),
-                ..Default::default()
-            };
-            vk::ColorBlendState::with_attachment_states(1, blend_states)
-        };
-        // ad hoc rendering for now, lazy lazy
-        let render_pass =
-            vk::PipelineSubpassType::BeginRendering(vk::PipelineRenderingCreateInfo {
-                color_attachment_formats: vec![Some(vk::Format::B8G8R8A8_SRGB)],
-                ..Default::default()
-            });
-        let textured_pipeline_info = vk::GraphicsPipelineCreateInfo {
-            color_blend_state: Some(alpha_blend),
-            input_assembly_state: Some(vk::InputAssemblyState {
-                topology: vk::PrimitiveTopology::TriangleList,
-                primitive_restart_enable: false,
-                ..Default::default()
-            }),
-            multisample_state: Some(vk::MultisampleState::default()),
-            rasterization_state: Some(vk::RasterizationState {
-                cull_mode: vk::CullMode::None,
-                ..Default::default()
-            }),
-            vertex_input_state: Some(
-                GizmoVertex::per_vertex().definition(&vertex.info().input_interface)?,
-            ),
-            // One viewport and scissor, scissor irrelevant and viewport dynamic
-            viewport_state: Some(vk::ViewportState::default()),
-            dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
-            subpass: Some(render_pass),
-            stages: smallvec::smallvec![vertex_stage.clone(), textured_fragment_stage],
-            ..vk::GraphicsPipelineCreateInfo::layout(textured_pipeline_layout)
-        };
-        let textured_pipeline = vk::GraphicsPipeline::new(
-            context.device().clone(),
-            None,
-            textured_pipeline_info.clone(),
-        )?;
-        let untextured_pipeline = vk::GraphicsPipeline::new(
-            context.device().clone(),
-            None,
-            vk::GraphicsPipelineCreateInfo {
-                layout: untextured_pipeline_layout,
-                stages: smallvec::smallvec![vertex_stage, untextured_fragment_stage],
-                ..textured_pipeline_info
+    fn vertices_for(&self, mesh_mode: &super::MeshMode) -> anyhow::Result<VertexBuffer> {
+        match mesh_mode {
+            super::MeshMode::None => anyhow::bail!("requested mesh for MeshMode::None"),
+            super::MeshMode::Shape(s) => match s {
+                super::RenderShape::Ellipse { .. } => {
+                    Ok(VertexBuffer::Normal(self.triangulated_circle.clone()))
+                }
+                super::RenderShape::Rectangle { .. } => {
+                    Ok(VertexBuffer::Normal(self.triangulated_square.clone()))
+                }
             },
-        )?;
+            super::MeshMode::WideLineStrip(mesh) => {
+                self.intern_wide_lines(mesh).map(VertexBuffer::WideLines)
+            }
+            super::MeshMode::Triangles => unimplemented!(),
+        }
+    }
+    /// Intern this collection of wide lines into a buffer slice.
+    /// Maintains a Weak pointer to it, so that the buffer may be freed
+    /// when it becomes inaccessible.
+    fn intern_wide_lines(
+        &self,
+        mesh_mode: &std::sync::Arc<[WideLineVertex]>,
+    ) -> anyhow::Result<vk::Subbuffer<[WideLineVertex]>> {
+        let data = mesh_mode.as_ref();
+        if data.is_empty() {
+            anyhow::bail!("cannot upload empty wide lines buffer");
+        }
+        let mut map = self.interned_widelines.lock();
+        // TODO: how often to call this?
+        Self::cleanup_wide_lines(&mut map);
 
+        match map.entry(arc_tools::WeakByPtr::from_arc(mesh_mode)) {
+            hashbrown::hash_map::Entry::Occupied(o) => Ok(o.get().clone()),
+            hashbrown::hash_map::Entry::Vacant(v) => {
+                let buffer = vk::Buffer::new_slice::<WideLineVertex>(
+                    self.context.allocators().memory().clone(),
+                    vk::BufferCreateInfo {
+                        usage: vk::BufferUsage::VERTEX_BUFFER,
+                        sharing: vk::Sharing::Exclusive,
+                        ..Default::default()
+                    },
+                    vk::AllocationCreateInfo {
+                        memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                        ..Default::default()
+                    },
+                    data.len().try_into()?,
+                )?;
+                // Unwrap ok - we definitely have exclusive access cause we just made it!
+                {
+                    let mut write = buffer.write().unwrap();
+                    // Won't panic. We made the buffer with size data.len().
+                    write.copy_from_slice(data);
+                }
+
+                Ok(v.insert(buffer).clone())
+            }
+        }
+    }
+    /// Cleans up every buffer which is no longer accessible.
+    fn cleanup_wide_lines(
+        map: &mut hashbrown::HashMap<
+            arc_tools::WeakByPtr<[WideLineVertex]>,
+            vk::Subbuffer<[WideLineVertex]>,
+        >,
+    ) {
+        // Remove all which no strong pointers exist anymore, and are thus gone.
+        // Subbuffer::drop should do all the cleanup we need.
+        map.retain(|pointer, _| pointer.strong_count() > 0);
+    }
+    /// Visuals specify some combination of Vertex processing and Texturing.
+    /// As more options for each of these are added, it would be silly to create them in
+    /// bulk, instead they are built lazily as needed.
+    #[allow(clippy::too_many_lines)]
+    fn lazy_pipeline_for(
+        &self,
+        vertex: shaders::VertexProcessing,
+        fragment: shaders::FragmentProcessing,
+    ) -> anyhow::Result<std::sync::Arc<vk::GraphicsPipeline>> {
+        let key = (vertex, fragment);
+        {
+            // NOT upgradable read, as that would just be a simple mutex and
+            // we get no benifit for RwLocking. The miss case is very rare in steadystate!
+            let read = self.lazy_pipelines.read();
+            if let Some(pipeline) = read.get(&key) {
+                return Ok(pipeline.clone());
+            }
+        }
+        // Fellthrough! We need to build this pipeline.
+        let mut write = self.lazy_pipelines.write();
+        let entry = write.entry(key);
+        match entry {
+            // Since the upgrade from read -> write was *not* atomic, it may have become
+            // available in the meantime!
+            hashbrown::hash_map::Entry::Occupied(o) => Ok(o.get().clone()),
+            hashbrown::hash_map::Entry::Vacant(v) => {
+                let device = self.context.device().clone();
+                let vertex_format = match vertex {
+                    shaders::VertexProcessing::Normal => GizmoVertex::per_vertex(),
+                    shaders::VertexProcessing::WideLine => WideLineVertex::per_vertex(),
+                };
+                let topology = match vertex {
+                    shaders::VertexProcessing::Normal => vk::PrimitiveTopology::TriangleList,
+                    shaders::VertexProcessing::WideLine => {
+                        vk::PrimitiveTopology::LineStripWithAdjacency
+                    }
+                };
+                let texture_descriptor = if fragment == shaders::FragmentProcessing::Textured {
+                    Some(vk::DescriptorSetLayout::new(
+                        device.clone(),
+                        vk::DescriptorSetLayoutCreateInfo {
+                            bindings: [(
+                                0,
+                                vk::DescriptorSetLayoutBinding {
+                                    descriptor_count: 1,
+                                    stages: vk::ShaderStages::FRAGMENT,
+                                    ..vk::DescriptorSetLayoutBinding::descriptor_type(
+                                        vk::DescriptorType::CombinedImageSampler,
+                                    )
+                                },
+                            )]
+                            .into_iter()
+                            .collect(),
+                            ..Default::default()
+                        },
+                    )?)
+                } else {
+                    None
+                };
+                let (vertex, geometry) = match vertex {
+                    shaders::VertexProcessing::Normal => {
+                        (shaders::vertex::load(device.clone())?, None)
+                    }
+                    shaders::VertexProcessing::WideLine => (
+                        shaders::thick_polyline::vert::load(device.clone())?,
+                        Some(shaders::thick_polyline::geom::load(device.clone())?),
+                    ),
+                };
+                let fragment = match fragment {
+                    shaders::FragmentProcessing::AntTrail => {
+                        shaders::fragment_ant_trail::load(device.clone())?
+                    }
+                    shaders::FragmentProcessing::Solid => {
+                        shaders::fragment_untextured::load(device.clone())?
+                    }
+                    shaders::FragmentProcessing::Textured => {
+                        shaders::fragment_textured::load(device.clone())?
+                    }
+                };
+
+                let push_constant_ranges = {
+                    let mut ranges = Vec::with_capacity(2);
+                    // Vertex always needs xform and color
+                    let matrix_color_range = vk::PushConstantRange {
+                        offset: 0,
+                        stages: vk::ShaderStages::VERTEX,
+                        size: 4 * 4 * 4 + 4 * 4, //4x4 matrix of f32, + vec4 of f32
+                    };
+                    ranges.push(matrix_color_range);
+
+                    // If geometry, give it access to the xform
+                    if geometry.is_some() {
+                        let matrix_range = vk::PushConstantRange {
+                            offset: 0,
+                            stages: vk::ShaderStages::GEOMETRY,
+                            size: 4 * 4 * 4, //4x4 matrix of f32
+                        };
+                        ranges.push(matrix_range);
+                    }
+                    ranges
+                };
+
+                let mut stages = smallvec::smallvec![];
+                // Unwraps OK - main is the only valid GLSL entrypoint.
+                let vertex_entry = vertex.entry_point("main").unwrap();
+                stages.push(vk::PipelineShaderStageCreateInfo::new(vertex_entry.clone()));
+                if let Some(geometry) = geometry {
+                    stages.push(vk::PipelineShaderStageCreateInfo::new(
+                        geometry.entry_point("main").unwrap(),
+                    ));
+                }
+                stages.push(vk::PipelineShaderStageCreateInfo::new(
+                    fragment.entry_point("main").unwrap(),
+                ));
+
+                let color_blend_state = {
+                    let blend_mode = vk::AttachmentBlend::alpha();
+                    let blend_states = vk::ColorBlendAttachmentState {
+                        blend: Some(blend_mode),
+                        ..Default::default()
+                    };
+                    vk::ColorBlendState::with_attachment_states(1, blend_states)
+                };
+
+                let input_assembly_state = vk::InputAssemblyState {
+                    topology,
+                    primitive_restart_enable: false,
+                    ..Default::default()
+                };
+                // ad hoc rendering for now, lazy lazy
+                let subpass =
+                    vk::PipelineSubpassType::BeginRendering(vk::PipelineRenderingCreateInfo {
+                        // FIXME!
+                        color_attachment_formats: vec![Some(vk::Format::B8G8R8A8_SRGB)],
+                        ..Default::default()
+                    });
+
+                let layout = vk::PipelineLayout::new(
+                    device.clone(),
+                    vk::PipelineLayoutCreateInfo {
+                        push_constant_ranges,
+                        // Empty, or the image if some.
+                        set_layouts: texture_descriptor.into_iter().collect(),
+                        ..Default::default()
+                    },
+                )?;
+
+                let graphics_pipe = vk::GraphicsPipeline::new(
+                    device,
+                    None,
+                    vk::GraphicsPipelineCreateInfo {
+                        stages,
+                        vertex_input_state: Some(
+                            vertex_format.definition(&vertex_entry.info().input_interface)?,
+                        ),
+                        input_assembly_state: Some(input_assembly_state),
+                        // Viewport doesn't matter (dynamic) scissor irrelevant.
+                        viewport_state: Some(vk::ViewportState::default()),
+                        // don't cull
+                        rasterization_state: Some(vk::RasterizationState::default()),
+                        multisample_state: Some(vk::MultisampleState::default()),
+                        color_blend_state: Some(color_blend_state),
+                        dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
+                        subpass: Some(subpass),
+
+                        ..vk::GraphicsPipelineCreateInfo::layout(layout)
+                    },
+                )?;
+
+                Ok(v.insert(graphics_pipe).clone())
+            }
+        }
+    }
+    pub fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
         let (shapes, square, circle) = Self::make_shapes(context.as_ref())?;
+
+        // Largest possible is the combinations of both!
+        let lazy_pipelines = hashbrown::HashMap::with_capacity(
+            <shaders::VertexProcessing as strum::EnumCount>::COUNT
+                * <shaders::FragmentProcessing as strum::EnumCount>::COUNT,
+        );
 
         Ok(Self {
             context,
-            textured_pipeline,
-            untextured_pipeline,
-
+            lazy_pipelines: lazy_pipelines.into(),
+            interned_widelines: hashbrown::HashMap::new().into(),
             triangulated_shapes: shapes,
-            _triangulated_circle: circle,
+            triangulated_circle: circle,
             triangulated_square: square,
         })
     }
@@ -497,8 +786,7 @@ impl GizmoRenderer {
                     extent: image_size,
                     offset: [0.0; 2],
                 }],
-            )?
-            .bind_vertex_buffers(0, self.triangulated_shapes.clone())?;
+            )?;
 
         Ok(RenderVisitor {
             renderer: self,
@@ -514,7 +802,11 @@ pub struct RenderVisitor<'a> {
     renderer: &'a GizmoRenderer,
     xform_stack: Vec<crate::view_transform::ViewTransform>,
     command_buffer: vk::AutoCommandBufferBuilder<vk::PrimaryAutoCommandBuffer>,
-    current_pipeline: Option<&'a vk::GraphicsPipeline>,
+    current_pipeline: Option<Arc<vk::GraphicsPipeline>>,
+    // Rebinds after every change, even if they're adjacent D:
+    // this optimization thus is worthless....
+    // would be nice to use a big buffer and just cursor around it with first_vertex, todo!
+    // current_vertex_buffer: Option<VertexBuffer>,
     proj: cgmath::Matrix4<f32>,
 }
 impl RenderVisitor<'_> {
@@ -545,73 +837,72 @@ impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
         std::ops::ControlFlow::Continue(())
     }
     fn visit_gizmo(&mut self, gizmo: &super::Gizmo) -> std::ops::ControlFlow<anyhow::Error> {
+        // Skip if nothing to draw.
+        let Some((vertex, fragment)) = shaders::processing_of(&gizmo.visual) else {
+            return std::ops::ControlFlow::Continue(());
+        };
         // try_block macro doesn't impl FnMut it's kinda weird :V
+        // We use this to map Result<> to ControlFlow
         let mut try_block = || -> anyhow::Result<()> {
-            // Get shape if any, early return if not.
-            let super::GizmoVisual::Shape {
-                shape,
-                texture,
-                color,
-            } = &gizmo.visual
-            else {
-                return Ok(());
-            };
-
+            // Calculate Xform
             let Some(parent_xform) = self.xform_stack.last() else {
                 // Shouldn't happen! visit_ and end_collection should be symmetric.
-                // Some to short circuit the visitation
                 anyhow::bail!("xform stack empty!")
             };
             // unwrap ok - checked above.
             let base_xform = self.xform_stack.first().unwrap();
             let local_xform = gizmo.transform.apply(base_xform, parent_xform);
 
-            // draw gizmo using local_xform.
-            if let Some(texture) = texture {
-                //swap pipeline, if needed:
-                if self.current_pipeline != Some(&*self.renderer.textured_pipeline) {
-                    self.current_pipeline = Some(&*self.renderer.textured_pipeline);
-                    self.command_buffer
-                        .bind_pipeline_graphics(self.renderer.textured_pipeline.clone())?;
-                }
-                self.command_buffer.bind_descriptor_sets(
-                    vk::PipelineBindPoint::Graphics,
-                    self.renderer.textured_pipeline.layout().clone(),
-                    0,
-                    texture.clone(),
-                )?;
-            } else {
-                //swap pipeline, if needed:
-                if self.current_pipeline != Some(&*self.renderer.untextured_pipeline) {
-                    self.current_pipeline = Some(&*self.renderer.untextured_pipeline);
-                    self.command_buffer
-                        .bind_pipeline_graphics(self.renderer.untextured_pipeline.clone())?;
-                }
+            // `MeshMode::None` handled gracefully above
+            if matches!(&gizmo.visual.mesh, super::MeshMode::Triangles) {
+                anyhow::bail!("todo!")
             }
-            let shape_xform: cgmath::Matrix4<f32> = {
-                // might seem silly. maybe.. maybe...
-                let (offs, scale, rotation) = match shape {
-                    super::RenderShape::Rectangle {
-                        position,
-                        size,
-                        rotation,
-                    } => (position, size, rotation),
-                    super::RenderShape::Ellipse {
-                        origin,
-                        radii,
-                        rotation,
-                    } => (origin, radii, rotation),
-                };
-                cgmath::Matrix4::from_translation(cgmath::Vector3 {
-                    x: offs.x,
-                    y: offs.y,
-                    z: 0.0,
-                }) * cgmath::Matrix4::from_nonuniform_scale(scale.x, scale.y, 1.0)
-                    * cgmath::Matrix4::from_angle_z(cgmath::Rad(*rotation))
+
+            let shape_xform: cgmath::Matrix4<f32> = match &gizmo.visual.mesh {
+                super::MeshMode::Shape(shape) => {
+                    let (offs, scale, rotation) = match *shape {
+                        super::RenderShape::Rectangle {
+                            position,
+                            size,
+                            rotation,
+                        } => (position, size, rotation),
+                        super::RenderShape::Ellipse {
+                            origin,
+                            radii,
+                            rotation,
+                        } => (origin, radii, rotation),
+                    };
+                    cgmath::Matrix4::from_translation(cgmath::Vector3 {
+                        x: offs.x,
+                        y: offs.y,
+                        z: 0.0,
+                    }) * cgmath::Matrix4::from_nonuniform_scale(scale.x, scale.y, 1.0)
+                        * cgmath::Matrix4::from_angle_z(cgmath::Rad(rotation))
+                }
+                _ => <cgmath::Matrix4<_> as cgmath::One>::one(),
             };
             let matrix: cgmath::Matrix4<f32> = local_xform.into();
             // Stretch/position shape, then move from local to viewspace, then project to NDC
             let matrix = self.proj * matrix * shape_xform;
+            let color = match gizmo.visual.texture {
+                super::TextureMode::AntTrail => {
+                    // Hack to give AntTrail access to the current time, since it does not accept a color.
+                    let time_millisecs = std::time::SystemTime::now()
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .ok()
+                        .map_or(0, |dur| dur.subsec_millis());
+                    // 0..250, looping.
+                    // time_millisecs ranges from 0..1000 already but just to prove the unwrap is sound :P
+                    let time: u8 = (time_millisecs % 1000 / 4).try_into().unwrap();
+                    [time; 4]
+                }
+                super::TextureMode::Solid(c) => c,
+                super::TextureMode::Texture { modulate, .. } => {
+                    // Todo: bind texture descriptor.
+                    unimplemented!();
+                    modulate
+                }
+            };
             let push_constants = shaders::PushConstants {
                 color: [
                     f32::from(color[0]) / 255.0,
@@ -622,23 +913,33 @@ impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
                 transform: matrix.into(),
             };
 
-            self.command_buffer.push_constants(
-                self.current_pipeline.unwrap().layout().clone(),
-                0,
-                push_constants,
-            )?;
-            match shape {
-                super::RenderShape::Rectangle { .. } => self.command_buffer.draw(
-                    self.renderer.triangulated_square.len() as u32,
-                    1,
-                    self.renderer.triangulated_square.offset() as u32,
-                    0,
-                )?,
-                super::RenderShape::Ellipse { .. } => {
-                    self.command_buffer
-                        .draw(GizmoRenderer::CIRCLE_RES as u32 * 3, 1, 6, 0)?
+            let pipeline = self.renderer.lazy_pipeline_for(vertex, fragment)?;
+            // Not the same, rebind!
+            // Push constants ALWAYS compatible.
+            // Descriptors are not compatible,
+            if self.current_pipeline.as_ref() != Some(&pipeline) {
+                self.command_buffer
+                    .bind_pipeline_graphics(pipeline.clone())?;
+                self.current_pipeline = Some(pipeline.clone());
+            }
+
+            let vertex_buffer = self.renderer.vertices_for(&gizmo.visual.mesh)?;
+            let num_verts = match vertex_buffer {
+                VertexBuffer::Normal(n) => {
+                    let len = n.len();
+                    self.command_buffer.bind_vertex_buffers(0, n)?;
+                    len
+                }
+                VertexBuffer::WideLines(w) => {
+                    let len = w.len();
+                    self.command_buffer.bind_vertex_buffers(0, w)?;
+                    len
                 }
             };
+
+            self.command_buffer
+                .push_constants(pipeline.layout().clone(), 0, push_constants)?
+                .draw(num_verts.try_into()?, 1, 0, 0)?;
             Ok(())
         };
         match try_block() {

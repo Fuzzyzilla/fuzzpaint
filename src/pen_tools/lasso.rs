@@ -90,14 +90,61 @@ pub struct Lasso {
     // of searching for hits. Reducing the count of points will make it
     // much much much faster :3
     in_progress_hoop: Option<TolerantCurve>,
+    test_lines: std::sync::Arc<[crate::gizmos::renderer::WideLineVertex]>,
 }
 
 impl super::MakePenTool for Lasso {
     fn new_from_renderer(
         _: &std::sync::Arc<crate::render_device::RenderContext>,
     ) -> anyhow::Result<Box<dyn super::PenTool>> {
+        use crate::gizmos::renderer::WideLineVertex;
+        let test_lines = [
+            WideLineVertex {
+                pos: [75.0, 500.0],
+                color: [255; 4],
+                tex_coord: 1.0,
+                width: 80.0,
+            },
+            WideLineVertex {
+                pos: [50.0, 50.0],
+                color: [255; 4],
+                tex_coord: 1.0,
+                width: 1.0,
+            },
+            WideLineVertex {
+                pos: [100.0, 25.0],
+                color: [255; 4],
+                tex_coord: 1.0,
+                width: 10.0,
+            },
+            WideLineVertex {
+                pos: [200.0, 200.0],
+                color: [255; 4],
+                tex_coord: 1.0,
+                width: 20.0,
+            },
+            WideLineVertex {
+                pos: [75.0, 500.0],
+                color: [255; 4],
+                tex_coord: 1.0,
+                width: 80.0,
+            },
+            WideLineVertex {
+                pos: [50.0, 50.0],
+                color: [255; 4],
+                tex_coord: 1.0,
+                width: 1.0,
+            },
+            WideLineVertex {
+                pos: [100.0, 25.0],
+                color: [255; 4],
+                tex_coord: 1.0,
+                width: 10.0,
+            },
+        ];
         Ok(Box::new(Lasso {
             in_progress_hoop: None,
+            test_lines: test_lines.into(),
         }))
     }
 }
@@ -113,7 +160,7 @@ impl super::PenTool for Lasso {
         stylus_input: crate::stylus_events::StylusEventFrame,
         _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
-        _render_output: &mut super::ToolRenderOutput,
+        render_output: &mut super::ToolRenderOutput,
     ) {
         let hoop = self
             .in_progress_hoop
@@ -125,5 +172,17 @@ impl super::PenTool for Lasso {
                 y: input.pos.1,
             });
         }
+        use crate::gizmos::{transform, Gizmo, MeshMode, TextureMode, Visual};
+        render_output.render_as = super::RenderAs::InlineGizmos(
+            [Gizmo {
+                visual: Visual {
+                    mesh: MeshMode::WideLineStrip(self.test_lines.clone()),
+                    texture: TextureMode::AntTrail,
+                },
+                transform: transform::GizmoTransform::inherit_all(),
+                ..Default::default()
+            }]
+            .into(),
+        );
     }
 }
