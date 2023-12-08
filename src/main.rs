@@ -195,6 +195,7 @@ impl StrokePoint {
         }
     }
 }
+
 pub struct Stroke {
     brush: state::StrokeBrushSettings,
     points: Vec<StrokePoint>,

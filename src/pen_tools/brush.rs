@@ -111,12 +111,53 @@ fn brush(
             ..Default::default()
         };
         render_output.cursor = Some(crate::gizmos::CursorOrInvisible::Invisible);
-        super::RenderAs::InlineGizmos([gizmo].into())
+        super::RenderAs::InlineGizmos(
+            [make_trail(in_progress_stroke.as_ref().unwrap()), gizmo]
+                .into_iter()
+                .collect(),
+        )
     } else {
         render_output.cursor = Some(crate::gizmos::CursorOrInvisible::Icon(
             winit::window::CursorIcon::Crosshair,
         ));
         super::RenderAs::None
+    }
+}
+fn make_trail(stroke: &crate::Stroke) -> crate::gizmos::Gizmo {
+    let mut points = Vec::with_capacity(stroke.points.len());
+    let pressure_scale = stroke.brush.size_mul - stroke.brush.spacing_px;
+    let pressure_offs = stroke.brush.spacing_px;
+    points.extend(
+        stroke
+            .points
+            .iter()
+            .map(|point| crate::gizmos::renderer::WideLineVertex {
+                pos: point.pos,
+                // We use gizmo global color for this
+                color: [255; 4],
+                tex_coord: 0.0,
+                width: point.pressure.mul_add(pressure_scale, pressure_offs),
+            }),
+    );
+
+    let color = stroke.brush.color_modulate;
+    // That's the point clippy :V
+    #[allow(clippy::cast_possible_truncation)]
+    let color = [
+        (color[0].clamp(0.0, 1.0) * 255.9999) as u8,
+        (color[1].clamp(0.0, 1.0) * 255.9999) as u8,
+        (color[2].clamp(0.0, 1.0) * 255.9999) as u8,
+        (color[3].clamp(0.0, 1.0) * 255.9999) as u8,
+    ];
+
+    use crate::gizmos::{transform::GizmoTransform, Gizmo, MeshMode, TextureMode, Visual};
+    Gizmo {
+        visual: Visual {
+            mesh: MeshMode::WideLineStrip(points.into()),
+            texture: TextureMode::Solid(color),
+        },
+        transform: GizmoTransform::inherit_all(),
+        ..Default::default()
     }
 }
 

@@ -147,7 +147,8 @@ mod shaders {
             layout(location = 1) in vec2 _1;
 
             layout(location = 0) out vec4 outColor;
-            const uint PERIOD = 16;
+            const uint PERIOD = 8;
+            const float TAU = 6.283185307;
 
             void main() {
                 // We could get a positive/negative color effect by configuring the blend hardware to:
@@ -159,10 +160,12 @@ mod shaders {
 
                 uint pos = uint(gl_FragCoord.x + gl_FragCoord.y);
                 // Over the course of a loop, move a whole period.
-                pos += uint(inTime * float(PERIOD));
+                pos += uint(inTime.a * float(PERIOD));
 
-                bool stripe = (pos % PERIOD) < (PERIOD/2);
-                outColor = vec4(vec3(float(stripe)), 0.75);
+                // Like a periodic threshold but smoother, purely arbitrary lol
+                float phase = float(pos) / float(PERIOD) * TAU;
+                float brite = sin(phase) * 0.5 + 0.5;
+                outColor = vec4(vec3(brite * brite), 0.75);
             }
             "#
         }
@@ -235,6 +238,10 @@ mod shaders {
                 float cross2(in vec2 a, in vec2 b) {
                     return a.x * b.y - a.y * b.x;
                 }
+                // Rotates input clockwise 90deg
+                vec2 clockwise90(in vec2 a) {
+                    return vec2(a.y, -a.x);
+                }
 
                 void main() {
                     //         2\--------4
@@ -245,10 +252,11 @@ mod shaders {
 
                     // --------- Calculate.....
                     // Todo: what if smol delta?
+                    // This causes small visual breaks in the line.
                     vec2 ba = normalize(A_in.gl_Position.xy - B_in.gl_Position.xy);
                     vec2 bc = normalize(C_in.gl_Position.xy - B_in.gl_Position.xy);
                     vec2 cd = normalize(D_in.gl_Position.xy - C_in.gl_Position.xy);
-                    vec2 cb = normalize(B_in.gl_Position.xy - C_in.gl_Position.xy);
+                    vec2 cb = -bc;
 
                     // If inner angle is acute, mirror it!
                     // Makes sharp corners have a squared off appearance instead of a needle lol
@@ -256,13 +264,16 @@ mod shaders {
                     cd = dot(cd, cb) < 0 ? -cd : cd;
 
                     // Points from B to 1 or 2
-                    // Todo: what if smol normal?
-                    vec2 b_normal = normalize((bc - ba) / 2.0);
+                    vec2 b_normal = (bc - ba) / 2.0;
+                    // If not sufficiently long to normalize, use rotated BC instead
+                    b_normal = dot(b_normal, b_normal) < 0.0001 ? clockwise90(bc) : normalize(b_normal);
                     // Make the cross positive, now points from B to 1
                     b_normal = cross2(ba, b_normal) < 0.0 ? -b_normal : b_normal;
 
                     // Points from C to 3 or 4
-                    vec2 c_normal = normalize((cb - cd) / 2.0);
+                    vec2 c_normal = (cb - cd) / 2.0;
+                    // If not sufficiently long to normalize, use rotated CB instead
+                    c_normal = dot(c_normal, c_normal) < 0.0001 ? clockwise90(cb) : normalize(c_normal);
                     // Make the cross positive, now points from C to 4
                     c_normal = cross2(cd, c_normal) < 0.0 ? -c_normal : c_normal;
 

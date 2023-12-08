@@ -168,7 +168,7 @@ impl ToolState {
             })
             .last()
         {
-            self.base = tool;
+            self.set_base_state(tool)
         }
 
         // Prepare output structs
@@ -226,6 +226,11 @@ impl ToolState {
     }
     /// Set the resting state, where tools will go when no hotkey set.
     pub fn set_base_state(&mut self, state: StateLayer) {
+        // Layer is none means this is an actual transition!
+        // Alert it of the exit
+        if self.layer.is_none() && self.base != state {
+            self.tool_for_state(self.base).exit();
+        }
         self.base = state;
     }
     #[must_use]

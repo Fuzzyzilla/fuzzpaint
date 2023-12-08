@@ -1,6 +1,6 @@
 /// A point collection who's `push` folds "close enough" points all into a single point.
 /// Works based on the delta angle between previously seen and new points. Currently this is a hardcoded threshold.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct TolerantCurve {
     points: Vec<ultraviolet::Vec2>,
     dir: Option<Dir>,
@@ -85,12 +85,56 @@ impl TolerantCurve {
     }
 }
 
+fn make_trail(curve: &TolerantCurve) -> crate::gizmos::Gizmo {
+    if curve.len() < 3 {
+        // No render
+        crate::gizmos::Gizmo::default()
+    } else {
+        // todo: horribly inefficient lol.
+        let curve = curve.clone().into_closed_vec();
+        // plus two due to lines adjacency!
+        let mut points = Vec::with_capacity(curve.len() + 2);
+        // push dummy to start at idx 1
+        points.push(crate::gizmos::renderer::WideLineVertex {
+            pos: [0.0; 2],
+            color: [0; 4],
+            tex_coord: 0.0,
+            width: 0.0,
+        });
+        points.extend(
+            curve
+                .into_iter()
+                .map(|point| crate::gizmos::renderer::WideLineVertex {
+                    pos: point.into(),
+                    color: [255; 4],
+                    tex_coord: 0.0,
+                    width: 2.0,
+                }),
+        );
+
+        // No panics. Guarded by curve.len() >= 3
+        points[0] = *points.last().unwrap();
+        points.push(points[1]);
+
+        let mesh = crate::gizmos::MeshMode::WideLineStrip(points.into());
+
+        crate::gizmos::Gizmo {
+            visual: crate::gizmos::Visual {
+                mesh,
+                texture: crate::gizmos::TextureMode::AntTrail,
+            },
+            transform: crate::gizmos::transform::GizmoTransform::inherit_all(),
+            ..Default::default()
+        }
+    }
+}
+
 pub struct Lasso {
     // We use a tolerance-based curve because of the high complexity
     // of searching for hits. Reducing the count of points will make it
     // much much much faster :3
     in_progress_hoop: Option<TolerantCurve>,
-    test_lines: std::sync::Arc<[crate::gizmos::renderer::WideLineVertex]>,
+    is_down: bool,
 }
 
 impl super::MakePenTool for Lasso {
@@ -98,91 +142,55 @@ impl super::MakePenTool for Lasso {
         _: &std::sync::Arc<crate::render_device::RenderContext>,
     ) -> anyhow::Result<Box<dyn super::PenTool>> {
         use crate::gizmos::renderer::WideLineVertex;
-        let test_lines = [
-            WideLineVertex {
-                pos: [75.0, 500.0],
-                color: [255; 4],
-                tex_coord: 1.0,
-                width: 80.0,
-            },
-            WideLineVertex {
-                pos: [50.0, 50.0],
-                color: [255; 4],
-                tex_coord: 1.0,
-                width: 1.0,
-            },
-            WideLineVertex {
-                pos: [100.0, 25.0],
-                color: [255; 4],
-                tex_coord: 1.0,
-                width: 10.0,
-            },
-            WideLineVertex {
-                pos: [200.0, 200.0],
-                color: [255; 4],
-                tex_coord: 1.0,
-                width: 20.0,
-            },
-            WideLineVertex {
-                pos: [75.0, 500.0],
-                color: [255; 4],
-                tex_coord: 1.0,
-                width: 80.0,
-            },
-            WideLineVertex {
-                pos: [50.0, 50.0],
-                color: [255; 4],
-                tex_coord: 1.0,
-                width: 1.0,
-            },
-            WideLineVertex {
-                pos: [100.0, 25.0],
-                color: [255; 4],
-                tex_coord: 1.0,
-                width: 10.0,
-            },
-        ];
         Ok(Box::new(Lasso {
             in_progress_hoop: None,
-            test_lines: test_lines.into(),
+            is_down: false,
         }))
     }
 }
 #[async_trait::async_trait]
 impl super::PenTool for Lasso {
     fn exit(&mut self) {
-        self.in_progress_hoop = None;
+        self.is_down = false;
     }
     /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
-        _view_info: &super::ViewInfo,
+        view_info: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
-        let hoop = self
-            .in_progress_hoop
-            .get_or_insert_with(TolerantCurve::default);
-
         for input in stylus_input.iter() {
-            hoop.push(ultraviolet::Vec2 {
-                x: input.pos.0,
-                y: input.pos.1,
-            });
+            // If new press, delete old.
+            // if held, continue old.
+            // Otherwise, ignore and keep old unchanged.
+            let hoop = match (self.is_down, input.pressed) {
+                (false, true) => {
+                    self.in_progress_hoop = Some(TolerantCurve::default());
+                    self.in_progress_hoop.as_mut()
+                }
+                (true, true) => self.in_progress_hoop.as_mut(),
+                (_, false) => None,
+            };
+            self.is_down = input.pressed;
+
+            if let Some(hoop) = hoop {
+                let Ok(proj) = view_info.transform.unproject(cgmath::Point2 {
+                    x: input.pos.0,
+                    y: input.pos.1,
+                }) else {
+                    return;
+                };
+                hoop.push(ultraviolet::Vec2 {
+                    x: proj.x,
+                    y: proj.y,
+                });
+            }
         }
-        use crate::gizmos::{transform, Gizmo, MeshMode, TextureMode, Visual};
-        render_output.render_as = super::RenderAs::InlineGizmos(
-            [Gizmo {
-                visual: Visual {
-                    mesh: MeshMode::WideLineStrip(self.test_lines.clone()),
-                    texture: TextureMode::AntTrail,
-                },
-                transform: transform::GizmoTransform::inherit_all(),
-                ..Default::default()
-            }]
-            .into(),
-        );
+        if let Some(hoop) = self.in_progress_hoop.as_ref() {
+            render_output.render_as = super::RenderAs::InlineGizmos([make_trail(hoop)].into());
+        }
     }
 }
