@@ -400,7 +400,6 @@ impl Renderer {
 pub async fn render_worker(
     renderer: Arc<crate::render_device::RenderContext>,
     document_preview: Arc<crate::document_viewport_proxy::DocumentViewportPreviewProxy>,
-    _: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> anyhow::Result<()> {
     let mut change_notifier = crate::default_provider().change_notifier();
     let mut changed: Vec<_> = crate::default_provider().document_iter().collect();
@@ -491,7 +490,9 @@ mod stroke_renderer {
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {
             // Begin uploading a brush image in the background while we continue setup
             let (image, sampler, _defer) = {
-                let brush_image = image::open("brushes/splotch.png")?.into_luma_alpha8();
+                let brush_image =
+                    image::load_from_memory(include_bytes!("../brushes/splotch.png"))?
+                        .into_luma_alpha8();
 
                 // Iter over opacities. Weird/inefficient way to do this hehe
                 // Idealy it'd just be an Alpha image but nothing suports that file layout :V

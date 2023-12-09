@@ -38,11 +38,12 @@ impl ViewportManipulateBase {
         &mut self,
         view_info: &super::ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
-        _actions: &crate::actions::ActionFrame,
+        actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
-        render_output: &mut super::ToolRenderOutput<'_>,
+        render_output: &mut super::ToolRenderOutput,
     ) {
         let mut new_transform = None::<crate::view_transform::ViewTransform>;
+
         for event in &*stylus_input {
             if event.pressed {
                 let initial_transform = self

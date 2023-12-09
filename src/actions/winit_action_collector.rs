@@ -113,6 +113,26 @@ impl WinitKeyboardActionCollector {
                 // Clear any hotkeys that stopped due to any modifiers releasing.
                 self.cull();
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let steps = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => -y.ceil() as i32,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => -pos.y.ceil() as i32,
+                };
+
+                match steps {
+                    1.. => {
+                        for _ in 0..steps {
+                            self.sender.oneshot(crate::actions::Action::ZoomIn);
+                        }
+                    }
+                    ..=-1 => {
+                        for _ in 0..-steps {
+                            self.sender.oneshot(crate::actions::Action::ZoomOut);
+                        }
+                    }
+                    _ => (),
+                }
+            }
             _ => (),
         }
     }

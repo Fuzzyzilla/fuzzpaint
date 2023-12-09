@@ -75,6 +75,24 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
         }],
     ),
     (
+        Action::ZoomIn,
+        &[KeyboardHotkey {
+            alt: false,
+            ctrl: true,
+            shift: false,
+            key: VirtualKeyCode::Equals,
+        }],
+    ),
+    (
+        Action::ZoomOut,
+        &[KeyboardHotkey {
+            alt: false,
+            ctrl: true,
+            shift: false,
+            key: VirtualKeyCode::Minus,
+        }],
+    ),
+    (
         Action::Gizmo,
         &[KeyboardHotkey {
             // FIXME: Should be just ctrl, but not possible yet.

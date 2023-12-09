@@ -103,6 +103,7 @@ impl MainUI {
             action_listener,
         }
     }
+    #[must_use]
     pub fn listen_requests(&self) -> crossbeam::channel::Receiver<requests::UiRequest> {
         self.requests_recv.clone()
     }
@@ -192,7 +193,7 @@ impl MainUI {
                 egui::TopBottomPanel::bottom("tools-panel")
                     .show_inside(ui, |ui| tools_panel(ui, &action_frame, &self.requests_send));
                 // Brush panel takes the rest
-                brush_panel(ui);
+                brush_panel(ui, &action_frame);
             });
 
         egui::TopBottomPanel::top("document-bar").show(ctx, |ui| self.document_bar(ui));
@@ -415,7 +416,7 @@ impl MainUI {
                 let _ = requests.send(requests::UiRequest::Document {
                     target: document,
                     request: requests::DocumentRequest::View(
-                        requests::DocumentViewRequest::SetRotation(0.0),
+                        requests::DocumentViewRequest::RotateTo(0.0),
                     ),
                 });
             };
@@ -425,7 +426,7 @@ impl MainUI {
                     let _ = requests.send(requests::UiRequest::Document {
                         target: document,
                         request: requests::DocumentRequest::View(
-                            requests::DocumentViewRequest::SetRotation(
+                            requests::DocumentViewRequest::RotateTo(
                                 *rotation % std::f32::consts::TAU,
                             ),
                         ),
@@ -464,7 +465,7 @@ impl MainUI {
         });
     }
 }
-/// For any tool, (icon string, tooltip, is_todo)
+/// For any tool, `(icon string, tooltip, opt_hotkey)`
 fn tool_button_for(
     tool: crate::pen_tools::StateLayer,
 ) -> (&'static str, &'static str, Option<crate::actions::Action>) {
@@ -549,8 +550,8 @@ fn leaf_props_panel(
     leaf: &mut crate::state::graph::LeafType,
     stroke_collections: &crate::state::stroke_collection::StrokeCollectionState,
 ) -> bool {
-    ui.separator();
     use crate::state::graph::LeafType;
+    ui.separator();
     let write = match leaf {
         // Nothing to show
         LeafType::Note => false,
@@ -833,7 +834,9 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
     });
 }
 /// Side panel showing layer tree and layer options
-fn brush_panel(ui: &mut Ui) {
+fn brush_panel(ui: &mut Ui, actions: &crate::actions::ActionFrame) {
+    use az::SaturatingAs;
+
     let mut globals = crate::AdHocGlobals::get().write();
     if let Some(brush) = globals.as_mut().map(|globals| &mut globals.brush) {
         ui.label("Color");
@@ -856,6 +859,27 @@ fn brush_panel(ui: &mut Ui) {
         };
         ui.label("Brush");
         ui.separator();
+
+        // Apply size up/down actions
+        // - for down, + for up
+        'size_steps: {
+            let size_steps = actions
+                .action_trigger_count(crate::actions::Action::BrushSizeUp)
+                .saturating_as::<i32>()
+                .saturating_sub(
+                    actions
+                        .action_trigger_count(crate::actions::Action::BrushSizeDown)
+                        .saturating_as(),
+                );
+            if size_steps == 0 {
+                break 'size_steps;
+            }
+            // Usually editors supply some kind of snapping here to snap to
+            // common values instead. Todo!
+            let factor = 2.0f32.powf(size_steps as f32 / 4.0);
+            brush.size_mul *= factor;
+            brush.spacing_px *= factor;
+        }
         ui.add(
             egui::Slider::new(&mut brush.spacing_px, 0.25..=10.0)
                 .text("Spacing")

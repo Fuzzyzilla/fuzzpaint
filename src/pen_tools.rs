@@ -82,10 +82,9 @@ impl ToolStateOutput {
     }
 }
 /// Interface for tools to (optionally) insert and read render data.
-pub struct ToolRenderOutput<'a> {
+pub struct ToolRenderOutput {
     // A reference, to avoid the potentially expensive cost of cloning 500 times per second when the tool
     // doesn't end up caring :P
-    pub render_task_messages: &'a tokio::sync::mpsc::UnboundedSender<()>,
     pub render_as: RenderAs,
     pub set_view: Option<crate::view_transform::DocumentTransform>,
     /// Set the cursor icon to this if Some, or default if None.
@@ -119,6 +118,34 @@ enum Transition {
     ToLayer(StateLayer),
     ToBase,
 }
+fn apply_transform_request(
+    view: &mut ViewInfo,
+    view_request: crate::ui::requests::DocumentViewRequest,
+) {
+    /*
+    use az::SaturatingAs;
+    // Count the number of discrete zoom requests.
+    let zoom_count = actions
+        .action_trigger_count(crate::actions::Action::ZoomIn)
+        .saturating_as::<i32>()
+        .saturating_sub(
+            actions
+                .action_trigger_count(crate::actions::Action::ZoomOut)
+                .saturating_as(),
+        );
+    if zoom_count != 0 {
+        if let Some(point) = stylus_input.last().map(|point| cgmath::Point2 {
+            x: point.pos.0,
+            y: point.pos.1,
+        }) {
+            let mut xform = view_info.transform.clone();
+            xform.scale_about(point, 1.5f32.powf(-zoom_count as f32));
+            render_output.set_view =
+                Some(crate::view_transform::DocumentTransform::Transform(xform));
+        }
+    }*/
+    todo!()
+}
 pub struct ToolState {
     /// User-defined base state (depending on what tool is selected via the UI)
     base: StateLayer,
@@ -151,30 +178,29 @@ impl ToolState {
     }
     /// Allow the tool to process the given stylus data and actions, optionally returning preview render commands,
     /// and possibly changing the tool's state.
-    pub async fn process<'r>(
+    pub async fn process(
         &mut self,
         view_info: &ViewInfo,
         stylus_input: crate::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
-        render_task_messages: &'r tokio::sync::mpsc::UnboundedSender<()>,
         ui_requests: &crossbeam::channel::Receiver<crate::ui::requests::UiRequest>,
-    ) -> ToolRenderOutput<'r> {
-        // Update base tool from ui requests
-        if let Some(tool) = ui_requests
-            .try_iter()
-            .filter_map(|req| match req {
-                crate::ui::requests::UiRequest::SetBaseTool { tool } => Some(tool),
-                _ => None,
-            })
-            .last()
-        {
-            self.set_base_state(tool)
+    ) -> ToolRenderOutput {
+        use crate::ui::requests::{DocumentRequest, UiRequest};
+        // Handle ui requests
+        for request in ui_requests.try_iter() {
+            match request {
+                UiRequest::Document {
+                    request: DocumentRequest::View(v),
+                    ..
+                } => apply_transform_request(todo!(), v),
+                UiRequest::SetBaseTool { tool } => self.set_base_state(tool),
+                _ => (),
+            }
         }
 
         // Prepare output structs
         let mut tool_output = ToolStateOutput { transition: None };
         let mut render_output = ToolRenderOutput {
-            render_task_messages,
             render_as: RenderAs::None,
             set_view: None,
             cursor: None,

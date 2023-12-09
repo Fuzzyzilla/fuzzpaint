@@ -124,6 +124,8 @@ fn brush(
     }
 }
 fn make_trail(stroke: &crate::Stroke) -> crate::gizmos::Gizmo {
+    use crate::gizmos::{transform::GizmoTransform, Gizmo, MeshMode, TextureMode, Visual};
+
     let mut points = Vec::with_capacity(stroke.points.len());
     let pressure_scale = stroke.brush.size_mul - stroke.brush.spacing_px;
     let pressure_offs = stroke.brush.spacing_px;
@@ -140,21 +142,35 @@ fn make_trail(stroke: &crate::Stroke) -> crate::gizmos::Gizmo {
             }),
     );
 
-    let color = stroke.brush.color_modulate;
-    // That's the point clippy :V
-    #[allow(clippy::cast_possible_truncation)]
-    let color = [
-        (color[0].clamp(0.0, 1.0) * 255.9999) as u8,
-        (color[1].clamp(0.0, 1.0) * 255.9999) as u8,
-        (color[2].clamp(0.0, 1.0) * 255.9999) as u8,
-        (color[3].clamp(0.0, 1.0) * 255.9999) as u8,
-    ];
+    let texture = if stroke.brush.is_eraser {
+        TextureMode::AntTrail
+    } else {
+        let color = stroke.brush.color_modulate;
+        // unmultiply
+        let color = if color[3].abs() > 0.001 {
+            [
+                color[0] / color[3],
+                color[1] / color[3],
+                color[2] / color[3],
+                color[3],
+            ]
+        } else {
+            // Avoid div by zero
+            [0.0; 4]
+        };
+        let color = [
+            (color[0].clamp(0.0, 1.0) * 255.9999) as u8,
+            (color[1].clamp(0.0, 1.0) * 255.9999) as u8,
+            (color[2].clamp(0.0, 1.0) * 255.9999) as u8,
+            (color[3].clamp(0.0, 1.0) * 255.9999) as u8,
+        ];
+        TextureMode::Solid(color)
+    };
 
-    use crate::gizmos::{transform::GizmoTransform, Gizmo, MeshMode, TextureMode, Visual};
     Gizmo {
         visual: Visual {
             mesh: MeshMode::WideLineStrip(points.into()),
-            texture: TextureMode::Solid(color),
+            texture,
         },
         transform: GizmoTransform::inherit_all(),
         ..Default::default()

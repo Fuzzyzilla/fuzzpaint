@@ -21,12 +21,19 @@ pub enum NodeRequest {
     InProgressBlend(crate::blend::Blend),
 }
 #[derive(Debug)]
+/// View requests. None of these give a centerpoint - the viewport center
+/// is the implicit center.
 pub enum DocumentViewRequest {
+    /// Reset to fit view.
     Fit,
     /// Set the absolute scale. One document pixel = this many screen pixels.
     RealSize(f32),
+    /// Multiply the zoom by this factor.
+    ZoomBy(f32),
     /// Set the absolute rotation, in radians CCW.
-    SetRotation(f32),
+    RotateBy(f32),
+    /// Set the absolute rotation, in radians from +X CCW.
+    RotateTo(f32),
 }
 /// Request that applies to a specific document
 #[derive(Debug)]

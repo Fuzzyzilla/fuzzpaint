@@ -95,12 +95,7 @@ fn make_trail(curve: &TolerantCurve) -> crate::gizmos::Gizmo {
         // plus two due to lines adjacency!
         let mut points = Vec::with_capacity(curve.len() + 2);
         // push dummy to start at idx 1
-        points.push(crate::gizmos::renderer::WideLineVertex {
-            pos: [0.0; 2],
-            color: [0; 4],
-            tex_coord: 0.0,
-            width: 0.0,
-        });
+        points.push(bytemuck::Zeroable::zeroed());
         points.extend(
             curve
                 .into_iter()

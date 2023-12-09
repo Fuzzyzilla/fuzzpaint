@@ -24,6 +24,9 @@ pub enum Action {
     ViewportRotate,
     ViewportFlipHorizontal,
 
+    ZoomIn,
+    ZoomOut,
+
     Gizmo,
     Brush,
     Erase,
@@ -139,6 +142,11 @@ impl ActionSender {
     }
     pub fn unshadow(&self, action: Action) {
         self.push(ActionEvent::Unshadowed, action);
+    }
+    fn oneshot(&self, action: Action) {
+        // Double locks, could speed up.
+        self.press(action);
+        self.release(action);
     }
     fn push(&self, event: ActionEvent, action: Action) {
         match self.current_state.upgrade() {

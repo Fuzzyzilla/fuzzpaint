@@ -206,7 +206,6 @@ async fn stylus_event_collector(
     mut action_listener: actions::ActionListener,
     mut tools: pen_tools::ToolState,
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
-    render_send: tokio::sync::mpsc::UnboundedSender<()>,
 ) -> AnyResult<()> {
     loop {
         match event_stream.recv().await {
@@ -227,13 +226,7 @@ async fn stylus_event_collector(
                 };
 
                 let render = tools
-                    .process(
-                        &transform,
-                        stylus_frame,
-                        &action_frame,
-                        &render_send,
-                        &ui_requests,
-                    )
+                    .process(&transform, stylus_frame, &action_frame, &ui_requests)
                     .await;
 
                 if let Some(transform) = render.set_view {
@@ -340,10 +333,6 @@ fn main() -> AnyResult<std::convert::Infallible> {
                     Ok(tools) => tools,
                     Err(e) => break 'block Err(e),
                 };
-                // We don't expect this channel to get very large, but it's important
-                // that messages don't get lost under any circumstance, lest an expensive
-                // document rebuild be needed :P
-                let (render_sender, render_reciever) = tokio::sync::mpsc::unbounded_channel::<()>();
 
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
@@ -353,18 +342,13 @@ fn main() -> AnyResult<std::convert::Infallible> {
                 // for now, just a note for future self UwU
                 runtime.block_on(async {
                     tokio::try_join!(
-                        renderer::render_worker(
-                            render_context,
-                            document_view.clone(),
-                            render_reciever,
-                        ),
+                        renderer::render_worker(render_context, document_view.clone(),),
                         stylus_event_collector(
                             event_stream,
                             ui_requests,
                             action_listener,
                             tools,
                             document_view,
-                            render_sender,
                         ),
                     )
                 })
