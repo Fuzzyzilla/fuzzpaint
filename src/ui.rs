@@ -1,3 +1,4 @@
+mod color_palette;
 pub mod requests;
 
 use egui::Ui;
@@ -8,6 +9,45 @@ const FILL_LAYER_ICON: &str = "⬛";
 const GROUP_ICON: &str = "🗀";
 const SCISSOR_ICON: &str = "✂";
 
+/// Justify `(available_size, size, margin)` -> `(size', margin')`, such that `count` elements
+/// will fill available space completely.
+///
+/// There are four ways to do this:
+/// increase or decrease size or margin.
+/// Current implementation increases size.
+fn justify(available_size: f32, base_size: f32, base_margin: f32) -> (f32, f32) {
+    // The math was originally a bit more sophisticated to avoid margin fenceposting,
+    // but it seems egui eagerly adds margin after even the last element so it's weird!
+
+    // get integer number of elements, at least one.
+    let num_buttons = (available_size / (base_size + base_margin))
+        .floor()
+        .max(1.0);
+    assert!(num_buttons.is_finite());
+
+    let just_size = (available_size - (num_buttons * base_margin)) / num_buttons;
+
+    (just_size, base_margin)
+}
+enum JustifyAxis {
+    Horizontal,
+    Vertical,
+}
+/// Adjusts UI style to be justified according to [`justify`].
+///
+/// Returns the size at which items should be drawn, margin is applied in-place
+/// to the Ui via Style::spacing::item_spacing.
+fn justify_mut(ui: &mut Ui, axis: JustifyAxis, base_size: f32, base_margin: f32) -> f32 {
+    let available = match axis {
+        JustifyAxis::Horizontal => ui.available_width(),
+        JustifyAxis::Vertical => ui.available_height(),
+    };
+    let (size, margin) = justify(available, base_size, base_margin);
+
+    ui.style_mut().spacing.item_spacing = egui::Vec2::splat(margin);
+
+    size
+}
 trait ResponseExt {
     /// Emulate a primary click whenever this action is triggered.
     fn or_action_clicked(
@@ -185,7 +225,7 @@ impl MainUI {
         });
 
         egui::SidePanel::left("inspector")
-            .resizable(false)
+            .resizable(true)
             .show(ctx, |ui| {
                 // Stats at bottom
                 egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
@@ -498,24 +538,15 @@ fn tools_panel(
         ],
     ];
     // size, grows to justify
-    const BTN_SIZE: f32 = 20.0;
+    const BTN_BASE_SIZE: f32 = 20.0;
     const ICON_SIZE: f32 = 15.0;
     // Margin
-    const BTN_SPACE: f32 = 5.0;
+    const BTN_BASE_MARGIN: f32 = 5.0;
 
-    // How many buttons can we fit?
-    // The math was originally a bit more sophisticated to avoid margin fencposting,
-    // but it seems egui adds margin after even the last element so it's weird!
-    let avail_width = ui.available_width();
-    let num_buttons = (avail_width / (BTN_SIZE + BTN_SPACE)).floor();
-    assert!(num_buttons >= 1.0 && num_buttons.is_finite());
-    // Justify button width to exactly fit.
-    let just_width = (avail_width - (num_buttons * BTN_SPACE)) / num_buttons;
+    let button_size = justify_mut(ui, JustifyAxis::Horizontal, BTN_BASE_SIZE, BTN_BASE_MARGIN);
 
-    // Adjust spacing accordingly
     let spacing = ui.spacing_mut();
-    spacing.interact_size = egui::Vec2::splat(just_width);
-    spacing.item_spacing = egui::Vec2::splat(BTN_SPACE);
+    spacing.interact_size = egui::Vec2::splat(button_size);
     spacing.button_padding = egui::Vec2::ZERO;
 
     let font_height = ICON_SIZE / ui.ctx().pixels_per_point();
@@ -527,7 +558,7 @@ fn tools_panel(
                 let (icon, tooltip, opt_action) = tool_button_for(tool);
 
                 let button = egui::Button::new(egui::RichText::new(icon).font(font.clone()))
-                    .min_size(egui::Vec2::splat(just_width));
+                    .min_size(egui::Vec2::splat(button_size));
                 // Add button. Trigger if button clicked or action occured.
                 let response = ui.add(button).on_hover_text(tooltip);
                 let response = if let Some(action) = opt_action {
@@ -857,6 +888,17 @@ fn brush_panel(ui: &mut Ui, actions: &crate::actions::ActionFrame) {
         {
             brush.color_modulate = color.to_array();
         };
+        // VERY hacky way to tell if user is modifying color.
+        // There is no way to actually tell. >:V
+        let in_flux = ui.input(|r| r.pointer.any_down());
+        // Small buttons with color history
+        ui.add(
+            color_palette::ColorPalette::new(&mut brush.color_modulate)
+                .scope(color_palette::HistoryScope::Global)
+                .in_flux(in_flux)
+                .max_history(64),
+        );
+
         ui.label("Brush");
         ui.separator();
 
