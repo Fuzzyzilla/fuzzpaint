@@ -512,11 +512,12 @@ fn tool_button_for(
     use crate::{actions::Action, pen_tools::StateLayer};
     match tool {
         StateLayer::Brush => (STROKE_LAYER_ICON, "Brush", Some(Action::Brush)),
-        // NO action for this! pen_tools takes care of it without latching.
-        StateLayer::Eraser => ("?", "Eraser", None),
+        StateLayer::Picker => ("✒", "Picker", Some(Action::Picker)),
         StateLayer::Gizmos => ("⌖", "Gizmos", Some(Action::Gizmo)),
         StateLayer::Lasso => ("?", "Lasso", Some(Action::Lasso)),
         // NO action for these! pen_tools takes care of it without latching.
+        // TODO: that's a weird mixing of roles lol
+        StateLayer::Eraser => ("?", "Eraser", None),
         StateLayer::ViewportPan => ("✋", "Pan View", None),
         StateLayer::ViewportRotate => ("🔃", "Rotate View", None),
         StateLayer::ViewportScrub => ("🔍", "Scrub View", None),
@@ -529,7 +530,7 @@ fn tools_panel(
 ) {
     use crate::pen_tools::StateLayer;
     const TOOL_GROUPS: [&[StateLayer]; 3] = [
-        &[StateLayer::Brush, StateLayer::Eraser],
+        &[StateLayer::Brush, StateLayer::Eraser, StateLayer::Picker],
         &[StateLayer::Lasso, StateLayer::Gizmos],
         &[
             StateLayer::ViewportPan,

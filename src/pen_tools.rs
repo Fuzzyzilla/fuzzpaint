@@ -18,6 +18,7 @@ mod brush;
 mod dummy;
 mod gizmo;
 mod lasso;
+mod picker;
 mod viewport;
 
 trait MakePenTool {
@@ -103,6 +104,7 @@ pub enum RenderAs {
 }
 #[derive(Copy, Clone, strum::EnumIter, Hash, PartialEq, Eq, Debug)]
 pub enum StateLayer {
+    Picker,
     Brush,
     Eraser,
     Gizmos,
@@ -235,7 +237,7 @@ impl ToolState {
     }
     fn tool_for_state(&mut self, state: StateLayer) -> &mut dyn PenTool {
         match state {
-            StateLayer::Brush => self.brush.as_mut(),
+            StateLayer::Brush | StateLayer::Picker => self.brush.as_mut(),
             StateLayer::Eraser => self.eraser.as_mut(),
             StateLayer::ViewportPan => self.document_pan.as_mut(),
             StateLayer::ViewportScrub => self.document_scrub.as_mut(),

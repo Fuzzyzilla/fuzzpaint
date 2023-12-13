@@ -206,110 +206,28 @@ mod shaders {
         // Takes lines adjacency and turns each segment into a
         // wide rectangle.
         pub mod geom {
+            // Cryptic defines to configure the widelines shader.
+            // See `src/shaders/widelines.geom` for docs.
+
+            // uv mighhtttt not be working :V
             vulkano_shaders::shader! {
                 ty: "geometry",
-                src: r#"#version 460
-                layout(std430, push_constant) uniform Push {
-                    mat4 transform;
-                };
-
-                layout(lines_adjacency) in;
-                layout(triangle_strip, max_vertices = 4) out;
-    
+                define: [
+                    ("WIDTH_LOCATION", "2"),
+                    ("INPUTS", r"
                 layout(location = 0) in vec4 in_color[4];
                 layout(location = 1) in float in_texcoord[4];
-                layout(location = 2) in float in_width[4];
-    
-                // Output compatible with the other fragment shaders
+                "),
+                    ("IN_U_NAME", "in_texcoord"),
+                    ("OUTPUTS", r"
                 layout(location = 0) out vec4 out_color;
                 layout(location = 1) out vec2 out_uv;
-
-                #define A 0
-                #define B 1
-                #define C 2
-                #define D 3
-                #define A_in gl_in[A]
-                #define B_in gl_in[B]
-                #define C_in gl_in[C]
-                #define D_in gl_in[D]
-
-                // positive if B is "to the left of" A.
-                // alternatively, sin of the counterclockwise angle between A and B, times A and B's lengths.
-                float cross2(in vec2 a, in vec2 b) {
-                    return a.x * b.y - a.y * b.x;
-                }
-                // Rotates input clockwise 90deg
-                vec2 clockwise90(in vec2 a) {
-                    return vec2(a.y, -a.x);
-                }
-
-                void main() {
-                    //         2\--------4
-                    //         |  \      |
-                    // A - - - B - -\- - C - - - D
-                    //         |      \  |
-                    //         1--------\3
-
-                    // --------- Calculate.....
-                    // Todo: what if smol delta?
-                    // This causes small visual breaks in the line.
-                    vec2 ba = normalize(A_in.gl_Position.xy - B_in.gl_Position.xy);
-                    vec2 bc = normalize(C_in.gl_Position.xy - B_in.gl_Position.xy);
-                    vec2 cd = normalize(D_in.gl_Position.xy - C_in.gl_Position.xy);
-                    vec2 cb = -bc;
-
-                    // If inner angle is acute, mirror it!
-                    // Makes sharp corners have a squared off appearance instead of a needle lol
-                    ba = dot(ba, bc) < 0 ? -ba : ba;
-                    cd = dot(cd, cb) < 0 ? -cd : cd;
-
-                    // Points from B to 1 or 2
-                    vec2 b_normal = (bc - ba) / 2.0;
-                    // If not sufficiently long to normalize, use rotated BC instead
-                    b_normal = dot(b_normal, b_normal) < 0.0001 ? clockwise90(bc) : normalize(b_normal);
-                    // Make the cross positive, now points from B to 1
-                    b_normal = cross2(ba, b_normal) < 0.0 ? -b_normal : b_normal;
-
-                    // Points from C to 3 or 4
-                    vec2 c_normal = (cb - cd) / 2.0;
-                    // If not sufficiently long to normalize, use rotated CB instead
-                    c_normal = dot(c_normal, c_normal) < 0.0001 ? clockwise90(cb) : normalize(c_normal);
-                    // Make the cross positive, now points from C to 4
-                    c_normal = cross2(cd, c_normal) < 0.0 ? -c_normal : c_normal;
-
-                    // Project normals (todo: is this right?)
-                    b_normal = (transform * vec4(b_normal, 0.0, 0.0)).xy;
-                    c_normal = (transform * vec4(c_normal, 0.0, 0.0)).xy;
-
-                    // --------- Do vertices!
-                    float b_half_width = abs(in_width[B] / 2.0);
-                    float c_half_width = abs(in_width[C] / 2.0);
-
-                    // 1
-                    gl_Position = B_in.gl_Position + vec4(b_normal * b_half_width, 0.0, 0.0);
-                    out_color = in_color[B];
-                    out_uv = vec2(in_texcoord[B], 0.0);
-                    EmitVertex();
-
-                    // 2
-                    gl_Position = B_in.gl_Position - vec4(b_normal * b_half_width, 0.0, 0.0);
-                    out_color = in_color[B];
-                    out_uv = vec2(in_texcoord[B], 1.0);
-                    EmitVertex();
-
-                    // 3
-                    gl_Position = C_in.gl_Position - vec4(c_normal * c_half_width, 0.0, 0.0);
-                    out_color = in_color[C];
-                    out_uv = vec2(in_texcoord[C], 1.0);
-                    EmitVertex();
-
-                    // 4
-                    gl_Position = C_in.gl_Position + vec4(c_normal * c_half_width, 0.0, 0.0);
-                    out_color = in_color[C];
-                    out_uv = vec2(in_texcoord[C], 0.0);
-                    EmitVertex();
-                }
-                "#
+                "),
+                    ("OUT_UV_NAME", "out_uv"),
+                    ("COPY_B", "out_color = in_color[B];"),
+                    ("COPY_C", "out_color = in_color[C];"),
+                ],
+                path: "src/shaders/widelines.geom",
             }
         }
     }

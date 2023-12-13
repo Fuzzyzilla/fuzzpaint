@@ -93,6 +93,16 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
         }],
     ),
     (
+        Action::Picker,
+        &[KeyboardHotkey {
+            // FIXME: Should be just ctrl, but not possible yet.
+            alt: false,
+            ctrl: false,
+            shift: false,
+            key: VirtualKeyCode::I,
+        }],
+    ),
+    (
         Action::Gizmo,
         &[KeyboardHotkey {
             // FIXME: Should be just ctrl, but not possible yet.

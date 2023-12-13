@@ -27,6 +27,7 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
 
+    Picker,
     Gizmo,
     Brush,
     Erase,

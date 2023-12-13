@@ -30,7 +30,13 @@ pub struct CollectionSummary {
     /// Non-null.
     pub arc_length: optional::Optioned<f32>,
 }
-
+impl CollectionSummary {
+    /// Gets the number of elements represented by this summary.
+    #[must_use]
+    pub fn elements(&self) -> usize {
+        self.len.saturating_mul(self.archetype.elements())
+    }
+}
 impl From<&[crate::StrokePoint]> for CollectionSummary {
     fn from(value: &[crate::StrokePoint]) -> Self {
         CollectionSummary {
@@ -48,16 +54,16 @@ pub type PointCollectionID = crate::FuzzID<PointCollectionIDMarker>;
 /// to be reclaimed by the repository for the duration of the lock's lifetime.
 #[derive(Clone)]
 pub struct PointCollectionReadLock {
-    points: &'static [crate::StrokePoint],
+    points: &'static [f32],
 }
-impl AsRef<[crate::StrokePoint]> for PointCollectionReadLock {
+impl AsRef<[f32]> for PointCollectionReadLock {
     // seal the detail that this is secretly 'static (shhhh...)
-    fn as_ref(&'_ self) -> &'_ [crate::StrokePoint] {
+    fn as_ref(&'_ self) -> &'_ [f32] {
         self.points
     }
 }
 impl std::ops::Deref for PointCollectionReadLock {
-    type Target = [crate::StrokePoint];
+    type Target = [f32];
     // seal the detail that this is secretly 'static (shhhh...)
     fn deref(&'_ self) -> &'_ Self::Target {
         self.points

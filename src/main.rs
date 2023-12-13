@@ -15,10 +15,10 @@ pub mod blend;
 pub mod brush;
 pub mod document_viewport_proxy;
 pub mod gizmos;
-pub mod gpu_tess;
 pub mod id;
 pub mod io;
 pub mod pen_tools;
+pub mod picker;
 pub mod render_device;
 pub mod state;
 pub mod stylus_events;
@@ -155,12 +155,15 @@ impl AdHocGlobals {
     }
 }
 
-#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
+#[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
 pub struct StrokePoint {
+    #[format(R32G32_SFLOAT)]
     pos: [f32; 2],
+    #[format(R32_SFLOAT)]
     pressure: f32,
     /// Arc length of stroke from beginning to this point
+    #[format(R32_SFLOAT)]
     dist: f32,
 }
 

@@ -8,7 +8,7 @@ pub mod writer;
 pub type StrokeCollectionID = crate::FuzzID<StrokeCollection>;
 pub type ImmutableStrokeID = crate::FuzzID<ImmutableStroke>;
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub struct ImmutableStroke {
     pub id: ImmutableStrokeID,
     pub brush: crate::state::StrokeBrushSettings,
