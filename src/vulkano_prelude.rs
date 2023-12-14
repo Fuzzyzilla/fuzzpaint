@@ -21,11 +21,14 @@ pub mod vk {
             allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
 
             AutoCommandBufferBuilder,
+            //Image ops
+            BlitImageInfo,
             BufferImageCopy,
             ClearColorImageInfo,
             CommandBufferUsage,
-            //Image ops
             CopyBufferToImageInfo,
+            CopyImageToBufferInfo,
+            ImageBlit,
             PrimaryAutoCommandBuffer,
             RenderPassBeginInfo,
             RenderingAttachmentInfo,
@@ -49,7 +52,7 @@ pub mod vk {
             Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo,
             QueueFlags,
         },
-        format::{ClearValue, Format},
+        format::{ClearValue, Format, FormatFeatures},
         image::{
             sampler::{ComponentMapping, ComponentSwizzle, Filter, Sampler, SamplerCreateInfo},
             view::{ImageView, ImageViewCreateInfo, ImageViewType},

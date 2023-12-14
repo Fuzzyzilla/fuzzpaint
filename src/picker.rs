@@ -1,8 +1,5 @@
 //! Pickers allow the user to query single points at a time. Some ideas include selecting the top most stroke,
-//! top layer, pick a color or brush from existing strokes, etc.
-//!
-//! This is achieved through textures provided by the renderer, each texel holding a `FuzzID` of whatever is being
-//! queried. Since these can be rendered much more crudely than the actual document, efficiency is maintained.
+//! top layer, pick a color or brush from existing strokes, etc. Or just regular image pixel color picking!
 
 pub trait Picker {
     /// What datatype does this picker yield when sampled?

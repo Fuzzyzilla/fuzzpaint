@@ -33,8 +33,8 @@ pub struct StrokeBatch {
 #[derive(thiserror::Error, Debug)]
 pub enum BatchError<Inner: std::fmt::Debug> {
     /// The inner closure reported an error.
-    // *why does anyhow::Error not impl Error??!???*
     // This Debug trait bound is icky and pervasive when it really should be `Error`.
+    // Unfortunately `anyhow::Error` cannot be `Error`, unsure of a better bound for this.
     #[error("{:?}", .0)]
     Inner(Inner),
     /// The staging buffer's access contract was broken.

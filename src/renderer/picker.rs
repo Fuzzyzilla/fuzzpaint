@@ -1,8 +1,136 @@
+use crate::picker::Picker;
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
 
-// An Option<NonZeroU64> in native endian. (R64_uint has very low support, this has very high support).
-// Vulkan spec guarantees that the device and host *must* have the same endian, so this works!
+mod stage;
+
+/// Checks the format is valid for interpreting texels as singular binary elements.
+/// Returns a descriptive error if incorrect.
+fn check_valid_binary_format(format: vk::Format) -> anyhow::Result<()> {
+    // Are these sufficient checks? :O
+    if format.block_extent() != [1; 3] {
+        anyhow::bail!("must have non-block format")
+    }
+    if !format.planes().is_empty() {
+        anyhow::bail!("must have non-planar format")
+    }
+    if format.compression().is_some() {
+        anyhow::bail!("must not be compressed format")
+    }
+
+    Ok(())
+}
+
+/// Common source for vulkan-image-based picking operations.
+/// Value is interpreted from the raw image texel regardless of format and thus must
+/// match the texel size exactly. By extension, the texel format must not be block or multiplanar, or compressed.
+///
+/// Filtering is done "Nearest Neighbor".
+struct PickedVkImage<Value: bytemuck::Pod> {
+    offset: (u32, u32),
+    extent: (u32, u32),
+    buffer: vk::Subbuffer<[Value]>,
+}
+impl<Value: bytemuck::Pod> PickedVkImage<Value> {
+    pub fn new(image: Arc<vk::Image>) -> anyhow::Result<Self> {
+        // Are these sufficient checks? :O
+        if image.format().block_size() != std::mem::size_of::<Value>() as u64 {
+            anyhow::bail!(
+                "texel size mismatch: format: {}, Value: {}",
+                image.format().block_size(),
+                std::mem::size_of::<Value>()
+            )
+        }
+        // Make sure the image's format is OK to be interpreted as binary.
+        check_valid_binary_format(image.format())?;
+
+        // We have options here - If the image is super zoomed in,
+        // >=100%, we can just copy the subbuffer normally.
+        // If it's zoomed out, should we blit it first and then transfer?
+        // Do we lazily stream texture data to avoid a whole copy?
+        // In theory, we need a staging buffer large enough for the largest possible viewport. Blegh.
+        // That'd be 66 MB at 4k! No thanks!
+        todo!()
+    }
+}
+impl<Value: bytemuck::Pod> Picker for PickedVkImage<Value> {
+    type Value = Value;
+    fn pick(&self, _: ultraviolet::Vec2) -> Option<Self::Value> {
+        todo!()
+    }
+}
+
+/// Trivial picker from a Solid fill layer. :P
+/// In the future when Fill layers become more.... more, this will do serious work,
+/// such as calculating gradient values, patterns, ect. With a fill, we can generally
+/// do the work on the host directly without needing to pester the device or use an image.
+pub struct ConstantColorPicker {
+    pub color: [f32; 4],
+}
+impl Picker for ConstantColorPicker {
+    type Value = [f32; 4];
+    fn pick(&self, _: ultraviolet::Vec2) -> Option<Self::Value> {
+        Some(self.color)
+    }
+}
+/// Picker that acts on rendered image output, yielding linear, premultiplied RGBA.
+/// This output could be a single layer, or a composite image.
+///
+/// Filtering is done "Nearest Neighbor"
+pub struct RenderedColorPicker {
+    offset: (u32, u32),
+    extent: (u32, u32),
+    /// slice of the image, starting at offset
+    /// must be `extent.0 * extent.1` elements in length.
+    buffer: vk::Subbuffer<[[vulkano::half::f16; 4]]>,
+}
+impl RenderedColorPicker {
+    pub fn pull_from_image(
+        image: Arc<vk::Image>,
+        xform: (),
+        viewport_rect: (),
+    ) -> anyhow::Result<Self> {
+        todo!()
+    }
+}
+impl Picker for RenderedColorPicker {
+    type Value = [vulkano::half::f16; 4];
+    fn pick(&self, viewport_coordinate: ultraviolet::Vec2) -> Option<Self::Value> {
+        todo!()
+    }
+}
+
+/// Picker from NE_ID image. These must be produced separately from the usual pipeline,
+/// but yield a reference to the clicked stroke. This allows for precise color selection,
+/// brush setting selection, ect.
+///
+/// Could be a single-layer image, or a composite.
+pub struct StrokeIDPicker {}
+impl crate::picker::Picker for StrokeIDPicker {
+    type Value = crate::state::stroke_collection::ImmutableStrokeID;
+    fn pick(&self, viewport_coordinate: ultraviolet::Vec2) -> Option<Self::Value> {
+        todo!()
+    }
+}
+// /// Picker from NE_ID image. These must be produced separately from the usual pipeline,
+// /// but yield a reference to the clicked layer.
+//
+// // this is just an idea, won't impl yet :3
+// pub struct LeafIDPicker {}
+// impl crate::picker::Picker for StrokeIDPicker {
+//     type Value = crate::state::graph::LeafID;
+//     fn pick(&self, viewport_coordinate: ultraviolet::Vec2) -> Option<Self::Value> {
+//         None
+//     }
+// }
+
+/// Option<NonZeroU64> in native endian. (`R64_uint` has very low support, this has very high support).
+/// Vulkan spec guarantees that the device and host *must* have the same endian, so this can be a bitwise reinterpret to get the ID!
+/// (alignment allowing, of course)
+///
+/// In the future, this could probably definitely be R32 or even R16,
+/// and have a host-side mapping between texel value <-> `FuzzID` to decrease memory footprint and bandwidth.
+/// For now, keep it simple!
 const NE_ID_FORMAT: vk::Format = vk::Format::R32G32_UINT;
 
 mod shaders {
@@ -57,14 +185,6 @@ mod shaders {
             ],
             path: "src/shaders/widelines.geom",
         }
-    }
-}
-
-pub struct StrokeLayerPicker {}
-impl crate::picker::Picker for StrokeLayerPicker {
-    type Value = crate::state::stroke_collection::ImmutableStrokeID;
-    fn pick(&self, viewport_coordinate: ultraviolet::Vec2) -> Option<Self::Value> {
-        None
     }
 }
 
