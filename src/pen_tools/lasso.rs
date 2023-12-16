@@ -136,7 +136,6 @@ impl super::MakePenTool for Lasso {
     fn new_from_renderer(
         _: &std::sync::Arc<crate::render_device::RenderContext>,
     ) -> anyhow::Result<Box<dyn super::PenTool>> {
-        use crate::gizmos::renderer::WideLineVertex;
         Ok(Box::new(Lasso {
             in_progress_hoop: None,
             is_down: false,

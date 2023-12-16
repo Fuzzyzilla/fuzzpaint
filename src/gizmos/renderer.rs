@@ -264,7 +264,8 @@ mod arc_tools {
     impl<T: ?Sized> PartialEq<WeakByPtr<T>> for ArcByPtr<T> {
         fn eq(&self, other: &WeakByPtr<T>) -> bool {
             // Soundness - WeakByPtr is made from a real Arc, so it is mem backed and ptr is stable.
-            Arc::as_ptr(&self.0) == Weak::as_ptr(&other.0)
+            // Use addr_eq to compare thin ptrs - same behavior as `{Arc, Weak}::ptr_eq`
+            std::ptr::addr_eq(Arc::as_ptr(&self.0), Weak::as_ptr(&other.0))
         }
     }
 

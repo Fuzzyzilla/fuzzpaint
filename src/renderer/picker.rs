@@ -21,45 +21,6 @@ fn check_valid_binary_format(format: vk::Format) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Common source for vulkan-image-based picking operations.
-/// Value is interpreted from the raw image texel regardless of format and thus must
-/// match the texel size exactly. By extension, the texel format must not be block or multiplanar, or compressed.
-///
-/// Filtering is done "Nearest Neighbor".
-struct PickedVkImage<Value: bytemuck::Pod> {
-    offset: (u32, u32),
-    extent: (u32, u32),
-    buffer: vk::Subbuffer<[Value]>,
-}
-impl<Value: bytemuck::Pod> PickedVkImage<Value> {
-    pub fn new(image: Arc<vk::Image>) -> anyhow::Result<Self> {
-        // Are these sufficient checks? :O
-        if image.format().block_size() != std::mem::size_of::<Value>() as u64 {
-            anyhow::bail!(
-                "texel size mismatch: format: {}, Value: {}",
-                image.format().block_size(),
-                std::mem::size_of::<Value>()
-            )
-        }
-        // Make sure the image's format is OK to be interpreted as binary.
-        check_valid_binary_format(image.format())?;
-
-        // We have options here - If the image is super zoomed in,
-        // >=100%, we can just copy the subbuffer normally.
-        // If it's zoomed out, should we blit it first and then transfer?
-        // Do we lazily stream texture data to avoid a whole copy?
-        // In theory, we need a staging buffer large enough for the largest possible viewport. Blegh.
-        // That'd be 66 MB at 4k! No thanks!
-        todo!()
-    }
-}
-impl<Value: bytemuck::Pod> Picker for PickedVkImage<Value> {
-    type Value = Value;
-    fn pick(&self, _: ultraviolet::Vec2) -> Option<Self::Value> {
-        todo!()
-    }
-}
-
 /// Trivial picker from a Solid fill layer. :P
 /// In the future when Fill layers become more.... more, this will do serious work,
 /// such as calculating gradient values, patterns, ect. With a fill, we can generally
@@ -80,9 +41,6 @@ impl Picker for ConstantColorPicker {
 pub struct RenderedColorPicker {
     offset: (u32, u32),
     extent: (u32, u32),
-    /// slice of the image, starting at offset
-    /// must be `extent.0 * extent.1` elements in length.
-    buffer: vk::Subbuffer<[[vulkano::half::f16; 4]]>,
 }
 impl RenderedColorPicker {
     pub fn pull_from_image(
@@ -200,7 +158,6 @@ pub struct PickerImage {}
 pub struct PickerRenderer {}
 impl PickerRenderer {
     fn make_pipeline(device: Arc<vk::Device>) -> anyhow::Result<Arc<vk::GraphicsPipeline>> {
-        use vk::Vertex;
         let vert = shaders::vert::load(device.clone())?;
         let geom = shaders::geom::load(device.clone())?;
         let frag = shaders::frag::load(device.clone())?;

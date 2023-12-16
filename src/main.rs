@@ -1,6 +1,7 @@
 #![feature(portable_simd)]
 #![feature(once_cell_try)]
 #![feature(write_all_vectored)]
+#![feature(new_uninit)]
 #![warn(clippy::pedantic)]
 use std::sync::Arc;
 pub mod commands;

@@ -468,7 +468,7 @@ pub struct RenderData {
 }
 mod stroke_renderer {
 
-    use crate::{renderer::stroke_batcher, vulkano_prelude::*};
+    use crate::vulkano_prelude::*;
     use anyhow::Result as AnyResult;
     use std::sync::Arc;
     mod vert {

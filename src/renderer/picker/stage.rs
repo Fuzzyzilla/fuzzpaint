@@ -20,7 +20,7 @@ impl BufferAddressing {
         Self { h_mirror, v_mirror }
     }
     /// Transform the coord based on this addressing scheme
-    fn address(self, [x, y]: [u32; 2], [width, height]: [u32; 2]) -> Option<u64> {
+    fn index(self, [x, y]: [u32; 2], [width, height]: [u32; 2]) -> Option<u64> {
         if x >= width || y >= height {
             None
         } else {
@@ -60,7 +60,7 @@ impl BufferState {
                     Some(u64::from(coord[0]) + u64::from(coord[1]) * u64::from(packed_extent[0]))
                 }
             }
-            BufferState::Sized { extent, addressing } => addressing.address(coord, extent),
+            BufferState::Sized { extent, addressing } => addressing.index(coord, extent),
         }
     }
 }
@@ -72,13 +72,15 @@ impl BufferState {
 // Using vulkano's RawImage and manually-allocated mem, (and device capabilities allowing), we could
 // safely interpret the same memory alloc as any of the needed image formats without needing to
 // alloc for each one. *BONK* no premature optimization!!
-struct ImageStage {
+pub struct ImageStage {
     image: Arc<vk::Image>,
     buffer: Arc<vk::Buffer>,
+    /// Filled portion of the buffer, meaningful if BufferState is NOT `Uninit`
+    init_slice: vk::Subbuffer<[u8]>,
     buffer_state: BufferState,
 }
 impl ImageStage {
-    fn new(
+    pub fn new(
         allocator: Arc<dyn vulkano::memory::allocator::MemoryAllocator>,
         format: vk::Format,
         staged_size: [u32; 2],
@@ -134,6 +136,8 @@ impl ImageStage {
 
         Ok(Self {
             image,
+            // Dummy, weh.
+            init_slice: vk::Subbuffer::new(buffer.clone()),
             buffer,
             buffer_state: BufferState::Uninit,
         })
@@ -141,10 +145,12 @@ impl ImageStage {
     /// Execute a transfer from the given input image and texel range, downsampled into host memory.
     /// Note that the names here are a tad misleading - they could specify other corners,
     /// and `bottom_right` is not necessarily > `top_left`. This corresponds to a mirroring operation.
+    ///
+    /// `other` and `self` is in use until the returned future.
     // There isn't much logical reason to break this up, and any further line
     // compression will serve to make it *less* readable.
     #[allow(clippy::too_many_lines)]
-    fn download(
+    pub fn download(
         &mut self,
         ctx: &crate::render_device::RenderContext,
         other: Arc<vk::Image>,
@@ -153,7 +159,7 @@ impl ImageStage {
         bottom_right: [i32; 2],
     ) -> anyhow::Result<vk::FenceSignalFuture<impl GpuFuture>> {
         use az::SaturatingAs;
-        // Don't allow "compatible formats" or "mutable format" features.
+        // Don't allow "compatible format" or "mutable format" features.
         if other.format() != self.image.format() {
             anyhow::bail!("image formats must match")
         }
@@ -280,16 +286,44 @@ impl ImageStage {
             .then_signal_fence_and_flush()?;
 
         self.buffer_state = new_state;
+        // Won't panic - we just set self to not be uninit.
+        self.update_self_slice();
 
         Ok(fence)
+    }
+    /// Extent of the internal buffer, derived from `self.buffer_state`. None if uninit.
+    pub fn extent(&self) -> Option<[u32; 2]> {
+        match self.buffer_state {
+            BufferState::Packed => {
+                let extent = self.image.extent();
+                Some([extent[0], extent[1]])
+            }
+            BufferState::Sized { extent, .. } => Some(extent),
+            BufferState::Uninit => None,
+        }
+    }
+    /// Number of init bytes of internal buffer, derived from `self.buffer_state`. None if uninit.
+    pub fn init_len_bytes(&self) -> Option<u64> {
+        let extent = self.extent()?;
+        // checked at create time that a single block == a single texel
+        let texel_size = self.image.format().block_size();
+        Some(u64::from(extent[0]) * u64::from(extent[1]) * texel_size)
+    }
+    /// Update `self.init_slice`. Panics if `buffer_state` is uninit or reports an extent larger than can fit.
+    fn update_self_slice(&mut self) {
+        // Logic error for self to be uninit.
+        let len = self.init_len_bytes().unwrap();
+        self.init_slice = vk::Subbuffer::new(self.buffer.clone()).slice(0..len);
     }
     /// Fetch a single texel from the local buffer.
     /// Image bits at the given location are interpreted bitwise as `Texel`.
     ///
-    /// `coord`: `top_left` is `[0, 0]` increasing towards `bottom_right` (this may be a
-    /// mirrored representation of the image, if the coordinates passed to `self::transfer`
-    /// were specified as such)
-    fn fetch<Texel>(&self, coord: [u32; 2]) -> Result<Texel, SamplingError>
+    /// `local` is in local space, where `top_left` is `[0, 0]` increasing towards `self.extent() - [1, 1]`
+    /// at `bottom_right` (this may be a mirrored representation of the image, if the coordinates passed to
+    /// `self::download` were specified as such)
+    ///
+    /// For many texel fetches, it is much more efficient to take a sampler using `Self::{owned_sampler, sampler}`.
+    pub fn fetch<Texel>(&self, local: [u32; 2]) -> Result<Texel, SamplingError>
     where
         Texel: bytemuck::Pod,
     {
@@ -297,34 +331,87 @@ impl ImageStage {
         // Can't think of a way to enforce this better than a runtime err :V
         // Could instead have typed wrappers that check once at creation time?
         if texel_size == self.image.format().block_size() {
+            if matches!(self.buffer_state, BufferState::Uninit) {
+                return Err(SamplingError::Uninit);
+            }
             let extent = self.image.extent();
             let idx = self
                 .buffer_state
-                .index(coord, [extent[0], extent[1]])
+                .index(local, [extent[0], extent[1]])
                 .ok_or(SamplingError::OutOfBounds)?;
-            let buf = vk::Subbuffer::new(self.buffer.clone());
             // Slice before accessing, so that only the bit we care about
             // actually gets memmapped.
             let byte_range = (idx * texel_size)..((idx + 1) * texel_size);
             // Check slice range (`.slice` would panic)
-            if byte_range.end > buf.len() {
+            if byte_range.end > self.init_slice.len() {
                 return Err(SamplingError::OutOfBounds);
             }
-            let sliced = buf.slice(byte_range);
+            let sliced = self.init_slice.clone().slice(byte_range);
             let read = sliced.read().map_err(SamplingError::AccessError)?;
 
-            // This works, but I am not sure of the alignment of mapped buffers.
+            // Mapped buffers are aligned to the gcd of the
+            // physical device's `minMemoryMapAlignment` and `Texel`'s size - which could be less than `Texel`'s align.
+
+            // On most systems it is aligned to a very large amount, but to check would
+            // prolly be more expensive than it's worth.
             Ok(bytemuck::pod_read_unaligned(&read))
+        } else {
+            Err(SamplingError::BadSize)
+        }
+    }
+    /// Take a heap copy of the image, to be used for sampling.
+    /// For a single texel fetch, it is more efficient to use `Self::fetch`.
+    pub fn owned_sampler<Texel: bytemuck::Pod>(
+        &self,
+    ) -> Result<OwnedSampler<Texel>, SamplingError> {
+        self.sampler().map(BorrowedSampler::to_owned)
+    }
+    /// Take a reference to the image, to be used for sampling.
+    /// For a single texel fetch, it is more efficient to use `Self::fetch`.
+    pub fn sampler<Texel: bytemuck::Pod>(
+        &self,
+    ) -> Result<BorrowedSampler<'_, Texel>, SamplingError> {
+        let texel_size = std::mem::size_of::<Texel>() as u64;
+        if texel_size == self.image.format().block_size() {
+            let (extent, addressing) = match self.buffer_state {
+                BufferState::Uninit => return Err(SamplingError::Uninit),
+                BufferState::Packed => {
+                    let extent = self.image.extent();
+                    (
+                        [extent[0], extent[1]],
+                        BufferAddressing {
+                            h_mirror: false,
+                            v_mirror: false,
+                        },
+                    )
+                }
+                BufferState::Sized { extent, addressing } => (extent, addressing),
+            };
+
+            let mapped_bytes = self.init_slice.read().map_err(SamplingError::AccessError)?;
+
+            let expected_len = u64::from(extent[0]) * u64::from(extent[1]) * texel_size;
+            // BorrowedSampler assumes this invariant, so just make sure we didn't bork anything.
+            assert_eq!(expected_len, mapped_bytes.len() as u64);
+            Ok(BorrowedSampler {
+                extent,
+                addressing,
+                mapped_bytes,
+                _phantom: std::marker::PhantomData,
+            })
         } else {
             Err(SamplingError::BadSize)
         }
     }
 }
 #[derive(thiserror::Error, Debug)]
-enum SamplingError {
+pub enum SamplingError {
     /// The sample falls outside the staged image region.
     #[error("sample coordinate out-of-bounds")]
     OutOfBounds,
+    /// The buffer is uninit..
+    #[error("staging buffer has not been filed yet")]
+    Uninit,
     /// Access error occured. The device is still writing this buffer, hints
     /// at a failure to await the fence.
     #[error(transparent)]
@@ -332,4 +419,88 @@ enum SamplingError {
     /// The size of the provided `Texel` is not correct.
     #[error("texel size does not match image format")]
     BadSize,
+}
+pub struct BorrowedSampler<'stage, Texel> {
+    extent: [u32; 2],
+    /// Buffer mirroring mode
+    addressing: BufferAddressing,
+    /// Bytes that represent the texels. NOT GUARANTEED TO BE ALIGNED TO `TEXEL`!
+    /// Must have precisely the right length according the `Texel size * extent`
+    mapped_bytes: vulkano::buffer::subbuffer::BufferReadGuard<'stage, [u8]>,
+    /// Pretend we hold slice of `Texel`s.
+    _phantom: std::marker::PhantomData<&'stage [Texel]>,
+}
+impl<Texel: bytemuck::Pod> BorrowedSampler<'_, Texel> {
+    /// Make a heap copy of this sampler, ending the borrow of the `ImageStage`.
+    // Can't use `ToOwned::to_owned`, as `Self` is not `Borrow<OwningSampler>` (and cannot be)
+    pub fn to_owned(self) -> OwnedSampler<Texel> {
+        let bytes: &[u8] = &self.mapped_bytes;
+        // checked at construction time!
+        debug_assert_eq!(bytes.len() % std::mem::size_of::<Texel>(), 0);
+        // SAFETY: `bytemuck::Pod` implies `bytemuck::Zeroable`, thus zeros are a correctly initialized `Texel` instance.
+        let mut texels = unsafe {
+            // May be able to elide this zeroing by writing bytes immediately using `slice_as_bytes`,
+            // but things get more dangerous!
+            Box::<[Texel]>::new_zeroed_slice(bytes.len() / std::mem::size_of::<Texel>())
+                .assume_init()
+        };
+
+        // memcpy `bytes` into `texels`.
+        // No panic - of course it's aligned to ones, and we checked at creation time the lens match exactly.
+        // Doing it this way allows efficient copying of data regardless of align, yippee!
+        bytemuck::cast_slice_mut(&mut texels).copy_from_slice(bytes);
+
+        OwnedSampler {
+            extent: self.extent,
+            addressing: self.addressing,
+            data: texels,
+        }
+    }
+    /// Fetch a texel from the internal buffer, in local space.
+    ///
+    /// `None` if out-of-bounds.
+    pub fn fetch(&self, local: [u32; 2]) -> Option<Texel> {
+        use az::CheckedAs;
+        let texel_size = std::mem::size_of::<Texel>() as u64;
+        let elem_idx = self.addressing.index(local, self.extent)?;
+
+        let byte_range = (elem_idx * texel_size)..((elem_idx + 1) * texel_size);
+        // Only fallible on 32bit
+        let byte_range = byte_range.start.checked_as()?..byte_range.end.checked_as()?;
+        // None if bytes out-of-bounds (shouldn't be possible due to self's preconditions! oh well, handle it)
+        let bytes = self.mapped_bytes.get(byte_range)?;
+
+        // No guaruntee that memmapped `[u8]` is aligned to `[Texel]`.
+        // On most systems it is aligned to a very large amount, but to check would
+        // prolly be more expensive than it's worth.
+        Some(bytemuck::pod_read_unaligned(bytes))
+    }
+    pub fn extent(&self) -> [u32; 2] {
+        self.extent
+    }
+}
+
+/// A sample which holds a heap copy of the image data.
+pub struct OwnedSampler<Texel> {
+    extent: [u32; 2],
+    /// Buffer mirroring mode
+    addressing: BufferAddressing,
+    data: Box<[Texel]>,
+}
+impl<Texel: bytemuck::Pod> OwnedSampler<Texel> {
+    /// Fetch a texel from the internal buffer, in local space.
+    ///
+    /// `None` if out-of-bounds.
+    pub fn fetch(&self, local: [u32; 2]) -> Option<Texel> {
+        use az::CheckedAs;
+        let idx: usize = self
+            .addressing
+            .index(self.extent, local)?
+            // Only fallible on 32bit
+            .checked_as()?;
+        self.data.get(idx).copied()
+    }
+    pub fn extent(&self) -> [u32; 2] {
+        self.extent
+    }
 }
