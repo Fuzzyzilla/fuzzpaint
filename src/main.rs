@@ -2,6 +2,7 @@
 #![feature(once_cell_try)]
 #![feature(write_all_vectored)]
 #![feature(new_uninit)]
+#![feature(float_next_up_down)]
 #![warn(clippy::pedantic)]
 use std::sync::Arc;
 pub mod commands;

@@ -54,7 +54,7 @@ impl BufferState {
         match self {
             BufferState::Uninit => None,
             BufferState::Packed => {
-                if coord[0] >= packed_extent[0] || coord[1] > packed_extent[1] {
+                if coord[0] >= packed_extent[0] || coord[1] >= packed_extent[1] {
                     None
                 } else {
                     Some(u64::from(coord[0]) + u64::from(coord[1]) * u64::from(packed_extent[0]))
@@ -64,6 +64,21 @@ impl BufferState {
         }
     }
 }
+/// Holds the stage mutably while writing.
+/// On drop, the fence is synchronized, and the mutability is held for that time.
+pub struct ImageStageFuture<'stage, Future: GpuFuture> {
+    stage: &'stage mut ImageStage,
+    fence: vk::FenceSignalFuture<Future>,
+}
+impl<Future: GpuFuture> ImageStageFuture<'_, Future> {
+    /// Detach the lifetime of the stage and take the future.
+    ///
+    /// This will never result in UB, however it may result in runtime errors on sampling if not properly synchronized!
+    pub fn detach(self) -> vk::FenceSignalFuture<Future> {
+        self.fence
+    }
+}
+// todo: defer impl GpuFuture for ImageStageFuture
 
 /// Stores a small staging image, and a buffer which it is decoded into.
 /// Used for downloading and sampling images from the host.
@@ -157,7 +172,7 @@ impl ImageStage {
         subresource: vk::ImageSubresourceLayers,
         top_left: [i32; 2],
         bottom_right: [i32; 2],
-    ) -> anyhow::Result<vk::FenceSignalFuture<impl GpuFuture>> {
+    ) -> anyhow::Result<ImageStageFuture<impl GpuFuture>> {
         use az::SaturatingAs;
         // Don't allow "compatible format" or "mutable format" features.
         if other.format() != self.image.format() {
@@ -289,7 +304,8 @@ impl ImageStage {
         // Won't panic - we just set self to not be uninit.
         self.update_self_slice();
 
-        Ok(fence)
+        // Return the future and bind our lifetime to it.
+        Ok(ImageStageFuture { fence, stage: self })
     }
     /// Extent of the internal buffer, derived from `self.buffer_state`. None if uninit.
     pub fn extent(&self) -> Option<[u32; 2]> {
@@ -456,10 +472,10 @@ impl<Texel: bytemuck::Pod> BorrowedSampler<'_, Texel> {
             data: texels,
         }
     }
-    /// Fetch a texel from the internal buffer, in local space.
-    ///
-    /// `None` if out-of-bounds.
-    pub fn fetch(&self, local: [u32; 2]) -> Option<Texel> {
+}
+impl<Texel: bytemuck::Pod> Sampler for BorrowedSampler<'_, Texel> {
+    type Texel = Texel;
+    fn fetch(&self, local: [u32; 2]) -> Option<Texel> {
         use az::CheckedAs;
         let texel_size = std::mem::size_of::<Texel>() as u64;
         let elem_idx = self.addressing.index(local, self.extent)?;
@@ -475,7 +491,7 @@ impl<Texel: bytemuck::Pod> BorrowedSampler<'_, Texel> {
         // prolly be more expensive than it's worth.
         Some(bytemuck::pod_read_unaligned(bytes))
     }
-    pub fn extent(&self) -> [u32; 2] {
+    fn extent(&self) -> [u32; 2] {
         self.extent
     }
 }
@@ -487,11 +503,9 @@ pub struct OwnedSampler<Texel> {
     addressing: BufferAddressing,
     data: Box<[Texel]>,
 }
-impl<Texel: bytemuck::Pod> OwnedSampler<Texel> {
-    /// Fetch a texel from the internal buffer, in local space.
-    ///
-    /// `None` if out-of-bounds.
-    pub fn fetch(&self, local: [u32; 2]) -> Option<Texel> {
+impl<Texel: bytemuck::Pod> Sampler for OwnedSampler<Texel> {
+    type Texel = Texel;
+    fn fetch(&self, local: [u32; 2]) -> Option<Texel> {
         use az::CheckedAs;
         let idx: usize = self
             .addressing
@@ -500,7 +514,51 @@ impl<Texel: bytemuck::Pod> OwnedSampler<Texel> {
             .checked_as()?;
         self.data.get(idx).copied()
     }
-    pub fn extent(&self) -> [u32; 2] {
+    fn extent(&self) -> [u32; 2] {
         self.extent
+    }
+}
+pub trait Sampler {
+    type Texel;
+    fn extent(&self) -> [u32; 2];
+    /// Fetch a texel from the image, in local space.
+    ///
+    /// `None` if out-of-bounds.
+    fn fetch(&self, local: [u32; 2]) -> Option<Self::Texel>;
+    /// Fetch a texel from normalized UV.
+    /// `None` if out-of-bounds, `NaN`, or `inf`.
+    // These lossy casts are intentional and/or checked.
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation
+    )]
+    fn fetch_nearest_normalized(&self, normalized: [f32; 2]) -> Option<Self::Texel> {
+        use std::num::FpCategory;
+        // Not nan nor inf
+        match (normalized[0].classify(), normalized[1].classify()) {
+            (_, FpCategory::Infinite | FpCategory::Nan)
+            | (FpCategory::Infinite | FpCategory::Nan, _) => return None,
+            _ => (),
+        };
+        // Not out-of-range
+        if normalized[0] < 0.0 || normalized[0] > 1.0 || normalized[1] < 0.0 || normalized[1] > 1.0
+        {
+            return None;
+        }
+        let extent = self.extent();
+        // map 0..=1 (inclusive) to 0..extent (exclusive)
+        // why is everything i wanna use unstable :cry:
+        // we don't expect these `as` casts to be lossy as a stage that large (16,777,216) is absurd!
+        // these `as` rounds are not a soundness issue regardless.
+        let coord = [
+            normalized[0] * (extent[0] as f32).next_down(),
+            normalized[1] * (extent[1] as f32).next_down(),
+        ];
+        // Truncate to integer coordinate.
+        // As ok - truncation is intentional, and it's known non-negative.
+        let coord = [coord[0] as u32, coord[1] as u32];
+
+        self.fetch(coord)
     }
 }
