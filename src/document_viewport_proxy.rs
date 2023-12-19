@@ -715,29 +715,16 @@ impl DocumentViewportPreviewProxy {
             .set_viewport_size(position, size);
     }
     pub async fn insert_document_transform(&self, new: crate::view_transform::DocumentTransform) {
-        *self.document_transform.write().await = new.clone();
+        *self.document_transform.write().await = new;
         self.surface_data.write().await.set_transform(new);
     }
-    pub async fn get_view_transform(&self) -> Option<crate::pen_tools::ViewInfo> {
+    pub async fn get_view_transform(&self) -> Option<crate::view_transform::ViewInfo> {
         // lock, clone, release asap
-        let xform = match { self.document_transform.read().await.clone() } {
-            crate::view_transform::DocumentTransform::Fit(f) => {
-                let (pos, size) = *self.viewport.read();
-                f.make_transform(
-                    cgmath::Vector2 {
-                        x: crate::DOCUMENT_DIMENSION as f32,
-                        y: crate::DOCUMENT_DIMENSION as f32,
-                    },
-                    pos,
-                    size,
-                )?
-            }
-            crate::view_transform::DocumentTransform::Transform(t) => t,
-        };
+        let transform = *self.document_transform.read().await;
         let (pos, size) = self.get_viewport();
 
-        Some(crate::pen_tools::ViewInfo {
-            transform: xform,
+        Some(crate::view_transform::ViewInfo {
+            transform,
             viewport_position: ultraviolet::Vec2 { x: pos.x, y: pos.y },
             viewport_size: ultraviolet::Vec2 {
                 x: size.x,
@@ -753,7 +740,7 @@ impl DocumentViewportPreviewProxy {
     }
     pub fn get_view_transform_sync(&self) -> Option<crate::view_transform::ViewTransform> {
         // lock, clone, release asap
-        match { self.document_transform.blocking_read().clone() } {
+        match { *self.document_transform.blocking_read() } {
             crate::view_transform::DocumentTransform::Fit(f) => {
                 let (pos, size) = *self.viewport.read();
                 f.make_transform(
@@ -834,7 +821,7 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
     }
     fn surface_changed(&self, render_surface: &render_device::RenderSurface) {
         let viewport = *self.viewport.read();
-        let transform = self.document_transform.blocking_read().clone();
+        let transform = *self.document_transform.blocking_read();
 
         let new = ProxySurfaceData::new(
             self.render_context.clone(),

@@ -156,6 +156,9 @@ impl super::PenTool for Lasso {
         _tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
+        let Some(transform) = view_info.calculate_transform() else {
+            return;
+        };
         for input in stylus_input.iter() {
             // If new press, delete old.
             // if held, continue old.
@@ -171,7 +174,7 @@ impl super::PenTool for Lasso {
             self.is_down = input.pressed;
 
             if let Some(hoop) = hoop {
-                let Ok(proj) = view_info.transform.unproject(cgmath::Point2 {
+                let Ok(proj) = transform.unproject(cgmath::Point2 {
                     x: input.pos.0,
                     y: input.pos.1,
                 }) else {

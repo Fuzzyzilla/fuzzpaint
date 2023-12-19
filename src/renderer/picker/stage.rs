@@ -122,7 +122,11 @@ impl ImageStage {
             },
             vulkano::memory::allocator::AllocationCreateInfo {
                 // Only device needs to access this.
-                memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
+                // Prefer a device local with no host access.
+                memory_type_filter: vk::MemoryTypeFilter {
+                    not_preferred_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
+                    ..vk::MemoryTypeFilter::PREFER_DEVICE
+                },
                 ..Default::default()
             },
         )?;
@@ -136,7 +140,10 @@ impl ImageStage {
                 ..Default::default()
             },
             vk::AllocationCreateInfo {
-                memory_type_filter: vk::MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                // "Download" buffer
+                // "Random Access" may still fetch over the PCI bus, prefer to not have this happen!
+                memory_type_filter: vk::MemoryTypeFilter::HOST_RANDOM_ACCESS
+                    | vk::MemoryTypeFilter::PREFER_HOST,
                 ..Default::default()
             },
             // Unwrap OK - an align of 1 will have no overflow possible.

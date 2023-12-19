@@ -115,8 +115,8 @@ impl WinitKeyboardActionCollector {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let steps = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => -y.ceil() as i32,
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => -pos.y.ceil() as i32,
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y.ceil() as i32,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y.ceil() as i32,
                 };
 
                 match steps {

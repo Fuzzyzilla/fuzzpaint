@@ -448,6 +448,18 @@ impl MainUI {
                     ),
                 });
             }
+            // Handle Scroll wheel
+            // future: configurable scroll direction and speed.
+            // FIXME: respect cursor position.
+            let scroll_zoom_cmds = frame.action_trigger_count(crate::actions::Action::ZoomIn)
+                as f32
+                - frame.action_trigger_count(crate::actions::Action::ZoomOut) as f32;
+            let _ = requests.send(requests::UiRequest::Document {
+                target: document,
+                request: requests::DocumentRequest::View(requests::DocumentViewRequest::ZoomBy(
+                    1.25f32.powf(scroll_zoom_cmds),
+                )),
+            });
 
             ui.add(egui::Separator::default().vertical());
 
@@ -460,15 +472,21 @@ impl MainUI {
                     ),
                 });
             };
-            latch::latch(ui, (document, "rotation"), 0.0, |ui, rotation| {
-                let rotation_response = ui.drag_angle(rotation);
+            latch::latch(ui, (document, "rotation"), 0.0, |ui, rotation: &mut f32| {
+                let before = *rotation;
+                let rotation_response = ui.add(
+                    egui::DragValue::new(rotation)
+                        .speed(0.5)
+                        .fixed_decimals(0)
+                        .suffix('°'),
+                );
                 if rotation_response.changed() {
+                    // Use a delta angle request
+                    let delta = *rotation - before;
                     let _ = requests.send(requests::UiRequest::Document {
                         target: document,
                         request: requests::DocumentRequest::View(
-                            requests::DocumentViewRequest::RotateTo(
-                                *rotation % std::f32::consts::TAU,
-                            ),
+                            requests::DocumentViewRequest::RotateBy(delta.to_radians()),
                         ),
                     });
                 }

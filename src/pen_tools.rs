@@ -20,16 +20,11 @@ mod gizmo;
 mod lasso;
 mod picker;
 mod viewport;
-
+use crate::view_transform::ViewInfo;
 trait MakePenTool {
     fn new_from_renderer(
         context: &std::sync::Arc<crate::render_device::RenderContext>,
     ) -> anyhow::Result<Box<dyn PenTool>>;
-}
-pub struct ViewInfo {
-    pub transform: crate::view_transform::ViewTransform,
-    pub viewport_position: ultraviolet::Vec2,
-    pub viewport_size: ultraviolet::Vec2,
 }
 #[async_trait::async_trait]
 trait PenTool {
@@ -121,32 +116,60 @@ enum Transition {
     ToBase,
 }
 fn apply_transform_request(
-    view: &mut ViewInfo,
+    transform: &mut crate::view_transform::DocumentTransform,
+    view: &ViewInfo,
     view_request: crate::ui::requests::DocumentViewRequest,
 ) {
-    /*
-    use az::SaturatingAs;
-    // Count the number of discrete zoom requests.
-    let zoom_count = actions
-        .action_trigger_count(crate::actions::Action::ZoomIn)
-        .saturating_as::<i32>()
-        .saturating_sub(
-            actions
-                .action_trigger_count(crate::actions::Action::ZoomOut)
-                .saturating_as(),
-        );
-    if zoom_count != 0 {
-        if let Some(point) = stylus_input.last().map(|point| cgmath::Point2 {
-            x: point.pos.0,
-            y: point.pos.1,
-        }) {
-            let mut xform = view_info.transform.clone();
-            xform.scale_about(point, 1.5f32.powf(-zoom_count as f32));
-            render_output.set_view =
-                Some(crate::view_transform::DocumentTransform::Transform(xform));
+    use crate::ui::requests::DocumentViewRequest;
+    use crate::view_transform::{DocumentFit, DocumentTransform};
+
+    // all the others require more work, this one is easy.
+    if matches!(view_request, DocumentViewRequest::Fit) {
+        *transform = DocumentTransform::Fit(DocumentFit {
+            // Todo: inherit these fields
+            flip_x: false,
+            rotation: cgmath::Rad(0.0),
+        });
+        return;
+    }
+
+    // I realllyyy need to refactor `cgmath` out
+    let uv_to_cg = |ultraviolet::Vec2 { x, y }| cgmath::Point2 { x, y };
+    let view_center = uv_to_cg(view.center());
+
+    // Move it into a ViewInfo for easier processing.
+    let mut cur_view = ViewInfo {
+        transform: *transform,
+        ..*view
+    };
+    let Some(xform) = cur_view.make_transformed() else {
+        // Malformed transform.
+        return;
+    };
+
+    match view_request {
+        // Impl above
+        DocumentViewRequest::Fit => unreachable!(),
+        DocumentViewRequest::ZoomBy(factor) => {
+            xform.scale_about(view_center, factor);
         }
-    }*/
-    todo!()
+        DocumentViewRequest::RealSize(size) => {
+            // Calculate factor from current and desired.
+            let cur_scale = xform.decomposed.scale;
+            let factor = size / cur_scale;
+            xform.scale_about(view_center, factor);
+        }
+        DocumentViewRequest::RotateBy(delta) => xform.rotate_about(view_center, cgmath::Rad(delta)),
+        DocumentViewRequest::RotateTo(angle) => {
+            // Calculate delta from current and destination.
+            use cgmath::Rotation;
+            let cur_unit = xform.decomposed.rot.rotate_vector(cgmath::vec2(1.0, 0.0));
+            let cur_angle = cur_unit.y.atan2(cur_unit.x);
+            let delta = angle - cur_angle;
+            xform.rotate_about(view_center, cgmath::Rad(delta));
+        }
+    }
+    *transform = cur_view.transform;
 }
 pub struct ToolState {
     /// User-defined base state (depending on what tool is selected via the UI)
@@ -188,18 +211,6 @@ impl ToolState {
         ui_requests: &crossbeam::channel::Receiver<crate::ui::requests::UiRequest>,
     ) -> ToolRenderOutput {
         use crate::ui::requests::{DocumentRequest, UiRequest};
-        // Handle ui requests
-        for request in ui_requests.try_iter() {
-            match request {
-                UiRequest::Document {
-                    request: DocumentRequest::View(v),
-                    ..
-                } => apply_transform_request(todo!(), v),
-                UiRequest::SetBaseTool { tool } => self.set_base_state(tool),
-                _ => (),
-            }
-        }
-
         // Prepare output structs
         let mut tool_output = ToolStateOutput { transition: None };
         let mut render_output = ToolRenderOutput {
@@ -207,6 +218,21 @@ impl ToolState {
             set_view: None,
             cursor: None,
         };
+
+        // Handle ui requests
+        for request in ui_requests.try_iter() {
+            match request {
+                UiRequest::Document {
+                    request: DocumentRequest::View(view_request),
+                    ..
+                } => {
+                    let mut transform = render_output.set_view.get_or_insert(view_info.transform);
+                    apply_transform_request(&mut transform, view_info, view_request);
+                }
+                UiRequest::SetBaseTool { tool } => self.set_base_state(tool),
+                _ => (),
+            }
+        }
 
         // Get current tool and run
         let cur_state = self.get_current_state();

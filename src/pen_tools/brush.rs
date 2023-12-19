@@ -3,7 +3,7 @@ fn brush(
     is_eraser: bool,
     in_progress_stroke: &mut Option<crate::Stroke>,
 
-    view_transform: &crate::view_transform::ViewTransform,
+    view: &super::ViewInfo,
     stylus_input: crate::stylus_events::StylusEventFrame,
 
     render_output: &mut super::ToolRenderOutput,
@@ -19,14 +19,14 @@ fn brush(
         *in_progress_stroke = None;
         return;
     };
+    let Some(view_transform) = view.calculate_transform() else {
+        return;
+    };
     for event in stylus_input.iter() {
         if event.pressed {
             // Get stroke-in-progress or start anew.
             let this_stroke = in_progress_stroke.get_or_insert_with(|| crate::Stroke {
-                brush: crate::state::StrokeBrushSettings {
-                    is_eraser,
-                    ..brush.clone()
-                },
+                brush: crate::state::StrokeBrushSettings { is_eraser, ..brush },
                 points: Vec::new(),
             });
             let Ok(pos) = view_transform.unproject(cgmath::point2(event.pos.0, event.pos.1)) else {
@@ -220,7 +220,7 @@ impl super::PenTool for Brush {
         brush(
             actions.is_action_held(crate::actions::Action::Erase),
             &mut self.in_progress_stroke,
-            &view_info.transform,
+            view_info,
             stylus_input,
             render_output,
         );
@@ -244,7 +244,7 @@ impl super::PenTool for Eraser {
         brush(
             true,
             &mut self.in_progress_stroke,
-            &view_info.transform,
+            view_info,
             stylus_input,
             render_output,
         );

@@ -4,6 +4,15 @@ use std::sync::Arc;
 
 mod stage;
 
+// 256x256x8x2, ends up being a combined 1MiB of memory per stage.
+const IMAGE_STAGE_DIMENSION: u32 = 256;
+
+// Oncelock can't be initialized fallilbly, use this worse solution. x,3
+static COLOR_STAGE: parking_lot::RwLock<Option<stage::ImageStage>> =
+    parking_lot::const_rwlock(None);
+static NE_ID_STAGE: parking_lot::RwLock<Option<stage::ImageStage>> =
+    parking_lot::const_rwlock(None);
+
 /// Checks the format is valid for interpreting texels as singular binary elements.
 /// Returns a descriptive error if incorrect.
 fn check_valid_binary_format(format: vk::Format) -> anyhow::Result<()> {
@@ -41,14 +50,50 @@ impl Picker for ConstantColorPicker {
 pub struct RenderedColorPicker {
     offset: (u32, u32),
     extent: (u32, u32),
+    inner_sampler: stage::OwnedSampler<[vulkano::half::f16; 4]>,
 }
 impl RenderedColorPicker {
     pub fn pull_from_image(
+        ctx: &crate::render_device::RenderContext,
         image: Arc<vk::Image>,
         xform: (),
         viewport_rect: (),
     ) -> anyhow::Result<Self> {
-        todo!()
+        let mut stage_lock = COLOR_STAGE.write();
+        // get or try insert:
+        let stage = if let Some(stage) = stage_lock.as_mut() {
+            stage
+        } else {
+            let new_stage = stage::ImageStage::new(
+                // These are long-lived staging bufs and should probably use
+                // their own bump allocator within a dedicated allocation rather than
+                // muddying the global allocator.
+                ctx.allocators().memory().clone(),
+                crate::DOCUMENT_FORMAT,
+                [IMAGE_STAGE_DIMENSION; 2],
+            )?;
+            stage_lock.insert(new_stage)
+        };
+        // Download and wait.
+        stage
+            .download(
+                ctx,
+                image,
+                vk::ImageSubresourceLayers {
+                    array_layers: 0..1,
+                    aspects: vk::ImageAspects::COLOR,
+                    mip_level: 0,
+                },
+                todo!(),
+                todo!(),
+            )?
+            .detach()
+            .wait(None)?;
+        Ok(Self {
+            offset: todo!(),
+            extent: todo!(),
+            inner_sampler: stage.owned_sampler()?,
+        })
     }
 }
 impl Picker for RenderedColorPicker {

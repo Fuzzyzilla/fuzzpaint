@@ -276,6 +276,10 @@ impl super::PenTool for GizmoManipulator {
         let mut collection = collection.write().await;
 
         for event in stylus_input.iter() {
+            let Some(base_xform) = view_info.calculate_transform() else {
+                continue;
+            };
+
             if event.pressed {
                 // A new press!
                 if !self.was_pressed {
@@ -284,7 +288,7 @@ impl super::PenTool for GizmoManipulator {
                         x: event.pos.0,
                         y: event.pos.1,
                     };
-                    let base_xform = view_info.transform.clone();
+
                     let mut visitor = visitors::ClickFindVisitor {
                         path: visitors::VisitPath::default(),
                         viewport_cursor: point,
@@ -319,7 +323,6 @@ impl super::PenTool for GizmoManipulator {
                     x: event.pos.0,
                     y: event.pos.1,
                 };
-                let base_xform = view_info.transform.clone();
                 let mut visitor = visitors::CursorFindVisitor {
                     viewport_cursor: point,
                     xform_stack: vec![base_xform],

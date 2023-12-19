@@ -6,7 +6,7 @@ pub const MARGIN: f32 = 8.0;
 
 /// An affine transform for views. Includes offset, rotation, uniform scale, and horizontal flip.
 /// (vertical flipping can be achieved by horizontal flip and rotate 180*)
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ViewTransform {
     // Marker flag for flipping on the x axis. cgmath::Decomposed cannot represent this.
     // todo: keeping it simple by not implementing this yet.
@@ -138,7 +138,7 @@ impl From<ViewTransform> for cgmath::Matrix4<f32> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct DocumentFit {
     pub flip_x: bool,
     pub rotation: cgmath::Rad<f32>,
@@ -146,6 +146,7 @@ pub struct DocumentFit {
 
 impl DocumentFit {
     /// Make a transform from the given document size and viewport rect (pos, size)
+    /// Returns `None` if the resulting scale is too small to be reasonably caclulated or used.
     #[must_use]
     pub fn make_transform(
         &self,
@@ -212,7 +213,7 @@ impl Default for DocumentFit {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum DocumentTransform {
     /// Auto positioned and sized, with given flip and rotation, to fit into the viewport.
     ///
@@ -227,5 +228,51 @@ pub enum DocumentTransform {
 impl Default for DocumentTransform {
     fn default() -> Self {
         Self::Fit(DocumentFit::default())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct ViewInfo {
+    pub transform: crate::view_transform::DocumentTransform,
+    pub viewport_position: ultraviolet::Vec2,
+    pub viewport_size: ultraviolet::Vec2,
+}
+impl ViewInfo {
+    #[must_use]
+    pub fn center(&self) -> ultraviolet::Vec2 {
+        self.viewport_position + self.viewport_size / 2.0
+    }
+    /// Make an explicit transform out of this view.
+    /// Leaves `DocumentTransform::Transform` as-is, and converts `DocumentTransform::Fit` into `ViewTransform`
+    /// `None` if too small to be usable.
+    #[must_use]
+    pub fn calculate_transform(&self) -> Option<crate::view_transform::ViewTransform> {
+        match &self.transform {
+            crate::view_transform::DocumentTransform::Fit(f) => f.make_transform(
+                cgmath::Vector2 {
+                    x: crate::DOCUMENT_DIMENSION as f32,
+                    y: crate::DOCUMENT_DIMENSION as f32,
+                },
+                cgmath::Point2 {
+                    x: self.viewport_position.x,
+                    y: self.viewport_position.y,
+                },
+                cgmath::Vector2 {
+                    x: self.viewport_size.x,
+                    y: self.viewport_size.y,
+                },
+            ),
+            crate::view_transform::DocumentTransform::Transform(t) => Some(*t),
+        }
+    }
+    /// Convert self in-place into a `ViewTransform` representation, returning mutable access to that transform.
+    /// `None` if too small to be usable.
+    pub fn make_transformed(&mut self) -> Option<&mut crate::view_transform::ViewTransform> {
+        let xform = self.calculate_transform()?;
+        self.transform = crate::view_transform::DocumentTransform::Transform(xform);
+        let crate::view_transform::DocumentTransform::Transform(xform) = &mut self.transform else {
+            unreachable!()
+        };
+
+        Some(xform)
     }
 }

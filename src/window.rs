@@ -314,7 +314,12 @@ impl WindowRenderer {
                         )?
                         .boxed();
                 }
-                future.then_execute_same_queue(draw)?.boxed()
+                future
+                    .then_execute(
+                        self.render_context.queues().graphics().queue().clone(),
+                        draw,
+                    )?
+                    .boxed()
             }
             None => image_future.boxed(),
         };
