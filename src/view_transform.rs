@@ -1,8 +1,6 @@
 use cgmath::prelude::*;
 
 type Decomposed2 = cgmath::Decomposed<cgmath::Vector2<f32>, cgmath::Basis2<f32>>;
-/// Margin around a fit document. Todo: make this user configurable?
-pub const MARGIN: f32 = 8.0;
 
 /// An affine transform for views. Includes offset, rotation, uniform scale, and horizontal flip.
 /// (vertical flipping can be achieved by horizontal flip and rotate 180*)
@@ -97,6 +95,20 @@ impl ViewTransform {
             decomposed: Decomposed2 { scale, rot, disp },
         }
     }
+    /// Scale self by this input scale factor.
+    /// e.g., with a `factor` of 2, the point formerly selected by `self` at (10, 20) will now be selected by (20, 40).
+    #[must_use]
+    pub fn with_scale_factor(mut self, factor: f32) -> Self {
+        // We know the 0,0 point in viewspace must remain fixed
+        self.scale_about(cgmath::Point2 { x: 0.0, y: 0.0 }, factor);
+        self
+    }
+    /// Calculate the effective "scale" of the document, as viewed by this viewport.
+    /// e.g. Some(2.0) means each document unit maps to two viewport units.
+    #[must_use]
+    pub fn view_points_per_document_point(&self) -> f32 {
+        self.decomposed.scale
+    }
 }
 
 impl From<ViewTransform> for cgmath::Matrix3<f32> {
@@ -105,35 +117,16 @@ impl From<ViewTransform> for cgmath::Matrix3<f32> {
     }
 }
 impl From<ViewTransform> for cgmath::Matrix4<f32> {
+    #[rustfmt::skip]
     fn from(value: ViewTransform) -> Self {
-        let mat3: cgmath::Matrix3<f32> = value.decomposed.into();
+        let mat3 = cgmath::Matrix3::<f32>::from(value.decomposed);
         // Is this the same op as mat3.into()?
         // found out - it's NOT! keep doin this :>
         Self {
-            x: cgmath::Vector4 {
-                x: mat3.x.x,
-                y: mat3.x.y,
-                z: 0.0,
-                w: mat3.x.z,
-            },
-            y: cgmath::Vector4 {
-                x: mat3.y.x,
-                y: mat3.y.y,
-                z: 0.0,
-                w: mat3.y.z,
-            },
-            z: cgmath::Vector4 {
-                x: 0.0,
-                y: 0.0,
-                z: 1.0,
-                w: 0.0,
-            },
-            w: cgmath::Vector4 {
-                x: mat3.z.x,
-                y: mat3.z.y,
-                z: 0.0,
-                w: mat3.z.z,
-            },
+            x: cgmath::Vector4 {x: mat3.x.x, y: mat3.x.y, z: 0.0, w: mat3.x.z,},
+            y: cgmath::Vector4 {x: mat3.y.x, y: mat3.y.y, z: 0.0, w: mat3.y.z,},
+            z: cgmath::Vector4 {x: 0.0,      y: 0.0,      z: 1.0, w: 0.0,     },
+            w: cgmath::Vector4 {x: mat3.z.x, y: mat3.z.y, z: 0.0, w: mat3.z.z,},
         }
     }
 }
@@ -142,6 +135,7 @@ impl From<ViewTransform> for cgmath::Matrix4<f32> {
 pub struct DocumentFit {
     pub flip_x: bool,
     pub rotation: cgmath::Rad<f32>,
+    pub margin: f32,
 }
 
 impl DocumentFit {
@@ -178,8 +172,8 @@ impl DocumentFit {
                 .max(bottom_right_corner_ray.y.abs()),
         );
         // Adjust viewport for margin.
-        let view_pos_margin = view_pos + cgmath::vec2(MARGIN, MARGIN);
-        let view_size_margin = view_size - 2.0 * cgmath::vec2(MARGIN, MARGIN);
+        let view_pos_margin = view_pos + cgmath::vec2(self.margin, self.margin);
+        let view_size_margin = view_size - 2.0 * cgmath::vec2(self.margin, self.margin);
 
         // pretend the document is the bounding rect of the rotated document
         let document_size = half_max_range * 2.0;
@@ -202,12 +196,20 @@ impl DocumentFit {
             ))
         }
     }
+    #[must_use]
+    pub fn with_scale_factor(self, factor: f32) -> Self {
+        Self {
+            margin: self.margin * factor,
+            ..self
+        }
+    }
 }
 
 impl Default for DocumentFit {
     fn default() -> Self {
         Self {
             flip_x: false,
+            margin: 8.0,
             rotation: Zero::zero(),
         }
     }
@@ -228,6 +230,17 @@ pub enum DocumentTransform {
 impl Default for DocumentTransform {
     fn default() -> Self {
         Self::Fit(DocumentFit::default())
+    }
+}
+impl DocumentTransform {
+    #[must_use]
+    pub fn with_scale_factor(self, factor: f32) -> Self {
+        match self {
+            DocumentTransform::Fit(f) => DocumentTransform::Fit(f.with_scale_factor(factor)),
+            DocumentTransform::Transform(f) => {
+                DocumentTransform::Transform(f.with_scale_factor(factor))
+            }
+        }
     }
 }
 #[derive(Clone, Copy)]
@@ -274,5 +287,79 @@ impl ViewInfo {
         };
 
         Some(xform)
+    }
+    /// Given a scale factor (relative to `self`), calculate a new view info.
+    #[must_use]
+    pub fn with_scale_factor(self, factor: f32) -> Self {
+        Self {
+            viewport_position: self.viewport_position * factor,
+            viewport_size: self.viewport_size * factor,
+            transform: self.transform.with_scale_factor(factor),
+        }
+    }
+    /// Calculate the position and size of the AABB the viewport covers, in document space.
+    /// Size will be non-negative. The rectangle is not clamped to the bounds of the document.
+    // I really need a rectangle type x3
+    #[must_use]
+    pub fn document_space_aabb(&self) -> Option<(cgmath::Point2<f32>, cgmath::Vector2<f32>)> {
+        let xform = self.calculate_transform()?;
+        let uv_to_cg = |ultraviolet::Vec2 { x, y }| cgmath::Point2 { x, y };
+        // Get corners of the viewport...
+        // This could be done with only three corners, but my brain too smol
+        // unwraps ok - if the first one succeeds, the rest will as well.
+        let points = [
+            xform.unproject(uv_to_cg(self.viewport_position)).ok()?,
+            xform
+                .unproject(uv_to_cg(
+                    self.viewport_position
+                        + ultraviolet::Vec2 {
+                            x: 0.0,
+                            ..self.viewport_size
+                        },
+                ))
+                .unwrap(),
+            xform
+                .unproject(uv_to_cg(
+                    self.viewport_position
+                        + ultraviolet::Vec2 {
+                            y: 0.0,
+                            ..self.viewport_size
+                        },
+                ))
+                .unwrap(),
+            xform
+                .unproject(uv_to_cg(self.viewport_position + self.viewport_size))
+                .unwrap(),
+        ];
+        // Unwrap ok - of course this array isn't empty!
+        // Use total ordering to silently ignore NaN/Inf
+        let min_x = points
+            .iter()
+            .map(|p| p.x)
+            .min_by(|a, b| a.total_cmp(&b))
+            .unwrap();
+        let max_x = points
+            .iter()
+            .map(|p| p.x)
+            .max_by(|a, b| a.total_cmp(&b))
+            .unwrap();
+        let min_y = points
+            .iter()
+            .map(|p| p.y)
+            .min_by(|a, b| a.total_cmp(&b))
+            .unwrap();
+        let max_y = points
+            .iter()
+            .map(|p| p.y)
+            .max_by(|a, b| a.total_cmp(&b))
+            .unwrap();
+
+        Some((
+            cgmath::Point2 { x: min_x, y: min_y },
+            cgmath::Vector2 {
+                x: max_x - min_x,
+                y: max_y - min_y,
+            },
+        ))
     }
 }

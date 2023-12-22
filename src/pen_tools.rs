@@ -28,7 +28,6 @@ trait MakePenTool {
 }
 #[async_trait::async_trait]
 trait PenTool {
-    /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
         view_info: &ViewInfo,
@@ -125,11 +124,8 @@ fn apply_transform_request(
 
     // all the others require more work, this one is easy.
     if matches!(view_request, DocumentViewRequest::Fit) {
-        *transform = DocumentTransform::Fit(DocumentFit {
-            // Todo: inherit these fields
-            flip_x: false,
-            rotation: cgmath::Rad(0.0),
-        });
+        // Todo: inherit the rotation, flip state.
+        *transform = DocumentTransform::Fit(DocumentFit::default());
         return;
     }
 
@@ -179,6 +175,7 @@ pub struct ToolState {
 
     brush: Box<dyn PenTool>,
     eraser: Box<dyn PenTool>,
+    picker: Box<dyn PenTool>,
     document_pan: Box<dyn PenTool>,
     document_scrub: Box<dyn PenTool>,
     document_rotate: Box<dyn PenTool>,
@@ -194,6 +191,7 @@ impl ToolState {
             layer: None,
             brush: brush::Brush::new_from_renderer(context)?,
             eraser: brush::Eraser::new_from_renderer(context)?,
+            picker: picker::Picker::new_from_renderer(context)?,
             document_pan: viewport::ViewportPan::new_from_renderer(context)?,
             document_scrub: viewport::ViewportScrub::new_from_renderer(context)?,
             document_rotate: viewport::ViewportRotate::new_from_renderer(context)?,
@@ -263,8 +261,9 @@ impl ToolState {
     }
     fn tool_for_state(&mut self, state: StateLayer) -> &mut dyn PenTool {
         match state {
-            StateLayer::Brush | StateLayer::Picker => self.brush.as_mut(),
+            StateLayer::Brush => self.brush.as_mut(),
             StateLayer::Eraser => self.eraser.as_mut(),
+            StateLayer::Picker => self.picker.as_mut(),
             StateLayer::ViewportPan => self.document_pan.as_mut(),
             StateLayer::ViewportScrub => self.document_scrub.as_mut(),
             StateLayer::ViewportRotate => self.document_rotate.as_mut(),

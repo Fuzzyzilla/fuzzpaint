@@ -190,7 +190,6 @@ impl super::PenTool for GizmoManipulator {
         self.clicked_path = None;
         self.was_pressed = false;
     }
-    /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,

@@ -208,6 +208,7 @@ pub struct Stroke {
 async fn stylus_event_collector(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     ui_requests: crossbeam::channel::Receiver<ui::requests::UiRequest>,
+    mut render_requests: tokio::sync::mpsc::Sender<renderer::requests::RenderRequest>,
     mut action_listener: actions::ActionListener,
     mut tools: pen_tools::ToolState,
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
@@ -339,6 +340,8 @@ fn main() -> AnyResult<std::convert::Infallible> {
                     Err(e) => break 'block Err(e),
                 };
 
+                let (send, recv) = tokio::sync::mpsc::channel(4);
+
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .unwrap();
@@ -347,10 +350,11 @@ fn main() -> AnyResult<std::convert::Infallible> {
                 // for now, just a note for future self UwU
                 runtime.block_on(async {
                     tokio::try_join!(
-                        renderer::render_worker(render_context, document_view.clone(),),
+                        renderer::render_worker(render_context, recv, document_view.clone(),),
                         stylus_event_collector(
                             event_stream,
                             ui_requests,
+                            send,
                             action_listener,
                             tools,
                             document_view,

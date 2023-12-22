@@ -1,5 +1,6 @@
 mod gpu_tess;
-mod picker;
+pub mod picker;
+pub mod requests;
 mod stroke_batcher;
 
 use std::sync::Arc;
@@ -401,7 +402,7 @@ impl Renderer {
         Ok(())
     }
 }
-pub async fn render_worker(
+async fn render_changes(
     renderer: Arc<crate::render_device::RenderContext>,
     document_preview: Arc<crate::document_viewport_proxy::DocumentViewportPreviewProxy>,
 ) -> anyhow::Result<()> {
@@ -454,6 +455,20 @@ pub async fn render_worker(
             Err(RecvError::Closed) => return Ok(()),
         }
     }
+}
+pub async fn render_worker(
+    renderer: Arc<crate::render_device::RenderContext>,
+    request_reciever: tokio::sync::mpsc::Receiver<requests::RenderRequest>,
+    document_preview: Arc<crate::document_viewport_proxy::DocumentViewportPreviewProxy>,
+) -> anyhow::Result<()> {
+    tokio::try_join!(
+        async {
+            requests::handler(request_reciever).await;
+            Ok(())
+        },
+        render_changes(renderer, document_preview),
+    )
+    .map(|_| ())
 }
 
 /// The data managed by the renderer.

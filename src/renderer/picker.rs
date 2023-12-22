@@ -2,6 +2,60 @@ use crate::picker::Picker;
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
 
+/// Given a `PickerInfo`, find the corners of the transfer region.
+///
+/// returns (`top_left`, `bottom_right`, viewCoord->UV matrix) or
+/// `None` if the transform is malformed or wildly out of bounds.
+fn calc_corners(
+    info: super::requests::PickerInfo,
+    stage_dimension: u32,
+) -> Option<([i32; 2], [i32; 2], ultraviolet::Similarity2)> {
+    use az::SaturatingAs;
+    // If zoom < 100%, calculate the rectangle covered by `stage_dimension` square *input points*,
+    //     (not viewport pixels!) centered around the picked location.
+    // If zoom >= 100%, take `stage_dimension` square texels around the picked location.
+    // This may result in a transfer region partially *outside* the viewport, however many windowing systems
+    //  allow drag gestures to go beyond the bounds of the window!
+    // A probably not worth it opt would be to only transfer the region covered by the total display area,
+    //  but that'd only matter at like 1000% zoom and yea.
+
+    let input_space_viewport = info
+        .viewport
+        .with_scale_factor(info.input_points_per_viewport_pixel)
+        .calculate_transform()?;
+    let scale = input_space_viewport.view_points_per_document_point();
+    if
+    /*scale >= 1.0*/
+    true {
+        use az::CheckedAs;
+        // Take a `stage_dimension` square region of texels centered around input point.
+        let input_point = input_space_viewport
+            .unproject(cgmath::Point2 {
+                x: info.sample_pos.x,
+                y: info.sample_pos.y,
+            })
+            .ok()?;
+        // As-cast ok, we just divided by two so the MAX will now certainly fit in i32.
+        let half_dimension = (stage_dimension / 2) as i32;
+        let input_point: [i32; 2] = [input_point.x.checked_as()?, input_point.y.checked_as()?];
+        let top_left = [
+            input_point[0].saturating_sub(half_dimension),
+            input_point[1].saturating_sub(half_dimension),
+        ];
+        let bottom_right = [
+            input_point[0].saturating_add(half_dimension),
+            input_point[1].saturating_add(half_dimension),
+        ];
+        let xform = todo!();
+
+        Some((top_left, bottom_right, xform))
+    } else {
+        // Take the largest possible AABB of texels such that every unique integer coordinate within the viewport
+        // maps to a unique texel. DAJDOIAJfioadunsdfnk sdlf mighty complicated i don't wanna.
+        todo!()
+    }
+}
+
 mod stage;
 
 // 256x256x8x2, ends up being a combined 1MiB of memory per stage.
@@ -39,8 +93,8 @@ pub struct ConstantColorPicker {
 }
 impl Picker for ConstantColorPicker {
     type Value = [f32; 4];
-    fn pick(&self, _: ultraviolet::Vec2) -> Option<Self::Value> {
-        Some(self.color)
+    fn pick(&self, _: ultraviolet::Vec2) -> Result<Self::Value, crate::picker::PickError> {
+        Ok(self.color)
     }
 }
 /// Picker that acts on rendered image output, yielding linear, premultiplied RGBA.
@@ -98,20 +152,27 @@ impl RenderedColorPicker {
 }
 impl Picker for RenderedColorPicker {
     type Value = [vulkano::half::f16; 4];
-    fn pick(&self, viewport_coordinate: ultraviolet::Vec2) -> Option<Self::Value> {
+    fn pick(
+        &self,
+        viewport_coordinate: ultraviolet::Vec2,
+    ) -> Result<Self::Value, crate::picker::PickError> {
         todo!()
     }
 }
 
-/// Picker from NE_ID image. These must be produced separately from the usual pipeline,
+/// Picker from `NE_ID` image. These must be produced separately from the usual pipeline,
 /// but yield a reference to the clicked stroke. This allows for precise color selection,
 /// brush setting selection, ect.
 ///
 /// Could be a single-layer image, or a composite.
 pub struct StrokeIDPicker {}
 impl crate::picker::Picker for StrokeIDPicker {
-    type Value = crate::state::stroke_collection::ImmutableStrokeID;
-    fn pick(&self, viewport_coordinate: ultraviolet::Vec2) -> Option<Self::Value> {
+    // None if no element under cursor
+    type Value = Option<crate::state::stroke_collection::ImmutableStrokeID>;
+    fn pick(
+        &self,
+        viewport_coordinate: ultraviolet::Vec2,
+    ) -> Result<Self::Value, crate::picker::PickError> {
         todo!()
     }
 }

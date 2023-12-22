@@ -147,7 +147,6 @@ impl super::PenTool for Lasso {
     fn exit(&mut self) {
         self.is_down = false;
     }
-    /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,

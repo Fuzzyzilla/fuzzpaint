@@ -208,7 +208,6 @@ impl super::PenTool for Brush {
     fn exit(&mut self) {
         self.in_progress_stroke = None;
     }
-    /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,
@@ -232,7 +231,6 @@ impl super::PenTool for Eraser {
     fn exit(&mut self) {
         self.in_progress_stroke = None;
     }
-    /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,
