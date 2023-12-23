@@ -5,15 +5,15 @@ Graphics accelerated vector-based paint program for people who like compositing 
 In heavy development, many features are in-progress and semver is ignored. But, you can doodle to your heart's content!
 
 ## Building
-Requires the [most recent Rust nightly toolchain](https://www.rust-lang.org/tools/install). Clone this repo and execute `cargo run --release` from within the root directory of this repo!
+Requires the [most recent Rust nightly toolchain](https://www.rust-lang.org/tools/install). Clone and execute `cargo run --release` from within the root directory of this repo!
 
-**Note the platform support below.** The app is cross platform and should run on any device (if not, please report) but tablet input is very much unfinished.
+**Note the platform support below.** The app is cross platform and should run on any device that meets the [current driver requirements](assumptions.md) (if your device doesnt work - even if it's because of these requirements - please file an issue!) but tablet input is very much unfinished.
 
 | **Platform**      | Pen input   | Pad input   | Notes                                                   |
 |-------------------|-------------|-------------|---------------------------------------------------------|
 | Windows (Ink)     |None         |None         |                                                         |
-| Unix (Xorg)       |Pressure only|None         |`WINIT_UNIX_BACKEND=x11` to activate using xwayland      |
 | ~~Unix (Wayland)~~|None         |None         |No universally supported tablet API. [Currently disabled!](https://github.com/Fuzzyzilla/fuzzpaint/issues/21#issue-1953431137)|
+| Unix (Xorg)       |Pressure only|None         |`WINIT_UNIX_BACKEND=x11` to activate using xwayland      |
 | Windows (wintab)  |None         |None         |Documentation tough to come accross                      |
 
 # Road to **0.2.0**
@@ -45,9 +45,11 @@ To declare **0.2.0**, I would like to be able to freely doodle a thing and save 
    - [X] A ~~simple~~ **✨robust and rebindable✨** hotkey system, with support for
          pen and pad buttons (although, pen+pad events are not yet reported)
    - [X] Infinite Undo/Redo
-   - [X] Pan, Zoom, Scroll, Rotate, Mirror viewport
-   - [ ] Fit, 100% modes
+   - [X] Pan, Zoom, Scroll, Rotate
+   - [ ] Mirror
+   - [X] Fit, 100% modes
  - [ ] Editor
+   - [ ] Color, Object Pickers
    - [ ] Select strokes
      - [ ] Select parts of strokes
    - [ ] Transform existing layers and strokes

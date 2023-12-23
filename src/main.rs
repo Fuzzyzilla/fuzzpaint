@@ -1,6 +1,8 @@
 #![feature(portable_simd)]
 #![feature(once_cell_try)]
 #![feature(write_all_vectored)]
+#![feature(new_uninit)]
+#![feature(float_next_up_down)]
 #![warn(clippy::pedantic)]
 use std::sync::Arc;
 pub mod commands;
@@ -15,10 +17,10 @@ pub mod blend;
 pub mod brush;
 pub mod document_viewport_proxy;
 pub mod gizmos;
-pub mod gpu_tess;
 pub mod id;
 pub mod io;
 pub mod pen_tools;
+pub mod picker;
 pub mod render_device;
 pub mod state;
 pub mod stylus_events;
@@ -155,12 +157,15 @@ impl AdHocGlobals {
     }
 }
 
-#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
+#[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
 #[repr(C)]
 pub struct StrokePoint {
+    #[format(R32G32_SFLOAT)]
     pos: [f32; 2],
+    #[format(R32_SFLOAT)]
     pressure: f32,
     /// Arc length of stroke from beginning to this point
+    #[format(R32_SFLOAT)]
     dist: f32,
 }
 
@@ -195,16 +200,18 @@ impl StrokePoint {
         }
     }
 }
+
 pub struct Stroke {
     brush: state::StrokeBrushSettings,
     points: Vec<StrokePoint>,
 }
 async fn stylus_event_collector(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
+    ui_requests: crossbeam::channel::Receiver<ui::requests::UiRequest>,
+    mut render_requests: tokio::sync::mpsc::Sender<renderer::requests::RenderRequest>,
     mut action_listener: actions::ActionListener,
     mut tools: pen_tools::ToolState,
     document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
-    render_send: tokio::sync::mpsc::UnboundedSender<()>,
 ) -> AnyResult<()> {
     loop {
         match event_stream.recv().await {
@@ -225,7 +232,7 @@ async fn stylus_event_collector(
                 };
 
                 let render = tools
-                    .process(&transform, stylus_frame, &action_frame, &render_send)
+                    .process(&transform, stylus_frame, &action_frame, &ui_requests)
                     .await;
 
                 if let Some(transform) = render.set_view {
@@ -317,6 +324,7 @@ fn main() -> AnyResult<std::convert::Infallible> {
 
     let event_stream = window_renderer.stylus_events();
     let action_listener = window_renderer.action_listener();
+    let ui_requests = window_renderer.ui_listener();
 
     std::thread::Builder::new()
         .name("Stylus+Render worker".to_owned())
@@ -331,10 +339,8 @@ fn main() -> AnyResult<std::convert::Infallible> {
                     Ok(tools) => tools,
                     Err(e) => break 'block Err(e),
                 };
-                // We don't expect this channel to get very large, but it's important
-                // that messages don't get lost under any circumstance, lest an expensive
-                // document rebuild be needed :P
-                let (render_sender, render_reciever) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+                let (send, recv) = tokio::sync::mpsc::channel(4);
 
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
@@ -344,17 +350,14 @@ fn main() -> AnyResult<std::convert::Infallible> {
                 // for now, just a note for future self UwU
                 runtime.block_on(async {
                     tokio::try_join!(
-                        renderer::render_worker(
-                            render_context,
-                            document_view.clone(),
-                            render_reciever,
-                        ),
+                        renderer::render_worker(render_context, recv, document_view.clone(),),
                         stylus_event_collector(
                             event_stream,
+                            ui_requests,
+                            send,
                             action_listener,
                             tools,
                             document_view,
-                            render_sender,
                         ),
                     )
                 })

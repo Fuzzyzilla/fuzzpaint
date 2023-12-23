@@ -39,7 +39,6 @@ impl WindowSurface {
     ) -> anyhow::Result<WindowRenderer> {
         let egui_ctx = egui_impl::EguiCtx::new(self.win.as_ref(), &render_surface)?;
 
-        let (ui_send, _) = std::sync::mpsc::channel();
         let (send, stream) = crate::actions::create_action_stream();
 
         Ok(WindowRenderer {
@@ -50,7 +49,7 @@ impl WindowSurface {
             event_loop: Some(self.event_loop),
             last_frame_fence: None,
             egui_ctx,
-            ui: crate::ui::MainUI::new(ui_send, stream.listen()),
+            ui: crate::ui::MainUI::new(stream.listen()),
             preview_renderer,
             action_collector:
                 crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
@@ -85,6 +84,9 @@ impl WindowRenderer {
     }
     pub fn action_listener(&self) -> crate::actions::ActionListener {
         self.action_stream.listen()
+    }
+    pub fn ui_listener(&self) -> crossbeam::channel::Receiver<crate::ui::requests::UiRequest> {
+        self.ui.listen_requests()
     }
     pub fn stylus_events(
         &self,
@@ -312,7 +314,12 @@ impl WindowRenderer {
                         )?
                         .boxed();
                 }
-                future.then_execute_same_queue(draw)?.boxed()
+                future
+                    .then_execute(
+                        self.render_context.queues().graphics().queue().clone(),
+                        draw,
+                    )?
+                    .boxed()
             }
             None => image_future.boxed(),
         };

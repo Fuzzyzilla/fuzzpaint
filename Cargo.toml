@@ -17,6 +17,7 @@ bitvec = { version = "1.0.1", default-features = false, features = [
 ] }
 bytemuck = "1.13.1"
 cgmath = "0.18.0"
+crossbeam = "0.8.2"
 defer = "0.1.0"
 dhat = { version = "0.3.2", optional = true }
 dirs = "5.0.1"

@@ -130,86 +130,27 @@ impl GpuStampTess {
             work_size,
         })
     }
-    /// Tessellate some strokes
-    /// Will automatically load stroke points into a buffer.
-    pub fn tess(
-        &self,
-        strokes: &[&crate::state::stroke_collection::ImmutableStroke],
-    ) -> anyhow::Result<(
-        vk::SemaphoreSignalFuture<impl vk::sync::GpuFuture>,
-        vk::Subbuffer<[interface::OutputStrokeVertex]>,
-        vk::Subbuffer<[interface::OutputStrokeInfo]>,
-    )> {
-        let point_repo = crate::repositories::points::global();
-        let count = strokes
-            .iter()
-            .map(|stroke| {
-                point_repo
-                    .summary_of(stroke.point_collection)
-                    .map(|summary| summary.len)
-            })
-            .try_fold(0, |fold, optional_length| {
-                optional_length.and_then(|length| u64::checked_add(length as u64, fold))
-            });
-        // Would be nice to differentiate these errors, but currently we don't handle many errors
-        // anyway...
-        let count = count.ok_or_else(|| {
-            anyhow::anyhow!("Packed point buffer too long, or contains invalid point collections!")
-        })?;
-
-        if count == 0 {
-            anyhow::bail!("Tess invoked on zero points!")
-        }
-        let packed_points = vk::Buffer::new_slice::<shaders::tessellate::InputStrokeVertex>(
-            self.context.allocators().memory().clone(),
-            vk::BufferCreateInfo {
-                usage: vk::BufferUsage::STORAGE_BUFFER,
-                ..Default::default()
-            },
-            vk::AllocationCreateInfo {
-                memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            count,
-        )?;
-        // Copy every vertex in order
-        {
-            let mut write = packed_points.write()?;
-            let mut cursor = 0;
-            for stroke in strokes {
-                let points = point_repo.try_get(stroke.point_collection)?;
-                write[cursor..(cursor + points.len())]
-                    .iter_mut()
-                    .zip(points.iter())
-                    .for_each(|(into, from)| *into = (*from).into());
-                cursor += points.len();
-            }
-        }
-
-        self.tess_buffer(strokes, packed_points)
-    }
     /// Tessellate some strokes!
-    /// `packed_points` should contain all the stroke data back-to-back, in order.
     /// Returns a semaphore for when the compute completes, the vertex buffer, and the draw indirection buffer.
-    pub fn tess_buffer(
+    ///
+    /// If `take_scratch` is set, will attempt to use the `residual` buffer for as much as possible, depending
+    /// on the underlying buffer's `usage`.
+    pub fn tess_batch(
         &self,
-        strokes: &[&crate::state::stroke_collection::ImmutableStroke],
-        packed_points: vk::Subbuffer<[shaders::tessellate::InputStrokeVertex]>,
+        batch: &crate::renderer::stroke_batcher::StrokeBatch,
+        // TODO: implement.
+        _take_scratch: bool,
     ) -> anyhow::Result<(
         vk::SemaphoreSignalFuture<impl GpuFuture>,
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
-        if strokes.is_empty() {
-            anyhow::bail!("Tess invoked on empty zero strokes!")
-        }
         let mut point_index_counter = 0;
         let mut group_index_counter = 0;
         let mut vertex_output_index_counter = 0;
 
-        let mut num_groups_per_info = Vec::new();
-
-        let point_repo = crate::repositories::points::global();
+        // For each info, how many workgroups are dispatched for it?
+        let mut num_groups_per_info = Vec::with_capacity(batch.allocs.len());
 
         let input_infos = vk::Buffer::from_iter(
             self.context.allocators().memory().clone(),
@@ -221,21 +162,21 @@ impl GpuStampTess {
                 memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            strokes.iter().map(|stroke| {
-                let density = stroke.brush.spacing_px;
+            batch.allocs.iter().map(|alloc| {
+                // Can't handle other archetypes yet
+                assert_eq!(alloc.summary.archetype, crate::StrokePoint::archetype());
+
+                let density = alloc.src.brush.spacing_px;
                 let (num_expected_stamps, num_points) = {
                     // If not found, ignore by claiming 0 stamps.
-                    if let Some(summary) = point_repo.summary_of(stroke.point_collection) {
-                        let dist = summary
-                            .arc_length
-                            .map(|dist| (dist / density).ceil() as u32)
-                            .unwrap_or(0);
-                        let num_points = summary.len as u32;
+                    let dist = alloc
+                        .summary
+                        .arc_length
+                        .map(|dist| (dist / density).ceil() as u32)
+                        .unwrap_or(0);
+                    let num_points = alloc.summary.len as u32;
 
-                        (dist, num_points)
-                    } else {
-                        (0, 0)
-                    }
+                    (dist, num_points)
                 };
                 let num_expected_verts = num_expected_stamps * 6;
                 let num_groups = num_expected_stamps.div_ceil(self.work_size);
@@ -247,10 +188,10 @@ impl GpuStampTess {
                     out_vert_limit: num_expected_verts,
                     start_group: group_index_counter,
                     num_groups,
-                    modulate: stroke.brush.color_modulate,
+                    modulate: alloc.src.brush.color_modulate,
                     density,
-                    size_mul: stroke.brush.size_mul,
-                    is_eraser: if stroke.brush.is_eraser { 1.0 } else { 0.0 },
+                    size_mul: alloc.src.brush.size_mul,
+                    is_eraser: if alloc.src.brush.is_eraser { 1.0 } else { 0.0 },
                 };
 
                 num_groups_per_info.push(num_groups);
@@ -307,7 +248,7 @@ impl GpuStampTess {
                 memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
                 ..Default::default()
             },
-            strokes.len() as u64,
+            batch.allocs.len() as u64,
         )?;
         let output_verts = vk::Buffer::new_slice::<interface::OutputStrokeVertex>(
             self.context.allocators().memory().clone(),
@@ -328,7 +269,7 @@ impl GpuStampTess {
             [
                 vk::WriteDescriptorSet::buffer(0, input_infos),
                 vk::WriteDescriptorSet::buffer(1, input_map),
-                vk::WriteDescriptorSet::buffer(2, packed_points),
+                vk::WriteDescriptorSet::buffer(2, batch.elements.clone()),
             ],
             [],
         )?;
@@ -363,7 +304,7 @@ impl GpuStampTess {
         log::trace!(
             "Dispatched {} tessellation workgroups for {} strokes",
             group_index_counter,
-            strokes.len()
+            batch.allocs.len()
         );
 
         let future = vk::sync::now(self.context.device().clone())

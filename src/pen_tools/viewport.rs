@@ -40,14 +40,27 @@ impl ViewportManipulateBase {
         stylus_input: crate::stylus_events::StylusEventFrame,
         _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
-        render_output: &mut super::ToolRenderOutput<'_>,
+        render_output: &mut super::ToolRenderOutput,
     ) {
         let mut new_transform = None::<crate::view_transform::ViewTransform>;
+
         for event in &*stylus_input {
             if event.pressed {
-                let initial_transform = self
-                    .original_transform
-                    .get_or_insert(view_info.transform.clone());
+                let initial_transform = match &self.original_transform {
+                    Some(t) => *t,
+                    None => {
+                        let view = super::ViewInfo {
+                            // Take new if available, else old.
+                            transform: render_output.set_view.unwrap_or(view_info.transform),
+                            ..*view_info
+                        };
+                        let Some(xform) = view.calculate_transform() else {
+                            // Nothing for us to do with a malformed transform.
+                            return;
+                        };
+                        *self.original_transform.insert(xform)
+                    }
+                };
                 let start_pos = self.drag_start_pos.get_or_insert(ultraviolet::Vec2 {
                     x: event.pos.0,
                     y: event.pos.1,
@@ -63,7 +76,7 @@ impl ViewportManipulateBase {
 
                         // Take the initial transform, and scale about the first drag point.
                         // If the transform becomes broken (returns err), don't use it.
-                        let mut new = initial_transform.clone();
+                        let mut new = initial_transform;
                         new.scale_about(
                             cgmath::Point2 {
                                 x: start_pos.x,
@@ -92,7 +105,7 @@ impl ViewportManipulateBase {
                         )*/
                     }
                     ViewportManipulateType::Pan => {
-                        let mut new = initial_transform.clone();
+                        let mut new = initial_transform;
                         new.pan(cgmath::Vector2 {
                             x: delta.0,
                             y: delta.1,
@@ -109,7 +122,7 @@ impl ViewportManipulateBase {
                             .atan2(event.pos.1 - viewport_middle.y);
                         let delta = start_angle - now_angle;
 
-                        let mut new = initial_transform.clone();
+                        let mut new = initial_transform;
                         new.rotate_about(
                             cgmath::Point2 {
                                 x: viewport_middle.x,

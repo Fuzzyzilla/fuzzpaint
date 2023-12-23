@@ -1,3 +1,8 @@
+mod gpu_tess;
+pub mod picker;
+pub mod requests;
+mod stroke_batcher;
+
 use std::sync::Arc;
 
 use crate::vulkano_prelude::*;
@@ -275,7 +280,7 @@ impl Renderer {
                             [0.0, 0.0, 0.0, 0.0],
                         )?);
                     } else {
-                        fences.push(renderer.draw(strokes.as_ref(), image, true)?);
+                        renderer.draw(strokes.as_ref(), image, true)?;
                     }
                 }
                 Some(LeafType::Note) | None => (),
@@ -397,10 +402,9 @@ impl Renderer {
         Ok(())
     }
 }
-pub async fn render_worker(
+async fn render_changes(
     renderer: Arc<crate::render_device::RenderContext>,
     document_preview: Arc<crate::document_viewport_proxy::DocumentViewportPreviewProxy>,
-    _: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> anyhow::Result<()> {
     let mut change_notifier = crate::default_provider().change_notifier();
     let mut changed: Vec<_> = crate::default_provider().document_iter().collect();
@@ -452,6 +456,20 @@ pub async fn render_worker(
         }
     }
 }
+pub async fn render_worker(
+    renderer: Arc<crate::render_device::RenderContext>,
+    request_reciever: tokio::sync::mpsc::Receiver<requests::RenderRequest>,
+    document_preview: Arc<crate::document_viewport_proxy::DocumentViewportPreviewProxy>,
+) -> anyhow::Result<()> {
+    tokio::try_join!(
+        async {
+            requests::handler(request_reciever).await;
+            Ok(())
+        },
+        render_changes(renderer, document_preview),
+    )
+    .map(|_| ())
+}
 
 /// The data managed by the renderer.
 /// For now, in persuit of actually getting a working product one day,
@@ -484,14 +502,16 @@ mod stroke_renderer {
     pub struct StrokeLayerRenderer {
         context: Arc<crate::render_device::RenderContext>,
         texture_descriptor: Arc<vk::PersistentDescriptorSet>,
-        gpu_tess: crate::gpu_tess::GpuStampTess,
+        gpu_tess: super::gpu_tess::GpuStampTess,
         pipeline: Arc<vk::GraphicsPipeline>,
     }
     impl StrokeLayerRenderer {
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {
             // Begin uploading a brush image in the background while we continue setup
             let (image, sampler, _defer) = {
-                let brush_image = image::open("brushes/splotch.png")?.into_luma_alpha8();
+                let brush_image =
+                    image::load_from_memory(include_bytes!("../brushes/splotch.png"))?
+                        .into_luma_alpha8();
 
                 // Iter over opacities. Weird/inefficient way to do this hehe
                 // Idealy it'd just be an Alpha image but nothing suports that file layout :V
@@ -667,7 +687,7 @@ mod stroke_renderer {
                         ..Default::default()
                     }),
                     vertex_input_state: Some(
-                        crate::gpu_tess::interface::OutputStrokeVertex::per_vertex()
+                        super::gpu_tess::interface::OutputStrokeVertex::per_vertex()
                             .definition(&vert.info().input_interface)?,
                     ),
                     viewport_state: Some(vk::ViewportState {
@@ -697,7 +717,7 @@ mod stroke_renderer {
                 [],
             )?;
 
-            let tess = crate::gpu_tess::GpuStampTess::new(context.clone())?;
+            let tess = super::gpu_tess::GpuStampTess::new(context.clone())?;
 
             Ok(Self {
                 context,
@@ -743,72 +763,83 @@ mod stroke_renderer {
             strokes: &[&crate::state::stroke_collection::ImmutableStroke],
             renderbuf: &super::RenderData,
             clear: bool,
-        ) -> AnyResult<vk::sync::future::FenceSignalFuture<Box<dyn vk::sync::GpuFuture>>> {
-            let (future, vertices, indirects) = self.gpu_tess.tess(strokes)?;
-
-            let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
-                self.context.allocators().command_buffer(),
-                self.context.queues().graphics().idx(),
-                vk::CommandBufferUsage::OneTimeSubmit,
-            )?;
-
+        ) -> AnyResult<()> {
             let mut matrix = cgmath::Matrix4::from_scale(2.0 / crate::DOCUMENT_DIMENSION as f32);
             matrix.y *= -1.0;
             matrix.w.x -= 1.0;
             matrix.w.y += 1.0;
 
-            log::trace!(
-                "Drawing {} vertices from {} indirects",
-                vertices.len(),
-                indirects.len()
-            );
+            let mut batch = super::stroke_batcher::StrokeBatcher::new(
+                self.context.allocators().memory().clone(),
+                65536,
+                vk::BufferUsage::STORAGE_BUFFER,
+                vulkano::sync::Sharing::Exclusive,
+            )?;
+            batch.batch(strokes.iter().map(|&&i| i), |batch| -> AnyResult<_> {
+                let (future, vertices, indirects) = self.gpu_tess.tess_batch(batch, true)?;
 
-            command_buffer
-                .begin_rendering(vk::RenderingInfo {
-                    color_attachments: vec![Some(vk::RenderingAttachmentInfo {
-                        clear_value: if clear {
-                            Some([0.0, 0.0, 0.0, 0.0].into())
-                        } else {
-                            None
-                        },
-                        load_op: if clear {
-                            vk::AttachmentLoadOp::Clear
-                        } else {
-                            vk::AttachmentLoadOp::Load
-                        },
-                        store_op: vk::AttachmentStoreOp::Store,
-                        ..vk::RenderingAttachmentInfo::image_view(renderbuf.view.clone())
-                    })],
-                    contents: vk::SubpassContents::Inline,
-                    depth_attachment: None,
-                    ..Default::default()
-                })?
-                .bind_pipeline_graphics(self.pipeline.clone())?
-                .push_constants(
-                    self.pipeline.layout().clone(),
-                    0,
-                    Into::<[[f32; 4]; 4]>::into(matrix),
-                )?
-                .bind_descriptor_sets(
-                    vk::PipelineBindPoint::Graphics,
-                    self.pipeline.layout().clone(),
-                    0,
-                    self.texture_descriptor.clone(),
-                )?
-                .bind_vertex_buffers(0, vertices)?
-                .draw_indirect(indirects)?
-                .end_rendering()?;
+                let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
+                    self.context.allocators().command_buffer(),
+                    self.context.queues().graphics().idx(),
+                    vk::CommandBufferUsage::OneTimeSubmit,
+                )?;
 
-            let command_buffer = command_buffer.build()?;
+                log::trace!(
+                    "Drawing {} vertices from {} indirects",
+                    vertices.len(),
+                    indirects.len()
+                );
 
-            // After tessellation finishes, render.
-            Ok(future
-                .then_execute(
-                    self.context.queues().graphics().queue().clone(),
-                    command_buffer,
-                )?
-                .boxed()
-                .then_signal_fence_and_flush()?)
+                command_buffer
+                    .begin_rendering(vk::RenderingInfo {
+                        color_attachments: vec![Some(vk::RenderingAttachmentInfo {
+                            clear_value: if clear {
+                                Some([0.0, 0.0, 0.0, 0.0].into())
+                            } else {
+                                None
+                            },
+                            load_op: if clear {
+                                vk::AttachmentLoadOp::Clear
+                            } else {
+                                vk::AttachmentLoadOp::Load
+                            },
+                            store_op: vk::AttachmentStoreOp::Store,
+                            ..vk::RenderingAttachmentInfo::image_view(renderbuf.view.clone())
+                        })],
+                        contents: vk::SubpassContents::Inline,
+                        depth_attachment: None,
+                        ..Default::default()
+                    })?
+                    .bind_pipeline_graphics(self.pipeline.clone())?
+                    .push_constants(
+                        self.pipeline.layout().clone(),
+                        0,
+                        Into::<[[f32; 4]; 4]>::into(matrix),
+                    )?
+                    .bind_descriptor_sets(
+                        vk::PipelineBindPoint::Graphics,
+                        self.pipeline.layout().clone(),
+                        0,
+                        self.texture_descriptor.clone(),
+                    )?
+                    .bind_vertex_buffers(0, vertices)?
+                    .draw_indirect(indirects)?
+                    .end_rendering()?;
+
+                let command_buffer = command_buffer.build()?;
+
+                let fence = future
+                    .then_execute(
+                        self.context.queues().graphics().queue().clone(),
+                        command_buffer,
+                    )?
+                    .then_signal_fence_and_flush()?;
+
+                // After tessellation finishes, render.
+                Ok(super::stroke_batcher::SyncOutput::Fence(fence))
+            })?;
+
+            Ok(())
         }
     }
 }

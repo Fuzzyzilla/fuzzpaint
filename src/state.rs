@@ -23,7 +23,7 @@ impl Default for Document {
         }
     }
 }
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 /// Per-stroke settings, i.e. ones we expect the user to change frequently without counting it as a "new brush."
 pub struct StrokeBrushSettings {
     /// Brushes are managed and owned by an external entity (todo), not the stroke nor the queue.

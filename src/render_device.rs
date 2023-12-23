@@ -105,9 +105,17 @@ impl RenderSurface {
 
         let Some(&(format, color_space)) = physical_device
             .surface_formats(&surface, surface_info)?
-            .first()
+            .iter()
+            // FIXME!! Find the highest BGRA swapchain format.
+            // Used to make bad assumptions about Framebuffer formats later in the code :V
+            // What really needs to happen is *whatever* format is chosen (we don't care)
+            // needs to be broadcast out and pipelines need to be remade if incompatible.
+            // No infrastructure for that at this time.
+            .find(|(format, _)| *format == vk::Format::B8G8R8A8_SRGB)
         else {
-            return Err(anyhow::anyhow!("Device reported no valid surface formats."));
+            return Err(anyhow::anyhow!(
+                "Device reported no supported surface formats."
+            ));
         };
 
         //Use mailbox for low-latency, if supported. Otherwise, FIFO is always supported.
@@ -427,6 +435,7 @@ impl RenderContext {
                     dynamic_rendering: true,
                     multi_draw_indirect: true,
                     maintenance4: true,
+                    geometry_shader: true,
                     ..vk::Features::empty()
                 },
                 queue_create_infos: create_infos,

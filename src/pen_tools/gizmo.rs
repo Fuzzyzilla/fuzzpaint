@@ -190,7 +190,6 @@ impl super::PenTool for GizmoManipulator {
         self.clicked_path = None;
         self.was_pressed = false;
     }
-    /// Process input, optionally returning a commandbuffer to be drawn.
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,
@@ -201,7 +200,7 @@ impl super::PenTool for GizmoManipulator {
     ) {
         use crate::gizmos::{
             transform, Collection, CursorOrInvisible, Gizmo, GizmoInteraction, GizmoShape,
-            GizmoTree, GizmoVisual, MutGizmoTree, RenderShape,
+            GizmoTree, MeshMode, MutGizmoTree, RenderShape, TextureMode, Visual,
         };
         let collection = self.shared_collection.get_or_insert_with(|| {
             let mut collection = Collection::new(transform::GizmoTransform {
@@ -213,14 +212,13 @@ impl super::PenTool for GizmoManipulator {
             });
             let square = Gizmo {
                 grab_cursor: CursorOrInvisible::Invisible,
-                visual: GizmoVisual::Shape {
-                    shape: RenderShape::Rectangle {
+                visual: Visual {
+                    mesh: MeshMode::Shape(RenderShape::Rectangle {
                         position: ultraviolet::Vec2 { x: 0.0, y: 0.0 },
                         size: ultraviolet::Vec2 { x: 20.0, y: 20.0 },
                         rotation: 0.0,
-                    },
-                    texture: None,
-                    color: [128, 255, 255, 255],
+                    }),
+                    texture: TextureMode::Solid([128, 255, 255, 255]),
                 },
                 hit_shape: GizmoShape::None,
                 hover_cursor: CursorOrInvisible::Invisible,
@@ -229,14 +227,13 @@ impl super::PenTool for GizmoManipulator {
             };
             let square2 = Gizmo {
                 grab_cursor: CursorOrInvisible::Invisible,
-                visual: GizmoVisual::Shape {
-                    shape: RenderShape::Rectangle {
+                visual: Visual {
+                    mesh: MeshMode::Shape(RenderShape::Rectangle {
                         position: ultraviolet::Vec2 { x: 15.0, y: 8.0 },
                         size: ultraviolet::Vec2 { x: 40.0, y: 10.0 },
                         rotation: 0.0,
-                    },
-                    texture: None,
-                    color: [128, 0, 200, 255],
+                    }),
+                    texture: TextureMode::AntTrail,
                 },
                 hit_shape: GizmoShape::None,
                 hover_cursor: CursorOrInvisible::Invisible,
@@ -249,14 +246,13 @@ impl super::PenTool for GizmoManipulator {
             };
             let circle = Gizmo {
                 grab_cursor: CursorOrInvisible::Icon(winit::window::CursorIcon::Move),
-                visual: GizmoVisual::Shape {
-                    shape: RenderShape::Ellipse {
+                visual: Visual {
+                    mesh: MeshMode::Shape(RenderShape::Ellipse {
                         origin: ultraviolet::Vec2 { x: 0.0, y: 0.0 },
                         radii: ultraviolet::Vec2 { x: 20.0, y: 20.0 },
                         rotation: 0.0,
-                    },
-                    texture: None,
-                    color: [128, 0, 0, 128],
+                    }),
+                    texture: TextureMode::AntTrail,
                 },
                 hit_shape: GizmoShape::Ring {
                     outer: 20.0,
@@ -279,6 +275,10 @@ impl super::PenTool for GizmoManipulator {
         let mut collection = collection.write().await;
 
         for event in stylus_input.iter() {
+            let Some(base_xform) = view_info.calculate_transform() else {
+                continue;
+            };
+
             if event.pressed {
                 // A new press!
                 if !self.was_pressed {
@@ -287,7 +287,7 @@ impl super::PenTool for GizmoManipulator {
                         x: event.pos.0,
                         y: event.pos.1,
                     };
-                    let base_xform = view_info.transform.clone();
+
                     let mut visitor = visitors::ClickFindVisitor {
                         path: visitors::VisitPath::default(),
                         viewport_cursor: point,
@@ -322,7 +322,6 @@ impl super::PenTool for GizmoManipulator {
                     x: event.pos.0,
                     y: event.pos.1,
                 };
-                let base_xform = view_info.transform.clone();
                 let mut visitor = visitors::CursorFindVisitor {
                     viewport_cursor: point,
                     xform_stack: vec![base_xform],

@@ -6,3 +6,6 @@ To ease development, several assumptions are made about the graphics device. Of 
 * dualSrcBlend (erasers) (~100% on desktop)
 * dynamicRendering (Pure laziness)
 * multiDrawIndirect (tessellated stroke draw batching)
+* geometry shading (WideLine gizmos) (~100% on desktop)
+* B8G8R8A8_SRGB surface format (pure laziness, Fixme!!)
+* R32G32_UINT optimal color attatchment (~100%) (Picker images, easily replaced)

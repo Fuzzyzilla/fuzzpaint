@@ -5,6 +5,7 @@
 //! easier to edit for the end user. Thus, the reverse many-to-one mapping of keys to actions will be built dynamically.
 
 use std::sync::Arc;
+mod defaults;
 
 pub trait HotkeyShadow {
     type Other;
@@ -140,176 +141,23 @@ impl From<PenHotkey> for AnyHotkey {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ActionsToKeys(hashbrown::HashMap<super::Action, HotkeyCollection>);
 impl Default for ActionsToKeys {
-    #[allow(clippy::too_many_lines)]
     fn default() -> Self {
-        use winit::event::VirtualKeyCode;
-        let mut keys = hashbrown::HashMap::default();
-        keys.insert(
-            super::Action::Undo,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
-                    alt: false,
-                    ctrl: true,
-                    shift: false,
-                    key: VirtualKeyCode::Z,
-                }])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        keys.insert(
-            super::Action::Redo,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([
-                    KeyboardHotkey {
-                        alt: false,
-                        ctrl: true,
-                        shift: false,
-                        key: VirtualKeyCode::Y,
-                    },
-                    KeyboardHotkey {
-                        alt: false,
-                        ctrl: true,
-                        shift: true,
-                        key: VirtualKeyCode::Z,
-                    },
-                ])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        keys.insert(
-            super::Action::ViewportPan,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
-                    alt: false,
-                    ctrl: false,
-                    shift: false,
-                    key: VirtualKeyCode::Space,
-                }])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        keys.insert(
-            super::Action::ViewportScrub,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
-                    alt: false,
-                    ctrl: false,
-                    shift: false,
-                    key: VirtualKeyCode::S,
-                }])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        keys.insert(
-            super::Action::ViewportFlipHorizontal,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
-                    alt: false,
-                    ctrl: false,
-                    shift: false,
-                    key: VirtualKeyCode::M,
-                }])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        keys.insert(
-            super::Action::ViewportRotate,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
-                    alt: false,
-                    ctrl: false,
-                    shift: false,
-                    key: VirtualKeyCode::R,
-                }])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        keys.insert(
-            super::Action::Erase,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
-                    alt: false,
-                    ctrl: false,
-                    shift: false,
-                    key: VirtualKeyCode::E,
-                }])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        keys.insert(
-            super::Action::Gizmo,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
-                    alt: false,
-                    ctrl: false,
-                    shift: false,
-                    key: VirtualKeyCode::G, // Should be just ctrl, but not possible yet.
-                }])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        keys.insert(
-            super::Action::LayerNew,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
-                    alt: false,
-                    ctrl: true,
-                    shift: false,
-                    key: VirtualKeyCode::T,
-                }])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        keys.insert(
-            super::Action::LayerDelete,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
-                    alt: false,
-                    ctrl: false,
-                    shift: false,
-                    key: VirtualKeyCode::Delete,
-                }])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        keys.insert(
-            super::Action::LayerUp,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
-                    alt: false,
-                    ctrl: true,
-                    shift: false,
-                    key: VirtualKeyCode::Up,
-                }])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        keys.insert(
-            super::Action::LayerDown,
-            HotkeyCollection {
-                keyboard_hotkeys: Some(Arc::new([KeyboardHotkey {
-                    alt: false,
-                    ctrl: true,
-                    shift: false,
-                    key: VirtualKeyCode::Down,
-                }])),
-                pad_hotkeys: None,
-                pen_hotkeys: None,
-            },
-        );
-        let new = Self(keys);
+        let mut keys_map = hashbrown::HashMap::with_capacity(defaults::KEYBOARD.len());
+        // Collect the keys from the defaults array
+        for (action, keys) in defaults::KEYBOARD {
+            keys_map.insert(
+                *action,
+                HotkeyCollection {
+                    keyboard_hotkeys: Some((*keys).into()),
+                    pad_hotkeys: None,
+                    pen_hotkeys: None,
+                },
+            );
+        }
+
+        let new = Self(keys_map);
         // Make sure we didn't accidentally bind a single key twice
+        // Would be nice if this was a static check.
         debug_assert!(TryInto::<KeysToActions>::try_into(&new).is_ok());
         new
     }
