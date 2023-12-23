@@ -21,13 +21,14 @@ impl super::PenTool for Picker {
         _tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
+        // Someone got bored and frustrated halfway through writing this...
+        let requests: &mut tokio::sync::mpsc::Sender<crate::renderer::requests::RenderRequest> =
+            return;
+        let _ = ();
+
         // If we have a sampler already, track with the pen sampling everwhere where it's down.
         // If we don't have a sampler (or lose it midway through), take the last input, and if it's down, make sampler.
         // For now, naive impl!
-        let requests: &mut tokio::sync::mpsc::Sender<crate::renderer::requests::RenderRequest> =
-            todo!();
-        let _ = ();
-
         for event in &*stylus_input {
             if !event.pressed && !self.was_down {
                 // Just released, take a sample!

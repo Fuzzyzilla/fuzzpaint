@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 /// Given a `PickerInfo`, find the corners of the transfer region.
 ///
-/// returns (`top_left`, `bottom_right`, viewCoord->UV matrix) or
+/// returns `(origin, extent)` or
 /// `None` if the transform is malformed or wildly out of bounds.
 fn calc_corners(
     info: super::requests::PickerInfo,
     stage_dimension: u32,
-) -> Option<([i32; 2], [i32; 2], ultraviolet::Similarity2)> {
-    use az::SaturatingAs;
+) -> Option<([u32; 2], [u32; 2])> {
+    use az::CheckedAs;
     // If zoom < 100%, calculate the rectangle covered by `stage_dimension` square *input points*,
     //     (not viewport pixels!) centered around the picked location.
     // If zoom >= 100%, take `stage_dimension` square texels around the picked location.
@@ -23,37 +23,32 @@ fn calc_corners(
         .viewport
         .with_scale_factor(info.input_points_per_viewport_pixel)
         .calculate_transform()?;
-    let scale = input_space_viewport.view_points_per_document_point();
-    if
-    /*scale >= 1.0*/
-    true {
-        use az::CheckedAs;
-        // Take a `stage_dimension` square region of texels centered around input point.
-        let input_point = input_space_viewport
-            .unproject(cgmath::Point2 {
-                x: info.sample_pos.x,
-                y: info.sample_pos.y,
-            })
-            .ok()?;
-        // As-cast ok, we just divided by two so the MAX will now certainly fit in i32.
-        let half_dimension = (stage_dimension / 2) as i32;
-        let input_point: [i32; 2] = [input_point.x.checked_as()?, input_point.y.checked_as()?];
-        let top_left = [
-            input_point[0].saturating_sub(half_dimension),
-            input_point[1].saturating_sub(half_dimension),
-        ];
-        let bottom_right = [
-            input_point[0].saturating_add(half_dimension),
-            input_point[1].saturating_add(half_dimension),
-        ];
-        let xform = todo!();
+    // BIG OL TODO: efficient downscaling when zoomed out.
+    // Take a `stage_dimension` square region of texels centered around input point.
+    let input_point = input_space_viewport
+        .unproject(cgmath::Point2 {
+            x: info.sample_pos.x,
+            y: info.sample_pos.y,
+        })
+        .ok()?;
+    // As-cast ok, we just divided by two so the MAX will now certainly fit in i32.
+    let half_dimension = stage_dimension / 2;
+    let input_point: [u32; 2] = [input_point.x.checked_as()?, input_point.y.checked_as()?];
+    // Silly lil back and forth to create a full stage_dimension rectangle even in the face of saturation x3
+    let top_left = [
+        input_point[0].saturating_sub(half_dimension),
+        input_point[1].saturating_sub(half_dimension),
+    ];
+    let bottom_right = [
+        top_left[0].saturating_add(stage_dimension),
+        top_left[1].saturating_add(stage_dimension),
+    ];
+    let top_left = [
+        bottom_right[0].saturating_sub(stage_dimension),
+        bottom_right[1].saturating_sub(stage_dimension),
+    ];
 
-        Some((top_left, bottom_right, xform))
-    } else {
-        // Take the largest possible AABB of texels such that every unique integer coordinate within the viewport
-        // maps to a unique texel. DAJDOIAJfioadunsdfnk sdlf mighty complicated i don't wanna.
-        todo!()
-    }
+    Some((top_left, bottom_right))
 }
 
 mod stage;
@@ -102,12 +97,12 @@ impl Picker for ConstantColorPicker {
 ///
 /// Filtering is done "Nearest Neighbor"
 pub struct RenderedColorPicker {
-    offset: (u32, u32),
-    extent: (u32, u32),
+    // Total extent of the image this is a picker of, outside of which this will return `OutOfBounds`
+    max_extent: [u32; 2],
     inner_sampler: stage::OwnedSampler<[vulkano::half::f16; 4]>,
 }
 impl RenderedColorPicker {
-    pub fn pull_from_image(
+    pub(super) fn pull_from_image(
         ctx: &crate::render_device::RenderContext,
         image: Arc<vk::Image>,
         xform: (),
@@ -143,11 +138,7 @@ impl RenderedColorPicker {
             )?
             .detach()
             .wait(None)?;
-        Ok(Self {
-            offset: todo!(),
-            extent: todo!(),
-            inner_sampler: stage.owned_sampler()?,
-        })
+        todo!()
     }
 }
 impl Picker for RenderedColorPicker {
