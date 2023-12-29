@@ -270,18 +270,15 @@ impl TextBuilder {
         face: &rustybuzz::Face,
         plan: &rustybuzz::ShapePlan,
         size_class: SizeClass,
-        text: &str,
+        text: rustybuzz::UnicodeBuffer,
         color: [f32; 4],
     ) -> Result<DrawOutput, DrawError> {
         // Currently there is no color support, and much work needs to be done
         // (in particular, current logic is totally unstable ordered)
 
-        // todo, reuse this alloc
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str(text);
         // We don't set any buffer properties (tbh I don't know what they do)
         // so they wont be incompatible.
-        let buffer = rustybuzz::shape_with_plan(face, plan, buffer);
+        let buffer = rustybuzz::shape_with_plan(face, plan, text);
 
         self.tess(face.as_ref(), size_class, &buffer)?;
         // self.cache should now have every glyph needed!
@@ -380,19 +377,30 @@ impl TextBuilder {
                 continue;
             }
 
-            tessellator::tessellate_glyph(
+            let res = tessellator::tessellate_glyph(
                 face,
                 glyph,
                 size_class,
                 &mut self.tessellator,
                 &mut vertices,
                 &mut indices,
-            )?;
+            );
+            match res {
+                Err(TessellateError::GlyphNotFound) => continue,
+                Err(e) => return Err(e.into()),
+                Ok(()) => (),
+            };
 
-            unsafe {
+            let res = unsafe {
                 self.cache
                     // Safety: indices are guaranteed correct by tessellate_glyph postcondition!
-                    .insert_mesh(glyph_key, size_class, &vertices, &indices)?;
+                    .insert_mesh(glyph_key, size_class, &vertices, &indices)
+            };
+
+            match res {
+                Err(CacheInsertError::AlreadyExists) => (),
+                Err(e) => return Err(e.into()),
+                _ => (),
             }
         }
 
@@ -434,7 +442,7 @@ pub enum DrawError {
     #[error(transparent)]
     InsertError(#[from] CacheInsertError),
 }
-mod renderer {
+pub mod renderer {
     use crate::vulkano_prelude::*;
     use std::sync::Arc;
 
@@ -447,13 +455,13 @@ mod renderer {
                     src: r"
                         #version 460
                         // Per-vertex
-                        layout(location = 0) in vec2 vertex_position; // units unknown yet
+                        layout(location = 0) in vec2 position; // units unknown yet
                         // Per-instance (per-glyph)
                         layout(location = 1) in ivec2 glyph_position; // units unknown yet
                         layout(location = 2) in vec4 glyph_color;     // monochrome - dontcare!
 
                         void main() {
-                            gl_Position = vec4(vertex_position + vec2(glyph_position), 0.0, 1.0);
+                            gl_Position = vec4((position + vec2(glyph_position)) / 12000.0 - vec2(0.8), 0.0, 1.0);
                         }
                     "
                 }
@@ -484,8 +492,8 @@ mod renderer {
                         void main() {
                             // fullscreen tri
                             gl_Position = vec4(
-                                float((gl_VertexIndex & 1) * 2),
-                                float((gl_VertexIndex & 2)),
+                                float((gl_VertexIndex & 1) * 4) - 1.0,
+                                float((gl_VertexIndex & 2) * 2) - 1.0,
                                 0.0,
                                 1.0
                             );
@@ -531,7 +539,7 @@ mod renderer {
         colorize_pipeline: Arc<vk::GraphicsPipeline>,
     }
     impl TextRenderer {
-        const SAMPLES: vk::SampleCount = vk::SampleCount::Sample4;
+        const SAMPLES: vk::SampleCount = vk::SampleCount::Sample8;
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
             let multisample_grey = vk::Image::new(
                 context.allocators().memory().clone(),
@@ -540,8 +548,8 @@ mod renderer {
                     samples: Self::SAMPLES,
                     // Don't need long-lived data. Render, and resolve source.
                     // DEAR FUTURE ME - the vulkano says this will err at runtime, but vulkan says otherwise.
-                    usage: vk::ImageUsage::TRANSIENT_ATTACHMENT
-                        | vk::ImageUsage::TRANSFER_SRC
+                    usage: //vk::ImageUsage::TRANSIENT_ATTACHMENT
+                         vk::ImageUsage::TRANSFER_SRC
                         | vk::ImageUsage::COLOR_ATTACHMENT,
                     // Todo: query whether this is supported
                     extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
@@ -558,8 +566,9 @@ mod renderer {
                 vk::ImageCreateInfo {
                     format: vk::Format::R8_UNORM,
                     // Don't need long-lived data. resolve destination and input.
-                    usage: vk::ImageUsage::TRANSIENT_ATTACHMENT
-                        | vk::ImageUsage::TRANSFER_DST
+                    usage: //vk::ImageUsage::TRANSIENT_ATTACHMENT
+                         vk::ImageUsage::TRANSFER_DST
+                         | vk::ImageUsage::COLOR_ATTACHMENT
                         | vk::ImageUsage::INPUT_ATTACHMENT,
                     // Todo: query whether this is supported
                     extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
@@ -694,6 +703,9 @@ mod renderer {
                         rasterization_samples: Self::SAMPLES,
                         ..Default::default()
                     }),
+                    // Viewport dynamic, scissor irrelevant.
+                    viewport_state: Some(vk::ViewportState::default()),
+                    dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
                     ..vk::GraphicsPipelineCreateInfo::layout(layout)
                 },
             )
@@ -772,6 +784,7 @@ mod renderer {
                             vk::ColorBlendAttachmentState::default(),
                         )),
                         rasterization_state: Some(vk::RasterizationState::default()),
+                        multisample_state: Some(vk::MultisampleState::default()),
                         subpass: Some(subpass.into()),
                         // Viewport dynamic, scissor irrelevant.
                         viewport_state: Some(vk::ViewportState::default()),
@@ -868,6 +881,14 @@ mod renderer {
 
             if let Some((instances, indirects)) = instances_indirects {
                 let framebuffer = self.make_framebuffer(render_into)?;
+                let viewport = vk::Viewport {
+                    depth_range: 0.0..=1.0,
+                    offset: [0.0; 2],
+                    extent: [
+                        framebuffer.extent()[0] as f32,
+                        framebuffer.extent()[1] as f32,
+                    ],
+                };
 
                 commands
                     .begin_render_pass(
@@ -882,6 +903,7 @@ mod renderer {
                         },
                     )?
                     .bind_pipeline_graphics(self.monochrome_pipeline.clone())?
+                    .set_viewport(0, smallvec::smallvec![viewport.clone()])?
                     .bind_vertex_buffers(0, (output.vertices.clone(), instances))?
                     .bind_index_buffer(output.indices.clone())?
                     .draw_indexed_indirect(indirects)?
@@ -893,6 +915,7 @@ mod renderer {
                         },
                     )?
                     .bind_pipeline_graphics(self.colorize_pipeline.clone())?
+                    .set_viewport(0, smallvec::smallvec![viewport.clone()])?
                     .bind_descriptor_sets(
                         vk::PipelineBindPoint::Graphics,
                         self.colorize_pipeline.layout().clone(),

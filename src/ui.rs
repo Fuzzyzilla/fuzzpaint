@@ -4,6 +4,7 @@ pub mod requests;
 use egui::Ui;
 
 const STROKE_LAYER_ICON: &str = "✏";
+const TEXT_LAYER_ICON: &str = "🗛";
 const NOTE_LAYER_ICON: &str = "🖹";
 const FILL_LAYER_ICON: &str = "⬛";
 const GROUP_ICON: &str = "🗀";
@@ -658,6 +659,7 @@ fn leaf_props_panel(
             );
             false
         }
+        LeafType::Text { text, .. } => ui.text_edit_multiline(text).changed(),
     };
 
     write
@@ -708,15 +710,18 @@ fn layer_buttons(
         // Borrow graph for the rest of the time.
         let mut graph = writer.graph();
         if ui
-            .button(NOTE_LAYER_ICON)
-            .on_hover_text("Add Note")
+            .button(TEXT_LAYER_ICON)
+            .on_hover_text("Add Text Layer")
             .clicked()
         {
             interface.graph_selection = graph
                 .add_leaf(
-                    crate::state::graph::LeafType::Note,
+                    crate::state::graph::LeafType::Text {
+                        blend: crate::blend::Blend::default(),
+                        text: "Uwu".to_owned(),
+                    },
                     add_location!(),
-                    "Note".to_string(),
+                    "Text".to_string(),
                 )
                 .ok()
                 .map(Into::into);
@@ -734,6 +739,20 @@ fn layer_buttons(
                     },
                     add_location!(),
                     "Fill".to_string(),
+                )
+                .ok()
+                .map(Into::into);
+        }
+        if ui
+            .button(NOTE_LAYER_ICON)
+            .on_hover_text("Add Note")
+            .clicked()
+        {
+            interface.graph_selection = graph
+                .add_leaf(
+                    crate::state::graph::LeafType::Note,
+                    add_location!(),
+                    "Note".to_string(),
                 )
                 .ok()
                 .map(Into::into);
@@ -979,6 +998,7 @@ fn icon_of_node(node: &crate::state::graph::NodeData) -> &'static str {
         // Leaves
         (Some(LeafType::SolidColor { .. }), None) => FILL_LAYER_ICON,
         (Some(LeafType::StrokeLayer { .. }), None) => STROKE_LAYER_ICON,
+        (Some(LeafType::Text { .. }), None) => TEXT_LAYER_ICON,
         (Some(LeafType::Note), None) => NOTE_LAYER_ICON,
 
         // Groups

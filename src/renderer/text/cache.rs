@@ -194,25 +194,45 @@ enum EitherBoth<A, B> {
 /// Glyphs can have COLR data, but at the same time can also have a contour!
 /// If a given data is not present, it merely means it has not been requested and is thus not cached,
 /// not that it's not available in the face itself.
-struct GlyphInfo(EitherBoth<MonotoneGlyphInfo, ColorGlyphInfo>);
+struct GlyphInfo(
+    // This is ALWAYS init at rest.
+    std::mem::MaybeUninit<EitherBoth<MonotoneGlyphInfo, ColorGlyphInfo>>,
+);
 impl GlyphInfo {
     fn new_monotone() -> Self {
-        Self(EitherBoth::Left(MonotoneGlyphInfo::default()))
+        Self(std::mem::MaybeUninit::new(EitherBoth::Left(
+            MonotoneGlyphInfo::default(),
+        )))
     }
     fn monotone(&self) -> Option<&MonotoneGlyphInfo> {
-        match &self.0 {
+        // Safety: always init at rest.
+        match unsafe { self.0.assume_init_ref() } {
             EitherBoth::Left(mono) | EitherBoth::Both(mono, _) => Some(mono),
             EitherBoth::Right(_) => None,
         }
     }
     fn monotone_mut(&mut self) -> Option<&mut MonotoneGlyphInfo> {
-        match &mut self.0 {
+        // Safety: always init at rest.
+        match unsafe { self.0.assume_init_mut() } {
             EitherBoth::Left(mono) | EitherBoth::Both(mono, _) => Some(mono),
             EitherBoth::Right(_) => None,
         }
     }
     fn monotone_mut_or_default(&mut self) -> &mut MonotoneGlyphInfo {
-        todo!() // needs unsafe crime >:(
+        // Take the inner value from self
+        // Safety; always init at rest. here, we're in flux, so we take it just to
+        // put it back again.
+        let mut inner = unsafe { self.0.assume_init_read() };
+        // Insert mono if not available.
+        if let EitherBoth::Right(r) = inner {
+            inner = EitherBoth::Both(MonotoneGlyphInfo::default(), r);
+        };
+        // Won't leak, we moved out of it.
+        match self.0.write(inner) {
+            EitherBoth::Left(mono) | EitherBoth::Both(mono, _) => mono,
+            // Just made sure this isn't the case.
+            EitherBoth::Right(_) => unreachable!(),
+        }
     }
 }
 /// Stores generated glyph data, indexed by `(face, variation, index, size class)`.
@@ -227,6 +247,8 @@ pub enum CacheInsertError {
     Alloc(#[from] VertexAllocationError),
     #[error(transparent)]
     AccessError(#[from] vk::HostAccessError),
+    #[error("a mesh of this key already exists")]
+    AlreadyExists,
 }
 #[derive(thiserror::Error, Debug)]
 pub enum ColorInsertError {
@@ -309,6 +331,20 @@ impl GlyphCache {
     ) -> Result<(), CacheInsertError> {
         // fixme!!
         assert!(u32::try_from(vertices.len()).is_ok() && u32::try_from(indices.len()).is_ok());
+        // Insert into the glyph's data
+        let monotone = self
+            .glyphs
+            .entry(key)
+            .or_insert(GlyphInfo::new_monotone())
+            .monotone_mut_or_default();
+
+        // Make sure we don't overwrite anything (`self::insert` should be a strictly additive operation)
+        if monotone
+            .get_ceil(class)
+            .is_some_and(|(found_class, _)| found_class == class)
+        {
+            return Err(CacheInsertError::AlreadyExists);
+        }
 
         // Allocate and try to copy data in
         let allocation = self.allocators.allocate(vertices, indices)?;
@@ -330,25 +366,11 @@ impl GlyphCache {
             return Err(e.into());
         }
 
-        // Insert into the glyph's data
-        let set = self
-            .glyphs
-            .entry(key)
-            .or_insert(GlyphInfo::new_monotone())
-            .monotone_mut_or_default();
-
         // Safety: We encapsulate this alloc, known never to be
         // dealloc'd except where explicitly taken out of the set beforehand
-        let old = unsafe { set.insert(class, allocation) };
-
-        // todo: could eagerly dealloc old ver, to increase chance of mem reuse.
-        if let Some(old) = old {
-            // Clear the old alloc. This is fine for the same reason as above!
-            // We have explicit ownership over this alloc as we just took it from the set.
-            unsafe {
-                self.allocators.deallocate(old);
-            }
-        }
+        let old = unsafe { monotone.insert(class, allocation) };
+        // Checked that this was a new alloc at the top.
+        debug_assert!(old.is_none());
 
         Ok(())
     }
