@@ -540,6 +540,116 @@ pub mod renderer {
     }
     impl TextRenderer {
         const SAMPLES: vk::SampleCount = vk::SampleCount::Sample8;
+        pub fn make_renderpass(device: Arc<vk::Device>) -> anyhow::Result<Arc<vk::RenderPass>> {
+            use vulkano::render_pass::{
+                AttachmentDescription, AttachmentReference, RenderPass, RenderPassCreateInfo,
+                Subpass, SubpassDependency, SubpassDescription,
+            };
+            use vulkano::sync::{AccessFlags, DependencyFlags, PipelineStages};
+
+            // Vulkano doesn't support this usecase of transient images, so we do it ourselves >:3c
+            let attachments = vec![
+                // First render attach. Transient. Clear, dontcare for store.
+                AttachmentDescription {
+                    load_op: vk::AttachmentLoadOp::Clear,
+                    store_op: vk::AttachmentStoreOp::DontCare,
+                    format: vk::Format::R8_UNORM,
+                    samples: Self::SAMPLES,
+                    initial_layout: vk::ImageLayout::Undefined,
+                    final_layout: vk::ImageLayout::ColorAttachmentOptimal,
+                    ..Default::default()
+                },
+                // Second attach, for resolving first. Transient input for final stage. dontcare for load/store.
+                AttachmentDescription {
+                    load_op: vk::AttachmentLoadOp::DontCare,
+                    store_op: vk::AttachmentStoreOp::DontCare,
+                    format: vk::Format::R8_UNORM,
+                    samples: vk::SampleCount::Sample1,
+                    initial_layout: vk::ImageLayout::Undefined,
+                    final_layout: vk::ImageLayout::ColorAttachmentOptimal,
+                    ..Default::default()
+                },
+                // Output color, user provided.
+                AttachmentDescription {
+                    // We overwrite every texel, dontcare for load.
+                    load_op: vk::AttachmentLoadOp::DontCare,
+                    store_op: vk::AttachmentStoreOp::Store,
+                    format: vk::Format::R16G16B16A16_SFLOAT,
+                    samples: vk::SampleCount::Sample1,
+                    // We clear it anyway, don't mind the initial layout.
+                    initial_layout: vk::ImageLayout::Undefined,
+                    final_layout: vk::ImageLayout::ColorAttachmentOptimal,
+                    ..Default::default()
+                },
+            ];
+            let attachment_references = vec![
+                AttachmentReference {
+                    attachment: 0,
+                    layout: vk::ImageLayout::ColorAttachmentOptimal,
+                    stencil_layout: None,
+                    ..Default::default()
+                },
+                // Pre-resolve:
+                AttachmentReference {
+                    attachment: 1,
+                    layout: vk::ImageLayout::ColorAttachmentOptimal,
+                    stencil_layout: None,
+                    ..Default::default()
+                },
+                // Post-resolve:
+                AttachmentReference {
+                    attachment: 1,
+                    layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+                    stencil_layout: None,
+                    aspects: vk::ImageAspects::COLOR,
+                    ..Default::default()
+                },
+                AttachmentReference {
+                    attachment: 2,
+                    layout: vk::ImageLayout::ColorAttachmentOptimal,
+                    stencil_layout: None,
+                    ..Default::default()
+                },
+            ];
+
+            let subpasses = vec![
+                SubpassDescription {
+                    color_attachments: vec![Some(attachment_references[0].clone())],
+                    // Afterwards, resolve into other transient attachment.
+                    color_resolve_attachments: vec![Some(attachment_references[1].clone())],
+                    ..Default::default()
+                },
+                SubpassDescription {
+                    color_attachments: vec![Some(attachment_references[3].clone())],
+                    input_attachments: vec![Some(attachment_references[2].clone())],
+                    ..Default::default()
+                },
+            ];
+            let dependencies = vec![SubpassDependency {
+                src_subpass: Some(0),
+                dst_subpass: Some(1),
+                // Second subpass only cares about pixel-local info, so individual tiles can move on asynchronously.
+                dependency_flags: DependencyFlags::BY_REGION,
+                // After we resolve...
+                src_access: AccessFlags::COLOR_ATTACHMENT_WRITE,
+                src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                // Then we can read from fragment...
+                dst_access: AccessFlags::INPUT_ATTACHMENT_READ,
+                dst_stages: PipelineStages::FRAGMENT_SHADER,
+                ..Default::default()
+            }];
+
+            RenderPass::new(
+                device,
+                RenderPassCreateInfo {
+                    attachments,
+                    subpasses,
+                    dependencies,
+                    ..Default::default()
+                },
+            )
+            .map_err(Into::into)
+        }
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
             let multisample_grey = vk::Image::new(
                 context.allocators().memory().clone(),
@@ -547,10 +657,7 @@ pub mod renderer {
                     format: vk::Format::R8_UNORM,
                     samples: Self::SAMPLES,
                     // Don't need long-lived data. Render, and resolve source.
-                    // DEAR FUTURE ME - the vulkano says this will err at runtime, but vulkan says otherwise.
-                    usage: //vk::ImageUsage::TRANSIENT_ATTACHMENT
-                         vk::ImageUsage::TRANSFER_SRC
-                        | vk::ImageUsage::COLOR_ATTACHMENT,
+                    usage: vk::ImageUsage::TRANSIENT_ATTACHMENT | vk::ImageUsage::COLOR_ATTACHMENT,
                     // Todo: query whether this is supported
                     extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
                     sharing: vk::Sharing::Exclusive,
@@ -566,9 +673,8 @@ pub mod renderer {
                 vk::ImageCreateInfo {
                     format: vk::Format::R8_UNORM,
                     // Don't need long-lived data. resolve destination and input.
-                    usage: //vk::ImageUsage::TRANSIENT_ATTACHMENT
-                         vk::ImageUsage::TRANSFER_DST
-                         | vk::ImageUsage::COLOR_ATTACHMENT
+                    usage: vk::ImageUsage::TRANSIENT_ATTACHMENT
+                        | vk::ImageUsage::COLOR_ATTACHMENT
                         | vk::ImageUsage::INPUT_ATTACHMENT,
                     // Todo: query whether this is supported
                     extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
@@ -583,44 +689,7 @@ pub mod renderer {
 
             // Tiling renderer shenanigans, mostly for practice lol
             // Forms a per-fragment pipe from MSAA -> Resolve -> Color
-            let monochrome_renderpass = vulkano::ordered_passes_renderpass! {
-                context.device().clone(),
-                attachments: {
-                    msaa_target: {
-                        format: vk::Format::R8_UNORM,
-                        samples: Self::SAMPLES,
-                        load_op: Clear,
-                        store_op: DontCare,
-                    },
-                    msaa_resolve: {
-                        format: vk::Format::R8_UNORM,
-                        samples: 1,
-                        load_op: DontCare,
-                        store_op: DontCare,
-                    },
-                    color_target: {
-                        format: vk::Format::R16G16B16A16_SFLOAT,
-                        samples: 1,
-                        load_op: DontCare,
-                        store_op: Store,
-                    },
-                },
-                passes: [
-                    {
-                        // Render into MSAA, then resolve.
-                        color: [msaa_target,],
-                        color_resolve: [msaa_resolve,],
-                        depth_stencil: {},
-                        input: [],
-                    },
-                    {
-                        // Take resolved image as input, color it into output.
-                        color: [color_target,],
-                        depth_stencil: {},
-                        input: [msaa_resolve],
-                    },
-                ],
-            }?;
+            let monochrome_renderpass = Self::make_renderpass(context.device().clone())?;
 
             let resolve_grey = vk::ImageView::new_default(resolve_grey)?;
             let multisample_grey = vk::ImageView::new_default(multisample_grey)?;

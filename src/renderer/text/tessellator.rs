@@ -147,7 +147,7 @@ pub fn tessellate_glyph(
     vertices.clear();
     indices.clear();
 
-    let mut options = lyon_tessellation::FillOptions::even_odd();
+    let mut options = lyon_tessellation::FillOptions::non_zero();
     // The tessellator works in higher res for larger size classes:
     // A double size scale class tesselates with half the tolerance.
     // With a size class of ONE leading to a tolerance of 1... mystery unit...
