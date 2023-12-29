@@ -1,3 +1,4 @@
+#![deny(unsafe_op_in_unsafe_fn)]
 #![feature(portable_simd)]
 #![feature(once_cell_try)]
 #![feature(write_all_vectored)]

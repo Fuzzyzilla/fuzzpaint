@@ -2,6 +2,7 @@ mod gpu_tess;
 pub mod picker;
 pub mod requests;
 mod stroke_batcher;
+mod text;
 
 use std::sync::Arc;
 
@@ -44,6 +45,7 @@ impl<'data> CachedImage<'data> {
 struct Renderer {
     context: Arc<crate::render_device::RenderContext>,
     stroke_renderer: stroke_renderer::StrokeLayerRenderer,
+    text_builder: text::TextBuilder,
     blend_engine: crate::blend::BlendEngine,
     data: hashbrown::HashMap<crate::state::DocumentID, PerDocumentData>,
 }
@@ -52,6 +54,7 @@ impl Renderer {
         Ok(Self {
             context: context.clone(),
             blend_engine: crate::blend::BlendEngine::new(context.device())?,
+            text_builder: text::TextBuilder::allocate_new(context.allocators().memory().clone())?,
             stroke_renderer: stroke_renderer::StrokeLayerRenderer::new(context)?,
             data: hashbrown::HashMap::new(),
         })

@@ -28,6 +28,7 @@ pub mod vk {
             CommandBufferUsage,
             CopyBufferToImageInfo,
             CopyImageToBufferInfo,
+            DrawIndexedIndirectCommand,
             ImageBlit,
             PrimaryAutoCommandBuffer,
             RenderPassBeginInfo,
@@ -57,7 +58,7 @@ pub mod vk {
             sampler::{ComponentMapping, ComponentSwizzle, Filter, Sampler, SamplerCreateInfo},
             view::{ImageView, ImageViewCreateInfo, ImageViewType},
             Image, ImageAspects, ImageCreateFlags, ImageCreateInfo, ImageLayout,
-            ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
+            ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, SampleCount,
         },
         instance::{Instance, InstanceCreateInfo},
         library::VulkanLibrary,
@@ -98,7 +99,7 @@ pub mod vk {
         sync::{
             self,
             future::{FenceSignalFuture, NowFuture, SemaphoreSignalFuture},
-            Sharing,
+            HostAccessError, Sharing,
         },
         DeviceSize, Validated, Version, VulkanError,
     };
