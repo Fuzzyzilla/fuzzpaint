@@ -27,6 +27,9 @@ pub enum LeafType {
         // (probably a ref to another document state specifying a WYSIWYG
         // text block with faces and sizes and colors and...)
         text: String,
+        // "em" is a physical unit. Currently, we have no means to deal with this fact.
+        // Allow the user to specify manually.
+        height: f32,
     },
     // The name of the note is the note!
     Note,

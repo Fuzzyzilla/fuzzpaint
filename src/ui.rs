@@ -608,41 +608,36 @@ fn leaf_props_panel(
         LeafType::Note => false,
         // Color picker
         LeafType::SolidColor { source, .. } => {
-            let color_latch = ui
-                .horizontal(|ui| {
-                    ui.label("Fill color:");
-                    // Latch onto fill color, to submit update only when selection is finished.
-                    latch::latch(ui, (leaf_id, "fill-color"), *source, |ui, [r, g, b, a]| {
-                        let mut rgba = egui::Rgba::from_rgba_premultiplied(*r, *g, *b, *a);
-                        egui::color_picker::color_edit_button_rgba(
-                            ui,
-                            &mut rgba,
-                            // If the user wants Add they should use the blend modes mwuahaha
-                            egui::color_picker::Alpha::OnlyBlend,
-                        );
-                        *r = rgba.r();
-                        *b = rgba.b();
-                        *g = rgba.g();
-                        *a = rgba.a();
+            ui.horizontal(|ui| {
+                ui.label("Fill color:");
+                // Latch onto fill color, to submit update only when selection is finished.
+                latch::latch(ui, (leaf_id, "fill-color"), *source, |ui, [r, g, b, a]| {
+                    let mut rgba = egui::Rgba::from_rgba_premultiplied(*r, *g, *b, *a);
+                    egui::color_picker::color_edit_button_rgba(
+                        ui,
+                        &mut rgba,
+                        // If the user wants Add they should use the blend modes mwuahaha
+                        egui::color_picker::Alpha::OnlyBlend,
+                    );
+                    *r = rgba.r();
+                    *b = rgba.b();
+                    *g = rgba.g();
+                    *a = rgba.a();
 
-                        // None of the response fields for color pickers seem to indicate
-                        // a finished interaction TwT
-                        if ui.button("Apply").clicked() {
-                            latch::Latch::Finish
-                        } else {
-                            latch::Latch::Continue
-                        }
-                    })
-                    .result()
+                    // None of the response fields for color pickers seem to indicate
+                    // a finished interaction TwT
+                    if ui.button("Apply").clicked() {
+                        latch::Latch::Finish
+                    } else {
+                        latch::Latch::Continue
+                    }
                 })
-                .inner;
-
-            if let Some(color) = color_latch {
-                *source = color;
-                true
-            } else {
-                false
-            }
+                // Set color on completion
+                .on_finish(|color| *source = color)
+                // Return true if set occured
+                .is_some()
+            })
+            .inner
         }
         LeafType::StrokeLayer { collection, .. } => {
             // Nothing interactible, but display some infos
@@ -659,7 +654,49 @@ fn leaf_props_panel(
             );
             false
         }
-        LeafType::Text { text, .. } => ui.text_edit_multiline(text).changed(),
+        LeafType::Text {
+            text,
+            height: px_per_em,
+            ..
+        } => {
+            let mut changed =
+                latch::latch(ui, (leaf_id, "pix-per-em"), *px_per_em, |ui, px_per_em| {
+                    let response = ui.add(
+                        egui::Slider::new(px_per_em, 20.0..=2000.0)
+                            .clamp_to_range(true)
+                            .logarithmic(true),
+                    );
+
+                    // There is, as far as I can tell, no way to do this right.
+                    if response.has_focus() {
+                        return latch::Latch::Continue;
+                    }
+                    if response.drag_released() || response.lost_focus() {
+                        return latch::Latch::Finish;
+                    }
+                    match (response.changed(), response.dragged()) {
+                        (_, true) => latch::Latch::Continue,
+                        (true, false) => latch::Latch::Finish,
+                        (false, false) => latch::Latch::None,
+                    }
+                })
+                .on_finish(|new_px_per_em| *px_per_em = new_px_per_em)
+                .is_some();
+            // Clones on every frame. Buh. bad.
+            changed |= latch::latch(ui, (leaf_id, "text"), text.clone(), |ui, new_text| {
+                let response = ui.text_edit_singleline(new_text);
+                // todo: Latch::None on esc.
+                match (response.lost_focus(), response.has_focus()) {
+                    (true, _) => latch::Latch::Finish,
+                    (false, true) => latch::Latch::Continue,
+                    (false, false) => latch::Latch::None,
+                }
+            })
+            .on_finish(|new_text| *text = new_text)
+            .is_some();
+
+            changed
+        }
     };
 
     write
@@ -718,7 +755,8 @@ fn layer_buttons(
                 .add_leaf(
                     crate::state::graph::LeafType::Text {
                         blend: crate::blend::Blend::default(),
-                        text: "Uwu".to_owned(),
+                        text: "Hello, world!".to_owned(),
+                        height: 50.0,
                     },
                     add_location!(),
                     "Text".to_string(),
@@ -1034,6 +1072,10 @@ mod latch {
         pub fn result(self) -> Option<State> {
             self.output
         }
+        /// Takes the output, if any, and calls the closure if the latch interaction just finished.
+        pub fn on_finish<R>(mut self, f: impl FnOnce(State) -> R) -> Option<R> {
+            self.output.take().map(f)
+        }
     }
     /// Interactible UI component where changes in-progress should be ignored,
     /// only producing output when the interaction is fully finished.
@@ -1096,7 +1138,7 @@ fn ui_layer_blend(
     id: impl std::hash::Hash,
     blend: crate::blend::Blend,
     disable: bool,
-) -> Option<crate::blend::Blend> {
+) -> self::latch::LatchResponse<'_, crate::blend::Blend> {
     // Get the persisted blend, or use the caller's blend if none.
     latch::latch(ui, (&id, "blend-state"), blend, |ui, blend| {
         let mut finished = false;
@@ -1139,7 +1181,6 @@ fn ui_layer_blend(
             (false, false) => latch::Latch::None,
         }
     })
-    .result()
 }
 /// Inline UI component for changing an optional (possibly passthrough) blend. Makes a copy of the blend internally,
 /// only returning a new one on change (skipping partial changes like a dragging slider), returning None otherwise.
@@ -1148,7 +1189,7 @@ fn ui_passthrough_or_blend(
     id: impl std::hash::Hash,
     blend: Option<crate::blend::Blend>,
     disable: bool,
-) -> Option<Option<crate::blend::Blend>> {
+) -> self::latch::LatchResponse<'_, Option<crate::blend::Blend>> {
     latch::latch(ui, (&id, "blend-state"), blend, |ui, blend| {
         let mut finished = false;
         let mut changed = false;
@@ -1207,7 +1248,6 @@ fn ui_passthrough_or_blend(
             (false, false) => latch::Latch::None,
         }
     })
-    .result()
 }
 fn graph_edit_recurse<
     // Well that's.... not great...
@@ -1279,12 +1319,8 @@ fn graph_edit_recurse<
                 // Blend, if any.
                 if let Some(old_blend) = data.blend() {
                     // Reports new blend when interaction is finished, disabled in yank mode.
-                    if let Some(new_blend) =
-                        ui_layer_blend(ui, (&id, "blend"), old_blend, yanked_node.is_some())
-                    {
-                        // Automatically ignores if no change
-                        graph.change_blend(id, new_blend).unwrap();
-                    };
+                    ui_layer_blend(ui, (&id, "blend"), old_blend, yanked_node.is_some())
+                        .on_finish(|new_blend| graph.change_blend(id, new_blend).unwrap());
                 }
             }
             (None, Some(n)) => {
@@ -1301,10 +1337,8 @@ fn graph_edit_recurse<
                 // Display node type - passthrough or grouped blend
                 let old_blend = n.blend();
                 // Reports new blend when interaction finished, disabled in yank mode.
-                if let Some(new_blend) =
-                    ui_passthrough_or_blend(ui, (&id, "blend"), old_blend, yanked_node.is_some())
-                {
-                    match (old_blend, new_blend) {
+                ui_passthrough_or_blend(ui, (&id, "blend"), old_blend, yanked_node.is_some())
+                    .on_finish(|new_blend| match (old_blend, new_blend) {
                         (Some(from), Some(to)) if from != to => {
                             // Simple blend change
                             graph.change_blend(id, to).unwrap();
@@ -1324,8 +1358,7 @@ fn graph_edit_recurse<
                         _ => {
                             // No change
                         }
-                    }
-                };
+                    });
 
                 // display children!
                 egui::CollapsingHeader::new(egui::RichText::new("Children").italics().weak())

@@ -299,7 +299,11 @@ impl Renderer {
                     }
                 }
                 // Render stroke image
-                Some(LeafType::Text { text, .. }) => {
+                Some(LeafType::Text {
+                    text,
+                    height: px_per_em,
+                    ..
+                }) => {
                     let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
                         anyhow::anyhow!(
                             "Expected image to be created by allocate_prune_graph for {id:?}"
@@ -310,6 +314,7 @@ impl Renderer {
                         text_builder,
                         text_renderer,
                         image,
+                        *px_per_em,
                         text,
                     )?);
                 }
@@ -393,6 +398,7 @@ impl Renderer {
         builder: &mut text::TextBuilder,
         renderer: &text::renderer::TextRenderer,
         image: &RenderData,
+        height: f32,
         text: &str,
     ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn GpuFuture>>> {
         static FACE: std::sync::OnceLock<(rustybuzz::Face<'static>, rustybuzz::ShapePlan)> =
@@ -401,6 +407,10 @@ impl Renderer {
 
         let (face, plan) = FACE.get_or_init(|| {
             let face = rustybuzz::Face::from_slice(FACE_DATA, 0).expect("bad face");
+            println!(
+                "{:#?}",
+                face.variation_axes().into_iter().collect::<Vec<_>>()
+            );
             let plan = rustybuzz::ShapePlan::new(
                 &face,
                 rustybuzz::Direction::LeftToRight,
@@ -411,17 +421,37 @@ impl Renderer {
 
             (face, plan)
         });
+        // Height, in font units.
+        // This seems to be roughly half the scale I would expect. Not sure
+        // if I am misunderstanding `height` or if the math is wrong.
+        let height_units = f32::from(face.as_ref().height());
+        let px_per_unit = height / height_units;
+        let size_class = text::SizeClass::from_scale_factor(px_per_unit)
+            .unwrap_or(text::SizeClass::ONE)
+            .saturating_mul(renderer.internal_size_class());
+        let mut xform = ultraviolet::Similarity2 {
+            scale: px_per_unit,
+            ..Default::default()
+        };
+        let proj = ultraviolet::Similarity2 {
+            // map 0..DOCUMENT_DIMENSION to 0.0..2.0
+            scale: 2.0 / (crate::DOCUMENT_DIMENSION as f32),
+            // map 0.0..2.0 to -1.0..1.0 (NDC)
+            translation: ultraviolet::Vec2 { x: -1.0, y: -1.0 },
+            ..Default::default()
+        };
+        // This is not behaving. Dont wanna fix it right now. grr.
+        xform.append_similarity(proj);
+
         let mut test_buf = rustybuzz::UnicodeBuffer::new();
         test_buf.push_str(text);
         test_buf.set_script(rustybuzz::script::LATIN);
-        let output = builder.tess_draw(
-            face,
-            plan,
-            text::SizeClass::ONE,
-            test_buf,
-            [0.0, 0.0, 0.0, 1.0],
+        let output = builder.tess_draw(face, plan, size_class, test_buf, [0.0, 0.0, 0.0, 1.0])?;
+        let commands = renderer.draw(
+            xform.into_homogeneous_matrix().into_homogeneous(),
+            image.view.clone(),
+            &output,
         )?;
-        let commands = renderer.draw(image.view.clone(), &output)?;
         context
             .now()
             .then_execute(context.queues().graphics().queue().clone(), commands)?

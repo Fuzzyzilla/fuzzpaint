@@ -154,7 +154,15 @@ impl SizeClass {
             Some(Self(pow))
         }
     }
-    /// Take the `log2` of the size factor. This is an precise operation.
+    /// Convert from an exponent, where scale factor is `2**exp`.
+    /// Clamps to valid range.
+    #[must_use]
+    pub fn from_exp_lossy(exp: i8) -> Self {
+        // Clamp out invalid exponents
+        let exp = exp.clamp(Self::MIN.0, Self::MAX.0);
+        Self(exp)
+    }
+    /// Take the `log2` of the size factor. This is a precise operation.
     #[must_use]
     pub fn log2(self) -> i8 {
         self.0
@@ -168,6 +176,21 @@ impl SizeClass {
             // Min val is -127, so unchecked negation is OK
             -self.0,
         )
+    }
+    /// Multiply two scale classes, saturating to `MIN` or `MAX` should this operation surpass it.
+    ///
+    /// ```
+    /// let two = ScaleClass::from_scale_factor(2.0).unwrap();
+    /// assert_eq!(
+    ///     two.saturating_mul(two),
+    ///     ScaleClass::from_scale_factor(4.0).unwrap()
+    /// );
+    /// ```
+    #[must_use = "does not modify self"]
+    pub fn saturating_mul(self, other: Self) -> Self {
+        // logarithmic representation, addition is scale factor mul!
+        let new_exp = self.0.saturating_add(other.0);
+        Self::from_exp_lossy(new_exp)
     }
     /// Get the largest scale factor of this scale class.
     /// Always Non-NaN, finite, and larger than zero.
@@ -203,6 +226,10 @@ pub struct DrawOutput {
     /// Describes whether rendering can be done in a colorless space.
     /// Instance buffers always contain glyph color regardless.
     pub color_mode: OutputColor,
+
+    /// The bounding box around the rendered content, in the same units as vertex and instance position.
+    /// (min, max)
+    pub bound: Option<([i32; 2], [i32; 2])>,
 
     /// Finished glyph buffer. Primarily for mem reclaimation.
     pub glyphs: rustybuzz::GlyphBuffer,
@@ -290,19 +317,38 @@ impl TextBuilder {
             );
 
         let mut cursor = [0i32; 2];
+        let mut render_bound = ([i32::MAX; 2], [i32::MIN; 2]);
         for (glyph, pos) in buffer
             .glyph_infos()
             .iter()
             .zip(buffer.glyph_positions().iter())
         {
-            // rustybuzz guarantees that glyph_id is a u16.. strange!
+            // rustybuzz guarantees that glyph_id is a u16 repr as u32.. strange!
             let glyph = ttf_parser::GlyphId(glyph.glyph_id.try_into().unwrap());
+            let glyph_position = [
+                cursor[0].wrapping_add(pos.x_offset),
+                cursor[1].wrapping_add(pos.y_offset),
+            ];
+            // todo: turns out bounding_box is massively expensive and we should cache this during tess.
+            if let Some(bound) = face.glyph_bounding_box(glyph) {
+                // copy+paste errors abound
+                // Offset box by position
+                let x_min = i32::from(bound.x_min).saturating_add(glyph_position[0]);
+                let x_max = i32::from(bound.x_max).saturating_add(glyph_position[0]);
+
+                let y_min = i32::from(bound.y_min).saturating_add(glyph_position[1]);
+                let y_max = i32::from(bound.y_max).saturating_add(glyph_position[1]);
+
+                // Expand as necessary
+                // horrible horrible!!
+                render_bound.0[0] = render_bound.0[0].min(x_min);
+                render_bound.1[0] = render_bound.1[0].max(x_max);
+                render_bound.0[1] = render_bound.0[1].min(y_min);
+                render_bound.1[1] = render_bound.1[1].max(y_max);
+            }
             let instance = interface::Instance {
                 // Current cursor plus offset
-                glyph_position: [
-                    cursor[0].wrapping_add(pos.x_offset),
-                    cursor[1].wrapping_add(pos.y_offset),
-                ],
+                glyph_position,
                 glyph_color: color,
             };
             // advance cursor afterwards
@@ -316,6 +362,10 @@ impl TextBuilder {
                 .or_default()
                 .push(instance);
         }
+        // Only some if valid box. This fails if no glyphs were rendered.
+        let render_bound = (render_bound.0[0] <= render_bound.1[0]
+            && render_bound.0[1] <= render_bound.1[1])
+            .then_some(render_bound);
 
         // Len is the number of unique glyph meshes, and thus the number of unique indirects!
         let mut indirects = Vec::with_capacity(glyph_instances.len());
@@ -325,8 +375,8 @@ impl TextBuilder {
             glyph_instances
                 .into_iter()
                 .filter_map(|(glyph, instances)| {
-                    // We expect this to not need to be filtered due to `tess` postcondition.
-                    // Failed to express this on a type level :<
+                    // Not every glyph have a mesh, and this is ok - spaces, for example.
+                    // incorrect chars are explicitly replaced with the "tofu" glyph by rustybuzz.
                     let ([first_vertex, _], [first_index, index_count]) =
                         self.cache.get_mesh(&glyph, size_class)?;
 
@@ -351,6 +401,7 @@ impl TextBuilder {
             indices: indices.clone(),
             indirects,
             instances: flat_instances,
+            bound: render_bound,
             color_mode: OutputColor::Solid(color),
             glyphs: buffer,
         })
@@ -454,14 +505,17 @@ pub mod renderer {
                     ty: "vertex",
                     src: r"
                         #version 460
+                        layout(push_constant) uniform Matrix {
+                            mat4 mvp;
+                        };
                         // Per-vertex
-                        layout(location = 0) in vec2 position; // units unknown yet
+                        layout(location = 0) in vec2 position;        // arbitrary font units (not em)
                         // Per-instance (per-glyph)
-                        layout(location = 1) in ivec2 glyph_position; // units unknown yet
-                        layout(location = 2) in vec4 glyph_color;     // monochrome - dontcare!
+                        layout(location = 1) in ivec2 glyph_position; // arbitrary font units (not em)
+                        layout(location = 2) in vec4 glyph_color;     // monochrome pipeline - dontcare!
 
                         void main() {
-                            gl_Position = vec4((position + vec2(glyph_position)) / 12000.0 - vec2(0.8), 0.0, 1.0);
+                            gl_Position = mvp * vec4((position + vec2(glyph_position)), 0.0, 1.0);
                         }
                     "
                 }
@@ -508,7 +562,7 @@ pub mod renderer {
                         #version 460
                         // R8_UNORM from resolved prepass
                         layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput in_coverage;
-                        layout(push_constant) uniform Push {
+                        layout(push_constant) uniform Color {
                             /// Premultipled color, directly multiplied by coverage.
                             vec4 modulate;
                         };
@@ -540,6 +594,26 @@ pub mod renderer {
     }
     impl TextRenderer {
         const SAMPLES: vk::SampleCount = vk::SampleCount::Sample8;
+        /// Get the internal scale factor due to multisampling.
+        /// Should be multiplied by the tessellation factor prior to building for best looking results.
+        pub fn internal_size_class(&self) -> super::SizeClass {
+            // In the future this will be a lookup of device capabilities,
+            // Self::SAMPLES won't be const.
+            #![allow(clippy::unused_self)]
+            use vk::SampleCount;
+            // Spacial resolution multiplier is sqrt(sample count).
+            // To convert to SizeClass, take the ciel of this, log2.
+            let log2_sqrt_samples = match Self::SAMPLES {
+                SampleCount::Sample1 => 0,
+                SampleCount::Sample2 | SampleCount::Sample4 => 1,
+                SampleCount::Sample8 | SampleCount::Sample16 => 2,
+                SampleCount::Sample32 | SampleCount::Sample64 => 3,
+                // We should never be able to choose a sample count we can't even observe!
+                _ => unimplemented!("unknown sample count"),
+            };
+
+            super::SizeClass::from_exp_lossy(log2_sqrt_samples)
+        }
         pub fn make_renderpass(device: Arc<vk::Device>) -> anyhow::Result<Arc<vk::RenderPass>> {
             use vulkano::render_pass::{
                 AttachmentDescription, AttachmentReference, RenderPass, RenderPassCreateInfo,
@@ -750,10 +824,21 @@ pub mod renderer {
                 vk::PipelineShaderStageCreateInfo::new(frag),
             ];
 
-            // Nothin to describe!
-            // Will prolly have a push constant in the future.
-            let layout =
-                vk::PipelineLayout::new(device.clone(), vk::PipelineLayoutCreateInfo::default())?;
+            let matrix_range = vk::PushConstantRange {
+                offset: 0,
+                size: std::mem::size_of::<shaders::monochrome::vert::Matrix>()
+                    .try_into()
+                    .unwrap(),
+                stages: vk::ShaderStages::VERTEX,
+            };
+
+            let layout = vk::PipelineLayout::new(
+                device.clone(),
+                vk::PipelineLayoutCreateInfo {
+                    push_constant_ranges: vec![matrix_range],
+                    ..Default::default()
+                },
+            )?;
 
             vk::GraphicsPipeline::new(
                 device,
@@ -802,7 +887,7 @@ pub mod renderer {
 
             let color_range = vk::PushConstantRange {
                 offset: 0,
-                size: std::mem::size_of::<shaders::colorize::frag::Push>()
+                size: std::mem::size_of::<shaders::colorize::frag::Color>()
                     .try_into()
                     .unwrap(),
                 stages: vk::ShaderStages::FRAGMENT,
@@ -933,9 +1018,13 @@ pub mod renderer {
         }
         /// Create commands to render `DrawOutput` into the given image.
         ///
+        /// `xform` should be a combined view+proj matrix, tranforming face's arbitrary units (NOT em) to NDC.
+        /// See [`rustybuzz::ttf_parser::Face::units_per_em`].
+        ///
         /// `self` is in exclusive use through the duration of the returned buffer's execution.
         pub fn draw(
             &self,
+            xform: ultraviolet::Mat4,
             render_into: Arc<vk::ImageView>,
             output: &super::DrawOutput,
         ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
@@ -975,6 +1064,11 @@ pub mod renderer {
                     .set_viewport(0, smallvec::smallvec![viewport.clone()])?
                     .bind_vertex_buffers(0, (output.vertices.clone(), instances))?
                     .bind_index_buffer(output.indices.clone())?
+                    .push_constants(
+                        self.monochrome_pipeline.layout().clone(),
+                        0,
+                        shaders::monochrome::vert::Matrix { mvp: xform.into() },
+                    )?
                     .draw_indexed_indirect(indirects)?
                     .next_subpass(
                         vk::SubpassEndInfo::default(),
@@ -994,7 +1088,7 @@ pub mod renderer {
                     .push_constants(
                         self.colorize_pipeline.layout().clone(),
                         0,
-                        shaders::colorize::frag::Push {
+                        shaders::colorize::frag::Color {
                             modulate: [0.0, 0.0, 0.0, 1.0],
                         },
                     )?

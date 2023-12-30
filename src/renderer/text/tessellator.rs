@@ -150,7 +150,7 @@ pub fn tessellate_glyph(
     let mut options = lyon_tessellation::FillOptions::non_zero();
     // The tessellator works in higher res for larger size classes:
     // A double size scale class tesselates with half the tolerance.
-    // With a size class of ONE leading to a tolerance of 1... mystery unit...
+    // With a size class of ONE leading to a tolerance of 1 font unit
     // (It is up to the caller to handle unit shenanigans to acquire the scale class passed in here)
     options.tolerance = size_class.recip().scale_factor();
 
