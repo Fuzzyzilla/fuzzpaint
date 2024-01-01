@@ -2,6 +2,7 @@ mod gpu_tess;
 pub mod picker;
 pub mod requests;
 mod stroke_batcher;
+mod text;
 
 use std::sync::Arc;
 
@@ -44,6 +45,8 @@ impl<'data> CachedImage<'data> {
 struct Renderer {
     context: Arc<crate::render_device::RenderContext>,
     stroke_renderer: stroke_renderer::StrokeLayerRenderer,
+    text_builder: text::TextBuilder,
+    text_renderer: text::renderer::TextRenderer,
     blend_engine: crate::blend::BlendEngine,
     data: hashbrown::HashMap<crate::state::DocumentID, PerDocumentData>,
 }
@@ -52,6 +55,8 @@ impl Renderer {
         Ok(Self {
             context: context.clone(),
             blend_engine: crate::blend::BlendEngine::new(context.device())?,
+            text_builder: text::TextBuilder::allocate_new(context.allocators().memory().clone())?,
+            text_renderer: text::renderer::TextRenderer::new(context.clone())?,
             stroke_renderer: stroke_renderer::StrokeLayerRenderer::new(context)?,
             data: hashbrown::HashMap::new(),
         })
@@ -99,6 +104,8 @@ impl Renderer {
                 &self.context,
                 &self.blend_engine,
                 &self.stroke_renderer,
+                &mut self.text_builder,
+                &self.text_renderer,
                 data,
                 &changes,
                 into,
@@ -120,6 +127,8 @@ impl Renderer {
                         &self.context,
                         &self.blend_engine,
                         &self.stroke_renderer,
+                        &mut self.text_builder,
+                        &self.text_renderer,
                         data,
                         &changes,
                         into,
@@ -136,6 +145,8 @@ impl Renderer {
         context: &Arc<crate::render_device::RenderContext>,
         blend_engine: &crate::blend::BlendEngine,
         renderer: &stroke_renderer::StrokeLayerRenderer,
+        text_builder: &mut text::TextBuilder,
+        text_renderer: &text::renderer::TextRenderer,
         document_data: &mut PerDocumentData,
         state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
         into: &Arc<vk::ImageView>,
@@ -155,7 +166,11 @@ impl Renderer {
             match (data.leaf(), data.node()) {
                 // Pre-rendered leaves
                 (
-                    Some(LeafType::SolidColor { blend, .. } | LeafType::StrokeLayer { blend, .. }),
+                    Some(
+                        LeafType::SolidColor { blend, .. }
+                        | LeafType::StrokeLayer { blend, .. }
+                        | LeafType::Text { blend, .. },
+                    ),
                     None,
                 ) => {
                     let view = document_data
@@ -283,6 +298,24 @@ impl Renderer {
                         renderer.draw(strokes.as_ref(), image, true)?;
                     }
                 }
+                // Render stroke image
+                Some(LeafType::Text {
+                    text, px_per_em, ..
+                }) => {
+                    let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Expected image to be created by allocate_prune_graph for {id:?}"
+                        )
+                    })?;
+                    fences.push(Self::render_text(
+                        context.as_ref(),
+                        text_builder,
+                        text_renderer,
+                        image,
+                        *px_per_em,
+                        text,
+                    )?);
+                }
                 Some(LeafType::Note) | None => (),
             }
         }
@@ -358,6 +391,80 @@ impl Renderer {
             .boxed()
             .then_signal_fence_and_flush()?)
     }
+    fn render_text(
+        context: &crate::render_device::RenderContext,
+        builder: &mut text::TextBuilder,
+        renderer: &text::renderer::TextRenderer,
+        image: &RenderData,
+        px_per_em: f32,
+        text: &str,
+    ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn GpuFuture>>> {
+        static FACE: std::sync::OnceLock<(rustybuzz::Face<'static>, rustybuzz::ShapePlan)> =
+            std::sync::OnceLock::new();
+        const FACE_DATA: &[u8] = include_bytes!("/usr/share/fonts/open-sans/OpenSans-Regular.ttf");
+
+        let (face, plan) = FACE.get_or_init(|| {
+            let face = rustybuzz::Face::from_slice(FACE_DATA, 0).expect("bad face");
+            println!(
+                "{:#?}",
+                face.variation_axes().into_iter().collect::<Vec<_>>()
+            );
+            let plan = rustybuzz::ShapePlan::new(
+                &face,
+                rustybuzz::Direction::LeftToRight,
+                Some(rustybuzz::script::LATIN),
+                None,
+                &[],
+            );
+
+            (face, plan)
+        });
+        let units_per_em = f32::from(face.as_ref().units_per_em());
+        let px_per_unit = px_per_em / units_per_em;
+        let size_class = text::SizeClass::from_scale_factor(px_per_unit)
+            .unwrap_or(text::SizeClass::ONE)
+            .saturating_mul(renderer.internal_size_class());
+        let mut xform = ultraviolet::Similarity2 {
+            scale: px_per_unit,
+            ..Default::default()
+        };
+        let proj = ultraviolet::Similarity2 {
+            // map 0..DOCUMENT_DIMENSION to 0.0..2.0
+            scale: 2.0 / (crate::DOCUMENT_DIMENSION as f32),
+            // map 0.0..2.0 to -1.0..1.0 (NDC)
+            translation: ultraviolet::Vec2 { x: -1.0, y: -1.0 },
+            ..Default::default()
+        };
+        // This is not behaving. Dont wanna fix it right now. grr.
+        xform.append_similarity(proj);
+
+        let output = builder.tess_draw_multiline(
+            face,
+            plan,
+            size_class,
+            &text::MultilineInfo {
+                text,
+                language: None,
+                script: Some(rustybuzz::script::LATIN),
+                main_direction: rustybuzz::Direction::LeftToRight,
+                line_spacing_mul: 1.0,
+                main_align: text::Align::Center,
+                cross_direction: rustybuzz::Direction::TopToBottom,
+            },
+            [0.0, 0.0, 0.0, 1.0],
+        )?;
+        let commands = renderer.draw(
+            xform.into_homogeneous_matrix().into_homogeneous(),
+            image.view.clone(),
+            &output,
+        )?;
+        context
+            .now()
+            .then_execute(context.queues().graphics().queue().clone(), commands)?
+            .boxed()
+            .then_signal_fence_and_flush()
+            .map_err(Into::into)
+    }
     /// Creates images for all nodes which require rendering, drops node images that are deleted, etc.
     /// Only fails when graphics device is out-of-memory
     fn allocate_prune_graph(
@@ -377,7 +484,8 @@ impl Renderer {
                 (
                     Some(
                         crate::state::graph::LeafType::SolidColor { .. }
-                        | crate::state::graph::LeafType::StrokeLayer { .. },
+                        | crate::state::graph::LeafType::StrokeLayer { .. }
+                        | crate::state::graph::LeafType::Text { .. },
                     ),
                     None,
                 ) => true,

@@ -21,6 +21,16 @@ pub enum LeafType {
         // Crate-wide color type would be nice :O
         source: [f32; 4],
     },
+    Text {
+        blend: crate::Blend,
+        // Horrible testing interface, this should be much richer
+        // (probably a ref to another document state specifying a WYSIWYG
+        // text block with faces and sizes and colors and...)
+        text: String,
+        // "em" is a physical unit. Currently, we have no means to deal with this fact.
+        // Allow the user to specify manually.
+        px_per_em: f32,
+    },
     // The name of the note is the note!
     Note,
 }
@@ -28,13 +38,17 @@ impl LeafType {
     #[must_use]
     pub fn blend(&self) -> Option<crate::Blend> {
         match self {
-            Self::StrokeLayer { blend, .. } | Self::SolidColor { blend, .. } => Some(*blend),
+            Self::StrokeLayer { blend, .. }
+            | Self::SolidColor { blend, .. }
+            | Self::Text { blend, .. } => Some(*blend),
             Self::Note => None,
         }
     }
     pub fn blend_mut(&mut self) -> Option<&mut crate::Blend> {
         match self {
-            Self::StrokeLayer { blend, .. } | Self::SolidColor { blend, .. } => Some(blend),
+            Self::StrokeLayer { blend, .. }
+            | Self::SolidColor { blend, .. }
+            | Self::Text { blend, .. } => Some(blend),
             Self::Note => None,
         }
     }
