@@ -9,12 +9,12 @@ Requires the [most recent Rust nightly toolchain](https://www.rust-lang.org/tool
 
 **Note the platform support below.** The app is cross platform and should run on any device that meets the [current driver requirements](assumptions.md) (if your device doesnt work - even if it's because of these requirements - please file an issue!) but tablet input is very much unfinished.
 
-| **Platform**      | Pen input   | Pad input   | Notes                                                   |
-|-------------------|-------------|-------------|---------------------------------------------------------|
-| Windows (Ink)     |None         |None         |                                                         |
-| ~~Unix (Wayland)~~|None         |None         |No universally supported tablet API. [Currently disabled!](https://github.com/Fuzzyzilla/fuzzpaint/issues/21#issue-1953431137)|
-| Unix (Xorg)       |Pressure only|None         |`WINIT_UNIX_BACKEND=x11` to activate using xwayland      |
-| Windows (wintab)  |None         |None         |Documentation tough to come accross                      |
+| **Platform**     | Pen input     | Pad input | Notes                                               |
+|------------------|---------------|-----------|-----------------------------------------------------|
+| Unix (Wayland)   | None          | None      |                                                     |
+| Windows (Ink)    | None          | None      |                                                     |
+| Unix (Xorg)      | Pressure only | None      | `WINIT_UNIX_BACKEND=x11` to activate using xwayland |
+| Windows (wintab) | None          | None      | Documentation tough to come accross                 |
 
 # Road to **0.2.0**
 To declare **0.2.0**, I would like to be able to freely doodle a thing and save it to disk. We're getting dangerously close!
