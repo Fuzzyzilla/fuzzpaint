@@ -2,7 +2,6 @@ mod gpu_tess;
 pub mod picker;
 pub mod requests;
 mod stroke_batcher;
-mod text;
 
 use std::sync::Arc;
 
@@ -45,8 +44,8 @@ impl<'data> CachedImage<'data> {
 struct Renderer {
     context: Arc<crate::render_device::RenderContext>,
     stroke_renderer: stroke_renderer::StrokeLayerRenderer,
-    text_builder: text::TextBuilder,
-    text_renderer: text::renderer::TextRenderer,
+    text_builder: crate::text::TextBuilder,
+    text_renderer: crate::text::renderer::TextRenderer,
     blend_engine: crate::blend::BlendEngine,
     data: hashbrown::HashMap<crate::state::DocumentID, PerDocumentData>,
 }
@@ -55,8 +54,10 @@ impl Renderer {
         Ok(Self {
             context: context.clone(),
             blend_engine: crate::blend::BlendEngine::new(context.device())?,
-            text_builder: text::TextBuilder::allocate_new(context.allocators().memory().clone())?,
-            text_renderer: text::renderer::TextRenderer::new(context.clone())?,
+            text_builder: crate::text::TextBuilder::allocate_new(
+                context.allocators().memory().clone(),
+            )?,
+            text_renderer: crate::text::renderer::TextRenderer::new(context.clone())?,
             stroke_renderer: stroke_renderer::StrokeLayerRenderer::new(context)?,
             data: hashbrown::HashMap::new(),
         })
@@ -145,8 +146,8 @@ impl Renderer {
         context: &Arc<crate::render_device::RenderContext>,
         blend_engine: &crate::blend::BlendEngine,
         renderer: &stroke_renderer::StrokeLayerRenderer,
-        text_builder: &mut text::TextBuilder,
-        text_renderer: &text::renderer::TextRenderer,
+        text_builder: &mut crate::text::TextBuilder,
+        text_renderer: &crate::text::renderer::TextRenderer,
         document_data: &mut PerDocumentData,
         state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
         into: &Arc<vk::ImageView>,
@@ -393,8 +394,8 @@ impl Renderer {
     }
     fn render_text(
         context: &crate::render_device::RenderContext,
-        builder: &mut text::TextBuilder,
-        renderer: &text::renderer::TextRenderer,
+        builder: &mut crate::text::TextBuilder,
+        renderer: &crate::text::renderer::TextRenderer,
         image: &RenderData,
         px_per_em: f32,
         text: &str,
@@ -421,8 +422,8 @@ impl Renderer {
         });
         let units_per_em = f32::from(face.as_ref().units_per_em());
         let px_per_unit = px_per_em / units_per_em;
-        let size_class = text::SizeClass::from_scale_factor(px_per_unit)
-            .unwrap_or(text::SizeClass::ONE)
+        let size_class = crate::text::SizeClass::from_scale_factor(px_per_unit)
+            .unwrap_or(crate::text::SizeClass::ONE)
             .saturating_mul(renderer.internal_size_class());
         let mut xform = ultraviolet::Similarity2 {
             scale: px_per_unit,
@@ -442,13 +443,13 @@ impl Renderer {
             face,
             plan,
             size_class,
-            &text::MultilineInfo {
+            &crate::text::MultilineInfo {
                 text,
                 language: None,
                 script: Some(rustybuzz::script::LATIN),
                 main_direction: rustybuzz::Direction::LeftToRight,
                 line_spacing_mul: 1.0,
-                main_align: text::Align::Center,
+                main_align: crate::text::Align::Center,
                 cross_direction: rustybuzz::Direction::TopToBottom,
             },
             [0.0, 0.0, 0.0, 1.0],

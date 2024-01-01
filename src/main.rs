@@ -22,6 +22,7 @@ pub mod id;
 pub mod io;
 pub mod pen_tools;
 pub mod picker;
+pub mod text;
 pub mod render_device;
 pub mod state;
 pub mod stylus_events;
