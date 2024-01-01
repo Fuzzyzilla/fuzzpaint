@@ -300,9 +300,7 @@ impl Renderer {
                 }
                 // Render stroke image
                 Some(LeafType::Text {
-                    text,
-                    height: px_per_em,
-                    ..
+                    text, px_per_em, ..
                 }) => {
                     let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
                         anyhow::anyhow!(
@@ -398,7 +396,7 @@ impl Renderer {
         builder: &mut text::TextBuilder,
         renderer: &text::renderer::TextRenderer,
         image: &RenderData,
-        height: f32,
+        px_per_em: f32,
         text: &str,
     ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn GpuFuture>>> {
         static FACE: std::sync::OnceLock<(rustybuzz::Face<'static>, rustybuzz::ShapePlan)> =
@@ -421,11 +419,8 @@ impl Renderer {
 
             (face, plan)
         });
-        // Height, in font units.
-        // This seems to be roughly half the scale I would expect. Not sure
-        // if I am misunderstanding `height` or if the math is wrong.
-        let height_units = f32::from(face.as_ref().height());
-        let px_per_unit = height / height_units;
+        let units_per_em = f32::from(face.as_ref().units_per_em());
+        let px_per_unit = px_per_em / units_per_em;
         let size_class = text::SizeClass::from_scale_factor(px_per_unit)
             .unwrap_or(text::SizeClass::ONE)
             .saturating_mul(renderer.internal_size_class());
@@ -443,10 +438,21 @@ impl Renderer {
         // This is not behaving. Dont wanna fix it right now. grr.
         xform.append_similarity(proj);
 
-        let mut test_buf = rustybuzz::UnicodeBuffer::new();
-        test_buf.push_str(text);
-        test_buf.set_script(rustybuzz::script::LATIN);
-        let output = builder.tess_draw(face, plan, size_class, test_buf, [0.0, 0.0, 0.0, 1.0])?;
+        let output = builder.tess_draw_multiline(
+            face,
+            plan,
+            size_class,
+            &text::MultilineInfo {
+                text,
+                language: None,
+                script: Some(rustybuzz::script::LATIN),
+                main_direction: rustybuzz::Direction::LeftToRight,
+                line_spacing_mul: 1.0,
+                main_align: text::Align::Center,
+                cross_direction: rustybuzz::Direction::TopToBottom,
+            },
+            [0.0, 0.0, 0.0, 1.0],
+        )?;
         let commands = renderer.draw(
             xform.into_homogeneous_matrix().into_homogeneous(),
             image.view.clone(),

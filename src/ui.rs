@@ -655,9 +655,7 @@ fn leaf_props_panel(
             false
         }
         LeafType::Text {
-            text,
-            height: px_per_em,
-            ..
+            text, px_per_em, ..
         } => {
             let mut changed =
                 latch::latch(ui, (leaf_id, "pix-per-em"), *px_per_em, |ui, px_per_em| {
@@ -684,7 +682,7 @@ fn leaf_props_panel(
                 .is_some();
             // Clones on every frame. Buh. bad.
             changed |= latch::latch(ui, (leaf_id, "text"), text.clone(), |ui, new_text| {
-                let response = ui.text_edit_singleline(new_text);
+                let response = ui.text_edit_multiline(new_text);
                 // todo: Latch::None on esc.
                 match (response.lost_focus(), response.has_focus()) {
                     (true, _) => latch::Latch::Finish,
@@ -756,7 +754,7 @@ fn layer_buttons(
                     crate::state::graph::LeafType::Text {
                         blend: crate::blend::Blend::default(),
                         text: "Hello, world!".to_owned(),
-                        height: 50.0,
+                        px_per_em: 50.0,
                     },
                     add_location!(),
                     "Text".to_string(),

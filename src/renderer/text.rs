@@ -21,6 +21,7 @@
 //! and will be handled separately - thus, a shaping request can end up with up to 2 batches to draw, with differing pipelines.~~
 //! *correction: turns out that the extent of color support in `ttf_parser` (`COLRv0`) is fully representable by layered instance-colored glyphs!*
 
+use egui::TextBuffer;
 use rustybuzz::ttf_parser;
 use vulkano::buffer::Subbuffer;
 
@@ -202,7 +203,7 @@ impl SizeClass {
         2.0f32.powi(i32::from(self.0))
     }
 }
-
+#[derive(PartialEq, Clone, Copy)]
 pub enum OutputColor {
     /// Color varies between glyphs.
     PerInstance,
@@ -210,6 +211,8 @@ pub enum OutputColor {
     Solid([f32; 4]),
 }
 
+/// Data needed to render tessellated, shaped, and colored glyphs.
+#[derive(Clone)]
 pub struct DrawOutput {
     /// Full vertex buffer. Not all parts are used. Read-only!
     pub vertices: Subbuffer<[interface::Vertex]>,
@@ -230,9 +233,249 @@ pub struct DrawOutput {
     /// The bounding box around the rendered content, in the same units as vertex and instance position.
     /// (min, max)
     pub bound: Option<([i32; 2], [i32; 2])>,
+    /// Primary direction of the contained text, or None if inconsistent.
+    ///
+    /// (i.e., multiple different lines with different primary directionality are merged)
+    pub main_direction: Option<rustybuzz::Direction>,
+    /// Cross-axis direction, where newlines take the cursor. E.g. in latin script this is top-to-bottom.
+    pub cross_direction: Option<rustybuzz::Direction>,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum DrawAppendError {
+    #[error("too many instances")]
+    /// Vulkan's indirects specify u32 for the instance offset, cannot exceed this.
+    TooLong,
+    /// Draws come from different vertex/index caches/builders.
+    #[error("sources differ")]
+    SourceMismatch,
+}
+#[derive(thiserror::Error, Debug)]
+pub enum DrawError {
+    #[error(transparent)]
+    Tessellation(#[from] TessellateError),
+    #[error(transparent)]
+    InsertError(#[from] CacheInsertError),
+}
+#[derive(thiserror::Error, Debug)]
+pub enum DrawMultilineError {
+    #[error(transparent)]
+    Draw(#[from] DrawError),
+    #[error(transparent)]
+    Append(#[from] DrawAppendError),
+}
+impl DrawOutput {
+    /// Translate render data by the given amount. This is not a free operation, but
+    /// should be fairly cheap. font units.
+    ///
+    /// `self::glyphs` is not affected.
+    pub fn translate(&mut self, by: [i32; 2]) {
+        // Nothing to do.
+        if by == [0, 0] {
+            return;
+        }
+        for instance in &mut self.instances {
+            instance.glyph_position[0] = instance.glyph_position[0].saturating_add(by[0]);
+            instance.glyph_position[1] = instance.glyph_position[1].saturating_add(by[1]);
+        }
+        if let Some(bound) = &mut self.bound {
+            // No other arithmetic behavior here would be correct :<
+            // Good news is that this remains a correct bound even if saturation occurs.
+            bound.0[0] = bound.0[0].saturating_add(by[0]);
+            bound.1[0] = bound.1[0].saturating_add(by[0]);
+
+            bound.0[1] = bound.0[1].saturating_add(by[1]);
+            bound.1[1] = bound.1[1].saturating_add(by[1]);
+        }
+    }
+    /// Calculate the anchor of a given direction and align.
+    /// E.g. Left-to-right + start will give the left edge,
+    ///
+    /// None if the direction is `Invalid` or `self.bound.is_none()`
+    pub fn anchor(&self, direction: rustybuzz::Direction, align: Align) -> Option<i32> {
+        let (min, max) = self.bound?;
+        let (start, end) = match direction {
+            rustybuzz::Direction::LeftToRight => (min[0], max[0]),
+            rustybuzz::Direction::RightToLeft => (max[0], min[0]),
+            rustybuzz::Direction::TopToBottom => (min[1], max[1]),
+            rustybuzz::Direction::BottomToTop => (max[1], min[1]),
+            rustybuzz::Direction::Invalid => return None,
+        };
+        Some(match align {
+            Align::Start => start,
+            Align::End => end,
+            // midpoint
+            // for each bit: One if both set, else half if either set.
+            Align::Center => (start & end) + ((start ^ end) >> 1),
+        })
+    }
+    pub fn align_to(&mut self, origin: [i32; 2], main: Option<Align>, cross: Option<Align>) {
+        let mut x_offs = None;
+        let mut y_offs = None;
+        // ======== Main
+        if let Some((align, direction)) = main.zip(self.main_direction) {
+            if let Some(anchor) = self.anchor(direction, align) {
+                match direction {
+                    rustybuzz::Direction::LeftToRight | rustybuzz::Direction::RightToLeft => {
+                        // x-axis
+                        x_offs = Some(origin[0] - anchor);
+                    }
+                    rustybuzz::Direction::TopToBottom | rustybuzz::Direction::BottomToTop => {
+                        // y-axis
+                        y_offs = Some(origin[1] - anchor);
+                    }
+                    // self.anchor would have returned none.
+                    rustybuzz::Direction::Invalid => unreachable!(),
+                }
+            }
+        }
+        // ======== Cross
+        if let Some((align, direction)) = cross.zip(self.cross_direction) {
+            if let Some(anchor) = self.anchor(direction, align) {
+                match direction {
+                    rustybuzz::Direction::LeftToRight | rustybuzz::Direction::RightToLeft => {
+                        // x-axis
+                        x_offs = Some(origin[0] - anchor);
+                    }
+                    rustybuzz::Direction::TopToBottom | rustybuzz::Direction::BottomToTop => {
+                        // y-axis
+                        y_offs = Some(origin[1] - anchor);
+                    }
+                    // self.anchor would have returned none.
+                    rustybuzz::Direction::Invalid => unreachable!(),
+                }
+            }
+        }
+        let offs = [x_offs.unwrap_or(0), y_offs.unwrap_or(0)];
+        self.translate(offs);
+    }
+    /// Tight extent of the rendered output, in font units.
+    pub fn extent(&self) -> [u32; 2] {
+        if let Some((min, max)) = self.bound {
+            // We assume max >= min.
+            [min[0].abs_diff(max[0]), min[1].abs_diff(max[1])]
+        } else {
+            // None = no output = zero size.
+            [0; 2]
+        }
+    }
+    /// Combine text rendering operations. `other` is rendered *after* self (this could change!)
+    ///
+    /// `self` is not modified if an error is returned.
+    pub fn append(&mut self, other: &Self) -> Result<(), DrawAppendError> {
+        // ================= Buffers ==================
+        {
+            use vulkano::VulkanObject;
+            if (self.indices.buffer().handle() != other.indices.buffer().handle())
+                || (self.vertices.buffer().handle() != other.vertices.buffer().handle())
+            {
+                return Err(DrawAppendError::SourceMismatch);
+            }
+        }
+
+        // ================= Instances ==================
+        // Vulkan only allows u32 as indexes into the instance array, ensure we don't exceed that.
+        // (this is over-strict, only the base-instance has this restriction, base+count is allowed to exceed)
+        // (not super concerned about the 2-billion-instance edgecase, tho :P )
+
+        if !self
+            .instances
+            .len()
+            .checked_add(other.instances.len())
+            // Didn't overflow and is a valid u32
+            // (inverted to overflow or invalid)
+            .is_some_and(|total| u32::try_from(total).is_ok())
+        {
+            return Err(DrawAppendError::TooLong);
+        }
+        // TODO: merge instead of append.
+        // (insert like draws next to each other and increase indirect instance cound instead of more indirects)
+        // Unwrap fine, Checked at start.
+        let base_instance_shift = u32::try_from(self.instances.len()).unwrap();
+        self.instances.extend_from_slice(&other.instances);
+
+        let base_indirect = self.indirects.len();
+        self.indirects.extend_from_slice(&other.indirects);
+        // For each new indirect we just added...
+        for other_indirect in &mut self.indirects[base_indirect..] {
+            // We put these instances on the end, but they used to be zero-indexed.
+            // Shift that base up!
+            // Won't overflow - checked at the start.
+            other_indirect.first_instance += base_instance_shift;
+        }
+
+        // ================= Colors ==================
+        self.color_mode = if self.color_mode == other.color_mode {
+            self.color_mode
+        } else {
+            // Different modes, fallback on instance data (always correct)
+            OutputColor::PerInstance
+        };
+
+        // ================= Bounds ==================
+        self.bound = match (self.bound, other.bound) {
+            // None is 'empty bound'. Thus the union is whichever is set.
+            (None, None) => None,
+            (Some(b), None) | (None, Some(b)) => Some(b),
+            // But if both set, find the AABB union of the two.
+            (Some((a_min, a_max)), Some((b_min, b_max))) => Some((
+                [a_min[0].min(b_min[0]), a_min[1].min(b_min[1])],
+                [a_min[1].max(b_max[1]), a_max[1].max(b_max[1])],
+            )),
+        };
+
+        // ================ Direction =================
+        self.main_direction = if self.main_direction == other.main_direction {
+            self.main_direction
+        } else {
+            // Mixed primary directionality, weh
+            None
+        };
+        self.cross_direction = if self.cross_direction == other.cross_direction {
+            self.cross_direction
+        } else {
+            None
+        };
+
+        Ok(())
+    }
+}
+pub struct FullOutput {
+    /// Rendering info
+    pub draw: DrawOutput,
 
     /// Finished glyph buffer. Primarily for mem reclaimation.
     pub glyphs: rustybuzz::GlyphBuffer,
+}
+
+/// Direction/Axis agnostic Align.
+#[derive(Clone, Copy)]
+pub enum Align {
+    Start,
+    Center,
+    End,
+    // Justify is a whole task. no thanks! x3
+}
+
+/// Wayyy too many args for a fn!
+pub struct MultilineInfo<'a> {
+    /// Text containing zero or more lines, delimited by `\n` or `\r\n` with optional newline at the end.
+    pub text: &'a str,
+    /// Language the string is in, None to guess. Must match the plan.
+    pub language: Option<rustybuzz::Language>,
+    /// Script the string is in, None to guess. Must match the plan.
+    pub script: Option<rustybuzz::Script>,
+    /// Main text direction. Must match the plan.
+    pub main_direction: rustybuzz::Direction,
+    /// Multiplier by the font's line spacing
+    pub line_spacing_mul: f32,
+    /// Main-axis align. Eg. in latin script, this is horizontal align with `Start` = left.
+    ///
+    /// Cross-axis is not yet implemented.
+    // Fixme, this is Flexbox language, not typographic language!
+    pub main_align: Align,
+    /// Order each new line goes in relation to the previous, must be perendicular to `main_direction`.
+    pub cross_direction: rustybuzz::Direction,
 }
 
 pub struct TextBuilder {
@@ -286,6 +529,136 @@ impl TextBuilder {
             cache: cache::GlyphCache::new(vertices, indices),
         }
     }
+    pub fn tess_draw_multiline(
+        &mut self,
+        face: &rustybuzz::Face,
+        plan: &rustybuzz::ShapePlan,
+        size_class: SizeClass,
+        info: &MultilineInfo,
+        color: [f32; 4],
+    ) -> Result<DrawOutput, DrawMultilineError> {
+        // This is a sealed implementation detail of rustybuzz that I snuck a peak at...
+        const CONTEXT_CHARS: usize = 5;
+        type Context = [char; CONTEXT_CHARS];
+        // Every unicode scalar is at most 4 utf8 bytes,
+        const CONTEXT_BYTES: usize = CONTEXT_CHARS * 4;
+        // In which I greatly overcomplicate it in the name of not having to allocate `Strings`:
+        fn make_context_str<'bytes>(
+            context: &[char],
+            context_bytes: &'bytes mut [u8; CONTEXT_BYTES],
+        ) -> &'bytes str {
+            let context = if context.len() > CONTEXT_CHARS {
+                &context[context.len() - CONTEXT_CHARS..]
+            } else {
+                context
+            };
+            let mut cursor = 0;
+            for c in context {
+                let c_str = c.encode_utf8(&mut context_bytes[cursor..]);
+                cursor += c_str.len();
+            }
+            // Safety: we just went char-by-char encoding into valid utf-8!
+            debug_assert!(std::str::from_utf8(&context_bytes[..cursor]).is_ok());
+            unsafe { std::str::from_utf8_unchecked(&context_bytes[..cursor]) }
+        }
+
+        const BREAK_CHAR: char = ' ';
+
+        // This seems like the wrong property to use, but line height is always zero!
+        // future self, this is called "Leading"
+        let line_height = i32::from(face.height());
+        let mut vcursor = 0i32;
+
+        let mut lines = info.text.lines();
+
+        let mut prev = None::<&str>;
+        // If no text, branch with Ok(empty)
+        let Some(mut cur) = lines.next() else {
+            return Ok(self.empty_draw());
+        };
+        // Purposefully none-able
+        let mut next = lines.next();
+
+        let mut outer_buffer = Some(rustybuzz::UnicodeBuffer::new());
+        let mut output = None::<DrawOutput>;
+
+        loop {
+            // Shape `cur`, using `prev` and `next` to inform context, if any.
+            // Append render data to collection
+            // while lines.next() is some, line -> next -> cur -> prev.
+
+            // Always some, put back at end of loop.
+            let mut buffer = outer_buffer.take().unwrap();
+            // *meticulously avoids string copies only to have to do it every loop lmao*
+            if let Some(lang) = info.language.clone() {
+                buffer.set_language(lang);
+            }
+            if let Some(script) = info.script {
+                buffer.set_script(script);
+            }
+            buffer.set_direction(info.main_direction);
+
+            // ==============================  Set str, pre-post context.
+            // (empty by default due to clear at the end)
+            buffer.push_str(cur);
+            let mut flags = rustybuzz::BufferFlags::empty();
+            if let Some(prev) = prev {
+                // Take *last* 4 chars of the last line
+                // Wont ever allocate.
+                let mut last_chars: smallvec::SmallVec<Context> =
+                    prev.chars().rev().take(CONTEXT_CHARS - 1).collect();
+                last_chars.reverse();
+                // Put a space on the end, to hint to shaper that there is a break here.
+                last_chars.push(BREAK_CHAR);
+                buffer.set_pre_context(make_context_str(&last_chars, &mut [0u8; CONTEXT_BYTES]));
+            } else {
+                flags |= rustybuzz::BufferFlags::BEGINNING_OF_TEXT;
+            }
+            if let Some(next) = next {
+                // Take *first* 4 chars of the next line
+                // Wont ever allocate.
+                let mut first_chars: smallvec::SmallVec<Context> =
+                    next.chars().take(CONTEXT_CHARS - 1).collect();
+                // Put a space on the front, to hint to shaper that there is a break here.
+                first_chars.insert(0, BREAK_CHAR);
+                buffer.set_post_context(make_context_str(&first_chars, &mut [0u8; CONTEXT_BYTES]));
+            } else {
+                flags |= rustybuzz::BufferFlags::END_OF_TEXT;
+            }
+            buffer.set_flags(flags);
+
+            // =============================== Shape and tess
+            let mut new_output = self.tess_draw(face, plan, size_class, buffer, color)?;
+            if vcursor != 0 {
+                new_output.draw.translate([0, vcursor]);
+            }
+            vcursor -= line_height;
+            new_output
+                .draw
+                .align_to([0; 2], Some(info.main_align), None);
+            match output.as_mut() {
+                None => output = Some(new_output.draw),
+                Some(output) => output.append(&new_output.draw)?,
+            }
+
+            // ================================= Continue
+            outer_buffer = Some(new_output.glyphs.clear());
+            if let Some(n) = next {
+                // More to do, shift down.
+                prev = Some(cur);
+                cur = n;
+                // Could be none - breaks out at end of next pass.
+                next = lines.next();
+            } else {
+                // Ran out of text!
+                break;
+            }
+        }
+
+        // Todo: should be FullOutput.
+        // Shouldn't ever be none.
+        Ok(output.unwrap_or_else(|| self.empty_draw()))
+    }
     /// Prepare to draw a single line string, tessellating if necessary.
     ///
     /// The output units are untouched and straight from the font data - it is up to the consumer to transform
@@ -299,12 +672,16 @@ impl TextBuilder {
         size_class: SizeClass,
         text: rustybuzz::UnicodeBuffer,
         color: [f32; 4],
-    ) -> Result<DrawOutput, DrawError> {
+    ) -> Result<FullOutput, DrawError> {
         // Currently there is no color support, and much work needs to be done
         // (in particular, current logic is totally unstable ordered)
 
         // We don't set any buffer properties (tbh I don't know what they do)
         // so they wont be incompatible.
+        let main_direction = match text.direction() {
+            rustybuzz::Direction::Invalid => None,
+            dir => Some(dir),
+        };
         let buffer = rustybuzz::shape_with_plan(face, plan, text);
 
         self.tess(face.as_ref(), size_class, &buffer)?;
@@ -396,13 +773,18 @@ impl TextBuilder {
         );
 
         let (vertices, indices) = self.cache.buffers();
-        Ok(DrawOutput {
-            vertices: vertices.clone(),
-            indices: indices.clone(),
-            indirects,
-            instances: flat_instances,
-            bound: render_bound,
-            color_mode: OutputColor::Solid(color),
+        Ok(FullOutput {
+            draw: DrawOutput {
+                vertices: vertices.clone(),
+                indices: indices.clone(),
+                indirects,
+                instances: flat_instances,
+                bound: render_bound,
+                color_mode: OutputColor::Solid(color),
+                main_direction,
+                // No data for this in a single-line context.
+                cross_direction: None,
+            },
             glyphs: buffer,
         })
     }
@@ -457,6 +839,19 @@ impl TextBuilder {
 
         Ok(())
     }
+    fn empty_draw(&self) -> DrawOutput {
+        let (vertices, indices) = self.cache.buffers();
+        DrawOutput {
+            vertices: vertices.clone(),
+            indices: indices.clone(),
+            instances: vec![],
+            indirects: vec![],
+            color_mode: OutputColor::Solid([1.0; 4]),
+            bound: None,
+            cross_direction: None,
+            main_direction: None,
+        }
+    }
 }
 
 pub mod interface {
@@ -485,14 +880,6 @@ pub mod interface {
         pub glyph_color: [f32; 4],
     }
 }
-
-#[derive(thiserror::Error, Debug)]
-pub enum DrawError {
-    #[error(transparent)]
-    Tessellation(#[from] TessellateError),
-    #[error(transparent)]
-    InsertError(#[from] CacheInsertError),
-}
 pub mod renderer {
     use crate::vulkano_prelude::*;
     use std::sync::Arc;
@@ -515,7 +902,7 @@ pub mod renderer {
                         layout(location = 2) in vec4 glyph_color;     // monochrome pipeline - dontcare!
 
                         void main() {
-                            gl_Position = mvp * vec4((position + vec2(glyph_position)), 0.0, 1.0);
+                            gl_Position = mvp * vec4(position + vec2(glyph_position), 0.0, 1.0);
                         }
                     "
                 }
@@ -579,6 +966,7 @@ pub mod renderer {
     }
 
     pub struct TextRenderer {
+        monochrome_samples: vk::SampleCount,
         context: Arc<crate::render_device::RenderContext>,
         monochrome_renderpass: Arc<vk::RenderPass>,
         /// Draws the tris into MSAA buff
@@ -593,17 +981,13 @@ pub mod renderer {
         colorize_pipeline: Arc<vk::GraphicsPipeline>,
     }
     impl TextRenderer {
-        const SAMPLES: vk::SampleCount = vk::SampleCount::Sample8;
         /// Get the internal scale factor due to multisampling.
         /// Should be multiplied by the tessellation factor prior to building for best looking results.
         pub fn internal_size_class(&self) -> super::SizeClass {
-            // In the future this will be a lookup of device capabilities,
-            // Self::SAMPLES won't be const.
-            #![allow(clippy::unused_self)]
             use vk::SampleCount;
             // Spacial resolution multiplier is sqrt(sample count).
-            // To convert to SizeClass, take the ciel of this, log2.
-            let log2_sqrt_samples = match Self::SAMPLES {
+            // To convert to SizeClass, take the log2 of this, ceil.
+            let log2_sqrt_samples = match self.monochrome_samples {
                 SampleCount::Sample1 => 0,
                 SampleCount::Sample2 | SampleCount::Sample4 => 1,
                 SampleCount::Sample8 | SampleCount::Sample16 => 2,
@@ -614,7 +998,10 @@ pub mod renderer {
 
             super::SizeClass::from_exp_lossy(log2_sqrt_samples)
         }
-        pub fn make_renderpass(device: Arc<vk::Device>) -> anyhow::Result<Arc<vk::RenderPass>> {
+        pub fn make_renderpass(
+            device: Arc<vk::Device>,
+            sample_count: vk::SampleCount,
+        ) -> anyhow::Result<Arc<vk::RenderPass>> {
             use vulkano::render_pass::{
                 AttachmentDescription, AttachmentReference, RenderPass, RenderPassCreateInfo,
                 Subpass, SubpassDependency, SubpassDescription,
@@ -628,7 +1015,7 @@ pub mod renderer {
                     load_op: vk::AttachmentLoadOp::Clear,
                     store_op: vk::AttachmentStoreOp::DontCare,
                     format: vk::Format::R8_UNORM,
-                    samples: Self::SAMPLES,
+                    samples: sample_count,
                     initial_layout: vk::ImageLayout::Undefined,
                     final_layout: vk::ImageLayout::ColorAttachmentOptimal,
                     ..Default::default()
@@ -725,11 +1112,26 @@ pub mod renderer {
             .map_err(Into::into)
         }
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
+            let monochrome_samples = context
+                .physical_device()
+                .image_format_properties(vulkano::image::ImageFormatInfo {
+                    format: vk::Format::R8_UNORM,
+                    tiling: vulkano::image::ImageTiling::Optimal,
+                    usage: vk::ImageUsage::TRANSIENT_ATTACHMENT | vk::ImageUsage::COLOR_ATTACHMENT,
+                    ..Default::default()
+                })?
+                .ok_or_else(|| anyhow::anyhow!("unsupported image configuration"))?
+                .sample_counts
+                .max_count();
+            if monochrome_samples == vk::SampleCount::Sample1 {
+                // The failure path here involves a whole different pipeline :V
+                anyhow::bail!("msaa unsupported")
+            }
             let multisample_grey = vk::Image::new(
                 context.allocators().memory().clone(),
                 vk::ImageCreateInfo {
                     format: vk::Format::R8_UNORM,
-                    samples: Self::SAMPLES,
+                    samples: monochrome_samples,
                     // Don't need long-lived data. Render, and resolve source.
                     usage: vk::ImageUsage::TRANSIENT_ATTACHMENT | vk::ImageUsage::COLOR_ATTACHMENT,
                     // Todo: query whether this is supported
@@ -763,20 +1165,25 @@ pub mod renderer {
 
             // Tiling renderer shenanigans, mostly for practice lol
             // Forms a per-fragment pipe from MSAA -> Resolve -> Color
-            let monochrome_renderpass = Self::make_renderpass(context.device().clone())?;
+            let monochrome_renderpass =
+                Self::make_renderpass(context.device().clone(), monochrome_samples)?;
 
             let resolve_grey = vk::ImageView::new_default(resolve_grey)?;
             let multisample_grey = vk::ImageView::new_default(multisample_grey)?;
 
             let mut pass = monochrome_renderpass.clone().first_subpass();
-            let monochrome_pipeline =
-                Self::make_monochrome_pipe(context.device().clone(), pass.clone())?;
+            let monochrome_pipeline = Self::make_monochrome_pipe(
+                context.device().clone(),
+                pass.clone(),
+                monochrome_samples,
+            )?;
 
             pass.next_subpass();
             let (colorize_pipeline, resolve_input_set) =
                 Self::make_colorize_pipe(context.as_ref(), pass, resolve_grey.clone())?;
 
             Ok(Self {
+                monochrome_samples,
                 context,
                 monochrome_renderpass,
                 monochrome_pipeline,
@@ -807,6 +1214,7 @@ pub mod renderer {
         fn make_monochrome_pipe(
             device: Arc<vk::Device>,
             subpass: vk::Subpass,
+            samples: vk::SampleCount,
         ) -> anyhow::Result<Arc<vk::GraphicsPipeline>> {
             let vert = shaders::monochrome::vert::load(device.clone())?;
             let vert = vert.entry_point("main").unwrap();
@@ -854,7 +1262,7 @@ pub mod renderer {
                     rasterization_state: Some(vk::RasterizationState::default()),
                     subpass: Some(subpass.into()),
                     multisample_state: Some(vk::MultisampleState {
-                        rasterization_samples: Self::SAMPLES,
+                        rasterization_samples: samples,
                         ..Default::default()
                     }),
                     // Viewport dynamic, scissor irrelevant.

@@ -29,7 +29,7 @@ pub enum LeafType {
         text: String,
         // "em" is a physical unit. Currently, we have no means to deal with this fact.
         // Allow the user to specify manually.
-        height: f32,
+        px_per_em: f32,
     },
     // The name of the note is the note!
     Note,
