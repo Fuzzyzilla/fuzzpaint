@@ -29,6 +29,7 @@ egui-winit = { version = "0.23.0", default-features = false, features = [
 ] }
 either = "1.9.0"
 env_logger = "0.10.0"
+fontdb = "0.16.0"
 hashbrown = { version = "0.14.0", features = ["serde"] }
 human_bytes = "0.4.3"
 id_tree = "1.8.0"

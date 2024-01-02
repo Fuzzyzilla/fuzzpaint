@@ -31,64 +31,6 @@ pub use cache::{CacheInsertError, ColorInsertError};
 mod tessellator;
 pub use tessellator::{ColorError, TessellateError};
 
-/// Based on the `fsType` field of OTF/os2. Does not correspond exactly with those flags.
-///
-/// Describes the licensing restriction of a font in increasing permissiveness, and how it may be used in relation
-/// to exported fuzzpaint documents. The comment description is NOT legal advice, but
-/// [Microsoft's](https://learn.microsoft.com/en-us/typography/opentype/spec/os2#fst) is probably closer.
-#[derive(Copy, Clone, Debug)]
-pub enum EmbedRestrictionLevel {
-    /// The font data cannot be embedded for our purposes.
-    LocalOnly,
-    /// The font data may be embedded into a read-only fuzzpaint document - no part of the document can be modified on a
-    /// system that did not author it as long as this font is embedded. The wording in Microsoft's document is permissive
-    /// enough to allow opening the document in a writable mode, as long as the font data is not loaded in this process and is discarded.
-    ReadOnly,
-    /// The font data may be embedded into an editable fuzzpaint document.
-    Writable,
-    /// The font data may be extracted from the document by an end user, for permanent use on their system.
-    Installable,
-}
-#[derive(Copy, Clone, Debug)]
-pub struct EmbedRestriction {
-    /// Can we save size by embedding just the used subset?
-    /// (we don't even have this capability yet and it seems unlikely I'll do it any time soon
-    /// + would interfere with document sharability)
-    ///
-    /// Meaningless if `level == LocalOnly`, but still parsed.
-    can_subset: bool,
-    /// To what extent are we allowed to embed this font?
-    /// Bitmap-only embeds are considered Non-embeddable, as that defeats the whole point.
-    level: EmbedRestrictionLevel,
-}
-impl EmbedRestriction {
-    // I originally wrote all of the bitparsing logic for all four versions, before realizing
-    // ttf_parser exposes all the fields itself. Whoops!
-    /// Extract the embed restrictions from the given table, or None if table failed to parse.
-    #[must_use]
-    pub fn from_table(table: &ttf_parser::os2::Table) -> Option<Self> {
-        let permissions = table.permissions()?;
-        // These flags are meaningless unless ^^ is some, that's okay!
-        let can_subset = table.is_subsetting_allowed();
-        // Misnomer - this checks if bit 9 is zero.
-        // If bit unset, this means all data embeddable, set means bitmap only.
-        let bitmap_only = !table.is_bitmap_embedding_allowed();
-
-        let level = if bitmap_only {
-            // Bitmap-only mode means there's no use in us embedding, at least for our purposes!
-            // (todo: for a bitmap-only font, this is actually permissive. We don't handle those yet anyway!)
-            EmbedRestrictionLevel::ReadOnly
-        } else {
-            match permissions {
-                ttf_parser::Permissions::Restricted => EmbedRestrictionLevel::LocalOnly,
-                ttf_parser::Permissions::PreviewAndPrint => EmbedRestrictionLevel::ReadOnly,
-                ttf_parser::Permissions::Editable => EmbedRestrictionLevel::Writable,
-                ttf_parser::Permissions::Installable => EmbedRestrictionLevel::Installable,
-            }
-        };
-        Some(Self { can_subset, level })
-    }
-}
 #[derive(Debug)]
 pub enum GlyphColorMode {
     /// Static color. This may vary by face variation axes.
