@@ -946,7 +946,7 @@ pub mod renderer {
         ) -> anyhow::Result<Arc<vk::RenderPass>> {
             use vulkano::render_pass::{
                 AttachmentDescription, AttachmentReference, RenderPass, RenderPassCreateInfo,
-                Subpass, SubpassDependency, SubpassDescription,
+                SubpassDependency, SubpassDescription,
             };
             use vulkano::sync::{AccessFlags, DependencyFlags, PipelineStages};
 
