@@ -59,6 +59,7 @@ pub mod vk {
             view::{ImageView, ImageViewCreateInfo, ImageViewType},
             Image, ImageAspects, ImageCreateFlags, ImageCreateInfo, ImageLayout,
             ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, SampleCount,
+            SampleCounts,
         },
         instance::{Instance, InstanceCreateInfo},
         library::VulkanLibrary,

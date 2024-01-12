@@ -16,6 +16,7 @@ use crate::util::{Color, NonNanF32};
 
 /// When inserting, is the caret glued to the span before or after it?
 /// Used when choosing what properties to inherit.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum CaretAffinity {
     Before,
     After,
@@ -37,6 +38,70 @@ struct TextProperties {
     face: rangemap::RangeMap<usize, Face>,
     size: rangemap::RangeMap<usize, NonNanF32>,
     style: rangemap::RangeMap<usize, Style>,
+}
+/// Expand from the given position, inheriting properties based on the affinity.
+fn insert_inherited<T: Eq + Clone>(
+    map: &mut rangemap::RangeMap<usize, T>,
+    pos: usize,
+    len: usize,
+    affinity: CaretAffinity,
+) {
+    // impossible, or highly hack-y.
+    // Do i need a fork? :V
+    todo!()
+}
+/// Checks that the insert doesn't fuse with pre or post. (ie, the sum of
+/// grapheme count of each is the same as the grapheme count of them concatenated).
+/// `false` if they fuse.
+///
+/// It is assumed that the string from which `pre` and `post` are
+/// taken was split at a grapheme boundary.
+fn check_doesnt_fuse(pre: &str, insert: &str, post: &str) -> bool {
+    use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
+    // Make a cursor into the theoretical merged text:
+    let mut cursor = GraphemeCursor::new(pre.len(), pre.len() + insert.len() + post.len(), true);
+    // Check start:
+    match cursor.is_boundary(insert, pre.len()) {
+        Ok(false) => return false,
+        Ok(true) => (),
+        Err(GraphemeIncomplete::PreContext(end)) => {
+            // Asked for further context, provide the start and try again:
+            cursor.provide_context(&pre[..end], 0);
+            // Failed again. Any "incomplete" errors here hint at merging.
+            if !cursor.is_boundary(insert, pre.len()).is_ok_and(|b| b) {
+                return false;
+            }
+        }
+        // Other err kinds do not apply to this operation.
+        Err(_) => unreachable!(),
+    }
+
+    // Check end:
+    // Yummy syntactic recursion >w>
+    cursor.set_cursor(pre.len() + insert.len());
+    match cursor.is_boundary(post, pre.len() + insert.len()) {
+        Ok(false) => false,
+        Ok(true) => true,
+        Err(GraphemeIncomplete::PreContext(end)) => {
+            // These assume the order it will ask for context in. I don't wanna fix that. Blegh.
+            // Asked for further context, provide `insert` and try again:
+            cursor.provide_context(&insert[..(end - pre.len())], pre.len());
+            match cursor.is_boundary(insert, pre.len()) {
+                Ok(false) => false,
+                Ok(true) => true,
+                Err(GraphemeIncomplete::PreContext(end)) => {
+                    // Asked for further context, provide the start and try again:
+                    cursor.provide_context(&pre[..end], 0);
+                    // Failed again. Any "incomplete" errors here hint at merging.
+                    cursor.is_boundary(insert, pre.len()).is_ok_and(|b| b)
+                }
+                // Other err kinds do not apply to this operation.
+                Err(_) => unreachable!(),
+            }
+        }
+        // Other err kinds do not apply to this operation.
+        Err(_) => unreachable!(),
+    }
 }
 impl TextProperties {
     fn new() -> Self {
@@ -81,13 +146,25 @@ impl TextProperties {
             self.style.remove(range);
         }
     }
+    /// Expand from the given position, inheriting properties based on the affinity.
+    fn insert_inherited(&mut self, pos: usize, len: usize, affinity: CaretAffinity) {
+        insert_inherited(&mut self.color, pos, len, affinity);
+        insert_inherited(&mut self.size, pos, len, affinity);
+        insert_inherited(&mut self.face, pos, len, affinity);
+        insert_inherited(&mut self.style, pos, len, affinity);
+    }
 }
-pub struct RichText {
+pub struct RichTextParagraph {
     properties: TextProperties,
     len_graphemes: usize,
     text: String,
 }
-impl RichText {
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+pub enum TextInsertError {
+    #[error("inserted text has incomplete graphemes on either end")]
+    DanglingGraphemes,
+}
+impl RichTextParagraph {
     pub fn new(text: String) -> Self {
         use unicode_segmentation::UnicodeSegmentation;
         Self {
@@ -99,8 +176,8 @@ impl RichText {
     /// Iterate spans of distinct styles.
     /// Every returned span is guaranteed to be properly aligned to graphemes.
     #[must_use = "returns an iterator"]
-    pub fn spans(&'_ self) -> RichTextSpanIter<'_> {
-        RichTextSpanIter {
+    pub fn spans(&'_ self) -> RichTextParagraphSpans<'_> {
+        RichTextParagraphSpans {
             cur_grapheme: 0,
             after_end_cursor: unicode_segmentation::GraphemeCursor::new(0, self.text.len(), true),
             text: &self.text,
@@ -139,14 +216,58 @@ impl RichText {
         self.properties
             .set(self.clamp_range(grapheme_range), color, size, face, style);
     }
+    pub fn insert(
+        &mut self,
+        text: &str,
+        grapheme_position: usize,
+        affinity: CaretAffinity,
+    ) -> Result<(), TextInsertError> {
+        use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
+        // Avoid weirdness
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        // Clamp to end
+        let grapheme_position = grapheme_position.min(self.len_graphemes);
+        // How many graphemes are we inserting?
+        let num_graphemes = text.graphemes(true).count();
+        // Into what byte position do we insert these chars?
+        let insert_position = self
+            .text
+            .grapheme_indices(true)
+            .nth(grapheme_position)
+            .map_or(self.text.len(), |(pos, _)| pos);
+        debug_assert!(insert_position <= self.text.len());
+
+        // Check that, upon insertion of this text, the world wont explode
+        // (ie, that the graphemes from either side won't merge with the new text,
+        // ruining all the indices in the process)
+        if !check_doesnt_fuse(
+            &self.text[..insert_position],
+            text,
+            &self.text[insert_position..],
+        ) {
+            return Err(TextInsertError::DanglingGraphemes);
+        }
+
+        // Make space in the properties
+        self.properties
+            .insert_inherited(grapheme_position, num_graphemes, affinity);
+        // Insert the string into the made space.
+        self.text.insert_str(insert_position, text);
+        self.len_graphemes += num_graphemes;
+
+        Ok(())
+    }
 }
 #[derive(Debug, PartialEq)]
 pub struct RichTextSpan<'a> {
-    /// Pre-context, if available. Not available at the start of a paragraph.
+    /// Pre-context, if available. Not available at the start of a line or paragraph.
     pub pre: Option<&'a str>,
-    /// The text, guaranteed to be aligned to graphemes.
+    /// The text, guaranteed to be aligned to graphemes and containing no line breaks or paragraph breaks.
     pub span: &'a str,
-    /// Post-context, if available. Not available at the end of a paragraph.
+    /// Post-context, if available. Not available at the end of a line or paragraph.
     pub post: Option<&'a str>,
     pub color: Option<&'a Color>,
     pub size: Option<&'a NonNanF32>,
@@ -155,7 +276,7 @@ pub struct RichTextSpan<'a> {
 }
 type PropertyIter<'a, V> = rangemap::map::Iter<'a, usize, V>;
 use std::iter::Peekable;
-pub struct RichTextSpanIter<'a> {
+pub struct RichTextParagraphSpans<'a> {
     /// Grapheme index of `after_end_cursor`
     cur_grapheme: usize,
     /// Current grapheme cursor
@@ -195,7 +316,7 @@ fn next_prop<'peek, 'inner: 'peek, V>(
         Some((peek.0.start, None))
     }
 }
-impl<'a> Iterator for RichTextSpanIter<'a> {
+impl<'a> Iterator for RichTextParagraphSpans<'a> {
     type Item = RichTextSpan<'a>;
     fn next(&mut self) -> Option<RichTextSpan<'a>> {
         // Start index, *in bytes*
@@ -269,7 +390,7 @@ impl<'a> Iterator for RichTextSpanIter<'a> {
 mod test {
     #[test]
     fn iter_nostyles() {
-        let rt = super::RichText::new("Uwu!!".to_owned());
+        let rt = super::RichTextParagraph::new("Uwu!!".to_owned());
 
         assert_eq!(
             rt.spans().collect::<Vec<_>>(),
@@ -288,19 +409,19 @@ mod test {
     }
     #[test]
     fn iter_unpaired_graphemes() {
-        let rt = super::RichText::new("Wow!\u{1F1E6}".to_owned());
+        let rt = super::RichTextParagraph::new("Wow!\u{1F1E6}".to_owned());
 
         assert_eq!(rt.spans().count(), 1);
     }
     #[test]
     fn iter_empty() {
-        let rt = super::RichText::new(String::new());
+        let rt = super::RichTextParagraph::new(String::new());
 
         assert_eq!(rt.spans().count(), 0);
     }
     #[test]
     fn context() {
-        let mut rt = super::RichText::new("Wow".to_owned());
+        let mut rt = super::RichTextParagraph::new("Wow".to_owned());
         // Setting the style of the "o" forces this into three spans:
         rt.set(1..2, Some(super::Color::BLACK), None, None, None);
 
@@ -342,7 +463,7 @@ mod test {
     }
     #[test]
     fn overlapping_spans() {
-        let mut rt = super::RichText::new("0123456789".to_owned());
+        let mut rt = super::RichTextParagraph::new("0123456789".to_owned());
         rt.set(1..5, Some(super::Color::BLACK), None, None, None);
         // API aint great at time of writing lol
         rt.set(
@@ -409,6 +530,29 @@ mod test {
             ]
             .into_iter()
             .collect::<Vec<_>>(),
+        );
+    }
+    #[test]
+    fn merge_error() {
+        // Ends with "REGIONAL INDICATOR A"
+        let mut rt = super::RichTextParagraph::new("Wow!\u{1F1E6}".to_owned());
+        // Inserting another regional indicator forms a flag, and should not be allowed for now.
+        // (will later imply more logic that must occur to make everything dandy)
+        assert_eq!(
+            rt.insert("\u{1F1E6}", 100, super::CaretAffinity::Before),
+            Err(super::TextInsertError::DanglingGraphemes)
+        );
+
+        let mut rt = super::RichTextParagraph::new("\u{1F1E6}Soup!!".to_owned());
+        assert_eq!(
+            rt.insert("\u{1F1E6}", 0, super::CaretAffinity::Before),
+            Err(super::TextInsertError::DanglingGraphemes)
+        );
+        let mut rt = super::RichTextParagraph::new("Wwawawaawawawa\u{1F1E6}Soup!!".to_owned());
+        // Inserting regional indicator here doesn't merge and is fine.
+        assert_eq!(
+            rt.insert("\u{1F1E6}", 2, super::CaretAffinity::Before),
+            Ok(())
         );
     }
 }

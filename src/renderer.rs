@@ -45,7 +45,7 @@ struct Renderer {
     context: Arc<crate::render_device::RenderContext>,
     stroke_renderer: stroke_renderer::StrokeLayerRenderer,
     text_builder: crate::text::TextBuilder,
-    text_renderer: crate::text::renderer::TextRenderer,
+    text_renderer: crate::text::renderer::monochrome::Renderer,
     blend_engine: crate::blend::BlendEngine,
     data: hashbrown::HashMap<crate::state::DocumentID, PerDocumentData>,
 }
@@ -57,7 +57,7 @@ impl Renderer {
             text_builder: crate::text::TextBuilder::allocate_new(
                 context.allocators().memory().clone(),
             )?,
-            text_renderer: crate::text::renderer::TextRenderer::new(context.clone())?,
+            text_renderer: crate::text::renderer::monochrome::Renderer::new(context.clone())?,
             stroke_renderer: stroke_renderer::StrokeLayerRenderer::new(context)?,
             data: hashbrown::HashMap::new(),
         })
@@ -147,7 +147,7 @@ impl Renderer {
         blend_engine: &crate::blend::BlendEngine,
         renderer: &stroke_renderer::StrokeLayerRenderer,
         text_builder: &mut crate::text::TextBuilder,
-        text_renderer: &crate::text::renderer::TextRenderer,
+        text_renderer: &crate::text::renderer::monochrome::Renderer,
         document_data: &mut PerDocumentData,
         state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
         into: &Arc<vk::ImageView>,
@@ -395,7 +395,7 @@ impl Renderer {
     fn render_text(
         context: &crate::render_device::RenderContext,
         builder: &mut crate::text::TextBuilder,
-        renderer: &crate::text::renderer::TextRenderer,
+        renderer: &crate::text::renderer::monochrome::Renderer,
         image: &RenderData,
         px_per_em: f32,
         text: &str,
