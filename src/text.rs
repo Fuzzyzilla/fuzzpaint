@@ -176,6 +176,8 @@ pub struct DrawOutput {
     /// The bounding box around the rendered content, in the same units as vertex and instance position.
     /// (min, max)
     pub bound: Option<([i32; 2], [i32; 2])>,
+    /// Where the cursor was at the end of the shaping.
+    pub end_cursor: Option<[i32; 2]>,
     /// Primary direction of the contained text, or None if inconsistent.
     ///
     /// (i.e., multiple different lines with different primary directionality are merged)
@@ -229,6 +231,10 @@ impl DrawOutput {
 
             bound.0[1] = bound.0[1].saturating_add(by[1]);
             bound.1[1] = bound.1[1].saturating_add(by[1]);
+        }
+        if let Some(cursor) = &mut self.end_cursor {
+            cursor[0] = cursor[0].saturating_add(by[0]);
+            cursor[1] = cursor[1].saturating_add(by[1]);
         }
     }
     /// Calculate the anchor of a given direction and align.
@@ -367,6 +373,10 @@ impl DrawOutput {
             )),
         };
 
+        // ================= Cursor ==================
+        // Prefer second cursor. fallback on self.
+        self.end_cursor = other.end_cursor.or(self.end_cursor);
+
         // ================ Direction =================
         self.main_direction = if self.main_direction == other.main_direction {
             self.main_direction
@@ -471,6 +481,24 @@ impl TextBuilder {
             tessellator: lyon_tessellation::FillTessellator::new(),
             cache: cache::GlyphCache::new(vertices, indices),
         }
+    }
+    pub fn tess_draw_rich<'faces, 'face: 'faces, 'rich, Faces>(
+        &mut self,
+        faces: &'faces Faces,
+        rich: &'rich crate::state::rich_text::RichTextParagraph,
+        base: &crate::state::rich_text::FullProperties,
+    ) -> Result<DrawOutput, DrawMultilineError>
+    where
+        // Todo: concrete type once Font repository is done.
+        Faces: std::ops::Index<
+            &'rich crate::repositories::fonts::VariedFaceID,
+            Output = Option<&'faces rustybuzz::Face<'face>>,
+        >,
+    {
+        for span in rich.spans() {
+            let style = span.unwrap_styles_or(base);
+        }
+        todo!()
     }
     pub fn tess_draw_multiline(
         &mut self,
@@ -723,6 +751,7 @@ impl TextBuilder {
                 indirects,
                 instances: flat_instances,
                 bound: render_bound,
+                end_cursor: Some(cursor),
                 color_mode: OutputColor::Solid(color),
                 main_direction,
                 // No data for this in a single-line context.
@@ -791,6 +820,7 @@ impl TextBuilder {
             indirects: vec![],
             color_mode: OutputColor::Solid([1.0; 4]),
             bound: None,
+            end_cursor: Some([0; 2]),
             cross_direction: None,
             main_direction: None,
         }

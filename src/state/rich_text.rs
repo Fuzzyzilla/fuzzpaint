@@ -14,6 +14,13 @@
 
 use crate::util::{Color, NonNanF32};
 
+pub struct FullProperties {
+    pub color: crate::util::Color,
+    pub px_per_em: crate::util::NonNanF32,
+    pub style: Style,
+    pub face: Face,
+}
+
 /// When inserting, is the caret glued to the span before or after it?
 /// Used when choosing what properties to inherit.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -31,12 +38,12 @@ pub struct Style {
 }
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct Face {
-    pub face: crate::repositories::fonts::FaceID,
+    pub face: crate::repositories::fonts::VariedFaceID,
 }
 struct TextProperties {
     color: rangemap::RangeMap<usize, Color>,
     face: rangemap::RangeMap<usize, Face>,
-    size: rangemap::RangeMap<usize, NonNanF32>,
+    px_per_em: rangemap::RangeMap<usize, NonNanF32>,
     style: rangemap::RangeMap<usize, Style>,
 }
 /// Expand from the given position, inheriting properties based on the affinity.
@@ -108,7 +115,7 @@ impl TextProperties {
         Self {
             color: rangemap::RangeMap::new(),
             face: rangemap::RangeMap::new(),
-            size: rangemap::RangeMap::new(),
+            px_per_em: rangemap::RangeMap::new(),
             style: rangemap::RangeMap::new(),
         }
     }
@@ -117,7 +124,7 @@ impl TextProperties {
         &mut self,
         range: std::ops::Range<usize>,
         color: Option<Color>,
-        size: Option<NonNanF32>,
+        px_per_em: Option<NonNanF32>,
         face: Option<Face>,
         style: Option<Style>,
     ) {
@@ -130,10 +137,10 @@ impl TextProperties {
         } else {
             self.color.remove(range.clone());
         }
-        if let Some(size) = size {
-            self.size.insert(range.clone(), size);
+        if let Some(px_per_em) = px_per_em {
+            self.px_per_em.insert(range.clone(), px_per_em);
         } else {
-            self.size.remove(range.clone());
+            self.px_per_em.remove(range.clone());
         }
         if let Some(face) = face {
             self.face.insert(range.clone(), face);
@@ -149,7 +156,7 @@ impl TextProperties {
     /// Expand from the given position, inheriting properties based on the affinity.
     fn insert_inherited(&mut self, pos: usize, len: usize, affinity: CaretAffinity) {
         insert_inherited(&mut self.color, pos, len, affinity);
-        insert_inherited(&mut self.size, pos, len, affinity);
+        insert_inherited(&mut self.px_per_em, pos, len, affinity);
         insert_inherited(&mut self.face, pos, len, affinity);
         insert_inherited(&mut self.style, pos, len, affinity);
     }
@@ -183,7 +190,7 @@ impl RichTextParagraph {
             text: &self.text,
             color: self.properties.color.iter().peekable(),
             style: self.properties.style.iter().peekable(),
-            size: self.properties.size.iter().peekable(),
+            px_per_em: self.properties.px_per_em.iter().peekable(),
             face: self.properties.face.iter().peekable(),
         }
     }
@@ -209,12 +216,17 @@ impl RichTextParagraph {
         &mut self,
         grapheme_range: impl std::ops::RangeBounds<usize>,
         color: Option<Color>,
-        size: Option<NonNanF32>,
+        px_per_em: Option<NonNanF32>,
         face: Option<Face>,
         style: Option<Style>,
     ) {
-        self.properties
-            .set(self.clamp_range(grapheme_range), color, size, face, style);
+        self.properties.set(
+            self.clamp_range(grapheme_range),
+            color,
+            px_per_em,
+            face,
+            style,
+        );
     }
     pub fn insert(
         &mut self,
@@ -261,7 +273,7 @@ impl RichTextParagraph {
         Ok(())
     }
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub struct RichTextSpan<'a> {
     /// Pre-context, if available. Not available at the start of a line or paragraph.
     pub pre: Option<&'a str>,
@@ -270,9 +282,21 @@ pub struct RichTextSpan<'a> {
     /// Post-context, if available. Not available at the end of a line or paragraph.
     pub post: Option<&'a str>,
     pub color: Option<&'a Color>,
-    pub size: Option<&'a NonNanF32>,
+    pub px_per_em: Option<&'a NonNanF32>,
     pub face: Option<&'a Face>,
     pub style: Option<&'a Style>,
+}
+impl RichTextSpan<'_> {
+    #[must_use]
+    /// Get the full properties of this span, by replacing unset values with those from `onto`.
+    pub fn unwrap_styles_or(self, default: &FullProperties) -> FullProperties {
+        FullProperties {
+            color: *self.color.unwrap_or(&default.color),
+            px_per_em: *self.px_per_em.unwrap_or(&default.px_per_em),
+            style: *self.style.unwrap_or(&default.style),
+            face: *self.face.unwrap_or(&default.face),
+        }
+    }
 }
 type PropertyIter<'a, V> = rangemap::map::Iter<'a, usize, V>;
 use std::iter::Peekable;
@@ -286,7 +310,7 @@ pub struct RichTextParagraphSpans<'a> {
     text: &'a str,
     // A bunch of iters to deal with in parallel
     color: Peekable<PropertyIter<'a, Color>>,
-    size: Peekable<PropertyIter<'a, NonNanF32>>,
+    px_per_em: Peekable<PropertyIter<'a, NonNanF32>>,
     face: Peekable<PropertyIter<'a, Face>>,
     style: Peekable<PropertyIter<'a, Style>>,
 }
@@ -328,13 +352,13 @@ impl<'a> Iterator for RichTextParagraphSpans<'a> {
         let color = next_prop(self.cur_grapheme, &mut self.color);
         let style = next_prop(self.cur_grapheme, &mut self.style);
         let face = next_prop(self.cur_grapheme, &mut self.face);
-        let size = next_prop(self.cur_grapheme, &mut self.size);
+        let px_per_em = next_prop(self.cur_grapheme, &mut self.px_per_em);
 
         let end = [
             color.map(|(e, _)| e),
             style.map(|(e, _)| e),
             face.map(|(e, _)| e),
-            size.map(|(e, _)| e),
+            px_per_em.map(|(e, _)| e),
         ]
         .into_iter()
         .flatten()
@@ -363,7 +387,7 @@ impl<'a> Iterator for RichTextParagraphSpans<'a> {
                 span,
                 color: color.and_then(|(_, v)| v),
                 style: style.and_then(|(_, v)| v),
-                size: size.and_then(|(_, v)| v),
+                px_per_em: px_per_em.and_then(|(_, v)| v),
                 face: face.and_then(|(_, v)| v),
             })
         } else {
@@ -379,7 +403,7 @@ impl<'a> Iterator for RichTextParagraphSpans<'a> {
                 post: None,
                 color: None,
                 face: None,
-                size: None,
+                px_per_em: None,
                 style: None,
             })
         }
@@ -399,7 +423,7 @@ mod test {
                 post: None,
                 span: "Uwu!!",
                 color: None,
-                size: None,
+                px_per_em: None,
                 style: None,
                 face: None,
             }]
@@ -435,7 +459,7 @@ mod test {
                     post: Some("ow"),
                     color: None,
                     face: None,
-                    size: None,
+                    px_per_em: None,
                     style: None,
                 },
                 super::RichTextSpan {
@@ -444,7 +468,7 @@ mod test {
                     post: Some("w"),
                     color: Some(&super::Color::BLACK),
                     face: None,
-                    size: None,
+                    px_per_em: None,
                     style: None,
                 },
                 super::RichTextSpan {
@@ -453,7 +477,7 @@ mod test {
                     post: None,
                     color: None,
                     face: None,
-                    size: None,
+                    px_per_em: None,
                     style: None,
                 }
             ]
@@ -488,7 +512,7 @@ mod test {
                     post: Some("123456789"),
                     color: None,
                     face: None,
-                    size: None,
+                    px_per_em: None,
                     style: None,
                 },
                 super::RichTextSpan {
@@ -497,7 +521,7 @@ mod test {
                     post: Some("3456789"),
                     color: Some(&super::Color::BLACK),
                     face: None,
-                    size: None,
+                    px_per_em: None,
                     style: None,
                 },
                 super::RichTextSpan {
@@ -506,7 +530,7 @@ mod test {
                     post: Some("56789"),
                     color: Some(&super::Color::BLACK),
                     face: None,
-                    size: Some(&super::NonNanF32::ONE),
+                    px_per_em: Some(&super::NonNanF32::ONE),
                     style: None,
                 },
                 super::RichTextSpan {
@@ -515,7 +539,7 @@ mod test {
                     post: Some("89"),
                     color: None,
                     face: None,
-                    size: Some(&super::NonNanF32::ONE),
+                    px_per_em: Some(&super::NonNanF32::ONE),
                     style: None,
                 },
                 super::RichTextSpan {
@@ -524,7 +548,7 @@ mod test {
                     post: None,
                     color: None,
                     face: None,
-                    size: None,
+                    px_per_em: None,
                     style: None,
                 }
             ]
