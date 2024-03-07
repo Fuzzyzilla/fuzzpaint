@@ -3,6 +3,7 @@
 //! Objects that are owned by the document, representing it's internal state.
 
 pub mod graph;
+pub mod rich_text;
 pub mod stroke_collection;
 
 pub type DocumentID = crate::FuzzID<Document>;

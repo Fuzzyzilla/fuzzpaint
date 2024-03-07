@@ -331,6 +331,7 @@ impl GlyphCache {
     ) -> Result<(), CacheInsertError> {
         // fixme!!
         assert!(u32::try_from(vertices.len()).is_ok() && u32::try_from(indices.len()).is_ok());
+        crate::render_device::debug_assert_indices_safe(vertices, indices);
         // Insert into the glyph's data
         let monotone = self
             .glyphs

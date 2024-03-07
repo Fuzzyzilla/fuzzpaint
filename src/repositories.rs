@@ -14,4 +14,5 @@ pub enum TryRepositoryError {
     NotFound,
 }
 
+pub mod fonts;
 pub mod points;

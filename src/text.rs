@@ -30,65 +30,8 @@ mod cache;
 pub use cache::{CacheInsertError, ColorInsertError};
 mod tessellator;
 pub use tessellator::{ColorError, TessellateError};
+pub mod renderer;
 
-/// Based on the `fsType` field of OTF/os2. Does not correspond exactly with those flags.
-///
-/// Describes the licensing restriction of a font in increasing permissiveness, and how it may be used in relation
-/// to exported fuzzpaint documents. The comment description is NOT legal advice, but
-/// [Microsoft's](https://learn.microsoft.com/en-us/typography/opentype/spec/os2#fst) is probably closer.
-#[derive(Copy, Clone, Debug)]
-pub enum EmbedRestrictionLevel {
-    /// The font data cannot be embedded for our purposes.
-    LocalOnly,
-    /// The font data may be embedded into a read-only fuzzpaint document - no part of the document can be modified on a
-    /// system that did not author it as long as this font is embedded. The wording in Microsoft's document is permissive
-    /// enough to allow opening the document in a writable mode, as long as the font data is not loaded in this process and is discarded.
-    ReadOnly,
-    /// The font data may be embedded into an editable fuzzpaint document.
-    Writable,
-    /// The font data may be extracted from the document by an end user, for permanent use on their system.
-    Installable,
-}
-#[derive(Copy, Clone, Debug)]
-pub struct EmbedRestriction {
-    /// Can we save size by embedding just the used subset?
-    /// (we don't even have this capability yet and it seems unlikely I'll do it any time soon
-    /// + would interfere with document sharability)
-    ///
-    /// Meaningless if `level == LocalOnly`, but still parsed.
-    can_subset: bool,
-    /// To what extent are we allowed to embed this font?
-    /// Bitmap-only embeds are considered Non-embeddable, as that defeats the whole point.
-    level: EmbedRestrictionLevel,
-}
-impl EmbedRestriction {
-    // I originally wrote all of the bitparsing logic for all four versions, before realizing
-    // ttf_parser exposes all the fields itself. Whoops!
-    /// Extract the embed restrictions from the given table, or None if table failed to parse.
-    #[must_use]
-    pub fn from_table(table: &ttf_parser::os2::Table) -> Option<Self> {
-        let permissions = table.permissions()?;
-        // These flags are meaningless unless ^^ is some, that's okay!
-        let can_subset = table.is_subsetting_allowed();
-        // Misnomer - this checks if bit 9 is zero.
-        // If bit unset, this means all data embeddable, set means bitmap only.
-        let bitmap_only = !table.is_bitmap_embedding_allowed();
-
-        let level = if bitmap_only {
-            // Bitmap-only mode means there's no use in us embedding, at least for our purposes!
-            // (todo: for a bitmap-only font, this is actually permissive. We don't handle those yet anyway!)
-            EmbedRestrictionLevel::ReadOnly
-        } else {
-            match permissions {
-                ttf_parser::Permissions::Restricted => EmbedRestrictionLevel::LocalOnly,
-                ttf_parser::Permissions::PreviewAndPrint => EmbedRestrictionLevel::ReadOnly,
-                ttf_parser::Permissions::Editable => EmbedRestrictionLevel::Writable,
-                ttf_parser::Permissions::Installable => EmbedRestrictionLevel::Installable,
-            }
-        };
-        Some(Self { can_subset, level })
-    }
-}
 #[derive(Debug)]
 pub enum GlyphColorMode {
     /// Static color. This may vary by face variation axes.
@@ -233,6 +176,8 @@ pub struct DrawOutput {
     /// The bounding box around the rendered content, in the same units as vertex and instance position.
     /// (min, max)
     pub bound: Option<([i32; 2], [i32; 2])>,
+    /// Where the cursor was at the end of the shaping.
+    pub end_cursor: Option<[i32; 2]>,
     /// Primary direction of the contained text, or None if inconsistent.
     ///
     /// (i.e., multiple different lines with different primary directionality are merged)
@@ -286,6 +231,10 @@ impl DrawOutput {
 
             bound.0[1] = bound.0[1].saturating_add(by[1]);
             bound.1[1] = bound.1[1].saturating_add(by[1]);
+        }
+        if let Some(cursor) = &mut self.end_cursor {
+            cursor[0] = cursor[0].saturating_add(by[0]);
+            cursor[1] = cursor[1].saturating_add(by[1]);
         }
     }
     /// Calculate the anchor of a given direction and align.
@@ -424,6 +373,10 @@ impl DrawOutput {
             )),
         };
 
+        // ================= Cursor ==================
+        // Prefer second cursor. fallback on self.
+        self.end_cursor = other.end_cursor.or(self.end_cursor);
+
         // ================ Direction =================
         self.main_direction = if self.main_direction == other.main_direction {
             self.main_direction
@@ -528,6 +481,24 @@ impl TextBuilder {
             tessellator: lyon_tessellation::FillTessellator::new(),
             cache: cache::GlyphCache::new(vertices, indices),
         }
+    }
+    pub fn tess_draw_rich<'faces, 'face: 'faces, 'rich, Faces>(
+        &mut self,
+        faces: &'faces Faces,
+        rich: &'rich crate::state::rich_text::RichTextParagraph,
+        base: &crate::state::rich_text::FullProperties,
+    ) -> Result<DrawOutput, DrawMultilineError>
+    where
+        // Todo: concrete type once Font repository is done.
+        Faces: std::ops::Index<
+            &'rich crate::repositories::fonts::VariedFaceID,
+            Output = Option<&'faces rustybuzz::Face<'face>>,
+        >,
+    {
+        for span in rich.spans() {
+            let style = span.unwrap_styles_or(base);
+        }
+        todo!()
     }
     pub fn tess_draw_multiline(
         &mut self,
@@ -780,6 +751,7 @@ impl TextBuilder {
                 indirects,
                 instances: flat_instances,
                 bound: render_bound,
+                end_cursor: Some(cursor),
                 color_mode: OutputColor::Solid(color),
                 main_direction,
                 // No data for this in a single-line context.
@@ -848,6 +820,7 @@ impl TextBuilder {
             indirects: vec![],
             color_mode: OutputColor::Solid([1.0; 4]),
             bound: None,
+            end_cursor: Some([0; 2]),
             cross_direction: None,
             main_direction: None,
         }
@@ -878,643 +851,5 @@ pub mod interface {
         // as this is a user-provided color.
         #[format(R32G32B32A32_SFLOAT)]
         pub glyph_color: [f32; 4],
-    }
-}
-pub mod renderer {
-    use crate::vulkano_prelude::*;
-    use std::sync::Arc;
-
-    mod shaders {
-        /// Write glyphs into monochrome MSAA buff
-        pub mod monochrome {
-            pub mod vert {
-                vulkano_shaders::shader! {
-                    ty: "vertex",
-                    src: r"
-                        #version 460
-                        layout(push_constant) uniform Matrix {
-                            mat4 mvp;
-                        };
-                        // Per-vertex
-                        layout(location = 0) in vec2 position;        // arbitrary font units (not em)
-                        // Per-instance (per-glyph)
-                        layout(location = 1) in ivec2 glyph_position; // arbitrary font units (not em)
-                        layout(location = 2) in vec4 glyph_color;     // monochrome pipeline - dontcare!
-
-                        void main() {
-                            gl_Position = mvp * vec4(position + vec2(glyph_position), 0.0, 1.0);
-                        }
-                    "
-                }
-            }
-            pub mod frag {
-                vulkano_shaders::shader! {
-                    ty: "fragment",
-                    src: r"
-                        #version 460
-                        // Rendering into R8_UNORM
-                        // Cleared to zero, frags set to one.
-                        layout(location = 0) out float color;
-                        void main() {
-                            color = 1.0;
-                        }
-                    "
-                }
-            }
-        }
-        /// Take a resolved coverage texture and color it.
-        pub mod colorize {
-            pub mod vert {
-                vulkano_shaders::shader! {
-                    ty: "vertex",
-                    src: r"
-                        #version 460
-
-                        void main() {
-                            // fullscreen tri
-                            gl_Position = vec4(
-                                float((gl_VertexIndex & 1) * 4) - 1.0,
-                                float((gl_VertexIndex & 2) * 2) - 1.0,
-                                0.0,
-                                1.0
-                            );
-                        }
-                    "
-                }
-            }
-            pub mod frag {
-                vulkano_shaders::shader! {
-                    ty: "fragment",
-                    src: r"
-                        #version 460
-                        // R8_UNORM from resolved prepass
-                        layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput in_coverage;
-                        layout(push_constant) uniform Color {
-                            /// Premultipled color, directly multiplied by coverage.
-                            vec4 modulate;
-                        };
-
-                        layout(location = 0) out vec4 color;
-
-                        void main() {
-                            color = modulate * subpassLoad(in_coverage).rrrr;
-                        }
-                    "
-                }
-            }
-        }
-    }
-
-    pub struct TextRenderer {
-        monochrome_samples: vk::SampleCount,
-        context: Arc<crate::render_device::RenderContext>,
-        monochrome_renderpass: Arc<vk::RenderPass>,
-        /// Draws the tris into MSAA buff
-        monochrome_pipeline: Arc<vk::GraphicsPipeline>,
-        /// MSAA buffer for antialaised rendering, immediately resolved to a regular image.
-        /// (thus, can be transient attatchment)
-        multisample_grey: Arc<vk::ImageView>,
-        /// Resolve target for MSAA, also transient. Used as input for a coloring stage.
-        resolve_grey: Arc<vk::ImageView>,
-        resolve_input_set: Arc<vk::PersistentDescriptorSet>,
-        /// Colors resolved greyscale image into color image
-        colorize_pipeline: Arc<vk::GraphicsPipeline>,
-    }
-    impl TextRenderer {
-        /// Get the internal scale factor due to multisampling.
-        /// Should be multiplied by the tessellation factor prior to building for best looking results.
-        pub fn internal_size_class(&self) -> super::SizeClass {
-            use vk::SampleCount;
-            // Spacial resolution multiplier is sqrt(sample count).
-            // To convert to SizeClass, take the log2 of this, ceil.
-            let log2_sqrt_samples = match self.monochrome_samples {
-                SampleCount::Sample1 => 0,
-                SampleCount::Sample2 | SampleCount::Sample4 => 1,
-                SampleCount::Sample8 | SampleCount::Sample16 => 2,
-                SampleCount::Sample32 | SampleCount::Sample64 => 3,
-                // We should never be able to choose a sample count we can't even observe!
-                _ => unimplemented!("unknown sample count"),
-            };
-
-            super::SizeClass::from_exp_lossy(log2_sqrt_samples)
-        }
-        pub fn make_renderpass(
-            device: Arc<vk::Device>,
-            sample_count: vk::SampleCount,
-        ) -> anyhow::Result<Arc<vk::RenderPass>> {
-            use vulkano::render_pass::{
-                AttachmentDescription, AttachmentReference, RenderPass, RenderPassCreateInfo,
-                Subpass, SubpassDependency, SubpassDescription,
-            };
-            use vulkano::sync::{AccessFlags, DependencyFlags, PipelineStages};
-
-            // Vulkano doesn't support this usecase of transient images, so we do it ourselves >:3c
-            let attachments = vec![
-                // First render attach. Transient. Clear, dontcare for store.
-                AttachmentDescription {
-                    load_op: vk::AttachmentLoadOp::Clear,
-                    store_op: vk::AttachmentStoreOp::DontCare,
-                    format: vk::Format::R8_UNORM,
-                    samples: sample_count,
-                    initial_layout: vk::ImageLayout::Undefined,
-                    final_layout: vk::ImageLayout::ColorAttachmentOptimal,
-                    ..Default::default()
-                },
-                // Second attach, for resolving first. Transient input for final stage. dontcare for load/store.
-                AttachmentDescription {
-                    load_op: vk::AttachmentLoadOp::DontCare,
-                    store_op: vk::AttachmentStoreOp::DontCare,
-                    format: vk::Format::R8_UNORM,
-                    samples: vk::SampleCount::Sample1,
-                    initial_layout: vk::ImageLayout::Undefined,
-                    final_layout: vk::ImageLayout::ColorAttachmentOptimal,
-                    ..Default::default()
-                },
-                // Output color, user provided.
-                AttachmentDescription {
-                    // We overwrite every texel, dontcare for load.
-                    load_op: vk::AttachmentLoadOp::DontCare,
-                    store_op: vk::AttachmentStoreOp::Store,
-                    format: vk::Format::R16G16B16A16_SFLOAT,
-                    samples: vk::SampleCount::Sample1,
-                    // We clear it anyway, don't mind the initial layout.
-                    initial_layout: vk::ImageLayout::Undefined,
-                    final_layout: vk::ImageLayout::ColorAttachmentOptimal,
-                    ..Default::default()
-                },
-            ];
-            let attachment_references = vec![
-                AttachmentReference {
-                    attachment: 0,
-                    layout: vk::ImageLayout::ColorAttachmentOptimal,
-                    stencil_layout: None,
-                    ..Default::default()
-                },
-                // Pre-resolve:
-                AttachmentReference {
-                    attachment: 1,
-                    layout: vk::ImageLayout::ColorAttachmentOptimal,
-                    stencil_layout: None,
-                    ..Default::default()
-                },
-                // Post-resolve:
-                AttachmentReference {
-                    attachment: 1,
-                    layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-                    stencil_layout: None,
-                    aspects: vk::ImageAspects::COLOR,
-                    ..Default::default()
-                },
-                AttachmentReference {
-                    attachment: 2,
-                    layout: vk::ImageLayout::ColorAttachmentOptimal,
-                    stencil_layout: None,
-                    ..Default::default()
-                },
-            ];
-
-            let subpasses = vec![
-                SubpassDescription {
-                    color_attachments: vec![Some(attachment_references[0].clone())],
-                    // Afterwards, resolve into other transient attachment.
-                    color_resolve_attachments: vec![Some(attachment_references[1].clone())],
-                    ..Default::default()
-                },
-                SubpassDescription {
-                    color_attachments: vec![Some(attachment_references[3].clone())],
-                    input_attachments: vec![Some(attachment_references[2].clone())],
-                    ..Default::default()
-                },
-            ];
-            let dependencies = vec![SubpassDependency {
-                src_subpass: Some(0),
-                dst_subpass: Some(1),
-                // Second subpass only cares about pixel-local info, so individual tiles can move on asynchronously.
-                dependency_flags: DependencyFlags::BY_REGION,
-                // After we resolve...
-                src_access: AccessFlags::COLOR_ATTACHMENT_WRITE,
-                src_stages: PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                // Then we can read from fragment...
-                dst_access: AccessFlags::INPUT_ATTACHMENT_READ,
-                dst_stages: PipelineStages::FRAGMENT_SHADER,
-                ..Default::default()
-            }];
-
-            RenderPass::new(
-                device,
-                RenderPassCreateInfo {
-                    attachments,
-                    subpasses,
-                    dependencies,
-                    ..Default::default()
-                },
-            )
-            .map_err(Into::into)
-        }
-        pub fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
-            let monochrome_samples = context
-                .physical_device()
-                .image_format_properties(vulkano::image::ImageFormatInfo {
-                    format: vk::Format::R8_UNORM,
-                    tiling: vulkano::image::ImageTiling::Optimal,
-                    usage: vk::ImageUsage::TRANSIENT_ATTACHMENT | vk::ImageUsage::COLOR_ATTACHMENT,
-                    ..Default::default()
-                })?
-                .ok_or_else(|| anyhow::anyhow!("unsupported image configuration"))?
-                .sample_counts
-                .max_count();
-            if monochrome_samples == vk::SampleCount::Sample1 {
-                // The failure path here involves a whole different pipeline :V
-                anyhow::bail!("msaa unsupported")
-            }
-            let multisample_grey = vk::Image::new(
-                context.allocators().memory().clone(),
-                vk::ImageCreateInfo {
-                    format: vk::Format::R8_UNORM,
-                    samples: monochrome_samples,
-                    // Don't need long-lived data. Render, and resolve source.
-                    usage: vk::ImageUsage::TRANSIENT_ATTACHMENT | vk::ImageUsage::COLOR_ATTACHMENT,
-                    // Todo: query whether this is supported
-                    extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
-                    sharing: vk::Sharing::Exclusive,
-                    ..Default::default()
-                },
-                vk::AllocationCreateInfo {
-                    memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
-                    ..Default::default()
-                },
-            )?;
-            let resolve_grey = vk::Image::new(
-                context.allocators().memory().clone(),
-                vk::ImageCreateInfo {
-                    format: vk::Format::R8_UNORM,
-                    // Don't need long-lived data. resolve destination and input.
-                    usage: vk::ImageUsage::TRANSIENT_ATTACHMENT
-                        | vk::ImageUsage::COLOR_ATTACHMENT
-                        | vk::ImageUsage::INPUT_ATTACHMENT,
-                    // Todo: query whether this is supported
-                    extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
-                    sharing: vk::Sharing::Exclusive,
-                    ..Default::default()
-                },
-                vk::AllocationCreateInfo {
-                    memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
-                    ..Default::default()
-                },
-            )?;
-
-            // Tiling renderer shenanigans, mostly for practice lol
-            // Forms a per-fragment pipe from MSAA -> Resolve -> Color
-            let monochrome_renderpass =
-                Self::make_renderpass(context.device().clone(), monochrome_samples)?;
-
-            let resolve_grey = vk::ImageView::new_default(resolve_grey)?;
-            let multisample_grey = vk::ImageView::new_default(multisample_grey)?;
-
-            let mut pass = monochrome_renderpass.clone().first_subpass();
-            let monochrome_pipeline = Self::make_monochrome_pipe(
-                context.device().clone(),
-                pass.clone(),
-                monochrome_samples,
-            )?;
-
-            pass.next_subpass();
-            let (colorize_pipeline, resolve_input_set) =
-                Self::make_colorize_pipe(context.as_ref(), pass, resolve_grey.clone())?;
-
-            Ok(Self {
-                monochrome_samples,
-                context,
-                monochrome_renderpass,
-                monochrome_pipeline,
-                multisample_grey,
-                resolve_grey,
-                resolve_input_set,
-                colorize_pipeline,
-            })
-        }
-        /// Make a framebuffer compatible with `self.monochrome_renderpass`
-        fn make_framebuffer(
-            &self,
-            render_into: Arc<vk::ImageView>,
-        ) -> anyhow::Result<Arc<vk::Framebuffer>> {
-            vk::Framebuffer::new(
-                self.monochrome_renderpass.clone(),
-                vk::FramebufferCreateInfo {
-                    attachments: vec![
-                        self.multisample_grey.clone(),
-                        self.resolve_grey.clone(),
-                        render_into,
-                    ],
-                    ..Default::default()
-                },
-            )
-            .map_err(Into::into)
-        }
-        fn make_monochrome_pipe(
-            device: Arc<vk::Device>,
-            subpass: vk::Subpass,
-            samples: vk::SampleCount,
-        ) -> anyhow::Result<Arc<vk::GraphicsPipeline>> {
-            let vert = shaders::monochrome::vert::load(device.clone())?;
-            let vert = vert.entry_point("main").unwrap();
-            let frag = shaders::monochrome::frag::load(device.clone())?;
-            let frag = frag.entry_point("main").unwrap();
-
-            let vertex_description = [
-                super::interface::Vertex::per_vertex(),
-                super::interface::Instance::per_instance(),
-            ]
-            .definition(&vert.info().input_interface)?;
-
-            let stages = smallvec::smallvec![
-                vk::PipelineShaderStageCreateInfo::new(vert),
-                vk::PipelineShaderStageCreateInfo::new(frag),
-            ];
-
-            let matrix_range = vk::PushConstantRange {
-                offset: 0,
-                size: std::mem::size_of::<shaders::monochrome::vert::Matrix>()
-                    .try_into()
-                    .unwrap(),
-                stages: vk::ShaderStages::VERTEX,
-            };
-
-            let layout = vk::PipelineLayout::new(
-                device.clone(),
-                vk::PipelineLayoutCreateInfo {
-                    push_constant_ranges: vec![matrix_range],
-                    ..Default::default()
-                },
-            )?;
-
-            vk::GraphicsPipeline::new(
-                device,
-                None,
-                vk::GraphicsPipelineCreateInfo {
-                    stages,
-                    vertex_input_state: Some(vertex_description),
-                    input_assembly_state: Some(vk::InputAssemblyState::default()),
-                    color_blend_state: Some(vk::ColorBlendState::with_attachment_states(
-                        1,
-                        vk::ColorBlendAttachmentState::default(),
-                    )),
-                    rasterization_state: Some(vk::RasterizationState::default()),
-                    subpass: Some(subpass.into()),
-                    multisample_state: Some(vk::MultisampleState {
-                        rasterization_samples: samples,
-                        ..Default::default()
-                    }),
-                    // Viewport dynamic, scissor irrelevant.
-                    viewport_state: Some(vk::ViewportState::default()),
-                    dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
-                    ..vk::GraphicsPipelineCreateInfo::layout(layout)
-                },
-            )
-            .map_err(Into::into)
-        }
-        fn make_colorize_pipe(
-            context: &crate::render_device::RenderContext,
-            subpass: vk::Subpass,
-            resolve_input_image: Arc<vk::ImageView>,
-        ) -> anyhow::Result<(Arc<vk::GraphicsPipeline>, Arc<vk::PersistentDescriptorSet>)> {
-            use vulkano::descriptor_set::DescriptorSet;
-            let device = context.device();
-            let vert = shaders::colorize::vert::load(device.clone())?;
-            let vert = vert.entry_point("main").unwrap();
-            let frag = shaders::colorize::frag::load(device.clone())?;
-            let frag = frag.entry_point("main").unwrap();
-
-            // No input.
-            let vertex_description = vk::VertexInputState::new();
-
-            let stages = smallvec::smallvec![
-                vk::PipelineShaderStageCreateInfo::new(vert),
-                vk::PipelineShaderStageCreateInfo::new(frag),
-            ];
-
-            let color_range = vk::PushConstantRange {
-                offset: 0,
-                size: std::mem::size_of::<shaders::colorize::frag::Color>()
-                    .try_into()
-                    .unwrap(),
-                stages: vk::ShaderStages::FRAGMENT,
-            };
-
-            let resolve_input_set = vk::PersistentDescriptorSet::new(
-                context.allocators().descriptor_set(),
-                vk::DescriptorSetLayout::new(
-                    device.clone(),
-                    vk::DescriptorSetLayoutCreateInfo {
-                        bindings: [(
-                            0,
-                            vk::DescriptorSetLayoutBinding {
-                                stages: vk::ShaderStages::FRAGMENT,
-                                ..vk::DescriptorSetLayoutBinding::descriptor_type(
-                                    vk::DescriptorType::InputAttachment,
-                                )
-                            },
-                        )]
-                        .into_iter()
-                        .collect(),
-                        ..Default::default()
-                    },
-                )?,
-                [vk::WriteDescriptorSet::image_view(0, resolve_input_image)],
-                [],
-            )?;
-
-            let layout = vk::PipelineLayout::new(
-                device.clone(),
-                vk::PipelineLayoutCreateInfo {
-                    set_layouts: vec![resolve_input_set.layout().clone()],
-                    push_constant_ranges: vec![color_range],
-                    ..Default::default()
-                },
-            )?;
-
-            Ok((
-                vk::GraphicsPipeline::new(
-                    device.clone(),
-                    None,
-                    vk::GraphicsPipelineCreateInfo {
-                        stages,
-                        vertex_input_state: Some(vertex_description),
-                        input_assembly_state: Some(vk::InputAssemblyState::default()),
-                        color_blend_state: Some(vk::ColorBlendState::with_attachment_states(
-                            1,
-                            vk::ColorBlendAttachmentState::default(),
-                        )),
-                        rasterization_state: Some(vk::RasterizationState::default()),
-                        multisample_state: Some(vk::MultisampleState::default()),
-                        subpass: Some(subpass.into()),
-                        // Viewport dynamic, scissor irrelevant.
-                        viewport_state: Some(vk::ViewportState::default()),
-                        dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
-                        ..vk::GraphicsPipelineCreateInfo::layout(layout)
-                    },
-                )?,
-                resolve_input_set,
-            ))
-        }
-        // Upload instances and indirects. Ok(None) if either is empty.
-        fn predraw_upload(
-            &self,
-            output: &super::DrawOutput,
-        ) -> anyhow::Result<
-            Option<(
-                vk::Subbuffer<[super::interface::Instance]>,
-                vk::Subbuffer<[vk::DrawIndexedIndirectCommand]>,
-            )>,
-        > {
-            if output.instances.is_empty() || output.indirects.is_empty() {
-                Ok(None)
-            } else {
-                let instances_len_bytes = std::mem::size_of_val(output.instances.as_slice()) as u64;
-                let indirects_len_bytes = std::mem::size_of_val(output.indirects.as_slice()) as u64;
-                let scratch_size = instances_len_bytes + indirects_len_bytes;
-
-                let align = std::mem::align_of_val(output.instances.as_slice());
-                // make sure align requirements are sound between the two bufs
-                assert!(align >= std::mem::align_of_val(output.indirects.as_slice()));
-
-                let scratch_buffer = vk::Buffer::new(
-                    self.context.allocators().memory().clone(),
-                    vk::BufferCreateInfo {
-                        sharing: vulkano::sync::Sharing::Exclusive,
-                        // We make a host accessible instance buffer... this kinda sucks!
-                        usage: vk::BufferUsage::INDIRECT_BUFFER | vk::BufferUsage::VERTEX_BUFFER,
-                        ..Default::default()
-                    },
-                    vk::AllocationCreateInfo {
-                        memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
-                            | vk::MemoryTypeFilter::PREFER_DEVICE,
-                        ..Default::default()
-                    },
-                    vulkano::memory::allocator::DeviceLayout::new(
-                        scratch_size
-                            .try_into()
-                            // Guarded by if, not empty!
-                            .unwrap(),
-                        // Std guarantees power of two
-                        vulkano::memory::DeviceAlignment::new(align as u64).unwrap(),
-                        // Unwrap ok - it fits in host mem just fine (<= device address space), the size won't overflow.
-                    )
-                    .unwrap(),
-                )?;
-                // Slices ok - both known non-zero by if guard
-                let instance_buffer = vk::Subbuffer::new(scratch_buffer.clone())
-                    .slice(0..instances_len_bytes)
-                    .reinterpret::<[super::interface::Instance]>();
-                {
-                    // We just made it - no concurrent access.
-                    let mut write = instance_buffer.write().unwrap();
-                    write.copy_from_slice(&output.instances);
-                }
-                let indirect_buffer = vk::Subbuffer::new(scratch_buffer)
-                    // Align is OK - we ickily checked that the aligns of the two types are compatible
-                    .slice(instances_len_bytes..)
-                    .reinterpret::<[vk::DrawIndexedIndirectCommand]>();
-                {
-                    // We just made it - no concurrent access.
-                    let mut write = indirect_buffer.write().unwrap();
-                    write.copy_from_slice(&output.indirects);
-                }
-
-                Ok(Some((instance_buffer, indirect_buffer)))
-            }
-        }
-        /// Create commands to render `DrawOutput` into the given image.
-        ///
-        /// `xform` should be a combined view+proj matrix, tranforming face's arbitrary units (NOT em) to NDC.
-        /// See [`rustybuzz::ttf_parser::Face::units_per_em`].
-        ///
-        /// `self` is in exclusive use through the duration of the returned buffer's execution.
-        pub fn draw(
-            &self,
-            xform: ultraviolet::Mat4,
-            render_into: Arc<vk::ImageView>,
-            output: &super::DrawOutput,
-        ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
-            // Even if none to draw, we can still clear and return.
-            let instances_indirects = self.predraw_upload(output)?;
-
-            let mut commands = vk::AutoCommandBufferBuilder::primary(
-                self.context.allocators().command_buffer(),
-                self.context.queues().graphics().idx(),
-                vk::CommandBufferUsage::OneTimeSubmit,
-            )?;
-
-            if let Some((instances, indirects)) = instances_indirects {
-                let framebuffer = self.make_framebuffer(render_into)?;
-                let viewport = vk::Viewport {
-                    depth_range: 0.0..=1.0,
-                    offset: [0.0; 2],
-                    extent: [
-                        framebuffer.extent()[0] as f32,
-                        framebuffer.extent()[1] as f32,
-                    ],
-                };
-
-                commands
-                    .begin_render_pass(
-                        vk::RenderPassBeginInfo {
-                            // Start is cleared, other two are dontcare (immediately overwritten)
-                            clear_values: vec![Some([0.0; 4].into()), None, None],
-                            ..vk::RenderPassBeginInfo::framebuffer(framebuffer)
-                        },
-                        vk::SubpassBeginInfo {
-                            contents: vk::SubpassContents::Inline,
-                            ..Default::default()
-                        },
-                    )?
-                    .bind_pipeline_graphics(self.monochrome_pipeline.clone())?
-                    .set_viewport(0, smallvec::smallvec![viewport.clone()])?
-                    .bind_vertex_buffers(0, (output.vertices.clone(), instances))?
-                    .bind_index_buffer(output.indices.clone())?
-                    .push_constants(
-                        self.monochrome_pipeline.layout().clone(),
-                        0,
-                        shaders::monochrome::vert::Matrix { mvp: xform.into() },
-                    )?
-                    .draw_indexed_indirect(indirects)?
-                    .next_subpass(
-                        vk::SubpassEndInfo::default(),
-                        vk::SubpassBeginInfo {
-                            contents: vk::SubpassContents::Inline,
-                            ..Default::default()
-                        },
-                    )?
-                    .bind_pipeline_graphics(self.colorize_pipeline.clone())?
-                    .set_viewport(0, smallvec::smallvec![viewport.clone()])?
-                    .bind_descriptor_sets(
-                        vk::PipelineBindPoint::Graphics,
-                        self.colorize_pipeline.layout().clone(),
-                        0,
-                        self.resolve_input_set.clone(),
-                    )?
-                    .push_constants(
-                        self.colorize_pipeline.layout().clone(),
-                        0,
-                        shaders::colorize::frag::Color {
-                            modulate: [0.0, 0.0, 0.0, 1.0],
-                        },
-                    )?
-                    .draw(3, 1, 0, 0)?
-                    .end_render_pass(vk::SubpassEndInfo::default())?;
-
-                commands.build().map_err(Into::into)
-            } else {
-                // Nothing to draw. Just clear the output image for consistent behavior
-                let clear = vk::ClearColorImageInfo {
-                    regions: smallvec::smallvec![render_into.subresource_range().clone()],
-                    ..vk::ClearColorImageInfo::image(render_into.image().clone())
-                };
-
-                commands.clear_color_image(clear)?;
-
-                commands.build().map_err(Into::into)
-            }
-        }
     }
 }

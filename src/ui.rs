@@ -745,7 +745,7 @@ fn layer_buttons(
         // Borrow graph for the rest of the time.
         let mut graph = writer.graph();
         if ui
-            .button(TEXT_LAYER_ICON)
+            .add_enabled(false, egui::Button::new(TEXT_LAYER_ICON))
             .on_hover_text("Add Text Layer")
             .clicked()
         {

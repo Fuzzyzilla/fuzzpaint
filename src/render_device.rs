@@ -2,6 +2,19 @@ use crate::vulkano_prelude::*;
 use anyhow::Result as AnyResult;
 use std::sync::Arc;
 
+/// Check that every index is less than the number of vertices in debug builds, nop in release mode.
+/// # Panics
+/// on failure.
+pub fn debug_assert_indices_safe<Vertex>(vertices: &[Vertex], indices: &[u16]) {
+    #[cfg(debug_assertions)]
+    if indices
+        .iter()
+        .any(|&index| usize::from(index) >= vertices.len())
+    {
+        panic!("index buffer includes invalid indices");
+    }
+}
+
 pub struct Queue {
     queue: Arc<vk::Queue>,
     family_idx: u32,

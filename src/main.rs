@@ -26,7 +26,9 @@ pub mod render_device;
 pub mod state;
 pub mod stylus_events;
 pub mod tess;
+pub mod text;
 pub mod ui;
+pub mod util;
 pub mod view_transform;
 use blend::Blend;
 
