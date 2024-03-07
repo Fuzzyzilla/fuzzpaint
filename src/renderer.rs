@@ -402,10 +402,12 @@ impl Renderer {
     ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn GpuFuture>>> {
         static FACE: std::sync::OnceLock<(rustybuzz::Face<'static>, rustybuzz::ShapePlan)> =
             std::sync::OnceLock::new();
-        const FACE_DATA: &[u8] = include_bytes!("/usr/share/fonts/open-sans/OpenSans-Regular.ttf");
+        // There is currently no font server.
+        let face_data : &'static [u8] = unimplemented!();
+        // const FACE_DATA: &[u8] = include_bytes!("/usr/share/fonts/open-sans/OpenSans-Regular.ttf");
 
         let (face, plan) = FACE.get_or_init(|| {
-            let face = rustybuzz::Face::from_slice(FACE_DATA, 0).expect("bad face");
+            let face = rustybuzz::Face::from_slice(face_data, 0).expect("bad face");
             println!(
                 "{:#?}",
                 face.variation_axes().into_iter().collect::<Vec<_>>()
