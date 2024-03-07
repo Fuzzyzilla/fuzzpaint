@@ -403,7 +403,7 @@ impl Renderer {
         static FACE: std::sync::OnceLock<(rustybuzz::Face<'static>, rustybuzz::ShapePlan)> =
             std::sync::OnceLock::new();
         // There is currently no font server.
-        let face_data : &'static [u8] = unimplemented!();
+        let face_data: &'static [u8] = unimplemented!();
         // const FACE_DATA: &[u8] = include_bytes!("/usr/share/fonts/open-sans/OpenSans-Regular.ttf");
 
         let (face, plan) = FACE.get_or_init(|| {
