@@ -2630,9 +2630,8 @@ dependencies = [
 
 [[package]]
 name = "vulkano"
-version = "0.34.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70f4278f76307b3c388679234b397b4f90de29cdba53873c26b624ed82653d75"
+version = "0.34.0"
+source = "git+https://github.com/fuzzyzilla/vulkano.git?branch=backport-null-check#83406ec018f472b6557e3f98941d5b5ed20a16ac"
 dependencies = [
  "ahash",
  "ash",
@@ -2661,8 +2660,7 @@ dependencies = [
 [[package]]
 name = "vulkano-macros"
 version = "0.34.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52be622d364272fd77e298e7f68e8547ae66e7687cb86eb85335412cee7e3965"
+source = "git+https://github.com/fuzzyzilla/vulkano.git?branch=backport-null-check#83406ec018f472b6557e3f98941d5b5ed20a16ac"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2673,8 +2671,7 @@ dependencies = [
 [[package]]
 name = "vulkano-shaders"
 version = "0.34.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1f63401297565d74afb96e9add12587d8e46235140cee325a8eb6ba4602f4ee"
+source = "git+https://github.com/fuzzyzilla/vulkano.git?branch=backport-null-check#83406ec018f472b6557e3f98941d5b5ed20a16ac"
 dependencies = [
  "ahash",
  "heck",
