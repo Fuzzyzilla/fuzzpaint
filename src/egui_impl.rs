@@ -109,7 +109,7 @@ impl EguiCtx {
         let res: AnyResult<_> = try_block::try_block! {
             let transfer_commands = self.renderer.do_image_deltas(output.textures_delta).transpose()?;
             let tess_geom = self.ctx.tessellate(output.shapes);
-            let draw_commands = self.renderer.upload_and_render(swapchain_idx, &tess_geom)?;
+            let draw_commands = self.renderer.upload_and_render(self.ctx.pixels_per_point(), swapchain_idx, &tess_geom)?;
             drop(tess_geom);
 
             Ok((transfer_commands, draw_commands))
@@ -365,6 +365,7 @@ impl EguiRenderer {
     }
     pub fn upload_and_render(
         &self,
+        scale_factor: f32,
         present_img_index: u32,
         tesselated_geom: &[egui::epaint::ClippedPrimitive],
     ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
@@ -434,9 +435,9 @@ impl EguiRenderer {
 
         let matrix = cgmath::ortho(
             0.0,
-            framebuffer.extent()[0] as f32,
+            framebuffer.extent()[0] as f32 / scale_factor,
             0.0,
-            framebuffer.extent()[1] as f32,
+            framebuffer.extent()[1] as f32 / scale_factor,
             -1.0,
             1.0,
         );
@@ -483,9 +484,12 @@ impl EguiRenderer {
             if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
                 // *Technically* it wants a float scissor rect. But.. oh well
                 let offset = clipped.clip_rect.left_top();
-                let offset = [offset.x.max(0.0) as u32, offset.y.max(0.0) as u32];
+                let offset = [
+                    (offset.x.max(0.0) * scale_factor) as u32,
+                    (offset.y.max(0.0) * scale_factor) as u32,
+                ];
 
-                let extent = clipped.clip_rect.size();
+                let extent = clipped.clip_rect.size() * scale_factor;
                 let extent = [extent.x as u32, extent.y as u32];
 
                 command_buffer_builder

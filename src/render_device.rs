@@ -75,6 +75,23 @@ impl Queues {
             QueueSrc::Queue(..) => true,
         }
     }
+    /// Create a sharing object for compute and graphics. If compute and graphics
+    /// are the same queue, returns exclusive sharing.
+    #[must_use]
+    pub fn sharing_compute_graphics<C>(&self) -> vk::Sharing<C>
+    where
+        C: FromIterator<u32> + IntoIterator<Item = u32>,
+    {
+        if self.has_unique_compute() {
+            vk::Sharing::Concurrent(
+                [self.graphics().idx(), self.compute().idx()]
+                    .into_iter()
+                    .collect(),
+            )
+        } else {
+            vk::Sharing::Exclusive
+        }
+    }
 }
 
 pub struct RenderSurface {
@@ -310,10 +327,17 @@ impl RenderContext {
             ext_line_rasterization: true,
             ..Default::default()
         };
+        // Extensions needed when the physical device supports less than vulkan 1.3
+        let required_device_extensions_lt_1_3 = vk::DeviceExtensions {
+            // Promoted to core in 1.3.
+            khr_dynamic_rendering: true,
+            ..Default::default()
+        };
 
         let Some((physical_device, queue_indices)) = Self::choose_physical_device(
             instance.clone(),
-            &required_device_extensions,
+            required_device_extensions,
+            required_device_extensions_lt_1_3,
             Some(&surface),
         )?
         else {
@@ -330,6 +354,7 @@ impl RenderContext {
             physical_device.clone(),
             queue_indices,
             required_device_extensions,
+            required_device_extensions_lt_1_3,
         )?;
 
         // We have a device! Now to create the swapchain..
@@ -367,6 +392,7 @@ impl RenderContext {
         physical_device: Arc<vk::PhysicalDevice>,
         queue_indices: QueueIndices,
         extensions: vk::DeviceExtensions,
+        extensions_lt_1_3: vk::DeviceExtensions,
     ) -> AnyResult<(Arc<vk::Device>, Queues)> {
         //Need a graphics queue.
         let mut graphics_queue_info = vk::QueueCreateInfo {
@@ -439,10 +465,16 @@ impl RenderContext {
             create_infos.push(present_create_info.clone());
         }
 
+        let enabled_extensions = if physical_device.api_version() < vk::Version::V1_3 {
+            extensions.union(&extensions_lt_1_3)
+        } else {
+            extensions
+        };
+
         let (device, mut queues) = vk::Device::new(
             physical_device,
             vk::DeviceCreateInfo {
-                enabled_extensions: extensions,
+                enabled_extensions,
                 enabled_features: vk::Features {
                     dual_src_blend: true,
                     dynamic_rendering: true,
@@ -494,7 +526,8 @@ impl RenderContext {
     /// Horrible signature - Returns Ok(None) if no device found, Ok(Some((device, queue indices))) if suitable device found.
     fn choose_physical_device(
         instance: Arc<vk::Instance>,
-        required_extensions: &vk::DeviceExtensions,
+        required_extensions: vk::DeviceExtensions,
+        required_extensions_lt_1_3: vk::DeviceExtensions,
         compatible_surface: Option<&Arc<vk::Surface>>,
     ) -> AnyResult<Option<(Arc<vk::PhysicalDevice>, QueueIndices)>> {
         //TODO: does not respect queue family max queue counts. This will need to be redone in some sort of
@@ -503,9 +536,13 @@ impl RenderContext {
             .enumerate_physical_devices()?
             .filter_map(|device| {
                 use vk::QueueFlags;
-
+                let required_extensions = if device.api_version() < vk::Version::V1_3 {
+                    required_extensions.union(&required_extensions_lt_1_3)
+                } else {
+                    required_extensions
+                };
                 //Make sure it has what we need
-                if !device.supported_extensions().contains(required_extensions) {
+                if !device.supported_extensions().contains(&required_extensions) {
                     return None;
                 }
 

@@ -851,10 +851,7 @@ mod stroke_renderer {
                     extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
                     array_layers: 1,
                     mip_levels: 1,
-                    sharing: vk::Sharing::Concurrent(smallvec::smallvec![
-                        self.context.queues().graphics().idx(),
-                        self.context.queues().compute().idx()
-                    ]),
+                    sharing: self.context.queues().sharing_compute_graphics(),
                     format: crate::DOCUMENT_FORMAT,
                     ..Default::default()
                 },
