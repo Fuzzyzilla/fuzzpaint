@@ -11,6 +11,8 @@ pub mod renderer;
 pub mod transform;
 use transform::GizmoTransform;
 
+pub use winit::window::CursorIcon;
+
 pub enum MeshMode {
     Triangles,
     WideLineStrip(std::sync::Arc<[renderer::WideLineVertex]>),
@@ -152,8 +154,8 @@ impl Default for Gizmo {
         Self {
             visual: Visual::empty(),
             hit_shape: GizmoShape::None,
-            grab_cursor: CursorOrInvisible::Icon(CursorIcon::Default),
-            hover_cursor: CursorOrInvisible::Icon(CursorIcon::Default),
+            grab_cursor: CursorOrInvisible::default(),
+            hover_cursor: CursorOrInvisible::default(),
             interaction: GizmoInteraction::None,
             transform: transform::GizmoTransform::inherit_all(),
         }
@@ -200,12 +202,16 @@ impl From<Collection> for AnyGizmo {
     }
 }
 
-use winit::window::CursorIcon;
 /// None to hide the cursor, or Some to choose a winit cursor.
 #[derive(Copy, Clone)]
 pub enum CursorOrInvisible {
     Icon(CursorIcon),
     Invisible,
+}
+impl Default for CursorOrInvisible {
+    fn default() -> Self {
+        Self::Icon(CursorIcon::Default)
+    }
 }
 
 /// A tree that can be visited (in several modes) by a [`GizmoVisitor`].

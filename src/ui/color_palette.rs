@@ -270,7 +270,7 @@ impl egui::Widget for ColorPalette<'_> {
                     // We don't have *that* large of history tho, WONTFIX for now
                     .show(ui, |ui| {
                         let palette_id = match (self.history_scope, self.id) {
-                            (HistoryScope::Global, _) => egui::Id::null(),
+                            (HistoryScope::Global, _) => egui::Id::NULL,
                             (HistoryScope::Local, None) => {
                                 // Get our own ID, not stable but it wasn't requested to be.
                                 ui.id()
@@ -305,7 +305,8 @@ impl egui::Widget for ColorPalette<'_> {
                             ui.horizontal_wrapped(|ui| {
                                 for color in palette.pinned.0 {
                                     let color_btn = ColorSquare { color, size };
-                                    let response = ui.add(color_btn).context_menu(|ui| {
+                                    let response = ui.add(color_btn);
+                                    response.context_menu(|ui| {
                                         if ui.small_button("Unpin").clicked() {
                                             new_unpins.push(color);
                                             ui.close_menu();
@@ -325,7 +326,8 @@ impl egui::Widget for ColorPalette<'_> {
                             ui.horizontal_wrapped(|ui| {
                                 for color in palette.history.0 {
                                     let color_btn = ColorSquare { color, size };
-                                    let response = ui.add(color_btn).context_menu(|ui| {
+                                    let response = ui.add(color_btn);
+                                    response.context_menu(|ui| {
                                         if ui.small_button("Pin").clicked() {
                                             new_pins.push(color);
                                             ui.close_menu();

@@ -1,3 +1,4 @@
+use crate::gizmos::CursorIcon;
 use std::sync::Arc;
 
 mod visitors {
@@ -245,7 +246,7 @@ impl super::PenTool for GizmoManipulator {
                 },
             };
             let circle = Gizmo {
-                grab_cursor: CursorOrInvisible::Icon(winit::window::CursorIcon::Move),
+                grab_cursor: CursorOrInvisible::Icon(CursorIcon::Move),
                 visual: Visual {
                     mesh: MeshMode::Shape(RenderShape::Ellipse {
                         origin: ultraviolet::Vec2 { x: 0.0, y: 0.0 },
@@ -258,7 +259,7 @@ impl super::PenTool for GizmoManipulator {
                     outer: 20.0,
                     inner: 10.0,
                 },
-                hover_cursor: CursorOrInvisible::Icon(winit::window::CursorIcon::Help),
+                hover_cursor: CursorOrInvisible::Icon(CursorIcon::Help),
                 interaction: GizmoInteraction::Move,
                 transform: transform::GizmoTransform {
                     scale_pinning: transform::GizmoTransformPinning::Document,

@@ -1,6 +1,6 @@
 use super::super::Action;
 use super::KeyboardHotkey;
-use winit::event::VirtualKeyCode;
+use winit::keyboard::KeyCode;
 
 pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
     (
@@ -9,7 +9,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: true,
             shift: false,
-            key: VirtualKeyCode::Z,
+            key: KeyCode::KeyZ,
         }],
     ),
     (
@@ -19,13 +19,13 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
                 alt: false,
                 ctrl: true,
                 shift: false,
-                key: VirtualKeyCode::Y,
+                key: KeyCode::KeyY,
             },
             KeyboardHotkey {
                 alt: false,
                 ctrl: true,
                 shift: true,
-                key: VirtualKeyCode::Z,
+                key: KeyCode::KeyZ,
             },
         ],
     ),
@@ -35,7 +35,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::Space,
+            key: KeyCode::Space,
         }],
     ),
     (
@@ -45,14 +45,14 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
                 alt: false,
                 ctrl: true,
                 shift: false,
-                key: VirtualKeyCode::Space,
+                key: KeyCode::Space,
             },
             // FIXME: shadowing bug means the true hotkey^^^ is unusable :V
             KeyboardHotkey {
                 alt: false,
                 ctrl: false,
                 shift: false,
-                key: VirtualKeyCode::S,
+                key: KeyCode::KeyS,
             },
         ],
     ),
@@ -62,7 +62,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::R,
+            key: KeyCode::KeyR,
         }],
     ),
     (
@@ -71,7 +71,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::M,
+            key: KeyCode::KeyM,
         }],
     ),
     (
@@ -80,7 +80,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: true,
             shift: false,
-            key: VirtualKeyCode::Equals,
+            key: KeyCode::Equal,
         }],
     ),
     (
@@ -89,7 +89,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: true,
             shift: false,
-            key: VirtualKeyCode::Minus,
+            key: KeyCode::Minus,
         }],
     ),
     (
@@ -99,7 +99,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::I,
+            key: KeyCode::KeyI,
         }],
     ),
     (
@@ -109,7 +109,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::G,
+            key: KeyCode::KeyG,
         }],
     ),
     (
@@ -118,7 +118,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::B,
+            key: KeyCode::KeyB,
         }],
     ),
     (
@@ -127,7 +127,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::E,
+            key: KeyCode::KeyE,
         }],
     ),
     (
@@ -136,7 +136,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::L,
+            key: KeyCode::KeyL,
         }],
     ),
     (
@@ -145,7 +145,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::LBracket,
+            key: KeyCode::BracketLeft,
         }],
     ),
     (
@@ -154,7 +154,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::RBracket,
+            key: KeyCode::BracketRight,
         }],
     ),
     (
@@ -163,7 +163,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::L,
+            key: KeyCode::KeyL,
         }],
     ),
     (
@@ -172,7 +172,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: true,
             shift: false,
-            key: VirtualKeyCode::T,
+            key: KeyCode::KeyT,
         }],
     ),
     (
@@ -181,7 +181,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: false,
             shift: false,
-            key: VirtualKeyCode::Delete,
+            key: KeyCode::Delete,
         }],
     ),
     (
@@ -190,7 +190,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: true,
             shift: false,
-            key: VirtualKeyCode::Up,
+            key: KeyCode::ArrowUp,
         }],
     ),
     (
@@ -199,7 +199,7 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
             alt: false,
             ctrl: true,
             shift: false,
-            key: VirtualKeyCode::Down,
+            key: KeyCode::ArrowDown,
         }],
     ),
 ];

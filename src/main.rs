@@ -255,15 +255,15 @@ async fn stylus_event_collector(
 
 //If we return, it was due to an error.
 //convert::Infallible is a quite ironic name for this useage, isn't it? :P
-fn main() -> AnyResult<std::convert::Infallible> {
+fn main() -> AnyResult<()> {
     let has_term = std::io::IsTerminal::is_terminal(&std::io::stdin());
     // Log to a terminal, if available. Else, log to "log.out" in the working directory.
     if has_term {
         env_logger::builder()
-            .filter_level(log::LevelFilter::max())
+            .filter_level(log::LevelFilter::Debug)
             .init();
     } else {
-        let _ = simple_logging::log_to_file("log.out", log::LevelFilter::max());
+        let _ = simple_logging::log_to_file("log.out", log::LevelFilter::Debug);
     }
     #[cfg(feature = "dhat_heap")]
     let _profiler = {
@@ -371,5 +371,5 @@ fn main() -> AnyResult<std::convert::Infallible> {
         })
         .unwrap();
 
-    window_renderer.run()
+    window_renderer.run().map_err(Into::into)
 }

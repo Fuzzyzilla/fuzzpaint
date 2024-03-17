@@ -1,0 +1,6 @@
+# dependency shaderc-sys has a build dep on `python3`, add it to the cross container for every target.
+[target.*]
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update && apt-get install --assume-yes python3:$CROSS_DEB_ARCH"
+]
