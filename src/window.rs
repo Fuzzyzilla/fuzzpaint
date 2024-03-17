@@ -39,6 +39,8 @@ impl WindowSurface {
     ) -> anyhow::Result<WindowRenderer> {
         let egui_ctx = egui_impl::EguiCtx::new(self.win.as_ref(), &render_surface)?;
 
+        let tablet_manager = octotablet::Builder::new().build_shared(&self.win).ok();
+
         let (send, stream) = crate::actions::create_action_stream();
 
         Ok(WindowRenderer {
@@ -49,6 +51,7 @@ impl WindowSurface {
             event_loop: Some(self.event_loop),
             last_frame_fence: None,
             egui_ctx,
+            tablet_manager,
             ui: crate::ui::MainUI::new(stream.listen()),
             preview_renderer,
             action_collector:
@@ -71,6 +74,8 @@ pub struct WindowRenderer {
 
     action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector,
     action_stream: crate::actions::ActionStream,
+    // May be None on unsupported platforms.
+    tablet_manager: Option<octotablet::Manager>,
     stylus_events: crate::stylus_events::WinitStylusEventCollector,
     swapchain_generation: u32,
 
@@ -200,12 +205,47 @@ impl WindowRenderer {
                     // 5 -> unknown, always zero (barrel rotation?)
                 }
                 Event::AboutToWait => {
+                    let has_tablet_update = if let Some(tab_events) =
+                        self.tablet_manager.as_mut().and_then(|m| m.pump().ok())
+                    {
+                        let mut has_tablet_update = false;
+                        for event in tab_events {
+                            if let octotablet::events::Event::Tool { event, .. } = event {
+                                match event {
+                                    octotablet::events::ToolEvent::Pose(p) => {
+                                        if let Some(p) = p.pressure.get() {
+                                            self.stylus_events.set_pressure(p);
+                                        }
+                                        self.stylus_events
+                                            .push_position((p.position[0], p.position[1]));
+                                        has_tablet_update = true;
+                                    }
+                                    octotablet::events::ToolEvent::Up
+                                    | octotablet::events::ToolEvent::Out => {
+                                        self.stylus_events.set_mouse_pressed(false);
+                                        has_tablet_update = true;
+                                    }
+                                    octotablet::events::ToolEvent::Down => {
+                                        self.stylus_events.set_mouse_pressed(true);
+                                        has_tablet_update = true;
+                                    }
+                                    _ => (),
+                                };
+                            }
+                        }
+                        has_tablet_update
+                    } else {
+                        false
+                    };
                     // run UI logics
                     self.do_ui();
                     self.apply_document_cursor();
 
-                    // Request draw if either the UI or document want it
-                    if self.egui_ctx.needs_redraw() || self.preview_renderer.has_update() {
+                    // Request draw if any interactive element wants it (UI, document, or tablet)
+                    if has_tablet_update
+                        || self.egui_ctx.needs_redraw()
+                        || self.preview_renderer.has_update()
+                    {
                         self.window().request_redraw();
                     }
 

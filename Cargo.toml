@@ -33,6 +33,7 @@ id_tree = "1.8.0"
 image = "0.25.0"
 log = "0.4.21"
 lyon_tessellation = "1.0.13"
+octotablet = "0.1.0"
 optional = "0.5.0"
 parking_lot = "0.12.1"
 rangemap = "1.5.1"
@@ -59,8 +60,8 @@ uuid = { version = "1.7.0", features = ["v4"] }
 vulkano = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vulkano.git", branch = "backport-null-check"  }
 vulkano-shaders = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vulkano.git", branch = "backport-null-check"  }
 # Can't inherit from egui_winit since it doesn't enable serde feature.
-# Also need legacy RWH version for `vulkano`
-winit = { version = "0.29.15", features = ["serde", "rwh_05"]}
+# Also need legacy RWH version for `vulkano` + new version for `octotablet`
+winit = { version = "0.29.15", features = ["serde", "rwh_05", "rwh_06"]}
 
 [profile.profiling]
 inherits = "release"
