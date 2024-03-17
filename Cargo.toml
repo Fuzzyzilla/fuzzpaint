@@ -18,33 +18,33 @@ bitvec = { version = "1.0.1", default-features = false, features = [
 bytemuck = "1.15.0"
 cgmath = "0.18.0"
 crossbeam = "0.8.4"
-defer = "0.1.0"
+defer = "0.2.1"
 dhat = { version = "0.3.3", optional = true }
 dirs = "5.0.1"
 # To enable default-font within egui-winit
 egui = "0.26.2"
 egui-winit = { version = "0.26.2", features = ["bytemuck"] }
 either = "1.10.0"
-env_logger = "0.10.2"
+env_logger = "0.11.3"
 fontdb = "0.16.2"
 hashbrown = { version = "0.14.3", features = ["serde"] }
 human_bytes = "0.4.3"
 id_tree = "1.8.0"
-image = "0.24.9"
+image = "0.25.0"
 log = "0.4.21"
 lyon_tessellation = "1.0.13"
 optional = "0.5.0"
 parking_lot = "0.12.1"
 rangemap = "1.5.1"
 rayon = "1.9.0"
-rfd = "0.11.4"
+rfd = "0.14.0"
 ron = "0.8.1"
-rustybuzz = "0.12.1"
+rustybuzz = "0.13.0"
 serde = { version = "1.0.197", features = ["derive", "rc"] }
 simple-logging = "2.0.2"
 slab_tree = "0.3.2"
 smallvec = { version = "1.13.1", features = ["serde", "union"] }
-strum = { version = "0.25.0", features = ["derive"] }
+strum = { version = "0.26.2", features = ["derive"] }
 thiserror = "1.0.58"
 tokio = { version = "1.36.0", features = [
     "sync",
