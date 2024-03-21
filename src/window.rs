@@ -1,6 +1,7 @@
 use crate::egui_impl;
 use crate::render_device;
 use crate::vulkano_prelude::*;
+
 use std::sync::Arc;
 
 use anyhow::Result as AnyResult;
@@ -13,17 +14,16 @@ impl WindowSurface {
     pub fn new() -> AnyResult<Self> {
         const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
-        let event_loop = winit::event_loop::EventLoopBuilder::default().build();
+        let event_loop = winit::event_loop::EventLoopBuilder::default().build()?;
         let win = winit::window::WindowBuilder::default()
             .with_title(format!("Fuzzpaint v{}", VERSION.unwrap_or("[unknown]")))
             .with_min_inner_size(winit::dpi::LogicalSize::new(500u32, 500u32))
             .with_transparent(false)
             .build(&event_loop)?;
 
-        Ok(Self {
-            event_loop,
-            win: Arc::new(win),
-        })
+        let win = Arc::new(win);
+
+        Ok(Self { event_loop, win })
     }
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
@@ -39,6 +39,8 @@ impl WindowSurface {
     ) -> anyhow::Result<WindowRenderer> {
         let egui_ctx = egui_impl::EguiCtx::new(self.win.as_ref(), &render_surface)?;
 
+        let tablet_manager = octotablet::Builder::new().build_shared(&self.win).ok();
+
         let (send, stream) = crate::actions::create_action_stream();
 
         Ok(WindowRenderer {
@@ -49,6 +51,7 @@ impl WindowSurface {
             event_loop: Some(self.event_loop),
             last_frame_fence: None,
             egui_ctx,
+            tablet_manager,
             ui: crate::ui::MainUI::new(stream.listen()),
             preview_renderer,
             action_collector:
@@ -71,6 +74,8 @@ pub struct WindowRenderer {
 
     action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector,
     action_stream: crate::actions::ActionStream,
+    // May be None on unsupported platforms.
+    tablet_manager: Option<octotablet::Manager>,
     stylus_events: crate::stylus_events::WinitStylusEventCollector,
     swapchain_generation: u32,
 
@@ -133,22 +138,25 @@ impl WindowRenderer {
             }
         }
     }
-    pub fn run(mut self) -> ! {
+    pub fn run(mut self) -> Result<(), winit::error::EventLoopError> {
         //There WILL be an event loop if we got here
         let event_loop = self.event_loop.take().unwrap();
         self.window().request_redraw();
 
-        event_loop.run(move |event, _, control_flow| {
+        event_loop.run(move |event, target| {
             use winit::event::{Event, WindowEvent};
             match event {
-                Event::WindowEvent { event, .. } => {
-                    let consumed = self.egui_ctx.push_winit_event(&event).consumed;
+                Event::WindowEvent { event, window_id } if window_id == self.window().id() => {
+                    let consumed = self
+                        .egui_ctx
+                        .push_winit_event(&self.window(), &event)
+                        .consumed;
                     if !consumed {
                         self.action_collector.push_event(&event);
                     }
                     match event {
                         WindowEvent::CloseRequested => {
-                            *control_flow = winit::event_loop::ControlFlow::Exit;
+                            target.exit();
                         }
                         WindowEvent::Resized(..) => {
                             self.recreate_surface().expect("Failed to rebuild surface");
@@ -174,6 +182,11 @@ impl WindowRenderer {
                                 self.stylus_events.set_mouse_pressed(false);
                             }
                         }
+                        WindowEvent::RedrawRequested => {
+                            if let Err(e) = self.paint() {
+                                log::error!("{e:?}");
+                            };
+                        }
                         _ => (),
                     }
                 }
@@ -191,18 +204,48 @@ impl WindowRenderer {
                     // 4 -> Tilt Y, degrees from vertical, + towards user
                     // 5 -> unknown, always zero (barrel rotation?)
                 }
-                Event::RedrawRequested(..) => {
-                    if let Err(e) = self.paint() {
-                        log::error!("{e:?}");
+                Event::AboutToWait => {
+                    let has_tablet_update = if let Some(tab_events) =
+                        self.tablet_manager.as_mut().and_then(|m| m.pump().ok())
+                    {
+                        let mut has_tablet_update = false;
+                        for event in tab_events {
+                            if let octotablet::events::Event::Tool { event, .. } = event {
+                                match event {
+                                    octotablet::events::ToolEvent::Pose(p) => {
+                                        if let Some(p) = p.pressure.get() {
+                                            self.stylus_events.set_pressure(p);
+                                        }
+                                        self.stylus_events
+                                            .push_position((p.position[0], p.position[1]));
+                                        has_tablet_update = true;
+                                    }
+                                    octotablet::events::ToolEvent::Up
+                                    | octotablet::events::ToolEvent::Out => {
+                                        self.stylus_events.set_mouse_pressed(false);
+                                        has_tablet_update = true;
+                                    }
+                                    octotablet::events::ToolEvent::Down => {
+                                        self.stylus_events.set_mouse_pressed(true);
+                                        has_tablet_update = true;
+                                    }
+                                    _ => (),
+                                };
+                            }
+                        }
+                        has_tablet_update
+                    } else {
+                        false
                     };
-                }
-                Event::MainEventsCleared => {
                     // run UI logics
                     self.do_ui();
                     self.apply_document_cursor();
 
-                    // Request draw if either the UI or document want it
-                    if self.egui_ctx.needs_redraw() || self.preview_renderer.has_update() {
+                    // Request draw if any interactive element wants it (UI, document, or tablet)
+                    if has_tablet_update
+                        || self.egui_ctx.needs_redraw()
+                        || self.preview_renderer.has_update()
+                    {
                         self.window().request_redraw();
                     }
 
@@ -210,7 +253,9 @@ impl WindowRenderer {
                     self.stylus_events.finish();
                     // Wait. We'll be notified when to redraw UI, but the document preview could assert
                     // an update at any time! Thus, we must poll. U_U
-                    control_flow.set_wait_timeout(std::time::Duration::from_millis(50));
+                    target.set_control_flow(winit::event_loop::ControlFlow::wait_duration(
+                        std::time::Duration::from_millis(50),
+                    ));
                 }
                 _ => (),
             }
@@ -323,6 +368,8 @@ impl WindowRenderer {
             }
             None => image_future.boxed(),
         };
+
+        self.window().pre_present_notify();
 
         let next_frame_future = render_complete
             .then_swapchain_present(

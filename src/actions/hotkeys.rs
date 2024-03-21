@@ -21,7 +21,7 @@ pub struct KeyboardHotkey {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
-    pub key: winit::event::VirtualKeyCode,
+    pub key: winit::keyboard::KeyCode,
 }
 impl KeyboardHotkey {
     /// Get an arbitrary score of how specific this key is -

@@ -21,7 +21,6 @@
 //! and will be handled separately - thus, a shaping request can end up with up to 2 batches to draw, with differing pipelines.~~
 //! *correction: turns out that the extent of color support in `ttf_parser` (`COLRv0`) is fully representable by layered instance-colored glyphs!*
 
-use egui::TextBuffer;
 use rustybuzz::ttf_parser;
 use vulkano::buffer::Subbuffer;
 

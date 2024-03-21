@@ -1044,6 +1044,7 @@ fn icon_of_node(node: &crate::state::graph::NodeData) -> &'static str {
     }
 }
 mod latch {
+
     pub enum Latch {
         /// The interaction is finished. State will be returned and deleted from persistant memory.
         Finish,

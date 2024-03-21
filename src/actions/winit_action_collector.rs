@@ -3,7 +3,7 @@ use super::hotkeys::HotkeyShadow;
 pub struct WinitKeyboardActionCollector {
     /// Maps keys to the number of times they are shadowed.
     current_hotkeys: hashbrown::HashMap<super::hotkeys::KeyboardHotkey, usize>,
-    currently_pressed: hashbrown::HashSet<winit::event::VirtualKeyCode>,
+    currently_pressed: hashbrown::HashSet<winit::keyboard::KeyCode>,
     ctrl: bool,
     shift: bool,
     alt: bool,
@@ -28,20 +28,19 @@ impl WinitKeyboardActionCollector {
 
         let hotkeys = crate::GlobalHotkeys::get();
         match event {
-            WindowEvent::KeyboardInput { input, .. } => {
-                let Some(code) = input.virtual_keycode else {
+            WindowEvent::KeyboardInput { event, .. } => {
+                let winit::keyboard::PhysicalKey::Code(code) = event.physical_key else {
                     return;
                 };
 
-                let was_pressed = self.currently_pressed.contains(&code);
-                let is_pressed = winit::event::ElementState::Pressed == input.state;
-
                 // Update currently_pressed set accordingly:
-                if is_pressed && !was_pressed {
-                    self.currently_pressed.insert(code);
-                } else if !is_pressed {
-                    self.currently_pressed.remove(&code);
-                }
+                let was_pressed = if event.state.is_pressed() {
+                    // Returns true if WASN'T present
+                    !self.currently_pressed.insert(code)
+                } else {
+                    // Returns true if WAS present
+                    self.currently_pressed.remove(&code)
+                };
 
                 // Depending on the status of ctrl, shift, and alt, this key
                 // event could correspond to eight different actions. Check
@@ -77,7 +76,7 @@ impl WinitKeyboardActionCollector {
                         Some((hotkeys.keys_to_actions.action_of(key)?, key))
                     });
 
-                match (was_pressed, is_pressed) {
+                match (was_pressed, event.state.is_pressed()) {
                     // Just pressed
                     (false, true) => {
                         possible_keys.for_each(|(action, key)| self.push_key(action, key));
@@ -97,9 +96,10 @@ impl WinitKeyboardActionCollector {
                 self.cull();
             }
             WindowEvent::ModifiersChanged(m) => {
-                self.alt = m.alt();
-                self.ctrl = m.ctrl();
-                self.shift = m.shift();
+                let state = m.state();
+                self.alt = state.alt_key();
+                self.ctrl = state.control_key();
+                self.shift = state.shift_key();
                 // Original plan:
                 // For every held key, re-evaluate their meaning w.r.t new
                 // modifiers.

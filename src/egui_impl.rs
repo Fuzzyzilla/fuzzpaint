@@ -2,6 +2,8 @@ use crate::render_device::RenderSurface;
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
 
+use egui_winit::{egui, winit};
+
 /// Merge the textures data from one egui output into another. Useful for discarding Egui geomety
 /// while maintaining its side-effects.
 pub fn prepend_textures_delta(into: &mut egui::TexturesDelta, mut from: egui::TexturesDelta) {
@@ -19,7 +21,6 @@ pub fn prepend_textures_delta(into: &mut egui::TexturesDelta, mut from: egui::Te
 }
 
 pub struct EguiCtx {
-    ctx: egui::Context,
     state: egui_winit::State,
     renderer: EguiRenderer,
 
@@ -34,14 +35,18 @@ impl EguiCtx {
         let mut renderer = EguiRenderer::new(render_surface.context(), render_surface.format())?;
         renderer.gen_framebuffers(render_surface)?;
 
-        let mut state = egui_winit::State::new(&window);
-        state.set_pixels_per_point(egui_winit::native_pixels_per_point(window));
+        let mut state = egui_winit::State::new(
+            egui::Context::default(),
+            egui::ViewportId::ROOT,
+            &window,
+            None,
+            None,
+        );
         let properties = render_surface.context().physical_device().properties();
         let max_size = properties.max_image_dimension2_d;
         state.set_max_texture_side(max_size as usize);
 
         Ok(Self {
-            ctx: egui::Context::default(),
             state,
             renderer,
             redraw_requested: true,
@@ -49,43 +54,34 @@ impl EguiCtx {
         })
     }
     pub fn wants_pointer_input(&self) -> bool {
-        self.ctx.wants_pointer_input()
+        self.state.egui_ctx().wants_pointer_input()
     }
     pub fn replace_surface(&mut self, surface: &RenderSurface) -> anyhow::Result<()> {
         self.renderer.gen_framebuffers(surface)
     }
     pub fn push_winit_event(
         &mut self,
+        window: &winit::window::Window,
         winit_event: &winit::event::WindowEvent,
     ) -> egui_winit::EventResponse {
-        let response = self.state.on_event(&self.ctx, winit_event);
+        let response = self.state.on_window_event(window, winit_event);
         if response.repaint {
             self.redraw_requested = true;
         }
         response
     }
     pub fn update(&'_ mut self, window: &winit::window::Window, f: impl FnOnce(&'_ egui::Context)) {
+        let input = self.state.take_egui_input(window);
         //Call into user code to draw
-        self.ctx.begin_frame(self.state.take_egui_input(window));
-        f(&self.ctx);
-        let mut output = self.ctx.end_frame();
+        let mut output = self.state.egui_ctx().run(input, f);
 
         //If there were outstanding deltas, accumulate those
         if let Some(old) = self.full_output.take() {
             prepend_textures_delta(&mut output.textures_delta, old.textures_delta);
         }
 
-        // handle repaint time
-        if output.repaint_after.is_zero() {
-            self.redraw_requested = true;
-        } else {
-            //Egui returns astronomically large number if it doesn't want a redraw - triggers overflow lol
-            // let requested_instant = std::time::Instant::now().checked_add(output.repaint_after);
-            // wawa, not implemented
-        }
-
         self.state
-            .handle_platform_output(window, &self.ctx, output.platform_output.clone());
+            .handle_platform_output(window, output.platform_output.clone());
         //return platform outputs
         self.full_output = Some(output);
     }
@@ -108,8 +104,8 @@ impl EguiCtx {
 
         let res: AnyResult<_> = try_block::try_block! {
             let transfer_commands = self.renderer.do_image_deltas(output.textures_delta).transpose()?;
-            let tess_geom = self.ctx.tessellate(output.shapes);
-            let draw_commands = self.renderer.upload_and_render(self.ctx.pixels_per_point(), swapchain_idx, &tess_geom)?;
+            let tess_geom = self.state.egui_ctx().tessellate(output.shapes, output.pixels_per_point);
+            let draw_commands = self.renderer.upload_and_render(output.pixels_per_point, swapchain_idx, &tess_geom)?;
             drop(tess_geom);
 
             Ok((transfer_commands, draw_commands))

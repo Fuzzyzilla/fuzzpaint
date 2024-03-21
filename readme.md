@@ -7,14 +7,10 @@ In heavy development, many features are in-progress and semver is ignored. But, 
 ## Building
 Requires the [most recent Rust nightly toolchain](https://www.rust-lang.org/tools/install). Clone and execute `cargo run --release` from within the root directory of this repo!
 
-**Note the platform support below.** The app is cross platform and should run on any device that meets the [current driver requirements](assumptions.md) (if your device doesnt work - even if it's because of these requirements - please file an issue!) but tablet input is very much unfinished.
+## Platform Support
+**Note the platform support below.** The app is cross platform and should run on any device that meets the [current driver requirements](assumptions.md) (if your device doesnt work - even if it's because of these requirements - please file an issue!).
 
-| **Platform**     | Pen input     | Pad input | Notes                                               |
-|------------------|---------------|-----------|-----------------------------------------------------|
-| Unix (Wayland)   | None          | None      |                                                     |
-| Windows (Ink)    | None          | None      |                                                     |
-| Unix (Xorg)      | Pressure only | None      | `WINIT_UNIX_BACKEND=x11` to activate using xwayland |
-| Windows (wintab) | None          | None      | Documentation tough to come accross                 |
+For tablet support, see the [octotablet](https://github.com/Fuzzyzilla/octotablet) sister project.
 
 # Road to **0.2.0**
 To declare **0.2.0**, I would like to be able to freely doodle a thing and save it to disk. We're getting dangerously close!

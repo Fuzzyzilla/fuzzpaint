@@ -1,24 +1,26 @@
+use crate::gizmos::CursorIcon;
+
 enum ViewportManipulateType {
     Pan,
     Rotate,
     Scrub,
 }
 impl ViewportManipulateType {
-    fn cursor(&self, holding: bool) -> winit::window::CursorIcon {
+    fn cursor(&self, holding: bool) -> CursorIcon {
         match self {
             Self::Pan => {
                 if holding {
-                    winit::window::CursorIcon::Grabbing
+                    CursorIcon::Grabbing
                 } else {
-                    winit::window::CursorIcon::Grab
+                    CursorIcon::Grab
                 }
             }
-            Self::Rotate => winit::window::CursorIcon::EwResize,
+            Self::Rotate => CursorIcon::EwResize,
             Self::Scrub => {
                 if holding {
-                    winit::window::CursorIcon::NeswResize
+                    CursorIcon::NeswResize
                 } else {
-                    winit::window::CursorIcon::ZoomIn
+                    CursorIcon::ZoomIn
                 }
             }
         }
