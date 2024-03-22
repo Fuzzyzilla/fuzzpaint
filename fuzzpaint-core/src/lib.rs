@@ -1,14 +1,13 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+#![feature(write_all_vectored)]
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod blend;
+pub mod brush;
+pub mod commands;
+pub mod id;
+pub mod io;
+pub mod repositories;
+pub mod state;
+pub mod stroke;
+pub mod util;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+use id::FuzzID;
