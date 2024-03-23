@@ -10,7 +10,7 @@ struct PerDocument {
 }
 /// A provider that keeps documents in-memory.
 pub struct InMemoryDocumentProvider {
-    on_change: crossbeam::channel::Sender<ProviderMessage>,
+    on_change: parking_lot::Mutex<bus::Bus<ProviderMessage>>,
     // We don't expect high contention - will only be locked for writing when a new queue is inserted.
     documents: parking_lot::RwLock<hashbrown::HashMap<crate::state::DocumentID, PerDocument>>,
 }
@@ -26,7 +26,9 @@ impl InMemoryDocumentProvider {
         };
         self.documents.write().insert(new_id, new_document);
 
-        let _ = self.on_change.send(ProviderMessage::Opened(new_id));
+        self.on_change
+            .lock()
+            .broadcast(ProviderMessage::Opened(new_id));
 
         new_id
     }
@@ -40,14 +42,14 @@ impl InMemoryDocumentProvider {
         match self.documents.write().entry(id) {
             hashbrown::hash_map::Entry::Occupied(_) => return Err(queue),
             hashbrown::hash_map::Entry::Vacant(v) => {
-                let id = queue.id();
                 let queue = PerDocument { queue };
 
                 v.insert(queue);
-
-                let _ = self.on_change.send(ProviderMessage::Opened(id));
             }
         }
+
+        self.on_change.lock().broadcast(ProviderMessage::Opened(id));
+
         Ok(())
     }
     /// Call the given closure on the document queue with the given ID, if found.
@@ -57,14 +59,18 @@ impl InMemoryDocumentProvider {
     {
         let read = self.documents.read();
         let data = read.get(&id)?;
+
+        // Capture state now, check if it matches after user closure..
         let mut cursor = data.queue.listen_from_now();
+
         let result = f(&data.queue);
         // Avoid locking for any longer than we need to (next may block)
         drop(read);
 
         if let Ok(true) = cursor.forward() {
-            // Change occured! Broadcast this...
-            let _ = self.on_change.send(ProviderMessage::Modified(id));
+            self.on_change
+                .lock()
+                .broadcast(ProviderMessage::Modified(id));
         }
 
         Some(result)
@@ -78,20 +84,28 @@ impl InMemoryDocumentProvider {
     /// Ensures the ID is valid before sending.
     pub fn touch(&self, id: crate::state::DocumentID) {
         if self.documents.read().contains_key(&id) {
-            let _ = self.on_change.send(ProviderMessage::Modified(id));
+            self.on_change
+                .lock()
+                .broadcast(ProviderMessage::Modified(id));
         }
+    }
+    /// Get a reciever of messages describing changes to the provider or it's documents.
+    /// Does not recieve old messages, use [`Self::document_iter`] to get up-to-date!
+    pub fn change_listener(&self) -> bus::BusReader<ProviderMessage> {
+        self.on_change.lock().add_rx()
     }
 }
 impl Default for InMemoryDocumentProvider {
     fn default() -> Self {
-        let (on_change, _) = crossbeam::channel::unbounded();
+        // Blocks on full, so choose a large number to avoid blocking user thread.
+        let on_change = bus::Bus::new(256);
         Self {
-            on_change,
+            on_change: on_change.into(),
             documents: parking_lot::RwLock::default(),
         }
     }
 }
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum ProviderMessage {
     /// A new document has been made available to the provider.
     Opened(crate::state::DocumentID),

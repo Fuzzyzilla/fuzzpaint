@@ -518,56 +518,79 @@ async fn render_changes(
     renderer: Arc<crate::render_device::RenderContext>,
     document_preview: Arc<crate::document_viewport_proxy::DocumentViewportPreviewProxy>,
 ) -> anyhow::Result<()> {
-    let mut change_notifier: tokio::sync::broadcast::Receiver<
-        fuzzpaint_core::commands::queue::provider::ProviderMessage,
-    > = todo!(); // crate::default_provider().change_notifier();
-    let mut changed: Vec<_> = crate::default_provider().document_iter().collect();
-    let mut renderer = Renderer::new(renderer)?;
-    // Initialize renderer with all documents.
-    // let _ = renderer.render(&changed);
-    loop {
-        use tokio::sync::broadcast::error::RecvError;
-        let first_msg = change_notifier.recv().await;
-        match first_msg {
-            // Got message. Collect as many as are available, then go render.
-            Ok(msg) => {
-                changed.clear();
-                changed.push(msg.id());
-                while let Ok(msg) = change_notifier.try_recv() {
-                    // Handle lagged? That'd be a weird failure case...
-                    changed.push(msg.id());
-                }
-                // Implicitly handles deletion - when the renderer goes to fetch changes,
-                // it will see that the document has closed.
-                //renderer.render(&changed)?;
-                // No current doc, skip rendering.
-                let Some(selections) = crate::AdHocGlobals::read_clone() else {
-                    continue;
-                };
-                // Rerender, if requested
-                if changed.contains(&selections.document) {
-                    let write = document_preview.write().await;
-                    renderer.render_one(selections.document, &write)?;
-                    // We sync with renderer, oofs :V
-                    write.submit_now();
-                }
+    // Sync -> Async bridge for change notification. Bleh..
+    let (send, mut changes_recv) = tokio::sync::mpsc::unbounded_channel();
+    let exit_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let exit_flag_move = exit_flag.clone();
+    let _thread = std::thread::spawn(move || {
+        let mut change_listener =
+            fuzzpaint_core::commands::queue::provider::provider().change_listener();
+        loop {
+            // Parent requested child exit.
+            if exit_flag_move.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
             }
-            // Messages lost. Resubscrive and check all documents for changes, to be safe.
-            Err(RecvError::Lagged(..)) => {
-                // Discard messages.
-                change_notifier = change_notifier.resubscribe();
-                // Replace with every document ID. Doing this after the
-                // resubscribe is important, such that no new docs are missed!
-                changed.clear();
-                changed.extend(crate::default_provider().document_iter());
-                // Retain here. This is a list of all docs, so any not listed
-                // are therefore deleted.
-                tokio::task::yield_now().await;
-                //renderer.render_retain(&changed)?;
+            // Poll every so often, so an assertion of the exit flag is not missed.
+            match change_listener.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(change) => {
+                    // Got a change. Broadcast this one (and all others that are ready now)
+                    if send.send(change.id()).is_err() {
+                        // Disconnected!
+                        return;
+                    }
+                    while let Ok(change) = change_listener.try_recv() {
+                        if send.send(change.id()).is_err() {
+                            // Disconnected!
+                            return;
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
-            // Work here is done!
-            Err(RecvError::Closed) => return Ok(()),
         }
+    });
+    // Drop order - this will run before thread is joined, otherwise deadlock occurs!
+    defer::defer!(exit_flag.store(true, std::sync::atomic::Ordering::Relaxed));
+
+    let mut changes: Vec<_> = crate::default_provider().document_iter().collect();
+    let mut renderer = Renderer::new(renderer)?;
+
+    loop {
+        let changes = async {
+            // Already has some! Report immediately.
+            if !changes.is_empty() {
+                return Some(&mut changes);
+            }
+            let first = changes_recv.recv().await?;
+            changes.push(first);
+            // Collect all others that are available without blocking as well:
+            while let Ok(next) = changes_recv.try_recv() {
+                changes.push(next);
+            }
+            Some(&mut changes)
+        };
+
+        let Some(changes) = changes.await else {
+            // Channel closed
+            return Ok(());
+        };
+        // Implicitly handles deletion - when the renderer goes to fetch changes,
+        // it will see that the document has closed.
+        //renderer.render(&changed)?;
+        // No current doc, skip rendering.
+        let Some(selections) = crate::AdHocGlobals::read_clone() else {
+            changes.clear();
+            continue;
+        };
+        // Rerender, if requested
+        if changes.contains(&selections.document) {
+            let write = document_preview.write().await;
+            renderer.render_one(selections.document, &write)?;
+            // We sync with renderer, oofs :V
+            write.submit_now();
+        }
+        changes.clear();
     }
 }
 pub async fn render_worker(
