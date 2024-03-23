@@ -262,6 +262,19 @@ impl DocumentCommandListener {
         self.cursor = state.shared_state.present;
         Ok(state)
     }
+    /// Moves the cursor forward up-to-date with the documnet, not reporting the changes.
+    /// Returns `true` if any change occured.
+    pub fn forward(&mut self) -> Result<bool, ListenerError> {
+        let inner = self.inner.upgrade().ok_or(ListenerError::DocumentClosed)?;
+        let lock = inner.read();
+
+        if lock.state.present != self.cursor {
+            self.cursor = lock.state.present;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 // Traverses the shortest path from one tree node to another.

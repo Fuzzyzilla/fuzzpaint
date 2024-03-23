@@ -14,6 +14,7 @@ bitvec = { version = "1.0.1", default-features = false, features = [
     "std",
 ] }
 bytemuck = { version = "1.15.0", features = ["derive"] }
+crossbeam = "0.8.4"
 dirs = "5.0.1"
 fontdb = "0.16.2"
 hashbrown = { version = "0.14.3", features = ["serde"] }
