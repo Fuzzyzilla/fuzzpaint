@@ -1361,7 +1361,6 @@ dependencies = [
  "async-trait",
  "az",
  "bitflags 2.4.2",
- "bitvec",
  "bytemuck",
  "cgmath",
  "crossbeam",
@@ -1376,14 +1375,11 @@ dependencies = [
  "fuzzpaint-core",
  "hashbrown",
  "human_bytes",
- "id_tree",
  "image",
  "log",
  "lyon_tessellation",
  "octotablet",
- "optional",
  "parking_lot",
- "rangemap",
  "rayon",
  "rfd",
  "ron",
@@ -1407,6 +1403,28 @@ dependencies = [
 [[package]]
 name = "fuzzpaint-core"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "az",
+ "bitflags 2.4.2",
+ "bitvec",
+ "bytemuck",
+ "dirs",
+ "fontdb",
+ "hashbrown",
+ "human_bytes",
+ "id_tree",
+ "log",
+ "parking_lot",
+ "rangemap",
+ "rustybuzz",
+ "slab_tree",
+ "smallvec",
+ "strum",
+ "thiserror",
+ "unicode-segmentation",
+ "uuid",
+]
 
 [[package]]
 name = "generic-array"
@@ -2102,12 +2120,6 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
-
-[[package]]
-name = "optional"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "978aa494585d3ca4ad74929863093e87cac9790d81fe7aba2b3dc2890643a0fc"
 
 [[package]]
 name = "orbclient"

@@ -18,6 +18,9 @@ impl NonNanF32 {
             Some(Self(val))
         }
     }
+    pub fn get(self) -> f32 {
+        self.0
+    }
 }
 // This is safe - even though f32 is !Eq, we guarantee that no component is ever NaN
 // So PartialEq can act like Eq
@@ -31,11 +34,9 @@ impl Ord for NonNanF32 {
         unsafe { self.partial_cmp(other).unwrap_unchecked() }
     }
 }
+// Would be fun to impl the operators here too, but unfortunately *None of them* are closed over the set of Non-NaN floats!!
+// Ie, Inf - Inf = NaN, 0 * Inf = NaN....
 
-/// An Optional float where NaN is None.
-#[derive(Copy, Clone, PartialEq, PartialOrd, bytemuck::Zeroable, bytemuck::Pod, Debug)]
-#[repr(transparent)]
-pub struct NicheF32(f32);
 /// Premultiplied, linear HDR color.
 /// Always non-NaN and well-formed premul color.
 // Why cant bytemuck::NoUninit? :(

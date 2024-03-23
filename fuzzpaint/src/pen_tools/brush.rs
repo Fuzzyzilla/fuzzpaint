@@ -26,7 +26,7 @@ fn brush(
         if event.pressed {
             // Get stroke-in-progress or start anew.
             let this_stroke = in_progress_stroke.get_or_insert_with(|| crate::Stroke {
-                brush: crate::state::StrokeBrushSettings { is_eraser, ..brush },
+                brush: fuzzpaint_core::state::StrokeBrushSettings { is_eraser, ..brush },
                 points: Vec::new(),
             });
             let Ok(pos) = view_transform.unproject(cgmath::point2(event.pos.0, event.pos.1)) else {
@@ -40,7 +40,7 @@ fn brush(
                 last.dist + (delta[0] * delta[0] + delta[1] * delta[1]).sqrt()
             });
 
-            this_stroke.points.push(crate::StrokePoint {
+            this_stroke.points.push(fuzzpaint_core::stroke::Point {
                 pos: [pos.x, pos.y],
                 pressure: event.pressure.unwrap_or(1.0),
                 dist,
@@ -53,8 +53,9 @@ fn brush(
                     let collection_id = {
                         let graph = write.graph();
                         let node = graph.get(node).and_then(|node| node.leaf());
-                        if let Some(crate::state::graph::LeafType::StrokeLayer {
-                            collection, ..
+                        if let Some(fuzzpaint_core::state::graph::LeafType::StrokeLayer {
+                            collection,
+                            ..
                         }) = node
                         {
                             *collection
@@ -69,10 +70,8 @@ fn brush(
                         anyhow::bail!("Current layer references nonexistant stroke collection")
                     };
                     // Huzzah, all is good! Upload stroke, and push it.
-                    let immutable =
-                        TryInto::<crate::state::stroke_collection::ImmutableStroke>::try_into(
-                            stroke,
-                        )?;
+                    let immutable = stroke.make_immutable();
+                    drop(stroke);
 
                     // Destructure immutable stroke and push it.
                     // Invokes an extra ID allocation, weh

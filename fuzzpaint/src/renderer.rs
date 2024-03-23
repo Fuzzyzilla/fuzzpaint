@@ -1,16 +1,18 @@
+mod blender;
 mod gpu_tess;
 pub mod picker;
 pub mod requests;
 mod stroke_batcher;
 
+use fuzzpaint_core::{blend, commands::queue, state};
 use std::sync::Arc;
 
 use crate::vulkano_prelude::*;
 
 struct PerDocumentData {
-    listener: crate::commands::queue::DocumentCommandListener,
+    listener: queue::DocumentCommandListener,
     /// Cached images of each of the nodes of the graph.
-    graph_render_data: hashbrown::HashMap<crate::state::graph::AnyID, RenderData>,
+    graph_render_data: hashbrown::HashMap<state::graph::AnyID, RenderData>,
 }
 #[derive(thiserror::Error, Debug)]
 enum IncrementalDrawErr {
@@ -46,14 +48,14 @@ struct Renderer {
     stroke_renderer: stroke_renderer::StrokeLayerRenderer,
     text_builder: crate::text::TextBuilder,
     text_renderer: crate::text::renderer::monochrome::Renderer,
-    blend_engine: crate::blend::BlendEngine,
-    data: hashbrown::HashMap<crate::state::DocumentID, PerDocumentData>,
+    blend_engine: blender::BlendEngine,
+    data: hashbrown::HashMap<state::DocumentID, PerDocumentData>,
 }
 impl Renderer {
     fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
         Ok(Self {
             context: context.clone(),
-            blend_engine: crate::blend::BlendEngine::new(context.device())?,
+            blend_engine: blender::BlendEngine::new(context.device())?,
             text_builder: crate::text::TextBuilder::allocate_new(
                 context.allocators().memory().clone(),
             )?,
@@ -64,7 +66,7 @@ impl Renderer {
     }
     fn render_one(
         &mut self,
-        id: crate::state::DocumentID,
+        id: state::DocumentID,
         into: &Arc<vk::ImageView>,
     ) -> anyhow::Result<()> {
         let data = self.data.entry(id);
@@ -72,10 +74,9 @@ impl Renderer {
         let (is_new, data) = match data {
             hashbrown::hash_map::Entry::Occupied(o) => (false, o.into_mut()),
             hashbrown::hash_map::Entry::Vacant(v) => {
-                let Some(listener) = crate::default_provider().inspect(
-                    id,
-                    crate::commands::queue::DocumentCommandQueue::listen_from_now,
-                ) else {
+                let Some(listener) = crate::default_provider()
+                    .inspect(id, queue::DocumentCommandQueue::listen_from_now)
+                else {
                     // Deleted before we could do anything.
                     anyhow::bail!("Document deleted before render worker reached it");
                 };
@@ -144,25 +145,25 @@ impl Renderer {
     /// Reuses allocated images, but ignores their contents!
     fn draw_from_scratch(
         context: &Arc<crate::render_device::RenderContext>,
-        blend_engine: &crate::blend::BlendEngine,
+        blend_engine: &blender::BlendEngine,
         renderer: &stroke_renderer::StrokeLayerRenderer,
         text_builder: &mut crate::text::TextBuilder,
         text_renderer: &crate::text::renderer::monochrome::Renderer,
         document_data: &mut PerDocumentData,
-        state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
+        state: &impl queue::state_reader::CommandQueueStateReader,
         into: &Arc<vk::ImageView>,
     ) -> anyhow::Result<()> {
-        use crate::state::graph::{LeafType, NodeID, NodeType};
+        use state::graph::{LeafType, NodeID, NodeType};
 
         /// Insert a single node (possibly recursing) into the builder.
         fn insert_blend(
-            blend_engine: &crate::blend::BlendEngine,
-            builder: &mut crate::blend::BlendInvocationBuilder,
+            blend_engine: &blender::BlendEngine,
+            builder: &mut blender::BlendInvocationBuilder,
             document_data: &PerDocumentData,
-            graph: &crate::state::graph::BlendGraph,
+            graph: &state::graph::BlendGraph,
 
-            id: crate::state::graph::AnyID,
-            data: &crate::state::graph::NodeData,
+            id: state::graph::AnyID,
+            data: &state::graph::NodeData,
         ) -> anyhow::Result<()> {
             match (data.leaf(), data.node()) {
                 // Pre-rendered leaves
@@ -180,7 +181,7 @@ impl Renderer {
                         .unwrap()
                         .view
                         .clone();
-                    builder.then_blend(crate::blend::BlendImageSource::Immediate(view), *blend)?;
+                    builder.then_blend(blender::BlendImageSource::Immediate(view), *blend)?;
                 }
                 (Some(LeafType::Note), None) => (),
                 // Passthrough - add children directly without grouped blend
@@ -218,10 +219,10 @@ impl Renderer {
 
         /// Recursively add children into existing blend builder.
         fn blend_for_passthrough(
-            blend_engine: &crate::blend::BlendEngine,
-            builder: &mut crate::blend::BlendInvocationBuilder,
+            blend_engine: &blender::BlendEngine,
+            builder: &mut blender::BlendInvocationBuilder,
             document_data: &PerDocumentData,
-            graph: &crate::state::graph::BlendGraph,
+            graph: &state::graph::BlendGraph,
             node: NodeID,
         ) -> anyhow::Result<()> {
             let iter = graph
@@ -235,14 +236,14 @@ impl Renderer {
 
         /// Recursively build a blend invocation for the node, or None for root.
         fn blend_for_node(
-            blend_engine: &crate::blend::BlendEngine,
+            blend_engine: &blender::BlendEngine,
             document_data: &PerDocumentData,
-            graph: &crate::state::graph::BlendGraph,
+            graph: &state::graph::BlendGraph,
             node: NodeID,
 
             into_image: Arc<vk::ImageView>,
             clear_image: bool,
-        ) -> anyhow::Result<crate::blend::BlendInvocationHandle> {
+        ) -> anyhow::Result<blender::BlendInvocationHandle> {
             let iter = graph
                 .iter_node(node)
                 .ok_or_else(|| anyhow::anyhow!("Node not found"))?;
@@ -314,7 +315,7 @@ impl Renderer {
                         text_renderer,
                         image,
                         *px_per_em,
-                        text,
+                        &text,
                     )?);
                 }
                 Some(LeafType::Note) | None => (),
@@ -351,10 +352,10 @@ impl Renderer {
     /// Assumes the existence of a previous `draw_from_scratch`, applying only the diff.
     fn draw_incremental(
         _context: &Arc<crate::render_device::RenderContext>,
-        _blend_engine: &crate::blend::BlendEngine,
+        _blend_engine: &blender::BlendEngine,
         _renderer: &stroke_renderer::StrokeLayerRenderer,
         _document_data: &mut PerDocumentData,
-        state: &impl crate::commands::queue::state_reader::CommandQueueStateReader,
+        state: &impl queue::state_reader::CommandQueueStateReader,
         _into: &Arc<vk::ImageView>,
     ) -> Result<(), IncrementalDrawErr> {
         if state.has_changes() {
@@ -472,8 +473,8 @@ impl Renderer {
     /// Only fails when graphics device is out-of-memory
     fn allocate_prune_graph(
         renderer: &stroke_renderer::StrokeLayerRenderer,
-        graph_render_data: &mut hashbrown::HashMap<crate::state::graph::AnyID, RenderData>,
-        graph: &crate::state::graph::BlendGraph,
+        graph_render_data: &mut hashbrown::HashMap<state::graph::AnyID, RenderData>,
+        graph: &state::graph::BlendGraph,
     ) -> anyhow::Result<()> {
         let mut retain_data = hashbrown::HashSet::new();
         for (id, node) in graph.iter() {
@@ -486,14 +487,14 @@ impl Renderer {
                 // Color needing a whole image is a big ol inefficiency but that's todo :P
                 (
                     Some(
-                        crate::state::graph::LeafType::SolidColor { .. }
-                        | crate::state::graph::LeafType::StrokeLayer { .. }
-                        | crate::state::graph::LeafType::Text { .. },
+                        state::graph::LeafType::SolidColor { .. }
+                        | state::graph::LeafType::StrokeLayer { .. }
+                        | state::graph::LeafType::Text { .. },
                     ),
                     None,
                 ) => true,
                 // Blend groups need an image.
-                (None, Some(crate::state::graph::NodeType::GroupedBlend(..))) => true,
+                (None, Some(state::graph::NodeType::GroupedBlend(..))) => true,
                 // Every other type has no graphic.
                 _ => false,
             };
@@ -517,7 +518,9 @@ async fn render_changes(
     renderer: Arc<crate::render_device::RenderContext>,
     document_preview: Arc<crate::document_viewport_proxy::DocumentViewportPreviewProxy>,
 ) -> anyhow::Result<()> {
-    let mut change_notifier = crate::default_provider().change_notifier();
+    let mut change_notifier: tokio::sync::broadcast::Receiver<
+        fuzzpaint_core::commands::queue::provider::ProviderMessage,
+    > = todo!(); // crate::default_provider().change_notifier();
     let mut changed: Vec<_> = crate::default_provider().document_iter().collect();
     let mut renderer = Renderer::new(renderer)?;
     // Initialize renderer with all documents.
@@ -868,7 +871,7 @@ mod stroke_renderer {
         }
         pub fn draw(
             &self,
-            strokes: &[&crate::state::stroke_collection::ImmutableStroke],
+            strokes: &[&fuzzpaint_core::state::stroke_collection::ImmutableStroke],
             renderbuf: &super::RenderData,
             clear: bool,
         ) -> AnyResult<()> {

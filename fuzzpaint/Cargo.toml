@@ -12,10 +12,6 @@ anyhow = "1.0.81"
 async-trait = "0.1.78"
 az = "1.2.1"
 bitflags = { version = "2.4.2", features = ["bytemuck"] }
-bitvec = { version = "1.0.1", default-features = false, features = [
-    "alloc",
-    "std",
-] }
 bytemuck = "1.15.0"
 cgmath = "0.18.0"
 crossbeam = "0.8.4"
@@ -30,14 +26,11 @@ env_logger = "0.11.3"
 fontdb = "0.16.2"
 hashbrown = { version = "0.14.3", features = ["serde"] }
 human_bytes = "0.4.3"
-id_tree = "1.8.0"
 image = "0.25.0"
 log = "0.4.21"
 lyon_tessellation = "1.0.13"
 octotablet = "0.1.0"
-optional = "0.5.0"
 parking_lot = "0.12.1"
-rangemap = "1.5.1"
 rayon = "1.9.0"
 rfd = "0.14.0"
 ron = "0.8.1"

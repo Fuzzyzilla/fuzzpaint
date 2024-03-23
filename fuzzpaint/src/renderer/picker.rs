@@ -159,7 +159,7 @@ impl Picker for RenderedColorPicker {
 pub struct StrokeIDPicker {}
 impl crate::picker::Picker for StrokeIDPicker {
     // None if no element under cursor
-    type Value = Option<crate::state::stroke_collection::ImmutableStrokeID>;
+    type Value = Option<fuzzpaint_core::state::stroke_collection::ImmutableStrokeID>;
     fn pick(
         &self,
         viewport_coordinate: ultraviolet::Vec2,
@@ -308,7 +308,7 @@ impl PickerRenderer {
                 }),
                 rasterization_state: Some(vk::RasterizationState::default()),
                 vertex_input_state: Some(
-                    crate::StrokePoint::per_instance().definition(&vert.info().input_interface)?,
+                    todo!(), //crate::StrokePoint::per_instance().definition(&vert.info().input_interface)?,
                 ),
 
                 // No blend - use as is!

@@ -26,8 +26,8 @@ mod shaders {
             path: "./src/shaders/tessellate_stamp.comp",
         }
 
-        impl From<crate::StrokePoint> for InputStrokeVertex {
-            fn from(value: crate::StrokePoint) -> Self {
+        impl From<fuzzpaint_core::stroke::Point> for InputStrokeVertex {
+            fn from(value: fuzzpaint_core::stroke::Point) -> Self {
                 Self {
                     dist: value.dist,
                     pos: value.pos,
@@ -164,7 +164,10 @@ impl GpuStampTess {
             },
             batch.allocs.iter().map(|alloc| {
                 // Can't handle other archetypes yet
-                assert_eq!(alloc.summary.archetype, crate::StrokePoint::archetype());
+                assert_eq!(
+                    alloc.summary.archetype,
+                    fuzzpaint_core::stroke::Point::archetype()
+                );
 
                 let density = alloc.src.brush.spacing_px;
                 let (num_expected_stamps, num_points) = {

@@ -2,7 +2,7 @@
 #[derive(Debug, Clone)]
 pub enum UiRequest {
     Document {
-        target: crate::state::DocumentID,
+        target: fuzzpaint_core::state::DocumentID,
         request: DocumentRequest,
     },
     SetBaseTool {
@@ -18,7 +18,7 @@ pub enum NodeRequest {
     /// A partial change to the layer's blend. Reported during editting to give the user
     /// visual feedback, prior to finalizing the blend and sending it to the queue. Not all
     /// blend changes will be reported via this request!
-    InProgressBlend(crate::blend::Blend),
+    InProgressBlend(fuzzpaint_core::blend::Blend),
 }
 #[derive(Debug, Clone, Copy)]
 /// View requests. None of these give a centerpoint - the viewport center
@@ -40,7 +40,7 @@ pub enum DocumentViewRequest {
 pub enum DocumentRequest {
     Node {
         // Todo: other kinds of layer.
-        target: crate::state::graph::AnyID,
+        target: fuzzpaint_core::state::graph::AnyID,
         request: NodeRequest,
     },
     View(DocumentViewRequest),

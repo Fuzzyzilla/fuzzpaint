@@ -36,6 +36,16 @@ impl CollectionSummary {
     }
 }
 
+impl From<&[crate::stroke::Point]> for CollectionSummary {
+    fn from(value: &[crate::stroke::Point]) -> Self {
+        CollectionSummary {
+            archetype: crate::stroke::Point::archetype(),
+            len: value.len(),
+            arc_length: value.last().map_or(0.0, |point| point.dist).into(),
+        }
+    }
+}
+
 pub struct PointCollectionIDMarker;
 pub type PointCollectionID = crate::FuzzID<PointCollectionIDMarker>;
 
@@ -115,7 +125,7 @@ impl PointRepository {
     /// Insert the collection into the repository, yielding a unique ID.
     /// Fails if the length of the collection caintains > [`SLAB_ELEMENT_COUNT`] f32 elements
     #[must_use = "the returned ID is needed to fetch the data in the future"]
-    pub fn insert(&self, collection: &[()]) -> Option<PointCollectionID> {
+    pub fn insert(&self, collection: &[crate::stroke::Point]) -> Option<PointCollectionID> {
         let elements = bytemuck::cast_slice(collection);
         if elements.len() <= SLAB_ELEMENT_COUNT {
             let slab_reads = self.slabs.upgradable_read();
@@ -130,7 +140,7 @@ impl PointRepository {
 
                 // populate info
                 let info = PointCollectionAllocInfo {
-                    summary: todo!(),
+                    summary: collection.into(),
                     slab_id,
                     start,
                 };
@@ -151,7 +161,7 @@ impl PointRepository {
                 };
                 // populate info
                 let info = PointCollectionAllocInfo {
-                    summary: todo!(),
+                    summary: collection.into(),
                     slab_id,
                     start,
                 };

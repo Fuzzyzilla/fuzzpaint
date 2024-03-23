@@ -29,13 +29,13 @@ pub enum PickerRequest {
     Composited(PickerResponse<super::picker::RenderedColorPicker>),
     /// Sample from the rendered output of a given leaf or node.
     Rendered(
-        crate::state::graph::AnyID,
+        fuzzpaint_core::state::graph::AnyID,
         PickerResponse<super::picker::RenderedColorPicker>,
     ),
 }
 pub enum RenderRequest {
     CreatePicker {
-        document: crate::state::DocumentID,
+        document: fuzzpaint_core::state::DocumentID,
         picker: PickerRequest,
         info: PickerInfo,
     },

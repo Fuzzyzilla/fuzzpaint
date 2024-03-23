@@ -481,16 +481,16 @@ impl TextBuilder {
             cache: cache::GlyphCache::new(vertices, indices),
         }
     }
-    pub fn tess_draw_rich<'faces, 'face: 'faces, 'rich, Faces>(
+    /*pub fn tess_draw_rich<'faces, 'face: 'faces, 'rich, Faces>(
         &mut self,
         faces: &'faces Faces,
-        rich: &'rich crate::state::rich_text::RichTextParagraph,
-        base: &crate::state::rich_text::FullProperties,
+        rich: &'rich fuzzpaint_core::rich_text::RichTextParagraph,
+        base: &fuzzpaint_core::rich_text::FullProperties,
     ) -> Result<DrawOutput, DrawMultilineError>
     where
         // Todo: concrete type once Font repository is done.
         Faces: std::ops::Index<
-            &'rich crate::repositories::fonts::VariedFaceID,
+            &'rich fuzzpaint_core::repositories::fonts::VariedFaceID,
             Output = Option<&'faces rustybuzz::Face<'face>>,
         >,
     {
@@ -498,7 +498,7 @@ impl TextBuilder {
             let style = span.unwrap_styles_or(base);
         }
         todo!()
-    }
+    }*/
     pub fn tess_draw_multiline(
         &mut self,
         face: &rustybuzz::Face,

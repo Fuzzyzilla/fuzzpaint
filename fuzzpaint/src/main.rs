@@ -6,36 +6,25 @@
 #![feature(float_next_up_down)]
 #![warn(clippy::pedantic)]
 use std::sync::Arc;
-pub mod commands;
 mod egui_impl;
 pub mod renderer;
-pub mod repositories;
 pub mod vulkano_prelude;
 pub mod window;
 use vulkano_prelude::*;
 pub mod actions;
-pub mod blend;
-pub mod brush;
 pub mod document_viewport_proxy;
 pub mod gizmos;
-pub mod id;
-pub mod io;
 pub mod pen_tools;
 pub mod picker;
 pub mod render_device;
-pub mod state;
 pub mod stylus_events;
-pub mod tess;
 pub mod text;
 pub mod ui;
-pub mod util;
 pub mod view_transform;
-use blend::Blend;
 
-pub use id::FuzzID;
-pub use tess::StrokeTessellator;
+use fuzzpaint_core::id::FuzzID;
 
-pub use commands::queue::provider::provider as default_provider;
+use fuzzpaint_core::commands::queue::provider::provider as default_provider;
 
 #[cfg(feature = "dhat_heap")]
 #[global_allocator]
@@ -142,9 +131,9 @@ impl GlobalHotkeys {
 /// There still needs to be a way to intercommunicate between UI selections, Pen actions, and renderer preview.
 #[derive(Clone)]
 pub struct AdHocGlobals {
-    pub document: state::DocumentID,
-    pub brush: state::StrokeBrushSettings,
-    pub node: Option<state::graph::AnyID>,
+    pub document: fuzzpaint_core::state::DocumentID,
+    pub brush: fuzzpaint_core::state::StrokeBrushSettings,
+    pub node: Option<fuzzpaint_core::state::graph::AnyID>,
 }
 impl AdHocGlobals {
     #[must_use]
@@ -160,54 +149,24 @@ impl AdHocGlobals {
     }
 }
 
-#[derive(vk::Vertex, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
-#[repr(C)]
-pub struct StrokePoint {
-    #[format(R32G32_SFLOAT)]
-    pos: [f32; 2],
-    #[format(R32_SFLOAT)]
-    pressure: f32,
-    /// Arc length of stroke from beginning to this point
-    #[format(R32_SFLOAT)]
-    dist: f32,
-}
-
-impl StrokePoint {
-    #[must_use]
-    pub const fn archetype() -> repositories::points::PointArchetype {
-        use repositories::points::PointArchetype;
-        // | isn't const except for on the bits type! x3
-        // This is infallible but unwrap also isn't const.
-        match PointArchetype::from_bits(
-            PointArchetype::POSITION.bits()
-                | PointArchetype::PRESSURE.bits()
-                | PointArchetype::ARC_LENGTH.bits(),
-        ) {
-            Some(s) => s,
-            None => unreachable!(),
-        }
-    }
-    #[must_use]
-    pub fn lerp(&self, other: &Self, factor: f32) -> Self {
-        let inv_factor = 1.0 - factor;
-
-        let s = std::simd::f32x4::from_array([self.pos[0], self.pos[1], self.pressure, self.dist]);
-        let o =
-            std::simd::f32x4::from_array([other.pos[0], other.pos[1], other.pressure, other.dist]);
-        // FMA is planned but unimplemented ;w;
-        let n = s * std::simd::f32x4::splat(inv_factor) + (o * std::simd::f32x4::splat(factor));
-        Self {
-            pos: [n[0], n[1]],
-            pressure: n[2],
-            dist: n[3],
-        }
-    }
-}
-
 pub struct Stroke {
-    brush: state::StrokeBrushSettings,
-    points: Vec<StrokePoint>,
+    brush: fuzzpaint_core::state::StrokeBrushSettings,
+    points: Vec<fuzzpaint_core::stroke::Point>,
 }
+impl Stroke {
+    fn make_immutable(&self) -> fuzzpaint_core::state::stroke_collection::ImmutableStroke {
+        let points = fuzzpaint_core::repositories::points::global();
+        let point_collection = points
+            .insert(&self.points)
+            .expect("Failed to upload stroke data");
+        fuzzpaint_core::state::stroke_collection::ImmutableStroke {
+            id: FuzzID::default(),
+            brush: self.brush,
+            point_collection,
+        }
+    }
+}
+
 async fn stylus_event_collector(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     ui_requests: crossbeam::channel::Receiver<ui::requests::UiRequest>,
@@ -279,11 +238,11 @@ fn main() -> AnyResult<()> {
         let paths: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
         // Did we have at least one success? No paths is a success.
         let had_success: std::sync::atomic::AtomicBool = paths.is_empty().into();
-        let repo = repositories::points::global();
+        let repo = fuzzpaint_core::repositories::points::global();
         paths.into_par_iter().for_each(|path| {
             let try_block =
-                || -> Result<crate::commands::queue::DocumentCommandQueue, std::io::Error> {
-                    io::read_path(&path, repo)
+                || -> Result<fuzzpaint_core::commands::queue::DocumentCommandQueue, std::io::Error> {
+                    fuzzpaint_core::io::read_path(&path, repo)
                 };
 
             match try_block() {

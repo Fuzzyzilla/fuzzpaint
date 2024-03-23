@@ -2,6 +2,10 @@ mod color_palette;
 pub mod requests;
 
 use egui::Ui;
+use fuzzpaint_core::{
+    blend::{Blend, BlendMode},
+    brush, commands, io, repositories, state,
+};
 
 const STROKE_LAYER_ICON: &str = "✏";
 const TEXT_LAYER_ICON: &str = "🗛";
@@ -97,11 +101,11 @@ trait UILayer {
 }
 #[derive(Clone)]
 struct PerDocumentData {
-    id: crate::state::DocumentID,
-    graph_selection: Option<crate::state::graph::AnyID>,
-    graph_focused_subtree: Option<crate::state::graph::NodeID>,
+    id: state::DocumentID,
+    graph_selection: Option<state::graph::AnyID>,
+    graph_focused_subtree: Option<state::graph::NodeID>,
     /// Yanked node during a reparent operation
-    yanked_node: Option<crate::state::graph::AnyID>,
+    yanked_node: Option<state::graph::AnyID>,
     name: String,
 }
 pub struct MainUI {
@@ -112,7 +116,7 @@ pub struct MainUI {
     inlays: Vec<Box<dyn UILayer>>,
 
     documents: Vec<PerDocumentData>,
-    cur_document: Option<crate::state::DocumentID>,
+    cur_document: Option<state::DocumentID>,
 
     requests_send: crossbeam::channel::Sender<requests::UiRequest>,
     requests_recv: crossbeam::channel::Receiver<requests::UiRequest>,
@@ -213,9 +217,9 @@ impl MainUI {
                 let old_brush = globals.take().map(|globals| globals.brush);
                 *globals = Some(crate::AdHocGlobals {
                     document: interface.id,
-                    brush: old_brush.unwrap_or(crate::state::StrokeBrushSettings {
+                    brush: old_brush.unwrap_or(state::StrokeBrushSettings {
                         is_eraser: false,
-                        brush: crate::brush::todo_brush().id(),
+                        brush: brush::todo_brush().id(),
                         color_modulate: [0.0, 0.0, 0.0, 1.0],
                         size_mul: 10.0,
                         spacing_px: 0.5,
@@ -265,7 +269,7 @@ impl MainUI {
                         ui.add(button)
                     };
                     if add_button(ui, "New", Some("Ctrl+N")).clicked() {
-                        let new_doc = crate::commands::queue::DocumentCommandQueue::new();
+                        let new_doc = commands::queue::DocumentCommandQueue::new();
                         let new_id = new_doc.id();
                         // Can't fail
                         let _ = crate::default_provider().insert(new_doc);
@@ -289,9 +293,9 @@ impl MainUI {
                             std::thread::spawn(move || {
                                 if let Some(reader) = crate::default_provider().inspect(
                                     current,
-                                    crate::commands::queue::DocumentCommandQueue::peek_clone_state,
+                                    commands::queue::DocumentCommandQueue::peek_clone_state,
                                 ) {
-                                    let repo = crate::repositories::points::global();
+                                    let repo = repositories::points::global();
 
                                     let try_block = || -> anyhow::Result<()> {
                                         let mut path = dirs::document_dir().unwrap();
@@ -299,7 +303,7 @@ impl MainUI {
                                         let file = std::fs::File::create(path)?;
 
                                         let start = std::time::Instant::now();
-                                        crate::io::write_into(&reader, repo, &file)?;
+                                        io::write_into(&reader, repo, &file)?;
                                         let duration = start.elapsed();
 
                                         file.sync_all()?;
@@ -331,13 +335,13 @@ impl MainUI {
                     if add_button(ui, "Open", Some("Ctrl+O")).clicked() {
                         // Synchronous and bad just for testing.
                         if let Some(files) = rfd::FileDialog::new().pick_files() {
-                            let point_repository = crate::repositories::points::global();
+                            let point_repository = repositories::points::global();
                             let provider = crate::default_provider();
 
                             // Keep track of the last successful loaded id
                             let mut recent_success = None;
                             for file in files {
-                                match crate::io::read_path(file, point_repository) {
+                                match io::read_path(file, point_repository) {
                                     Ok(doc) => {
                                         let id = doc.id();
                                         if provider.insert(doc).is_ok() {
@@ -370,7 +374,7 @@ impl MainUI {
     fn document_bar(&mut self, ui: &mut Ui) {
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal(|ui| {
-                let mut deleted_ids = smallvec::SmallVec::<[crate::state::DocumentID; 1]>::new();
+                let mut deleted_ids = smallvec::SmallVec::<[state::DocumentID; 1]>::new();
                 for PerDocumentData { id, name, .. } in &self.documents {
                     egui::containers::Frame::group(ui.style())
                         .outer_margin(egui::Margin::symmetric(0.0, 0.0))
@@ -408,7 +412,7 @@ impl MainUI {
     /// Bottom trim showing view controls.
     fn nav_bar(
         ui: &mut Ui,
-        document: crate::state::DocumentID,
+        document: state::DocumentID,
         requests: &crossbeam::channel::Sender<requests::UiRequest>,
         frame: &crate::actions::ActionFrame,
     ) {
@@ -597,11 +601,11 @@ fn tools_panel(
 /// `true` is returned.
 fn leaf_props_panel(
     ui: &mut Ui,
-    leaf_id: crate::state::graph::LeafID,
-    leaf: &mut crate::state::graph::LeafType,
-    stroke_collections: &crate::state::stroke_collection::StrokeCollectionState,
+    leaf_id: state::graph::LeafID,
+    leaf: &mut state::graph::LeafType,
+    stroke_collections: &state::stroke_collection::StrokeCollectionState,
 ) -> bool {
-    use crate::state::graph::LeafType;
+    use state::graph::LeafType;
     ui.separator();
     let write = match leaf {
         // Nothing to show
@@ -702,7 +706,7 @@ fn leaf_props_panel(
 fn layer_buttons(
     ui: &mut Ui,
     interface: &mut PerDocumentData,
-    writer: &mut crate::commands::queue::writer::CommandQueueWriter,
+    writer: &mut commands::queue::writer::CommandQueueWriter,
 ) {
     ui.horizontal(|ui| {
         // Copied logic since we can't borrow test_graph_selection throughout this whole
@@ -710,14 +714,14 @@ fn layer_buttons(
         macro_rules! add_location {
             () => {
                 match interface.graph_selection.as_ref() {
-                    Some(crate::state::graph::AnyID::Node(id)) => {
-                        crate::state::graph::Location::IndexIntoNode(id, 0)
+                    Some(state::graph::AnyID::Node(id)) => {
+                        state::graph::Location::IndexIntoNode(id, 0)
                     }
-                    Some(any) => crate::state::graph::Location::AboveSelection(any),
+                    Some(any) => state::graph::Location::AboveSelection(any),
                     // No selection, add into the root of the viewed subree
                     None => match interface.graph_focused_subtree.as_ref() {
-                        Some(root) => crate::state::graph::Location::IndexIntoNode(root, 0),
-                        None => crate::state::graph::Location::IndexIntoRoot(0),
+                        Some(root) => state::graph::Location::IndexIntoNode(root, 0),
+                        None => state::graph::Location::IndexIntoRoot(0),
                     },
                 }
             };
@@ -732,8 +736,8 @@ fn layer_buttons(
             interface.graph_selection = writer
                 .graph()
                 .add_leaf(
-                    crate::state::graph::LeafType::StrokeLayer {
-                        blend: crate::blend::Blend::default(),
+                    state::graph::LeafType::StrokeLayer {
+                        blend: Blend::default(),
                         collection: new_stroke_collection,
                     },
                     add_location!(),
@@ -751,8 +755,8 @@ fn layer_buttons(
         {
             interface.graph_selection = graph
                 .add_leaf(
-                    crate::state::graph::LeafType::Text {
-                        blend: crate::blend::Blend::default(),
+                    state::graph::LeafType::Text {
+                        blend: Blend::default(),
                         text: "Hello, world!".to_owned(),
                         px_per_em: 50.0,
                     },
@@ -769,8 +773,8 @@ fn layer_buttons(
         {
             interface.graph_selection = graph
                 .add_leaf(
-                    crate::state::graph::LeafType::SolidColor {
-                        blend: crate::blend::Blend::default(),
+                    state::graph::LeafType::SolidColor {
+                        blend: Blend::default(),
                         source: [1.0; 4],
                     },
                     add_location!(),
@@ -786,7 +790,7 @@ fn layer_buttons(
         {
             interface.graph_selection = graph
                 .add_leaf(
-                    crate::state::graph::LeafType::Note,
+                    state::graph::LeafType::Note,
                     add_location!(),
                     "Note".to_string(),
                 )
@@ -799,7 +803,7 @@ fn layer_buttons(
         if ui.button(GROUP_ICON).on_hover_text("Add Group").clicked() {
             interface.graph_selection = graph
                 .add_node(
-                    crate::state::graph::NodeType::Passthrough,
+                    state::graph::NodeType::Passthrough,
                     add_location!(),
                     "Group Layer".to_string(),
                 )
@@ -873,7 +877,7 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                         ui.label(format!("{} properties", node_props.name()));
                     });
                     match id {
-                        crate::state::graph::AnyID::Leaf(leaf_id) => {
+                        state::graph::AnyID::Leaf(leaf_id) => {
                             let Ok(mut leaf) = node_props.into_leaf() else {
                                 // bad interface :V
                                 // match on ID says it must be a leaf.
@@ -888,7 +892,7 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                                 let _ = writer.graph().set_leaf(leaf_id, leaf);
                             }
                         }
-                        crate::state::graph::AnyID::Node(_n) => {
+                        state::graph::AnyID::Node(_n) => {
                             // Todo!
                         }
                     }
@@ -1019,7 +1023,7 @@ fn brush_panel(ui: &mut Ui, actions: &crate::actions::ActionFrame) {
 /// Panel showing debug stats
 fn stats_panel(ui: &mut Ui) {
     ui.label("Memory Usage Stats");
-    let point_resident_usage = crate::repositories::points::global().resident_usage();
+    let point_resident_usage = repositories::points::global().resident_usage();
     ui.label(format!(
         "Point repository: {}/{}",
         human_bytes::human_bytes(point_resident_usage.0 as f64),
@@ -1027,8 +1031,8 @@ fn stats_panel(ui: &mut Ui) {
     ));
 }
 
-fn icon_of_node(node: &crate::state::graph::NodeData) -> &'static str {
-    use crate::state::graph::{LeafType, NodeType};
+fn icon_of_node(node: &state::graph::NodeData) -> &'static str {
+    use state::graph::{LeafType, NodeType};
     const UNKNOWN: &str = "？";
     match (node.leaf(), node.node()) {
         // Leaves
@@ -1135,9 +1139,9 @@ mod latch {
 fn ui_layer_blend(
     ui: &mut Ui,
     id: impl std::hash::Hash,
-    blend: crate::blend::Blend,
+    blend: Blend,
     disable: bool,
-) -> self::latch::LatchResponse<'_, crate::blend::Blend> {
+) -> self::latch::LatchResponse<'_, Blend> {
     // Get the persisted blend, or use the caller's blend if none.
     latch::latch(ui, (&id, "blend-state"), blend, |ui, blend| {
         let mut finished = false;
@@ -1167,7 +1171,7 @@ fn ui_layer_blend(
             egui::ComboBox::new(&id, "")
                 .selected_text(blend.mode.as_ref())
                 .show_ui(ui, |ui| {
-                    for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
+                    for blend_mode in <BlendMode as strum::IntoEnumIterator>::iter() {
                         finished |= ui
                             .selectable_value(&mut blend.mode, blend_mode, blend_mode.as_ref())
                             .clicked();
@@ -1186,9 +1190,9 @@ fn ui_layer_blend(
 fn ui_passthrough_or_blend(
     ui: &mut Ui,
     id: impl std::hash::Hash,
-    blend: Option<crate::blend::Blend>,
+    blend: Option<Blend>,
     disable: bool,
-) -> self::latch::LatchResponse<'_, Option<crate::blend::Blend>> {
+) -> self::latch::LatchResponse<'_, Option<Blend>> {
     latch::latch(ui, (&id, "blend-state"), blend, |ui, blend| {
         let mut finished = false;
         let mut changed = false;
@@ -1225,8 +1229,8 @@ fn ui_passthrough_or_blend(
                 .show_ui(ui, |ui| {
                     changed |= ui.selectable_value(blend, None, "Passthrough").clicked();
                     ui.separator();
-                    for blend_mode in <crate::blend::BlendMode as strum::IntoEnumIterator>::iter() {
-                        let select_value = Some(crate::blend::Blend {
+                    for blend_mode in <BlendMode as strum::IntoEnumIterator>::iter() {
+                        let select_value = Some(Blend {
                             mode: blend_mode,
                             // Set the blend to itself with new mode,
                             // or default fields if blend is None.
@@ -1250,14 +1254,14 @@ fn ui_passthrough_or_blend(
 }
 fn graph_edit_recurse<
     // Well that's.... not great...
-    W: crate::commands::queue::writer::CommandWrite<crate::state::graph::commands::GraphCommand>,
+    W: commands::queue::writer::CommandWrite<state::graph::commands::GraphCommand>,
 >(
     ui: &mut Ui,
-    graph: &mut crate::state::graph::writer::GraphWriter<'_, W>,
-    root: Option<crate::state::graph::NodeID>,
-    selected_node: &mut Option<crate::state::graph::AnyID>,
-    focused_node: &mut Option<crate::state::graph::NodeID>,
-    yanked_node: Option<crate::state::graph::AnyID>,
+    graph: &mut state::graph::writer::GraphWriter<'_, W>,
+    root: Option<state::graph::NodeID>,
+    selected_node: &mut Option<state::graph::AnyID>,
+    focused_node: &mut Option<state::graph::NodeID>,
+    yanked_node: Option<state::graph::AnyID>,
 ) {
     let node_ids: Vec<_> = match root {
         Some(root) => graph.iter_node(root).unwrap().map(|(id, _)| id).collect(),
@@ -1324,7 +1328,7 @@ fn graph_edit_recurse<
             }
             (None, Some(n)) => {
                 // Unwrap nodeID:
-                let crate::state::graph::AnyID::Node(node_id) = id else {
+                let state::graph::AnyID::Node(node_id) = id else {
                     panic!("Node data and ID mismatch!")
                 };
                 // Option to focus this subtree:
@@ -1345,13 +1349,13 @@ fn graph_edit_recurse<
                         (None, Some(to)) => {
                             // Type change - passthrough to grouped.
                             graph
-                                .set_node(node_id, crate::state::graph::NodeType::GroupedBlend(to))
+                                .set_node(node_id, state::graph::NodeType::GroupedBlend(to))
                                 .unwrap();
                         }
                         (Some(_), None) => {
                             // Type change - grouped to passthrough
                             graph
-                                .set_node(node_id, crate::state::graph::NodeType::Passthrough)
+                                .set_node(node_id, state::graph::NodeType::Passthrough)
                                 .unwrap();
                         }
                         _ => {

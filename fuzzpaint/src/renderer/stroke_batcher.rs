@@ -1,6 +1,8 @@
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
 
+use fuzzpaint_core::{repositories::points, state::stroke_collection::ImmutableStroke};
+
 pub enum SyncOutput<InnerFuture: vk::sync::GpuFuture> {
     /// No sync needed.
     Immediate,
@@ -11,9 +13,9 @@ pub struct StrokeAlloc {
     /// Offset into the `elements` buffer, in f32 elements
     pub offset: usize,
     /// Summary of the collection.
-    pub summary: crate::repositories::points::CollectionSummary,
+    pub summary: points::CollectionSummary,
     /// which stroke does this data come from?
-    pub src: crate::state::stroke_collection::ImmutableStroke,
+    pub src: ImmutableStroke,
 }
 pub struct StrokeBatch {
     /// Filled portion of the buffer.
@@ -98,7 +100,7 @@ impl StrokeBatcher {
         mut consume: F,
     ) -> Result<(), BatchError<InnerError>>
     where
-        Strokes: Iterator<Item = crate::state::stroke_collection::ImmutableStroke>,
+        Strokes: Iterator<Item = ImmutableStroke>,
         Future: vk::sync::GpuFuture,
         F: FnMut(&mut StrokeBatch) -> Result<SyncOutput<Future>, InnerError>,
         InnerError: std::fmt::Debug,
@@ -125,7 +127,7 @@ impl StrokeBatcher {
         mut consume: F,
     ) -> Result<(), BatchError<InnerError>>
     where
-        Strokes: Iterator<Item = crate::state::stroke_collection::ImmutableStroke>,
+        Strokes: Iterator<Item = ImmutableStroke>,
         Future: vk::sync::GpuFuture,
         F: FnMut(&mut StrokeBatch) -> Result<SyncOutput<Future>, InnerError>,
         InnerError: std::fmt::Debug,
@@ -167,7 +169,7 @@ impl StrokeBatcher {
         into_sequential_elems: &mut [f32],
     ) -> usize
     where
-        Strokes: Iterator<Item = crate::state::stroke_collection::ImmutableStroke>,
+        Strokes: Iterator<Item = ImmutableStroke>,
     {
         // This impl leaves a lot to be desired, with several global locks per stroke...
         // It should be moved into the points repository, where it has more info and
@@ -176,9 +178,7 @@ impl StrokeBatcher {
         while let Some(&next) = strokes.peek() {
             // not found o.O
             // fixme!
-            let Some(info) =
-                crate::repositories::points::global().summary_of(next.point_collection)
-            else {
+            let Some(info) = points::global().summary_of(next.point_collection) else {
                 panic!("bad id!")
             };
 
@@ -189,8 +189,7 @@ impl StrokeBatcher {
 
             // not found o.O
             // fixme!
-            let Ok(read) = crate::repositories::points::global().try_get(next.point_collection)
-            else {
+            let Ok(read) = points::global().try_get(next.point_collection) else {
                 panic!("bad id!")
             };
             assert_eq!(read.len(), info.elements());
