@@ -178,7 +178,7 @@ impl StrokeBatcher {
         while let Some(&next) = strokes.peek() {
             // not found o.O
             // fixme!
-            let Some(info) = points::global().summary_of(next.point_collection) else {
+            let Some(info) = crate::global::points().summary_of(next.point_collection) else {
                 panic!("bad id!")
             };
 
@@ -189,7 +189,7 @@ impl StrokeBatcher {
 
             // not found o.O
             // fixme!
-            let Ok(read) = points::global().try_get(next.point_collection) else {
+            let Ok(read) = crate::global::points().try_get(next.point_collection) else {
                 panic!("bad id!")
             };
             assert_eq!(read.len(), info.elements());

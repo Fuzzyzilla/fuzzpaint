@@ -86,7 +86,7 @@ struct LazyPointCollectionAllocInfo {
     summary: CollectionSummary,
 }
 
-impl super::PointRepository {
+impl super::Points {
     /// Given an iterator of collection IDs, encodes them directly (in order) into the given Write stream in a `DICT ptls` chunk.
     /// On success, returns a map between `PointCollectionID` and file local id as written.
     pub fn write_dict_into(

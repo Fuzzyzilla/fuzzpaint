@@ -15,10 +15,6 @@ pub enum EitherFace {
     Varied(VariedFaceID),
 }
 
-pub fn global() -> &'static Faces {
-    static ONCE: std::sync::OnceLock<Faces> = std::sync::OnceLock::new();
-    ONCE.get_or_init(Faces::new_system)
-}
 /// Location of fonts that the user has chosen to keep from previously opened documents.
 ///
 /// Always read this dir when enumerating fonts. When saving fonts, try the users [`shared_fonts`] first.
@@ -158,7 +154,7 @@ pub enum FaceError {
 }
 impl Faces {
     /// Create the database from predefined system font folders, and the fuzzpaint local fonts.
-    fn new_system() -> Self {
+    pub fn new_system() -> Self {
         // Font DB has no way to enumerate fonts, meaning a user selection pane is impossible.
         // need something else! TwT
         let mut db = fontdb::Database::new();

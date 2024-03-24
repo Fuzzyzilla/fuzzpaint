@@ -26,7 +26,7 @@ impl WinitKeyboardActionCollector {
     pub fn push_event(&mut self, event: &winit::event::WindowEvent) {
         use winit::event::WindowEvent;
 
-        let hotkeys = crate::GlobalHotkeys::get();
+        let hotkeys = crate::global::hotkeys::Hotkeys::get();
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
                 let winit::keyboard::PhysicalKey::Code(code) = event.physical_key else {
@@ -151,7 +151,7 @@ impl WinitKeyboardActionCollector {
             }
         }
 
-        let hotkeys = crate::GlobalHotkeys::get();
+        let hotkeys = crate::global::hotkeys::Hotkeys::get();
         for hotkey in to_remove {
             if let Some(action) = hotkeys.keys_to_actions.action_of(hotkey) {
                 self.pop_key(action, hotkey);
@@ -167,7 +167,7 @@ impl WinitKeyboardActionCollector {
             return;
         }
 
-        let hotkeys = crate::GlobalHotkeys::get();
+        let hotkeys = crate::global::hotkeys::Hotkeys::get();
 
         let mut shadows_on_new = 0;
         for (old_key, shadows) in &mut self.current_hotkeys {
@@ -202,7 +202,7 @@ impl WinitKeyboardActionCollector {
         };
         self.sender.release(action);
 
-        let hotkeys = crate::GlobalHotkeys::get();
+        let hotkeys = crate::global::hotkeys::Hotkeys::get();
         for (old_key, shadows) in &mut self.current_hotkeys {
             if remove.shadows(old_key) {
                 *shadows = shadows.checked_sub(1).unwrap_or_else(|| {

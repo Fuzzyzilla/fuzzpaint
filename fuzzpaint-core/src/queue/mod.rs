@@ -16,7 +16,6 @@ use crate::{
     state,
 };
 
-pub mod provider;
 mod queue_state;
 pub mod state_reader;
 pub mod writer;

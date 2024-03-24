@@ -14,6 +14,7 @@ use vulkano_prelude::*;
 pub mod actions;
 pub mod document_viewport_proxy;
 pub mod gizmos;
+pub mod global;
 pub mod pen_tools;
 pub mod picker;
 pub mod render_device;
@@ -23,8 +24,6 @@ pub mod ui;
 pub mod view_transform;
 
 use fuzzpaint_core::id::FuzzID;
-
-use fuzzpaint_core::queue::provider::provider as default_provider;
 
 #[cfg(feature = "dhat_heap")]
 #[global_allocator]
@@ -38,94 +37,6 @@ const DOCUMENT_DIMENSION: u32 = 1080;
 const DOCUMENT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 use anyhow::Result as AnyResult;
-
-#[must_use]
-pub fn preferences_dir() -> Option<std::path::PathBuf> {
-    let mut base_dir = dirs::preference_dir()?;
-    base_dir.push(env!("CARGO_PKG_NAME"));
-    Some(base_dir)
-}
-
-pub struct GlobalHotkeys {
-    failed_to_load: bool,
-    actions_to_keys: actions::hotkeys::ActionsToKeys,
-    keys_to_actions: actions::hotkeys::KeysToActions,
-}
-impl GlobalHotkeys {
-    const FILENAME: &'static str = "hotkeys.ron";
-    /// Shared global hotkeys, saved and loaded from user preferences.
-    /// (Or defaulted, if unavailable for some reason)
-    #[must_use]
-    pub fn get() -> &'static Self {
-        static GLOBAL_HOTKEYS: std::sync::OnceLock<GlobalHotkeys> = std::sync::OnceLock::new();
-
-        GLOBAL_HOTKEYS.get_or_init(|| {
-            let mut dir = preferences_dir();
-            match dir.as_mut() {
-                None => Self::no_path(),
-                Some(dir) => {
-                    dir.push(Self::FILENAME);
-                    Self::load_or_default(dir)
-                }
-            }
-        })
-    }
-    #[must_use]
-    pub fn no_path() -> Self {
-        use actions::hotkeys::ActionsToKeys;
-        log::warn!("Hotkeys weren't available, defaulting.");
-        let default = ActionsToKeys::default();
-        // Default action map is reversable - this is assured by the default impl when debugging.
-        let reverse = (&default).try_into().unwrap();
-
-        Self {
-            failed_to_load: true,
-            keys_to_actions: reverse,
-            actions_to_keys: default,
-        }
-    }
-    #[must_use]
-    fn load_or_default(path: &std::path::Path) -> Self {
-        use actions::hotkeys::{ActionsToKeys, KeysToActions};
-        let mappings: anyhow::Result<(ActionsToKeys, KeysToActions)> = try_block::try_block! {
-            let string = std::fs::read_to_string(path)?;
-            let actions_to_keys : ActionsToKeys = ron::from_str(&string)?;
-            let keys_to_actions : KeysToActions = (&actions_to_keys).try_into()?;
-
-            Ok((actions_to_keys,keys_to_actions))
-        };
-
-        match mappings {
-            Ok((actions_to_keys, keys_to_actions)) => Self {
-                failed_to_load: false,
-                actions_to_keys,
-                keys_to_actions,
-            },
-            Err(_) => Self::no_path(),
-        }
-    }
-    /// Return true if loading user's settings failed. This can be useful for
-    /// displaying a warning.
-    #[must_use]
-    pub fn did_fail_to_load(&self) -> bool {
-        self.failed_to_load
-    }
-    pub fn save(&self) -> anyhow::Result<()> {
-        let mut preferences =
-            preferences_dir().ok_or_else(|| anyhow::anyhow!("No preferences dir found"))?;
-        // Explicity do *not* create recursively. If not found, the user probably has a good reason.
-        // Ignore errors (could already exist). Any real errors will be emitted by file access below.
-        let _ = std::fs::DirBuilder::new().create(&preferences);
-
-        preferences.push(Self::FILENAME);
-        let writer = std::io::BufWriter::new(std::fs::File::create(&preferences)?);
-        Ok(ron::ser::to_writer_pretty(
-            writer,
-            &self.actions_to_keys,
-            ron::ser::PrettyConfig::default(),
-        )?)
-    }
-}
 
 /// FIXME! This is temp until I can see that everything is working :3
 /// There still needs to be a way to intercommunicate between UI selections, Pen actions, and renderer preview.
@@ -155,7 +66,7 @@ pub struct Stroke {
 }
 impl Stroke {
     fn make_immutable(&self) -> fuzzpaint_core::state::stroke_collection::ImmutableStroke {
-        let points = fuzzpaint_core::repositories::points::global();
+        let points = crate::global::points();
         let point_collection = points
             .insert(&self.points)
             .expect("Failed to upload stroke data");
@@ -238,7 +149,7 @@ fn main() -> AnyResult<()> {
         let paths: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
         // Did we have at least one success? No paths is a success.
         let had_success: std::sync::atomic::AtomicBool = paths.is_empty().into();
-        let repo = fuzzpaint_core::repositories::points::global();
+        let repo = crate::global::points();
         paths.into_par_iter().for_each(|path| {
             let try_block =
                 || -> Result<fuzzpaint_core::queue::DocumentCommandQueue, std::io::Error> {
@@ -253,7 +164,7 @@ fn main() -> AnyResult<()> {
                     // We don't care when it's stored, so long as it gets there eventually.
                     had_success.store(true, std::sync::atomic::Ordering::Relaxed);
                     // Defaulted ID, can't fail
-                    let _ = default_provider().insert(queue);
+                    let _ = global::provider().insert(queue);
                 }
             }
         });
@@ -271,7 +182,7 @@ fn main() -> AnyResult<()> {
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
-    if let Err(e) = GlobalHotkeys::get().save() {
+    if let Err(e) = global::hotkeys::Hotkeys::get().save() {
         log::warn!("Failed to save hotkey config:\n{e:?}");
     };
 

@@ -74,7 +74,7 @@ impl Renderer {
         let (is_new, data) = match data {
             hashbrown::hash_map::Entry::Occupied(o) => (false, o.into_mut()),
             hashbrown::hash_map::Entry::Vacant(v) => {
-                let Some(listener) = crate::default_provider()
+                let Some(listener) = crate::global::provider()
                     .inspect(id, queue::DocumentCommandQueue::listen_from_now)
                 else {
                     // Deleted before we could do anything.
@@ -523,7 +523,7 @@ async fn render_changes(
     let exit_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let exit_flag_move = exit_flag.clone();
     let _thread = std::thread::spawn(move || {
-        let mut change_listener = fuzzpaint_core::queue::provider::provider().change_listener();
+        let mut change_listener = crate::global::provider().change_listener();
         loop {
             // Parent requested child exit.
             if exit_flag_move.load(std::sync::atomic::Ordering::Relaxed) {
@@ -552,7 +552,7 @@ async fn render_changes(
     // Drop order - this will run before thread is joined, otherwise deadlock occurs!
     defer::defer!(exit_flag.store(true, std::sync::atomic::Ordering::Relaxed));
 
-    let mut changes: Vec<_> = crate::default_provider().document_iter().collect();
+    let mut changes: Vec<_> = crate::global::provider().document_iter().collect();
     let mut renderer = Renderer::new(renderer)?;
 
     loop {

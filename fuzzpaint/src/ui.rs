@@ -4,7 +4,7 @@ pub mod requests;
 use egui::Ui;
 use fuzzpaint_core::{
     blend::{Blend, BlendMode},
-    brush, commands, io, queue, repositories, state,
+    brush, io, queue, state,
 };
 
 const STROKE_LAYER_ICON: &str = "✏";
@@ -125,7 +125,7 @@ pub struct MainUI {
 impl MainUI {
     #[must_use]
     pub fn new(action_listener: crate::actions::ActionListener) -> Self {
-        let documents = crate::default_provider().document_iter();
+        let documents = crate::global::provider().document_iter();
         let documents: Vec<_> = documents
             .map(|id| PerDocumentData {
                 id,
@@ -272,7 +272,7 @@ impl MainUI {
                         let new_doc = queue::DocumentCommandQueue::new();
                         let new_id = new_doc.id();
                         // Can't fail
-                        let _ = crate::default_provider().insert(new_doc);
+                        let _ = crate::global::provider().insert(new_doc);
                         let interface = PerDocumentData {
                             id: new_id,
                             graph_focused_subtree: None,
@@ -291,10 +291,10 @@ impl MainUI {
                         // Dirty testing implementation!
                         if let Some(current) = self.cur_document {
                             std::thread::spawn(move || {
-                                if let Some(reader) = crate::default_provider()
+                                if let Some(reader) = crate::global::provider()
                                     .inspect(current, queue::DocumentCommandQueue::peek_clone_state)
                                 {
-                                    let repo = repositories::points::global();
+                                    let repo = crate::global::points();
 
                                     let try_block = || -> anyhow::Result<()> {
                                         let mut path = dirs::document_dir().unwrap();
@@ -334,8 +334,8 @@ impl MainUI {
                     if add_button(ui, "Open", Some("Ctrl+O")).clicked() {
                         // Synchronous and bad just for testing.
                         if let Some(files) = rfd::FileDialog::new().pick_files() {
-                            let point_repository = repositories::points::global();
-                            let provider = crate::default_provider();
+                            let point_repository = crate::global::points();
+                            let provider = crate::global::provider();
 
                             // Keep track of the last successful loaded id
                             let mut recent_success = None;
@@ -519,10 +519,10 @@ impl MainUI {
             };
             // Submit undo/redos as requested.
             if redos != 0 {
-                crate::default_provider().inspect(document, |document| document.redo_n(redos));
+                crate::global::provider().inspect(document, |document| document.redo_n(redos));
             }
             if undos != 0 {
-                crate::default_provider().inspect(document, |document| document.undo_n(undos));
+                crate::global::provider().inspect(document, |document| document.undo_n(undos));
             }
         });
     }
@@ -852,7 +852,7 @@ fn layer_buttons(
 }
 /// Side panel showing layer add buttons, layer tree, and layer options
 fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
-    crate::default_provider().inspect(interface.id, |queue| {
+    crate::global::provider().inspect(interface.id, |queue| {
         queue.write_with(|writer| {
             let graph = writer.graph();
             // Node properties editor panel, at the bottom. Shown only when a node is selected.
@@ -1022,7 +1022,7 @@ fn brush_panel(ui: &mut Ui, actions: &crate::actions::ActionFrame) {
 /// Panel showing debug stats
 fn stats_panel(ui: &mut Ui) {
     ui.label("Memory Usage Stats");
-    let point_resident_usage = repositories::points::global().resident_usage();
+    let point_resident_usage = crate::global::points().resident_usage();
     ui.label(format!(
         "Point repository: {}/{}",
         human_bytes::human_bytes(point_resident_usage.0 as f64),

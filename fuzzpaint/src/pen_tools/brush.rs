@@ -47,7 +47,7 @@ fn brush(
             });
         } else if let Some(stroke) = in_progress_stroke.take() {
             // Insert the stroke into the document.
-            if let Some(Err(e)) = crate::default_provider().inspect(document, |queue| {
+            if let Some(Err(e)) = crate::global::provider().inspect(document, |queue| {
                 queue.write_with(|write| {
                     // Find the collection to insert into.
                     let collection_id = {

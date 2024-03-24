@@ -13,12 +13,6 @@ pub mod io;
 mod slab;
 use slab::Slab;
 
-/// Get the shared global instance of the point repository.
-pub fn global() -> &'static PointRepository {
-    static REPO: std::sync::OnceLock<PointRepository> = std::sync::OnceLock::new();
-    REPO.get_or_init(PointRepository::new)
-}
-
 #[derive(Copy, Clone)]
 pub struct CollectionSummary {
     /// The archetype of the points of the collection.
@@ -98,18 +92,12 @@ struct PointCollectionAllocInfo {
 pub const SLAB_ELEMENT_COUNT: usize = 1024 * 1024;
 type ElementSlab = slab::Slab<f32, SLAB_ELEMENT_COUNT>;
 
-pub struct PointRepository {
+#[derive(Default)]
+pub struct Points {
     slabs: parking_lot::RwLock<Vec<ElementSlab>>,
     allocs: parking_lot::RwLock<hashbrown::HashMap<PointCollectionID, PointCollectionAllocInfo>>,
 }
-impl PointRepository {
-    fn new() -> Self {
-        // Self doesn't impl Default as we don't want any ctors to be public.
-        Self {
-            slabs: parking_lot::RwLock::default(),
-            allocs: parking_lot::RwLock::default(),
-        }
-    }
+impl Points {
     /// Get the memory usage of resident data (uncompressed in RAM), in bytes, and the capacity.
     #[must_use]
     pub fn resident_usage(&self) -> (usize, usize) {

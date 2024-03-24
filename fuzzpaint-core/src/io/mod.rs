@@ -108,7 +108,7 @@ const EMPTY_DICT: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 /// From the given document state reader and repository handle, write a `.fzp` document into the given writer.
 pub fn write_into<Document, Writer>(
     document: &Document,
-    point_repository: &crate::repositories::points::PointRepository,
+    point_repository: &crate::repositories::points::Points,
     writer: Writer,
 ) -> Result<(), WriteError>
 where
@@ -161,7 +161,7 @@ where
 // Todo: explicit bufread support in chunks!
 pub fn read_path<Path: Into<std::path::PathBuf>>(
     path: Path,
-    point_repository: &crate::repositories::points::PointRepository,
+    point_repository: &crate::repositories::points::Points,
 ) -> Result<crate::queue::DocumentCommandQueue, std::io::Error> {
     use riff::{decode::BinaryChunkReader, ChunkID};
     use std::io::Error as IOError;

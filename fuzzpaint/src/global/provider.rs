@@ -5,21 +5,23 @@
 //! Although only one is currently implemented, this interface will allow for placing the document data in a daemon,
 //! on a server, ect.
 
+use fuzzpaint_core::{queue::DocumentCommandQueue, state::DocumentID};
+
 struct PerDocument {
-    queue: super::DocumentCommandQueue,
+    queue: DocumentCommandQueue,
 }
 /// A provider that keeps documents in-memory.
 pub struct InMemoryDocumentProvider {
     on_change: parking_lot::Mutex<bus::Bus<ProviderMessage>>,
     // We don't expect high contention - will only be locked for writing when a new queue is inserted.
-    documents: parking_lot::RwLock<hashbrown::HashMap<crate::state::DocumentID, PerDocument>>,
+    documents: parking_lot::RwLock<hashbrown::HashMap<DocumentID, PerDocument>>,
 }
 // Todo: This sould be a trait! For out-of-process providers, network providers, etc.
 // That's a ways away, though :3
 impl InMemoryDocumentProvider {
     /// Create and insert a new document, returning it's new ID.
-    pub fn insert_new(&self) -> crate::state::DocumentID {
-        let new_document = super::DocumentCommandQueue::new();
+    pub fn insert_new(&self) -> DocumentID {
+        let new_document = DocumentCommandQueue::new();
         let new_id = new_document.id();
         let new_document = PerDocument {
             queue: new_document,
@@ -34,10 +36,7 @@ impl InMemoryDocumentProvider {
     }
     /// Insert a queue into this provider.
     /// If a document with this ID already exists, the untouched queue is returned as an error.
-    pub fn insert(
-        &self,
-        queue: super::DocumentCommandQueue,
-    ) -> Result<(), super::DocumentCommandQueue> {
+    pub fn insert(&self, queue: DocumentCommandQueue) -> Result<(), DocumentCommandQueue> {
         let id = queue.id();
         match self.documents.write().entry(id) {
             hashbrown::hash_map::Entry::Occupied(_) => return Err(queue),
@@ -53,9 +52,9 @@ impl InMemoryDocumentProvider {
         Ok(())
     }
     /// Call the given closure on the document queue with the given ID, if found.
-    pub fn inspect<F, T>(&self, id: crate::state::DocumentID, f: F) -> Option<T>
+    pub fn inspect<F, T>(&self, id: DocumentID, f: F) -> Option<T>
     where
-        F: FnOnce(&super::DocumentCommandQueue) -> T,
+        F: FnOnce(&DocumentCommandQueue) -> T,
     {
         let read = self.documents.read();
         let data = read.get(&id)?;
@@ -76,13 +75,13 @@ impl InMemoryDocumentProvider {
         Some(result)
     }
     /// Iterate over all the open documents, by ID.
-    pub fn document_iter(&self) -> impl Iterator<Item = crate::state::DocumentID> {
+    pub fn document_iter(&self) -> impl Iterator<Item = DocumentID> {
         let ids: Vec<_> = self.documents.read().keys().copied().collect();
         ids.into_iter()
     }
     /// Broadcast a `ProviderMessage::Modified` with the given ID to any change listeners.
     /// Ensures the ID is valid before sending.
-    pub fn touch(&self, id: crate::state::DocumentID) {
+    pub fn touch(&self, id: DocumentID) {
         if self.documents.read().contains_key(&id) {
             self.on_change
                 .lock()
@@ -108,17 +107,17 @@ impl Default for InMemoryDocumentProvider {
 #[derive(Copy, Clone, Debug)]
 pub enum ProviderMessage {
     /// A new document has been made available to the provider.
-    Opened(crate::state::DocumentID),
+    Opened(DocumentID),
     /// A document has been modified, i.e. it is likely that existing listeners
     /// will see new commands.
-    Modified(crate::state::DocumentID),
+    Modified(DocumentID),
     /// A document is no longer available.
-    Closed(crate::state::DocumentID),
+    Closed(DocumentID),
 }
 impl ProviderMessage {
     /// Gets the document this message refers to.
     #[must_use]
-    pub fn id(&self) -> crate::state::DocumentID {
+    pub fn id(&self) -> DocumentID {
         match self {
             Self::Closed(id) | Self::Modified(id) | Self::Opened(id) => *id,
         }

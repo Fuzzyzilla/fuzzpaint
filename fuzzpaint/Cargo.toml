@@ -56,6 +56,7 @@ vulkano-shaders = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vul
 # Can't inherit from egui_winit since it doesn't enable serde feature.
 # Also need legacy RWH version for `vulkano` + new version for `octotablet`
 winit = { version = "0.29.15", features = ["serde", "rwh_05", "rwh_06"]}
+bus = "2.4.1"
 
 [features]
 dhat_heap = ["dhat"]
