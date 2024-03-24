@@ -101,7 +101,7 @@ impl CommandQueueWriter<'_> {
 impl<Subcommand, Array> CommandWrite<Subcommand> for smallvec::SmallVec<Array>
 where
     Subcommand: Into<crate::commands::Command>,
-    Array: smallvec::Array<Item = super::super::Command>,
+    Array: smallvec::Array<Item = crate::commands::Command>,
 {
     fn write(&mut self, command: Subcommand) {
         self.push(command.into());

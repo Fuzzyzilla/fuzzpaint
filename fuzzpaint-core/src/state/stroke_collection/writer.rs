@@ -2,7 +2,7 @@ use super::{
     commands, ImmutableStroke, ImmutableStrokeID, StrokeCollection, StrokeCollectionID,
     StrokeCollectionState,
 };
-use crate::commands::queue::writer::CommandWrite;
+use crate::queue::writer::CommandWrite;
 
 pub struct StrokeCollectionWriter<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>> {
     id: StrokeCollectionID,
@@ -30,7 +30,7 @@ impl<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>>
     ) -> ImmutableStrokeID {
         let id = ImmutableStrokeID::default();
         let stroke = ImmutableStroke {
-            brush: brush.clone(),
+            brush,
             id,
             point_collection: points,
         };

@@ -5,6 +5,7 @@ pub mod brush;
 pub mod commands;
 pub mod id;
 pub mod io;
+pub mod queue;
 pub mod repositories;
 pub mod state;
 pub mod stroke;

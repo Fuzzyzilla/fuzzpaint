@@ -4,7 +4,7 @@ pub mod picker;
 pub mod requests;
 mod stroke_batcher;
 
-use fuzzpaint_core::{blend, commands::queue, state};
+use fuzzpaint_core::{queue, state};
 use std::sync::Arc;
 
 use crate::vulkano_prelude::*;
@@ -523,8 +523,7 @@ async fn render_changes(
     let exit_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let exit_flag_move = exit_flag.clone();
     let _thread = std::thread::spawn(move || {
-        let mut change_listener =
-            fuzzpaint_core::commands::queue::provider::provider().change_listener();
+        let mut change_listener = fuzzpaint_core::queue::provider::provider().change_listener();
         loop {
             // Parent requested child exit.
             if exit_flag_move.load(std::sync::atomic::Ordering::Relaxed) {

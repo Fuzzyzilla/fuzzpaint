@@ -112,7 +112,7 @@ pub fn write_into<Document, Writer>(
     writer: Writer,
 ) -> Result<(), WriteError>
 where
-    Document: crate::commands::queue::state_reader::CommandQueueStateReader,
+    Document: crate::queue::state_reader::CommandQueueStateReader,
     Writer: std::io::Write + std::io::Seek,
 {
     use riff::{
@@ -162,7 +162,7 @@ where
 pub fn read_path<Path: Into<std::path::PathBuf>>(
     path: Path,
     point_repository: &crate::repositories::points::PointRepository,
-) -> Result<crate::commands::queue::DocumentCommandQueue, std::io::Error> {
+) -> Result<crate::queue::DocumentCommandQueue, std::io::Error> {
     use riff::{decode::BinaryChunkReader, ChunkID};
     use std::io::Error as IOError;
     let path_buf = path.into();
@@ -280,7 +280,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
             human_bytes::human_bytes(size / duration.as_secs_f64())
         );
     }
-    Ok(crate::commands::queue::DocumentCommandQueue::from_state(
+    Ok(crate::queue::DocumentCommandQueue::from_state(
         document_info,
         my_graph,
         stroke_state,

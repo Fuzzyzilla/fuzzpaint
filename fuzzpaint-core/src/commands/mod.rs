@@ -3,7 +3,6 @@
 //! Commands are the way the shared state of the document are modified. Every (nontrivial, like renaming a layer) change
 //! is recorded automatically as a command by a [`queue::writer`].
 
-pub mod queue;
 pub use state::graph::commands::GraphCommand;
 pub use state::stroke_collection::commands::StrokeCollectionCommand;
 

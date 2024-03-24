@@ -1,5 +1,5 @@
 use super::{commands::GraphCommand, TargetError};
-use crate::commands::queue::writer::CommandWrite;
+use crate::queue::writer::CommandWrite;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CommandError<Err: std::error::Error> {

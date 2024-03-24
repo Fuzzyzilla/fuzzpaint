@@ -4,7 +4,7 @@ pub mod requests;
 use egui::Ui;
 use fuzzpaint_core::{
     blend::{Blend, BlendMode},
-    brush, commands, io, repositories, state,
+    brush, commands, io, queue, repositories, state,
 };
 
 const STROKE_LAYER_ICON: &str = "✏";
@@ -269,7 +269,7 @@ impl MainUI {
                         ui.add(button)
                     };
                     if add_button(ui, "New", Some("Ctrl+N")).clicked() {
-                        let new_doc = commands::queue::DocumentCommandQueue::new();
+                        let new_doc = queue::DocumentCommandQueue::new();
                         let new_id = new_doc.id();
                         // Can't fail
                         let _ = crate::default_provider().insert(new_doc);
@@ -291,10 +291,9 @@ impl MainUI {
                         // Dirty testing implementation!
                         if let Some(current) = self.cur_document {
                             std::thread::spawn(move || {
-                                if let Some(reader) = crate::default_provider().inspect(
-                                    current,
-                                    commands::queue::DocumentCommandQueue::peek_clone_state,
-                                ) {
+                                if let Some(reader) = crate::default_provider()
+                                    .inspect(current, queue::DocumentCommandQueue::peek_clone_state)
+                                {
                                     let repo = repositories::points::global();
 
                                     let try_block = || -> anyhow::Result<()> {
@@ -706,7 +705,7 @@ fn leaf_props_panel(
 fn layer_buttons(
     ui: &mut Ui,
     interface: &mut PerDocumentData,
-    writer: &mut commands::queue::writer::CommandQueueWriter,
+    writer: &mut queue::writer::CommandQueueWriter,
 ) {
     ui.horizontal(|ui| {
         // Copied logic since we can't borrow test_graph_selection throughout this whole
@@ -1254,7 +1253,7 @@ fn ui_passthrough_or_blend(
 }
 fn graph_edit_recurse<
     // Well that's.... not great...
-    W: commands::queue::writer::CommandWrite<state::graph::commands::GraphCommand>,
+    W: queue::writer::CommandWrite<state::graph::commands::GraphCommand>,
 >(
     ui: &mut Ui,
     graph: &mut state::graph::writer::GraphWriter<'_, W>,

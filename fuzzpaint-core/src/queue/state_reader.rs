@@ -1,8 +1,6 @@
 //! Views into the document state represented by a command queue.
 
-use super::super::*;
-
-use crate::state;
+use crate::{commands, state};
 pub trait CommandQueueStateReader {
     fn graph(&self) -> &state::graph::BlendGraph;
     fn stroke_collections(&self) -> &state::stroke_collection::StrokeCollectionState;
@@ -10,7 +8,7 @@ pub trait CommandQueueStateReader {
     fn stroke_layer(&self, id: state::StrokeLayerID) -> Option<&state::StrokeLayer> {
         self.stroke_layers().iter().find(|layer| layer.id == id)
     }*/
-    fn changes(&'_ self) -> impl Iterator<Item = DoUndo<'_, Command>> + '_;
+    fn changes(&'_ self) -> impl Iterator<Item = commands::DoUndo<'_, commands::Command>> + '_;
     fn has_changes(&self) -> bool;
 }
 
@@ -26,14 +24,14 @@ pub(super) enum OwnedDoUndo<C> {
     Do(C),
     Undo(C),
 }
-impl<C> From<DoUndo<'_, C>> for OwnedDoUndo<C>
+impl<C> From<commands::DoUndo<'_, C>> for OwnedDoUndo<C>
 where
     C: Clone,
 {
-    fn from(value: DoUndo<'_, C>) -> Self {
+    fn from(value: commands::DoUndo<'_, C>) -> Self {
         match value {
-            DoUndo::Do(c) => Self::Do(c.clone()),
-            DoUndo::Undo(c) => Self::Undo(c.clone()),
+            commands::DoUndo::Do(c) => Self::Do(c.clone()),
+            commands::DoUndo::Undo(c) => Self::Undo(c.clone()),
         }
     }
 }
@@ -44,7 +42,7 @@ pub struct CommandQueueCloneLock {
     /// Eager clone of the commands. Since commands are immutable, it *should*
     /// be possible to architect this to not need to clone. But for now since queue's
     /// commands are stored in a Vec, their addresses are not 'static :/
-    pub(super) commands: Vec<OwnedDoUndo<Command>>,
+    pub(super) commands: Vec<OwnedDoUndo<commands::Command>>,
     pub(super) shared_state: std::sync::Arc<super::queue_state::State>,
     pub(super) inner: std::sync::Weak<parking_lot::RwLock<super::DocumentCommandQueueInner>>,
 }
@@ -86,17 +84,17 @@ impl CommandQueueCloneLock {
 
         match first_step {
             None => Stale::UpToDate,
-            Some(DoUndo::Undo(..)) => Stale::Ahead,
-            Some(DoUndo::Do(..)) => Stale::Behind,
+            Some(commands::DoUndo::Undo(..)) => Stale::Ahead,
+            Some(commands::DoUndo::Do(..)) => Stale::Behind,
         }
     }
 }
 
 impl CommandQueueStateReader for CommandQueueCloneLock {
-    fn changes(&'_ self) -> impl Iterator<Item = DoUndo<'_, Command>> + '_ {
+    fn changes(&'_ self) -> impl Iterator<Item = commands::DoUndo<'_, commands::Command>> + '_ {
         self.commands.iter().map(|owned| match owned {
-            OwnedDoUndo::Do(c) => DoUndo::Do(c),
-            OwnedDoUndo::Undo(c) => DoUndo::Undo(c),
+            OwnedDoUndo::Do(c) => commands::DoUndo::Do(c),
+            OwnedDoUndo::Undo(c) => commands::DoUndo::Undo(c),
         })
     }
     fn graph(&self) -> &state::graph::BlendGraph {

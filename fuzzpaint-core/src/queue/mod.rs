@@ -11,18 +11,21 @@
 
 use std::sync::Arc;
 
-use super::CommandConsumer;
+use crate::{
+    commands::{self, CommandConsumer},
+    state,
+};
+
 pub mod provider;
 mod queue_state;
 pub mod state_reader;
 pub mod writer;
 
-// pub struct CommandAtomsWriter {}
 struct DocumentCommandQueueInner {
     /// Tree structure of commands, where undos create branches.
     /// "First child" represents earlier series of commands that were undone, "last" is the most recent.
     /// More than two branches are allowed, of course!
-    command_tree: slab_tree::Tree<super::Command>,
+    command_tree: slab_tree::Tree<commands::Command>,
     state: queue_state::State,
     // "Pointer" into the tree where the most recent command took place.
     root: slab_tree::NodeId,
@@ -30,12 +33,12 @@ struct DocumentCommandQueueInner {
 pub struct DocumentCommandQueue {
     /// Mutable inner bits.
     inner: std::sync::Arc<parking_lot::RwLock<DocumentCommandQueueInner>>,
-    document: crate::state::DocumentID,
+    document: state::DocumentID,
 }
 impl Default for DocumentCommandQueue {
     fn default() -> Self {
         let command_tree = slab_tree::TreeBuilder::new()
-            .with_root(super::Command::Dummy)
+            .with_root(commands::Command::Dummy)
             .build();
         let root = command_tree.root_id().unwrap();
         Self {
@@ -59,12 +62,12 @@ impl DocumentCommandQueue {
     // Create a queue from data, without a history.
     #[must_use]
     pub fn from_state(
-        document: crate::state::Document,
-        blend_graph: crate::state::graph::BlendGraph,
-        stroke_state: crate::state::stroke_collection::StrokeCollectionState,
+        document: state::Document,
+        blend_graph: state::graph::BlendGraph,
+        stroke_state: state::stroke_collection::StrokeCollectionState,
     ) -> Self {
         let command_tree = slab_tree::TreeBuilder::new()
-            .with_root(super::Command::Dummy)
+            .with_root(commands::Command::Dummy)
             .build();
         let root = command_tree.root_id().unwrap();
         Self {
@@ -85,7 +88,7 @@ impl DocumentCommandQueue {
         }
     }
     #[must_use]
-    pub fn id(&self) -> crate::state::DocumentID {
+    pub fn id(&self) -> state::DocumentID {
         self.document
     }
     /// Locks the queue for writing commands during the span of the closure, where each modification of the state is tracked
@@ -294,12 +297,12 @@ struct TreeTraverser<'t, T> {
 }
 
 impl<'t, T> Iterator for TreeTraverser<'t, T> {
-    type Item = super::DoUndo<'t, T>;
+    type Item = commands::DoUndo<'t, T>;
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(ancestor) = self.ancestor {
             // Ancestor is Some, we're going up!
             // Undo, then move cur
-            let result = super::DoUndo::Undo(self.cur.data());
+            let result = commands::DoUndo::Undo(self.cur.data());
             // Move up. Parent will be some, as we know there's a common ancestor.
             // Kinda silly code, as NodeRef.parent borrows the ref, not the tree.
             self.cur = self.tree.get(self.cur.parent()?.node_id())?;
@@ -341,7 +344,7 @@ impl<'t, T> Iterator for TreeTraverser<'t, T> {
                 .tree
                 .get(self.cur.children().nth(child_idx)?.node_id())?;
 
-            let result = super::DoUndo::Do(self.cur.data());
+            let result = commands::DoUndo::Do(self.cur.data());
 
             Some(result)
         }
@@ -498,7 +501,7 @@ mod traversal_test {
     }
     #[test]
     fn test_traverse() {
-        use super::super::DoUndo;
+        use crate::commands::DoUndo;
         let (ids, tree) = make_test_tree();
         macro_rules! id_of {
             ($id:expr) => {
