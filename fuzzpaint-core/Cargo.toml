@@ -1,0 +1,31 @@
+[package]
+name = "fuzzpaint-core"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.81"
+az = "1.2.1"
+bitflags = { version = "2.5.0", features = ["bytemuck"] }
+bitvec = { version = "1.0.1", default-features = false, features = [
+    "alloc",
+    "std",
+] }
+bytemuck = { version = "1.15.0", features = ["derive"] }
+dirs = "5.0.1"
+fontdb = "0.16.2"
+hashbrown = { version = "0.14.3", features = ["serde"] }
+human_bytes = "0.4.3"
+id_tree = "1.8.0"
+log = "0.4.21"
+parking_lot = "0.12.1"
+rangemap = "1.5.1"
+rustybuzz = "0.13.0"
+slab_tree = "0.3.2"
+smallvec = { version = "1.13.2", features = ["serde", "union"] }
+strum = { version = "0.26.2", features = ["derive"] }
+thiserror = "1.0.58"
+unicode-segmentation = "1.11.0"
+uuid = { version = "1.8.0", features = ["v4"] }

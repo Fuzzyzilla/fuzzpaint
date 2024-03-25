@@ -1,71 +1,11 @@
-[package]
-name = "fuzzpaint"
-version = "0.1.0"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
-ahash = { version = "0.8.11", default-features = false, features = ["std"] }
-anyhow = "1.0.81"
-async-trait = "0.1.78"
-az = "1.2.1"
-bitflags = { version = "2.4.2", features = ["bytemuck"] }
-bitvec = { version = "1.0.1", default-features = false, features = [
-    "alloc",
-    "std",
-] }
-bytemuck = "1.15.0"
-cgmath = "0.18.0"
-crossbeam = "0.8.4"
-defer = "0.2.1"
-dhat = { version = "0.3.3", optional = true }
-dirs = "5.0.1"
-# To enable default-font within egui-winit
-egui = "0.26.2"
-egui-winit = { version = "0.26.2", features = ["bytemuck"] }
-either = "1.10.0"
-env_logger = "0.11.3"
-fontdb = "0.16.2"
-hashbrown = { version = "0.14.3", features = ["serde"] }
-human_bytes = "0.4.3"
-id_tree = "1.8.0"
-image = "0.25.0"
-log = "0.4.21"
-lyon_tessellation = "1.0.13"
-octotablet = "0.1.0"
-optional = "0.5.0"
-parking_lot = "0.12.1"
-rangemap = "1.5.1"
-rayon = "1.9.0"
-rfd = "0.14.0"
-ron = "0.8.1"
-rustybuzz = "0.13.0"
-serde = { version = "1.0.197", features = ["derive", "rc"] }
-simple-logging = "2.0.2"
-slab_tree = "0.3.2"
-smallvec = { version = "1.13.1", features = ["serde", "union"] }
-strum = { version = "0.26.2", features = ["derive"] }
-thiserror = "1.0.58"
-tokio = { version = "1.36.0", features = [
-    "sync",
-    "rt",
-    "macros",
-    "parking_lot",
-] }
-try-block = "0.1.0"
-ultraviolet = { version = "0.9.2", features = ["bytemuck"] }
-unicode-segmentation = "1.11.0"
-uuid = { version = "1.7.0", features = ["v4"] }
-vulkano = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vulkano.git", branch = "backport-null-check"  }
-vulkano-shaders = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vulkano.git", branch = "backport-null-check"  }
-# Can't inherit from egui_winit since it doesn't enable serde feature.
-# Also need legacy RWH version for `vulkano` + new version for `octotablet`
-winit = { version = "0.29.15", features = ["serde", "rwh_05", "rwh_06"]}
+[workspace]
+resolver = "2"
+members = [
+    "fuzzpaint",
+    "fuzzpaint-core"
+]
 
 [profile.profiling]
 inherits = "release"
 debug = true
 
-[features]
-dhat_heap = ["dhat"]
