@@ -646,7 +646,7 @@ mod stroke_renderer {
             // Begin uploading a brush image in the background while we continue setup
             let (image, sampler, _defer) = {
                 let brush_image =
-                    image::load_from_memory(include_bytes!("../brushes/splotch.png"))?
+                    image::load_from_memory(include_bytes!("../../brushes/splotch.png"))?
                         .into_luma_alpha8();
 
                 // Iter over opacities. Weird/inefficient way to do this hehe
