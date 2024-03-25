@@ -192,10 +192,10 @@ impl ToolState {
             brush: brush::Brush::new_from_renderer(context)?,
             eraser: brush::Eraser::new_from_renderer(context)?,
             picker: picker::Picker::new_from_renderer(context)?,
-            document_pan: viewport::ViewportPan::new_from_renderer(context)?,
-            document_scrub: viewport::ViewportScrub::new_from_renderer(context)?,
-            document_rotate: viewport::ViewportRotate::new_from_renderer(context)?,
-            gizmos: gizmo::GizmoManipulator::new_from_renderer(context)?,
+            document_pan: viewport::Pan::new_from_renderer(context)?,
+            document_scrub: viewport::Scrub::new_from_renderer(context)?,
+            document_rotate: viewport::Rotate::new_from_renderer(context)?,
+            gizmos: gizmo::Gizmo::new_from_renderer(context)?,
             lasso: lasso::Lasso::new_from_renderer(context)?,
         })
     }
@@ -224,11 +224,11 @@ impl ToolState {
                     request: DocumentRequest::View(view_request),
                     ..
                 } => {
-                    let mut transform = render_output.set_view.get_or_insert(view_info.transform);
-                    apply_transform_request(&mut transform, view_info, view_request);
+                    let transform = render_output.set_view.get_or_insert(view_info.transform);
+                    apply_transform_request(transform, view_info, view_request);
                 }
                 UiRequest::SetBaseTool { tool } => self.set_base_state(tool),
-                _ => (),
+                UiRequest::Document { .. } => (),
             }
         }
 

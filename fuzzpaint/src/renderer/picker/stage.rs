@@ -68,7 +68,7 @@ impl ResizedImageExtent {
 /// Holds the stage mutably while writing.
 /// On drop, the fence is synchronized, and the mutability is held for that time.
 pub struct ImageStageFuture<'stage, Future: GpuFuture> {
-    _stage: &'stage mut ImageStage,
+    _stage: &'stage mut Stage,
     fence: vk::FenceSignalFuture<Future>,
 }
 impl<Future: GpuFuture> ImageStageFuture<'_, Future> {
@@ -88,14 +88,14 @@ impl<Future: GpuFuture> ImageStageFuture<'_, Future> {
 // Using vulkano's RawImage and manually-allocated mem, (and device capabilities allowing), we could
 // safely interpret the same memory alloc as any of the needed image formats without needing to
 // alloc for each one. *BONK* no premature optimization!!
-pub struct ImageStage {
+pub struct Stage {
     image: Arc<vk::Image>,
     buffer: Arc<vk::Buffer>,
     /// Filled portion of the buffer, meaningful if BufferState is NOT `Uninit`
     init_slice: vk::Subbuffer<[u8]>,
     buffer_state: Option<ResizedImageExtent>,
 }
-impl ImageStage {
+impl Stage {
     pub fn new(
         allocator: Arc<dyn vulkano::memory::allocator::MemoryAllocator>,
         format: vk::Format,

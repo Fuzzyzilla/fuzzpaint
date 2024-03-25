@@ -20,9 +20,11 @@ pub struct Queue {
     family_idx: u32,
 }
 impl Queue {
+    #[must_use]
     pub fn idx(&self) -> u32 {
         self.family_idx
     }
+    #[must_use]
     pub fn queue(&self) -> &Arc<vk::Queue> {
         &self.queue
     }
@@ -33,6 +35,7 @@ enum QueueSrc {
     Queue(Queue),
 }
 
+#[derive(Clone, Copy)]
 struct QueueIndices {
     graphics: u32,
     present: Option<u32>,
@@ -150,7 +153,7 @@ impl RenderSurface {
 
         //Use mailbox for low-latency, if supported. Otherwise, FIFO is always supported.
         let present_mode = physical_device
-            .surface_present_modes(&surface, Default::default())
+            .surface_present_modes(&surface, vulkano::swapchain::SurfaceInfo::default())
             .map(|mut modes| {
                 if modes.any(|mode| mode == vk::PresentMode::Mailbox) {
                     vk::PresentMode::Mailbox
@@ -191,7 +194,7 @@ impl RenderSurface {
         Ok(Self {
             context,
             swapchain,
-            _surface: surface.clone(),
+            _surface: surface,
             swapchain_images: images,
             swapchain_create_info,
         })
@@ -247,7 +250,7 @@ impl RenderContext {
         unimplemented!()
     }
     pub fn new_with_window_surface(
-        win: &crate::window::WindowSurface,
+        win: &crate::window::Surface,
     ) -> AnyResult<(Arc<Self>, RenderSurface)> {
         use vulkano::instance::debug as vkDebug;
 
@@ -335,9 +338,9 @@ impl RenderContext {
         };
 
         let Some((physical_device, queue_indices)) = Self::choose_physical_device(
-            instance.clone(),
-            required_device_extensions,
-            required_device_extensions_lt_1_3,
+            &instance,
+            &required_device_extensions,
+            &required_device_extensions_lt_1_3,
             Some(&surface),
         )?
         else {
@@ -353,8 +356,8 @@ impl RenderContext {
         let (device, queues) = Self::create_device(
             physical_device.clone(),
             queue_indices,
-            required_device_extensions,
-            required_device_extensions_lt_1_3,
+            &required_device_extensions,
+            &required_device_extensions_lt_1_3,
         )?;
 
         // We have a device! Now to create the swapchain..
@@ -391,8 +394,8 @@ impl RenderContext {
     fn create_device(
         physical_device: Arc<vk::PhysicalDevice>,
         queue_indices: QueueIndices,
-        extensions: vk::DeviceExtensions,
-        extensions_lt_1_3: vk::DeviceExtensions,
+        extensions: &vk::DeviceExtensions,
+        extensions_lt_1_3: &vk::DeviceExtensions,
     ) -> AnyResult<(Arc<vk::Device>, Queues)> {
         //Need a graphics queue.
         let mut graphics_queue_info = vk::QueueCreateInfo {
@@ -466,9 +469,9 @@ impl RenderContext {
         }
 
         let enabled_extensions = if physical_device.api_version() < vk::Version::V1_3 {
-            extensions.union(&extensions_lt_1_3)
+            extensions.union(extensions_lt_1_3)
         } else {
-            extensions
+            *extensions
         };
 
         let (device, mut queues) = vk::Device::new(
@@ -525,10 +528,10 @@ impl RenderContext {
     /// Find a device that fits our needs, including the ability to present to the surface if in non-headless mode.
     /// Horrible signature - Returns Ok(None) if no device found, Ok(Some((device, queue indices))) if suitable device found.
     fn choose_physical_device(
-        instance: Arc<vk::Instance>,
-        required_extensions: vk::DeviceExtensions,
-        required_extensions_lt_1_3: vk::DeviceExtensions,
-        compatible_surface: Option<&Arc<vk::Surface>>,
+        instance: &Arc<vk::Instance>,
+        required_extensions: &vk::DeviceExtensions,
+        required_extensions_lt_1_3: &vk::DeviceExtensions,
+        compatible_surface: Option<&vk::Surface>,
     ) -> AnyResult<Option<(Arc<vk::PhysicalDevice>, QueueIndices)>> {
         //TODO: does not respect queue family max queue counts. This will need to be redone in some sort of
         //multi-pass shenanigan to properly find a good queue setup. Also requires that graphics and compute queues be transfer as well.
@@ -537,9 +540,9 @@ impl RenderContext {
             .filter_map(|device| {
                 use vk::QueueFlags;
                 let required_extensions = if device.api_version() < vk::Version::V1_3 {
-                    required_extensions.union(&required_extensions_lt_1_3)
+                    required_extensions.union(required_extensions_lt_1_3)
                 } else {
-                    required_extensions
+                    *required_extensions
                 };
                 //Make sure it has what we need
                 if !device.supported_extensions().contains(&required_extensions) {
@@ -553,7 +556,7 @@ impl RenderContext {
                     families.iter().enumerate().find(|(family_idx, _)| {
                         //Assume error is false. Todo?
                         device
-                            .surface_support(*family_idx as u32, surface.as_ref())
+                            .surface_support(*family_idx as u32, surface)
                             .unwrap_or(false)
                     })
                 });
@@ -564,12 +567,10 @@ impl RenderContext {
                 }
 
                 //We need a graphics queue, always! Otherwise, disqualify.
-                let Some(graphics_queue) = families.iter().enumerate().find(|q| {
+                let graphics_queue = families.iter().enumerate().find(|q| {
                     q.1.queue_flags
                         .contains(QueueFlags::GRAPHICS | QueueFlags::TRANSFER)
-                }) else {
-                    return None;
-                };
+                })?;
 
                 //We need a compute queue. This can be the same as graphics, but preferably not.
                 let graphics_supports_compute =

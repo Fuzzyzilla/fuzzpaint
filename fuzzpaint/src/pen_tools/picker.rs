@@ -16,20 +16,19 @@ impl super::PenTool for Picker {
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,
-        stylus_input: crate::stylus_events::StylusEventFrame,
+        _stylus_input: crate::stylus_events::StylusEventFrame,
         _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
-        render_output: &mut super::ToolRenderOutput,
+        _render_output: &mut super::ToolRenderOutput,
     ) {
         // Someone got bored and frustrated halfway through writing this...
-        let requests: &mut tokio::sync::mpsc::Sender<crate::renderer::requests::RenderRequest> =
+        let _requests: &mut tokio::sync::mpsc::Sender<crate::renderer::requests::RenderRequest> =
             return;
-        let _ = ();
 
         // If we have a sampler already, track with the pen sampling everwhere where it's down.
         // If we don't have a sampler (or lose it midway through), take the last input, and if it's down, make sampler.
         // For now, naive impl!
-        for event in &*stylus_input {
+        for event in &*_stylus_input {
             if !event.pressed && !self.was_down {
                 // Just released, take a sample!
                 let Some(globals) = crate::AdHocGlobals::read_clone() else {
@@ -48,7 +47,7 @@ impl super::PenTool for Picker {
                         },
                     },
                 };
-                let _ = requests.send(req).await;
+                let _ = _requests.send(req).await;
                 if let Ok(Err(e)) = response.await {
                     log::trace!("{:?}", e);
                 };

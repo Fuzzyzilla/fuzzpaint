@@ -4,6 +4,8 @@
 //! This interns certain abstractions, such as loading embedded fonts from opened documents as if
 //! they were any other font.
 
+#![allow(dead_code)]
+
 use rustybuzz::ttf_parser;
 pub struct FaceIDMarker;
 pub type FaceID = crate::FuzzID<FaceIDMarker>;
@@ -173,13 +175,13 @@ impl Faces {
     /// will fail with `Private` if needed and not provided.
     pub fn get_varied(
         &self,
-        face: VariedFaceID,
-        document: Option<crate::state::DocumentID>,
+        _face: VariedFaceID,
+        _document: Option<crate::state::DocumentID>,
     ) -> Result<(), FaceError> {
         todo!()
     }
     /// Clear all private (non-installable) fonts belonging to this document.
-    pub fn clear_private(&self, document: crate::state::DocumentID) {
+    pub fn clear_private(&self, _document: crate::state::DocumentID) {
         todo!()
     }
 }

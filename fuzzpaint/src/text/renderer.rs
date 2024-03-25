@@ -185,6 +185,7 @@ pub mod monochrome {
     impl Renderer {
         /// Get the internal scale factor due to multisampling.
         /// Should be multiplied by the tessellation factor prior to building for best looking results.
+        #[must_use]
         pub fn internal_size_class(&self) -> super::SizeClass {
             super::sample_count_to_size_class(self.multisample.image().samples())
         }
@@ -234,7 +235,7 @@ pub mod monochrome {
                     ..Default::default()
                 },
             ];
-            let attachment_references = vec![
+            let attachment_references = [
                 AttachmentReference {
                     attachment: 0,
                     layout: vk::ImageLayout::ColorAttachmentOptimal,
@@ -715,6 +716,7 @@ pub mod color {
     impl Renderer {
         /// Get the internal scale factor due to multisampling.
         /// Should be multiplied by the tessellation factor prior to building for best looking results.
+        #[must_use]
         pub fn internal_size_class(&self) -> super::SizeClass {
             use vk::SampleCount;
             // Spacial resolution multiplier is sqrt(sample count).

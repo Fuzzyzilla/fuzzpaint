@@ -218,7 +218,7 @@ impl BlendEngine {
         let mut specialization =
             ahash::HashMap::<u32, vk::SpecializationConstant>::with_capacity_and_hasher(
                 2,
-                Default::default(),
+                ahash::RandomState::default(),
             );
         specialization.insert(0, size.x.into());
         specialization.insert(1, size.y.into());
@@ -521,7 +521,7 @@ impl BlendEngine {
         {
             // bind a new pipeline if changed from last iter
             if last_mode != Some(*mode) {
-                let Some(program) = self.mode_pipelines.get(mode).map(Arc::clone) else {
+                let Some(program) = self.mode_pipelines.get(mode).cloned() else {
                     anyhow::bail!("Blend mode {:?} unsupported", mode)
                 };
                 commands.bind_pipeline_compute(program)?;

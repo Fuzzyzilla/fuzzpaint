@@ -164,18 +164,18 @@ mod visitors {
         }
     }
 }
-pub struct GizmoManipulator {
+pub struct Gizmo {
     shared_collection: Option<std::sync::Arc<tokio::sync::RwLock<crate::gizmos::Collection>>>,
     cursor_latch: Option<crate::gizmos::CursorOrInvisible>,
     clicked_path: Option<visitors::VisitPath>,
     was_pressed: bool,
 }
 
-impl super::MakePenTool for GizmoManipulator {
+impl super::MakePenTool for Gizmo {
     fn new_from_renderer(
         _: &std::sync::Arc<crate::render_device::RenderContext>,
     ) -> anyhow::Result<Box<dyn super::PenTool>> {
-        Ok(Box::new(GizmoManipulator {
+        Ok(Box::new(Gizmo {
             shared_collection: None,
             cursor_latch: None,
             clicked_path: None,
@@ -184,7 +184,7 @@ impl super::MakePenTool for GizmoManipulator {
     }
 }
 #[async_trait::async_trait]
-impl super::PenTool for GizmoManipulator {
+impl super::PenTool for Gizmo {
     fn exit(&mut self) {
         self.shared_collection = None;
         self.cursor_latch = None;
@@ -204,12 +204,12 @@ impl super::PenTool for GizmoManipulator {
             GizmoTree, MeshMode, MutGizmoTree, RenderShape, TextureMode, Visual,
         };
         let collection = self.shared_collection.get_or_insert_with(|| {
-            let mut collection = Collection::new(transform::GizmoTransform {
+            let mut collection = Collection::new(transform::Transform {
                 position: ultraviolet::Vec2 { x: 10.0, y: 10.0 },
-                origin_pinning: transform::GizmoOriginPinning::Document,
-                scale_pinning: transform::GizmoTransformPinning::Viewport,
+                origin_pinning: transform::OriginPinning::Document,
+                scale_pinning: transform::BasisPinning::Viewport,
                 rotation: 0.0,
-                rotation_pinning: transform::GizmoTransformPinning::Viewport,
+                rotation_pinning: transform::BasisPinning::Viewport,
             });
             let square = Gizmo {
                 grab_cursor: CursorOrInvisible::Invisible,
@@ -224,7 +224,7 @@ impl super::PenTool for GizmoManipulator {
                 hit_shape: GizmoShape::None,
                 hover_cursor: CursorOrInvisible::Invisible,
                 interaction: GizmoInteraction::None,
-                transform: transform::GizmoTransform::inherit_all(),
+                transform: transform::Transform::inherit_all(),
             };
             let square2 = Gizmo {
                 grab_cursor: CursorOrInvisible::Invisible,
@@ -239,10 +239,10 @@ impl super::PenTool for GizmoManipulator {
                 hit_shape: GizmoShape::None,
                 hover_cursor: CursorOrInvisible::Invisible,
                 interaction: GizmoInteraction::None,
-                transform: transform::GizmoTransform {
-                    origin_pinning: transform::GizmoOriginPinning::Inherit,
-                    rotation_pinning: transform::GizmoTransformPinning::Document,
-                    ..transform::GizmoTransform::inherit_all()
+                transform: transform::Transform {
+                    origin_pinning: transform::OriginPinning::Inherit,
+                    rotation_pinning: transform::BasisPinning::Document,
+                    ..transform::Transform::inherit_all()
                 },
             };
             let circle = Gizmo {
@@ -261,9 +261,9 @@ impl super::PenTool for GizmoManipulator {
                 },
                 hover_cursor: CursorOrInvisible::Icon(CursorIcon::Help),
                 interaction: GizmoInteraction::Move,
-                transform: transform::GizmoTransform {
-                    scale_pinning: transform::GizmoTransformPinning::Document,
-                    ..transform::GizmoTransform::inherit_all()
+                transform: transform::Transform {
+                    scale_pinning: transform::BasisPinning::Document,
+                    ..transform::Transform::inherit_all()
                 },
             };
             collection.push_top(square);

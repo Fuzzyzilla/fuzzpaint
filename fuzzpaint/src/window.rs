@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use anyhow::Result as AnyResult;
 
-pub struct WindowSurface {
+pub struct Surface {
     event_loop: winit::event_loop::EventLoop<()>,
     win: Arc<winit::window::Window>,
 }
-impl WindowSurface {
+impl Surface {
     pub fn new() -> AnyResult<Self> {
         const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
@@ -36,14 +36,14 @@ impl WindowSurface {
         render_surface: render_device::RenderSurface,
         render_context: Arc<render_device::RenderContext>,
         preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
-    ) -> anyhow::Result<WindowRenderer> {
-        let egui_ctx = egui_impl::EguiCtx::new(self.win.as_ref(), &render_surface)?;
+    ) -> anyhow::Result<Renderer> {
+        let egui_ctx = egui_impl::Ctx::new(self.win.as_ref(), &render_surface)?;
 
         let tablet_manager = octotablet::Builder::new().build_shared(&self.win).ok();
 
         let (send, stream) = crate::actions::create_action_stream();
 
-        Ok(WindowRenderer {
+        Ok(Renderer {
             win: self.win,
             render_surface: Some(render_surface),
             swapchain_generation: 0,
@@ -62,14 +62,14 @@ impl WindowSurface {
     }
 }
 
-pub struct WindowRenderer {
+pub struct Renderer {
     event_loop: Option<winit::event_loop::EventLoop<()>>,
     win: Arc<winit::window::Window>,
     /// Always Some. This is to allow it to be take-able to be remade.
     /// Could None represent a temporary loss of surface that can be recovered from?
     render_surface: Option<render_device::RenderSurface>,
     render_context: Arc<render_device::RenderContext>,
-    egui_ctx: egui_impl::EguiCtx,
+    egui_ctx: egui_impl::Ctx,
     ui: crate::ui::MainUI,
 
     action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector,
@@ -83,7 +83,7 @@ pub struct WindowRenderer {
 
     preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
 }
-impl WindowRenderer {
+impl Renderer {
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
     }

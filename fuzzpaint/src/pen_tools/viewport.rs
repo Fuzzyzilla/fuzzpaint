@@ -1,11 +1,11 @@
 use crate::gizmos::CursorIcon;
 
-enum ViewportManipulateType {
+enum ManipulationType {
     Pan,
     Rotate,
     Scrub,
 }
-impl ViewportManipulateType {
+impl ManipulationType {
     fn cursor(&self, holding: bool) -> CursorIcon {
         match self {
             Self::Pan => {
@@ -26,12 +26,12 @@ impl ViewportManipulateType {
         }
     }
 }
-struct ViewportManipulateBase {
-    manipulate_type: ViewportManipulateType,
+struct Base {
+    manipulate_type: ManipulationType,
     original_transform: Option<crate::view_transform::ViewTransform>,
     drag_start_pos: Option<ultraviolet::Vec2>,
 }
-impl ViewportManipulateBase {
+impl Base {
     fn exit(&mut self) {
         self.drag_start_pos = None;
         self.original_transform = None;
@@ -70,7 +70,7 @@ impl ViewportManipulateBase {
 
                 let delta = (event.pos.0 - start_pos.x, event.pos.1 - start_pos.y);
                 match self.manipulate_type {
-                    ViewportManipulateType::Scrub => {
+                    ManipulationType::Scrub => {
                         // Up or right is zoom in. This is natural for me as a right-handed
                         // person, but might ask around and see if this should be adjustable.
                         // certainly the speed should be :P
@@ -106,7 +106,7 @@ impl ViewportManipulateBase {
                             .into(),
                         )*/
                     }
-                    ViewportManipulateType::Pan => {
+                    ManipulationType::Pan => {
                         let mut new = initial_transform;
                         new.pan(cgmath::Vector2 {
                             x: delta.0,
@@ -114,7 +114,7 @@ impl ViewportManipulateBase {
                         });
                         new_transform = Some(new);
                     }
-                    ViewportManipulateType::Rotate => {
+                    ManipulationType::Rotate => {
                         let viewport_middle =
                             view_info.viewport_position + view_info.viewport_size / 2.0;
 
@@ -152,16 +152,16 @@ impl ViewportManipulateBase {
     }
 }
 
-pub struct ViewportScrub {
-    manipulate: ViewportManipulateBase,
+pub struct Scrub {
+    manipulate: Base,
 }
-impl super::MakePenTool for ViewportScrub {
+impl super::MakePenTool for Scrub {
     fn new_from_renderer(
         _: &std::sync::Arc<crate::render_device::RenderContext>,
     ) -> anyhow::Result<Box<dyn super::PenTool>> {
-        Ok(Box::new(ViewportScrub {
-            manipulate: ViewportManipulateBase {
-                manipulate_type: ViewportManipulateType::Scrub,
+        Ok(Box::new(Scrub {
+            manipulate: Base {
+                manipulate_type: ManipulationType::Scrub,
                 original_transform: None,
                 drag_start_pos: None,
             },
@@ -169,7 +169,7 @@ impl super::MakePenTool for ViewportScrub {
     }
 }
 #[async_trait::async_trait]
-impl super::PenTool for ViewportScrub {
+impl super::PenTool for Scrub {
     fn exit(&mut self) {
         self.manipulate.exit();
     }
@@ -186,16 +186,16 @@ impl super::PenTool for ViewportScrub {
             .process(view_info, stylus_input, actions, tool_output, render_output);
     }
 }
-pub struct ViewportPan {
-    manipulate: ViewportManipulateBase,
+pub struct Pan {
+    manipulate: Base,
 }
-impl super::MakePenTool for ViewportPan {
+impl super::MakePenTool for Pan {
     fn new_from_renderer(
         _: &std::sync::Arc<crate::render_device::RenderContext>,
     ) -> anyhow::Result<Box<dyn super::PenTool>> {
-        Ok(Box::new(ViewportPan {
-            manipulate: ViewportManipulateBase {
-                manipulate_type: ViewportManipulateType::Pan,
+        Ok(Box::new(Pan {
+            manipulate: Base {
+                manipulate_type: ManipulationType::Pan,
                 original_transform: None,
                 drag_start_pos: None,
             },
@@ -203,7 +203,7 @@ impl super::MakePenTool for ViewportPan {
     }
 }
 #[async_trait::async_trait]
-impl super::PenTool for ViewportPan {
+impl super::PenTool for Pan {
     fn exit(&mut self) {
         self.manipulate.exit();
     }
@@ -220,16 +220,16 @@ impl super::PenTool for ViewportPan {
             .process(view_info, stylus_input, actions, tool_output, render_output);
     }
 }
-pub struct ViewportRotate {
-    manipulate: ViewportManipulateBase,
+pub struct Rotate {
+    manipulate: Base,
 }
-impl super::MakePenTool for ViewportRotate {
+impl super::MakePenTool for Rotate {
     fn new_from_renderer(
         _: &std::sync::Arc<crate::render_device::RenderContext>,
     ) -> anyhow::Result<Box<dyn super::PenTool>> {
-        Ok(Box::new(ViewportRotate {
-            manipulate: ViewportManipulateBase {
-                manipulate_type: ViewportManipulateType::Rotate,
+        Ok(Box::new(Rotate {
+            manipulate: Base {
+                manipulate_type: ManipulationType::Rotate,
                 original_transform: None,
                 drag_start_pos: None,
             },
@@ -237,7 +237,7 @@ impl super::MakePenTool for ViewportRotate {
     }
 }
 #[async_trait::async_trait]
-impl super::PenTool for ViewportRotate {
+impl super::PenTool for Rotate {
     fn exit(&mut self) {
         self.manipulate.exit();
     }

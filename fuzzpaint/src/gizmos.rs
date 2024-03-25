@@ -9,7 +9,7 @@
 
 pub mod renderer;
 pub mod transform;
-use transform::GizmoTransform;
+use transform::Transform;
 
 pub use winit::window::CursorIcon;
 
@@ -147,7 +147,7 @@ pub struct Gizmo {
     pub hover_cursor: CursorOrInvisible,
     pub grab_cursor: CursorOrInvisible,
 
-    pub transform: GizmoTransform,
+    pub transform: Transform,
 }
 impl Default for Gizmo {
     fn default() -> Self {
@@ -157,7 +157,7 @@ impl Default for Gizmo {
             grab_cursor: CursorOrInvisible::default(),
             hover_cursor: CursorOrInvisible::default(),
             interaction: GizmoInteraction::None,
-            transform: transform::GizmoTransform::inherit_all(),
+            transform: transform::Transform::inherit_all(),
         }
     }
 }
@@ -165,13 +165,13 @@ impl Default for Gizmo {
 /// A collection of many gizmos. It itself is a Gizmo,
 /// meaning Collections-in-Collections is supported.
 pub struct Collection {
-    pub transform: GizmoTransform,
+    pub transform: Transform,
     /// Children of this gizmo, sorted top to bottom.
     children: Vec<AnyGizmo>,
 }
 impl Collection {
     #[must_use]
-    pub fn new(transform: GizmoTransform) -> Self {
+    pub fn new(transform: Transform) -> Self {
         Self {
             transform,
             children: Vec::new(),

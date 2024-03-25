@@ -307,7 +307,7 @@ mod arc_tools {
         }
     }
 }
-pub struct GizmoRenderer {
+pub struct Renderer {
     context: Arc<crate::render_device::RenderContext>,
     /// Map from processings -> compiled pipeline.
     lazy_pipelines: parking_lot::RwLock<
@@ -331,7 +331,7 @@ pub struct GizmoRenderer {
     triangulated_square: vk::Subbuffer<[GizmoVertex]>,
     triangulated_circle: vk::Subbuffer<[GizmoVertex]>,
 }
-impl GizmoRenderer {
+impl Renderer {
     const CIRCLE_RES: usize = 32;
     /// Make static shape buffers. (unit square origin at 0.0, unit circle origin at 0.0)
     fn make_shapes(
@@ -729,7 +729,7 @@ impl GizmoRenderer {
 }
 
 pub struct RenderVisitor<'a> {
-    renderer: &'a GizmoRenderer,
+    renderer: &'a Renderer,
     xform_stack: Vec<crate::view_transform::ViewTransform>,
     command_buffer: vk::AutoCommandBufferBuilder<vk::PrimaryAutoCommandBuffer>,
     current_pipeline: Option<Arc<vk::GraphicsPipeline>>,
@@ -827,10 +827,9 @@ impl<'a> super::GizmoVisitor<anyhow::Error> for RenderVisitor<'a> {
                     [time; 4]
                 }
                 super::TextureMode::Solid(c) => c,
-                super::TextureMode::Texture { modulate, .. } => {
+                super::TextureMode::Texture { modulate: _, .. } => {
                     // Todo: bind texture descriptor.
                     unimplemented!();
-                    modulate
                 }
             };
             let push_constants = shaders::PushConstants {

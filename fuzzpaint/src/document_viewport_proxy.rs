@@ -84,12 +84,12 @@ mod shaders {
 
 /// An acquired image from the proxy. Will become the current image when dropped,
 /// or after a user-provided GPU fence.
-pub struct DocumentViewportPreviewProxyImageGuard<'proxy> {
-    proxy: &'proxy DocumentViewportPreviewProxy,
+pub struct ImageGuard<'proxy> {
+    proxy: &'proxy Proxy,
     image: Arc<vk::ImageView>,
     is_submitted: bool,
 }
-impl DocumentViewportPreviewProxyImageGuard<'_> {
+impl ImageGuard<'_> {
     /// Submit this image for display immediately. The image should be done writing by the device, as it
     /// will be used for reading without synchronizing!
     pub fn submit_now(self) {
@@ -112,7 +112,7 @@ impl DocumentViewportPreviewProxyImageGuard<'_> {
         *write = SwapAfter::Fence(fence);
     }
 }
-impl Drop for DocumentViewportPreviewProxyImageGuard<'_> {
+impl Drop for ImageGuard<'_> {
     fn drop(&mut self) {
         if self.is_submitted {
             return;
@@ -126,7 +126,7 @@ impl Drop for DocumentViewportPreviewProxyImageGuard<'_> {
         *write = SwapAfter::Now;
     }
 }
-impl std::ops::Deref for DocumentViewportPreviewProxyImageGuard<'_> {
+impl std::ops::Deref for ImageGuard<'_> {
     type Target = Arc<vk::ImageView>;
     fn deref(&self) -> &Self::Target {
         &self.image
@@ -150,7 +150,7 @@ impl<Future: GpuFuture> SwapAfter<Future> {
 ///
 /// The dynamic transforms very much spoiled the purpose of this struct, evaluate if it can be re-merged into
 /// the main struct.
-struct ProxySurfaceData {
+struct SurfaceData {
     context: Arc<crate::render_device::RenderContext>,
     pipeline: Arc<vk::GraphicsPipeline>,
     framebuffers: Box<[Arc<vk::Framebuffer>]>,
@@ -164,7 +164,7 @@ struct ProxySurfaceData {
     view_size: cgmath::Vector2<f32>,
     surface_dimensions: [u32; 2],
 }
-impl ProxySurfaceData {
+impl SurfaceData {
     fn new(
         context: Arc<render_device::RenderContext>,
         render_surface: &render_device::RenderSurface,
@@ -265,7 +265,7 @@ impl ProxySurfaceData {
                             self.view_size,
                         )
                         .ok_or_else(|| anyhow::anyhow!("Malformed document transform"))?,
-                    view_transform::DocumentTransform::Transform(t) => t.clone(),
+                    view_transform::DocumentTransform::Transform(t) => *t,
                 };
 
                 let base_xform = ultraviolet::Mat4::from_nonuniform_scale(ultraviolet::Vec3 {
@@ -367,7 +367,7 @@ impl ProxySurfaceData {
 /// (Because dealing with one image is easier than potentially many, as we don't care about excess framerate)
 /// Provides a method to get a drawable buffer asynchronously, and handles drawing that to the screen
 /// whenever needed by the swapchain.
-pub struct DocumentViewportPreviewProxy {
+pub struct Proxy {
     render_context: Arc<render_device::RenderContext>,
 
     document_transform: tokio::sync::RwLock<crate::view_transform::DocumentTransform>,
@@ -389,17 +389,17 @@ pub struct DocumentViewportPreviewProxy {
     // Static render data ============
     render_pass: Arc<vk::RenderPass>,
     pipeline: Arc<vk::GraphicsPipeline>,
-    gizmo_renderer: Arc<crate::gizmos::renderer::GizmoRenderer>,
+    gizmo_renderer: Arc<crate::gizmos::renderer::Renderer>,
 
     // Surface-derived render data ===============
-    surface_data: tokio::sync::RwLock<ProxySurfaceData>,
+    surface_data: tokio::sync::RwLock<SurfaceData>,
 
     // User render data ============
     cursor: parking_lot::RwLock<Option<crate::gizmos::CursorOrInvisible>>,
     tool_render_as: parking_lot::RwLock<crate::pen_tools::RenderAs>,
 }
 
-impl DocumentViewportPreviewProxy {
+impl Proxy {
     pub fn new(render_surface: &render_device::RenderSurface) -> AnyResult<Self> {
         // Only one frame-in-flight - Keep an additional buffer for writing to.
         const NUM_DOCUMENT_BUFFERS: u32 = 2;
@@ -609,7 +609,7 @@ impl DocumentViewportPreviewProxy {
         .into();
         let document_transform = crate::view_transform::DocumentTransform::default();
 
-        let surface_data = ProxySurfaceData::new(
+        let surface_data = SurfaceData::new(
             render_surface.context().clone(),
             render_surface,
             render_pass.clone(),
@@ -617,7 +617,7 @@ impl DocumentViewportPreviewProxy {
             &document_image_bindings,
             viewport_pos,
             viewport_size,
-            document_transform.clone(),
+            document_transform,
         );
 
         let notify = tokio::sync::Notify::new();
@@ -625,7 +625,7 @@ impl DocumentViewportPreviewProxy {
         notify.notify_one();
 
         let gizmo_renderer =
-            crate::gizmos::renderer::GizmoRenderer::new(render_surface.context().clone())?;
+            crate::gizmos::renderer::Renderer::new(render_surface.context().clone())?;
 
         Ok(Self {
             render_context: render_surface.context().clone(),
@@ -694,11 +694,11 @@ impl DocumentViewportPreviewProxy {
             SwapAfter::Fence(fence) => fence.is_signaled().unwrap(),
         }
     }
-    pub async fn write(&self) -> DocumentViewportPreviewProxyImageGuard<'_> {
+    pub async fn write(&self) -> ImageGuard<'_> {
         self.write_ready_notify.notified().await;
         assert!(self.swap_after.read().is_empty());
         // We are now the sole writer. Hopefully. Return the proxy:
-        DocumentViewportPreviewProxyImageGuard {
+        ImageGuard {
             // Return whichever image is *not* the read buf. Uhm uh ordering??
             image: self.document_images
                 [(self.read_buf.load(std::sync::atomic::Ordering::SeqCst) ^ 1) as usize]
@@ -740,7 +740,7 @@ impl DocumentViewportPreviewProxy {
     }
     pub fn get_view_transform_sync(&self) -> Option<crate::view_transform::ViewTransform> {
         // lock, clone, release asap
-        match { *self.document_transform.blocking_read() } {
+        match *self.document_transform.blocking_read() {
             crate::view_transform::DocumentTransform::Fit(f) => {
                 let (pos, size) = *self.viewport.read();
                 f.make_transform(
@@ -759,7 +759,7 @@ impl DocumentViewportPreviewProxy {
         *self.viewport.read()
     }
 }
-impl PreviewRenderProxy for DocumentViewportPreviewProxy {
+impl PreviewRenderProxy for Proxy {
     #[deny(unsafe_op_in_unsafe_fn)]
     unsafe fn render(
         &self,
@@ -823,7 +823,7 @@ impl PreviewRenderProxy for DocumentViewportPreviewProxy {
         let viewport = *self.viewport.read();
         let transform = *self.document_transform.blocking_read();
 
-        let new = ProxySurfaceData::new(
+        let new = SurfaceData::new(
             self.render_context.clone(),
             render_surface,
             self.render_pass.clone(),

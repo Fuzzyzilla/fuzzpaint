@@ -118,7 +118,7 @@ fn make_trail(curve: &TolerantCurve) -> crate::gizmos::Gizmo {
                 mesh,
                 texture: crate::gizmos::TextureMode::AntTrail,
             },
-            transform: crate::gizmos::transform::GizmoTransform::inherit_all(),
+            transform: crate::gizmos::transform::Transform::inherit_all(),
             ..Default::default()
         }
     }

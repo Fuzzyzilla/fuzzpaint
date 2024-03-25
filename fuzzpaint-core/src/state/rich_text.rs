@@ -48,10 +48,10 @@ struct TextProperties {
 }
 /// Expand from the given position, inheriting properties based on the affinity.
 fn insert_inherited<T: Eq + Clone>(
-    map: &mut rangemap::RangeMap<usize, T>,
-    pos: usize,
-    len: usize,
-    affinity: CaretAffinity,
+    _map: &mut rangemap::RangeMap<usize, T>,
+    _pos: usize,
+    _len: usize,
+    _affinity: CaretAffinity,
 ) {
     // impossible, or highly hack-y.
     // Do i need a fork? :V
@@ -234,7 +234,7 @@ impl RichTextParagraph {
         grapheme_position: usize,
         affinity: CaretAffinity,
     ) -> Result<(), TextInsertError> {
-        use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
+        use unicode_segmentation::UnicodeSegmentation;
         // Avoid weirdness
         if text.is_empty() {
             return Ok(());

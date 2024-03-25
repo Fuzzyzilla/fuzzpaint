@@ -104,7 +104,8 @@ impl GpuStampTess {
 
         let shader = shaders::tessellate::load(context.device().clone())?;
         // Specialize workgroup shape
-        let mut specialize = ahash::HashMap::with_capacity_and_hasher(1, Default::default());
+        let mut specialize =
+            ahash::HashMap::with_capacity_and_hasher(1, ahash::RandomState::default());
         specialize.insert(0, work_size.into());
         let entry = shader.specialize(specialize)?.entry_point("main").unwrap();
         log::info!("Tess workgroup size: {}", work_size);
@@ -175,8 +176,7 @@ impl GpuStampTess {
                     let dist = alloc
                         .summary
                         .arc_length
-                        .map(|dist| (dist / density).ceil() as u32)
-                        .unwrap_or(0);
+                        .map_or(0, |dist| (dist / density).ceil() as u32);
                     let num_points = alloc.summary.len as u32;
 
                     (dist, num_points)

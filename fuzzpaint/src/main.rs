@@ -5,6 +5,7 @@
 #![feature(new_uninit)]
 #![feature(float_next_up_down)]
 #![warn(clippy::pedantic)]
+
 use std::sync::Arc;
 mod egui_impl;
 pub mod renderer;
@@ -81,10 +82,10 @@ impl Stroke {
 async fn stylus_event_collector(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     ui_requests: crossbeam::channel::Receiver<ui::requests::UiRequest>,
-    mut render_requests: tokio::sync::mpsc::Sender<renderer::requests::RenderRequest>,
+    _: tokio::sync::mpsc::Sender<renderer::requests::RenderRequest>,
     mut action_listener: actions::ActionListener,
     mut tools: pen_tools::ToolState,
-    document_preview: Arc<document_viewport_proxy::DocumentViewportPreviewProxy>,
+    document_preview: Arc<document_viewport_proxy::Proxy>,
 ) -> AnyResult<()> {
     loop {
         match event_stream.recv().await {
@@ -178,7 +179,7 @@ fn main() -> AnyResult<()> {
         log::warn!("Failed to load any provided document.");
     }
 
-    let window_surface = window::WindowSurface::new()?;
+    let window_surface = window::Surface::new()?;
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
@@ -186,9 +187,7 @@ fn main() -> AnyResult<()> {
         log::warn!("Failed to save hotkey config:\n{e:?}");
     };
 
-    let document_view = Arc::new(document_viewport_proxy::DocumentViewportPreviewProxy::new(
-        &render_surface,
-    )?);
+    let document_view = Arc::new(document_viewport_proxy::Proxy::new(&render_surface)?);
     let window_renderer = window_surface.with_render_surface(
         render_surface,
         render_context.clone(),

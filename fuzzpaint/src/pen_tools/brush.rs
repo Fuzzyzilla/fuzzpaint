@@ -123,7 +123,7 @@ fn brush(
     }
 }
 fn make_trail(stroke: &crate::Stroke) -> crate::gizmos::Gizmo {
-    use crate::gizmos::{transform::GizmoTransform, Gizmo, MeshMode, TextureMode, Visual};
+    use crate::gizmos::{transform::Transform, Gizmo, MeshMode, TextureMode, Visual};
 
     let mut points = Vec::with_capacity(stroke.points.len());
     let pressure_scale = stroke.brush.size_mul - stroke.brush.spacing_px;
@@ -171,7 +171,7 @@ fn make_trail(stroke: &crate::Stroke) -> crate::gizmos::Gizmo {
             mesh: MeshMode::WideLineStrip(points.into()),
             texture,
         },
-        transform: GizmoTransform::inherit_all(),
+        transform: Transform::inherit_all(),
         ..Default::default()
     }
 }

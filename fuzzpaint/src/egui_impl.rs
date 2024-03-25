@@ -20,19 +20,19 @@ pub fn prepend_textures_delta(into: &mut egui::TexturesDelta, mut from: egui::Te
     into.set = std::mem::take(&mut from.set);
 }
 
-pub struct EguiCtx {
+pub struct Ctx {
     state: egui_winit::State,
-    renderer: EguiRenderer,
+    renderer: Render,
 
     redraw_requested: bool,
     full_output: Option<egui::FullOutput>,
 }
-impl EguiCtx {
+impl Ctx {
     pub fn new(
         window: &winit::window::Window,
         render_surface: &RenderSurface,
     ) -> anyhow::Result<Self> {
-        let mut renderer = EguiRenderer::new(render_surface.context(), render_surface.format())?;
+        let mut renderer = Render::new(render_surface.context(), render_surface.format())?;
         renderer.gen_framebuffers(render_surface)?;
 
         let mut state = egui_winit::State::new(
@@ -98,9 +98,7 @@ impl EguiCtx {
         self.redraw_requested = false;
 
         // Check if there's anything to draw!
-        let Some(output) = self.full_output.take() else {
-            return None;
-        };
+        let output = self.full_output.take()?;
 
         let res: AnyResult<_> = try_block::try_block! {
             let transfer_commands = self.renderer.do_image_deltas(output.textures_delta).transpose()?;
@@ -202,21 +200,21 @@ impl From<egui::epaint::Vertex> for EguiVertex {
         }
     }
 }
-struct EguiTexture {
+struct Texture {
     image: Arc<vk::Image>,
 
     descriptor_set: Arc<vk::PersistentDescriptorSet>,
 }
-struct EguiRenderer {
+struct Render {
     remove_next_frame: Vec<egui::TextureId>,
-    images: hashbrown::HashMap<egui::TextureId, EguiTexture>,
-    render_context: Arc<crate::render_device::RenderContext>,
+    images: hashbrown::HashMap<egui::TextureId, Texture>,
+    context: Arc<crate::render_device::RenderContext>,
 
     render_pass: Arc<vk::RenderPass>,
     pipeline: Arc<vk::GraphicsPipeline>,
     framebuffers: Vec<Arc<vk::Framebuffer>>,
 }
-impl EguiRenderer {
+impl Render {
     pub fn new(
         render_context: &Arc<crate::render_device::RenderContext>,
         surface_format: vk::Format,
@@ -330,7 +328,7 @@ impl EguiRenderer {
             images: hashbrown::HashMap::default(),
             render_pass: renderpass,
             pipeline,
-            render_context: render_context.clone(),
+            context: render_context.clone(),
             framebuffers: Vec::new(),
         })
     }
@@ -382,8 +380,8 @@ impl EguiRenderer {
 
         if vert_buff_size == 0 || index_buff_size == 0 {
             let builder = vk::AutoCommandBufferBuilder::primary(
-                self.render_context.allocators().command_buffer(),
-                self.render_context.queues().graphics().idx(),
+                self.context.allocators().command_buffer(),
+                self.context.queues().graphics().idx(),
                 vk::CommandBufferUsage::OneTimeSubmit,
             )?;
             return Ok(builder.build()?);
@@ -399,7 +397,7 @@ impl EguiRenderer {
             }
         }
         let vertices = vk::Buffer::from_iter(
-            self.render_context.allocators().memory().clone(),
+            self.context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::VERTEX_BUFFER,
                 ..Default::default()
@@ -411,7 +409,7 @@ impl EguiRenderer {
             vertex_vec,
         )?;
         let indices = vk::Buffer::from_iter(
-            self.render_context.allocators().memory().clone(),
+            self.context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 usage: vk::BufferUsage::INDEX_BUFFER,
                 ..Default::default()
@@ -442,8 +440,8 @@ impl EguiRenderer {
         let pipeline_layout = self.pipeline.layout();
 
         let mut command_buffer_builder = vk::AutoCommandBufferBuilder::primary(
-            self.render_context.allocators().command_buffer(),
-            self.render_context.queues().graphics().idx(),
+            self.context.allocators().command_buffer(),
+            self.context.queues().graphics().idx(),
             vk::CommandBufferUsage::OneTimeSubmit,
         )?;
         command_buffer_builder
@@ -524,7 +522,7 @@ impl EguiRenderer {
         let pipe_layout = self.pipeline.layout();
         let layout = pipe_layout
             .set_layouts()
-            .get(0)
+            .first()
             .expect("Egui shader needs a sampler!")
             .clone();
         (0, layout)
@@ -593,7 +591,7 @@ impl EguiRenderer {
         }
 
         let staging_buffer = vk::Buffer::from_iter(
-            self.render_context.allocators().memory().clone(),
+            self.context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 sharing: vk::Sharing::Exclusive,
                 usage: vk::BufferUsage::TRANSFER_SRC,
@@ -607,8 +605,8 @@ impl EguiRenderer {
         )?;
 
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
-            self.render_context.allocators().command_buffer(),
-            self.render_context.queues().transfer().idx(),
+            self.context.allocators().command_buffer(),
+            self.context.queues().transfer().idx(),
             vk::CommandBufferUsage::OneTimeSubmit,
         )?;
 
@@ -633,7 +631,7 @@ impl EguiRenderer {
                         [extent[0] as u32, extent[1] as u32, 1]
                     };
                     let image = vk::Image::new(
-                        self.render_context.allocators().memory().clone(),
+                        self.context.allocators().memory().clone(),
                         vk::ImageCreateInfo {
                             array_layers: 1,
                             format,
@@ -676,7 +674,7 @@ impl EguiRenderer {
 
                     //Could optimize here, re-using the four possible options of sampler.
                     let sampler = vk::Sampler::new(
-                        self.render_context.device().clone(),
+                        self.context.device().clone(),
                         vk::SamplerCreateInfo {
                             mag_filter: egui_to_vk_filter(delta.options.magnification),
                             min_filter: egui_to_vk_filter(delta.options.minification),
@@ -686,7 +684,7 @@ impl EguiRenderer {
                     )?;
 
                     let descriptor_set = vk::PersistentDescriptorSet::new(
-                        self.render_context.allocators().descriptor_set(),
+                        self.context.allocators().descriptor_set(),
                         texture_set_layout.clone(),
                         [vk::WriteDescriptorSet::image_view_sampler(
                             texture_set_idx,
@@ -695,7 +693,7 @@ impl EguiRenderer {
                         )],
                         [],
                     )?;
-                    Ok(v.insert(EguiTexture {
+                    Ok(v.insert(Texture {
                         image,
                         descriptor_set,
                     })

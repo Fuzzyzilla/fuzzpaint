@@ -413,7 +413,7 @@ impl super::Points {
                                         bytemuck::try_cast_slice::<_, crate::stroke::Point>(slice)
                                             .ok()
                                     })
-                                    .and_then(|slice| slice.get(0));
+                                    .and_then(|slice| slice.first());
                                 opt_last_point
                             } else {
                                 None

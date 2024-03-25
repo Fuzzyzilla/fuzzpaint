@@ -24,6 +24,7 @@ struct VertexAllocator<Vertex, Allocator> {
     // (>22k triangles) Lets just assume that's not gonna need to happen.
     // Arranged such that 0 means "first vertex of this allocation", so the draw call's base-vertex must be set accordingly.
     indices: vk::Subbuffer<[u16]>,
+    #[allow(clippy::struct_field_names)]
     vertex_allocator: Allocator,
     index_allocator: Allocator,
 }
@@ -236,13 +237,13 @@ impl GlyphInfo {
     }
 }
 /// Stores generated glyph data, indexed by `(face, variation, index, size class)`.
-pub struct GlyphCache {
+pub struct Cache {
     allocators: VertexAllocator<interface::Vertex, BuddyAllocator>,
     // Map between a varied face glyph, and it's color + potentially many tesselated forms.
     glyphs: hashbrown::HashMap<UnsizedGlyphKey, GlyphInfo>,
 }
 #[derive(thiserror::Error, Debug)]
-pub enum CacheInsertError {
+pub enum InsertError {
     #[error(transparent)]
     Alloc(#[from] VertexAllocationError),
     #[error(transparent)]
@@ -255,7 +256,7 @@ pub enum ColorInsertError {
     #[error("color subglyphs must not be have color themselves")]
     WouldRecurse,
 }
-impl GlyphCache {
+impl Cache {
     /// Create a new cache from subbuffers. Buffers must be host accessible.
     pub fn new(vertices: Subbuffer<[interface::Vertex]>, indices: Subbuffer<[u16]>) -> Self {
         Self {
@@ -314,8 +315,8 @@ impl GlyphCache {
     }
     pub fn insert_color_info(
         &mut self,
-        key: &UnsizedGlyphKey,
-        color_info: &[()],
+        _key: &UnsizedGlyphKey,
+        _color_info: &[()],
     ) -> Result<(), ColorInsertError> {
         todo!()
     }
@@ -328,7 +329,7 @@ impl GlyphCache {
         class: SizeClass,
         vertices: &[super::interface::Vertex],
         indices: &[u16],
-    ) -> Result<(), CacheInsertError> {
+    ) -> Result<(), InsertError> {
         // fixme!!
         assert!(u32::try_from(vertices.len()).is_ok() && u32::try_from(indices.len()).is_ok());
         crate::render_device::debug_assert_indices_safe(vertices, indices);
@@ -344,7 +345,7 @@ impl GlyphCache {
             .get_ceil(class)
             .is_some_and(|(found_class, _)| found_class == class)
         {
-            return Err(CacheInsertError::AlreadyExists);
+            return Err(InsertError::AlreadyExists);
         }
 
         // Allocate and try to copy data in

@@ -57,10 +57,8 @@ mod stage;
 const IMAGE_STAGE_DIMENSION: u32 = 256;
 
 // Oncelock can't be initialized fallilbly, use this worse solution. x,3
-static COLOR_STAGE: parking_lot::RwLock<Option<stage::ImageStage>> =
-    parking_lot::const_rwlock(None);
-static NE_ID_STAGE: parking_lot::RwLock<Option<stage::ImageStage>> =
-    parking_lot::const_rwlock(None);
+static COLOR_STAGE: parking_lot::RwLock<Option<stage::Stage>> = parking_lot::const_rwlock(None);
+static NE_ID_STAGE: parking_lot::RwLock<Option<stage::Stage>> = parking_lot::const_rwlock(None);
 
 /// Checks the format is valid for interpreting texels as singular binary elements.
 /// Returns a descriptive error if incorrect.
@@ -83,10 +81,10 @@ fn check_valid_binary_format(format: vk::Format) -> anyhow::Result<()> {
 /// In the future when Fill layers become more.... more, this will do serious work,
 /// such as calculating gradient values, patterns, ect. With a fill, we can generally
 /// do the work on the host directly without needing to pester the device or use an image.
-pub struct ConstantColorPicker {
+pub struct ConstantColor {
     pub color: [f32; 4],
 }
-impl Picker for ConstantColorPicker {
+impl Picker for ConstantColor {
     type Value = [f32; 4];
     fn pick(&self, _: ultraviolet::Vec2) -> Result<Self::Value, crate::picker::PickError> {
         Ok(self.color)
@@ -105,15 +103,15 @@ impl RenderedColorPicker {
     pub(super) fn pull_from_image(
         ctx: &crate::render_device::RenderContext,
         image: Arc<vk::Image>,
-        xform: (),
-        viewport_rect: (),
+        _xform: (),
+        _viewport_rect: (),
     ) -> anyhow::Result<Self> {
         let mut stage_lock = COLOR_STAGE.write();
         // get or try insert:
         let stage = if let Some(stage) = stage_lock.as_mut() {
             stage
         } else {
-            let new_stage = stage::ImageStage::new(
+            let new_stage = stage::Stage::new(
                 // These are long-lived staging bufs and should probably use
                 // their own bump allocator within a dedicated allocation rather than
                 // muddying the global allocator.
@@ -145,7 +143,7 @@ impl Picker for RenderedColorPicker {
     type Value = [vulkano::half::f16; 4];
     fn pick(
         &self,
-        viewport_coordinate: ultraviolet::Vec2,
+        _viewport_coordinate: ultraviolet::Vec2,
     ) -> Result<Self::Value, crate::picker::PickError> {
         todo!()
     }
@@ -162,7 +160,7 @@ impl crate::picker::Picker for StrokeIDPicker {
     type Value = Option<fuzzpaint_core::state::stroke_collection::ImmutableStrokeID>;
     fn pick(
         &self,
-        viewport_coordinate: ultraviolet::Vec2,
+        _viewport_coordinate: ultraviolet::Vec2,
     ) -> Result<Self::Value, crate::picker::PickError> {
         todo!()
     }

@@ -11,14 +11,14 @@ struct PerDocument {
     queue: DocumentCommandQueue,
 }
 /// A provider that keeps documents in-memory.
-pub struct InMemoryDocumentProvider {
-    on_change: parking_lot::Mutex<bus::Bus<ProviderMessage>>,
+pub struct Local {
+    on_change: parking_lot::Mutex<bus::Bus<ChangeMessage>>,
     // We don't expect high contention - will only be locked for writing when a new queue is inserted.
     documents: parking_lot::RwLock<hashbrown::HashMap<DocumentID, PerDocument>>,
 }
 // Todo: This sould be a trait! For out-of-process providers, network providers, etc.
 // That's a ways away, though :3
-impl InMemoryDocumentProvider {
+impl Local {
     /// Create and insert a new document, returning it's new ID.
     pub fn insert_new(&self) -> DocumentID {
         let new_document = DocumentCommandQueue::new();
@@ -30,7 +30,7 @@ impl InMemoryDocumentProvider {
 
         self.on_change
             .lock()
-            .broadcast(ProviderMessage::Opened(new_id));
+            .broadcast(ChangeMessage::Opened(new_id));
 
         new_id
     }
@@ -47,7 +47,7 @@ impl InMemoryDocumentProvider {
             }
         }
 
-        self.on_change.lock().broadcast(ProviderMessage::Opened(id));
+        self.on_change.lock().broadcast(ChangeMessage::Opened(id));
 
         Ok(())
     }
@@ -67,9 +67,7 @@ impl InMemoryDocumentProvider {
         drop(read);
 
         if let Ok(true) = cursor.forward() {
-            self.on_change
-                .lock()
-                .broadcast(ProviderMessage::Modified(id));
+            self.on_change.lock().broadcast(ChangeMessage::Modified(id));
         }
 
         Some(result)
@@ -83,18 +81,16 @@ impl InMemoryDocumentProvider {
     /// Ensures the ID is valid before sending.
     pub fn touch(&self, id: DocumentID) {
         if self.documents.read().contains_key(&id) {
-            self.on_change
-                .lock()
-                .broadcast(ProviderMessage::Modified(id));
+            self.on_change.lock().broadcast(ChangeMessage::Modified(id));
         }
     }
     /// Get a reciever of messages describing changes to the provider or it's documents.
     /// Does not recieve old messages, use [`Self::document_iter`] to get up-to-date!
-    pub fn change_listener(&self) -> bus::BusReader<ProviderMessage> {
+    pub fn change_listener(&self) -> bus::BusReader<ChangeMessage> {
         self.on_change.lock().add_rx()
     }
 }
-impl Default for InMemoryDocumentProvider {
+impl Default for Local {
     fn default() -> Self {
         // Blocks on full, so choose a large number to avoid blocking user thread.
         let on_change = bus::Bus::new(256);
@@ -105,7 +101,7 @@ impl Default for InMemoryDocumentProvider {
     }
 }
 #[derive(Copy, Clone, Debug)]
-pub enum ProviderMessage {
+pub enum ChangeMessage {
     /// A new document has been made available to the provider.
     Opened(DocumentID),
     /// A document has been modified, i.e. it is likely that existing listeners
@@ -114,7 +110,7 @@ pub enum ProviderMessage {
     /// A document is no longer available.
     Closed(DocumentID),
 }
-impl ProviderMessage {
+impl ChangeMessage {
     /// Gets the document this message refers to.
     #[must_use]
     pub fn id(&self) -> DocumentID {
@@ -124,7 +120,7 @@ impl ProviderMessage {
     }
 }
 
-pub fn provider() -> &'static InMemoryDocumentProvider {
-    static ONCE: std::sync::OnceLock<InMemoryDocumentProvider> = std::sync::OnceLock::new();
+pub fn provider() -> &'static Local {
+    static ONCE: std::sync::OnceLock<Local> = std::sync::OnceLock::new();
     ONCE.get_or_init(Default::default)
 }

@@ -45,9 +45,9 @@ impl<'data> CachedImage<'data> {
 }
 struct Renderer {
     context: Arc<crate::render_device::RenderContext>,
-    stroke_renderer: stroke_renderer::StrokeLayerRenderer,
-    text_builder: crate::text::TextBuilder,
-    text_renderer: crate::text::renderer::monochrome::Renderer,
+    strokes: stroke_renderer::StrokeLayerRenderer,
+    text_builder: crate::text::Builder,
+    text: crate::text::renderer::monochrome::Renderer,
     blend_engine: blender::BlendEngine,
     data: hashbrown::HashMap<state::DocumentID, PerDocumentData>,
 }
@@ -56,11 +56,11 @@ impl Renderer {
         Ok(Self {
             context: context.clone(),
             blend_engine: blender::BlendEngine::new(context.device())?,
-            text_builder: crate::text::TextBuilder::allocate_new(
+            text_builder: crate::text::Builder::allocate_new(
                 context.allocators().memory().clone(),
             )?,
-            text_renderer: crate::text::renderer::monochrome::Renderer::new(context.clone())?,
-            stroke_renderer: stroke_renderer::StrokeLayerRenderer::new(context)?,
+            text: crate::text::renderer::monochrome::Renderer::new(context.clone())?,
+            strokes: stroke_renderer::StrokeLayerRenderer::new(context)?,
             data: hashbrown::HashMap::new(),
         })
     }
@@ -105,9 +105,9 @@ impl Renderer {
             Self::draw_from_scratch(
                 &self.context,
                 &self.blend_engine,
-                &self.stroke_renderer,
+                &self.strokes,
                 &mut self.text_builder,
-                &self.text_renderer,
+                &self.text,
                 data,
                 &changes,
                 into,
@@ -118,7 +118,7 @@ impl Renderer {
             match Self::draw_incremental(
                 &self.context,
                 &self.blend_engine,
-                &self.stroke_renderer,
+                &self.strokes,
                 data,
                 &changes,
                 into,
@@ -128,9 +128,9 @@ impl Renderer {
                     Self::draw_from_scratch(
                         &self.context,
                         &self.blend_engine,
-                        &self.stroke_renderer,
+                        &self.strokes,
                         &mut self.text_builder,
-                        &self.text_renderer,
+                        &self.text,
                         data,
                         &changes,
                         into,
@@ -147,7 +147,7 @@ impl Renderer {
         context: &Arc<crate::render_device::RenderContext>,
         blend_engine: &blender::BlendEngine,
         renderer: &stroke_renderer::StrokeLayerRenderer,
-        text_builder: &mut crate::text::TextBuilder,
+        text_builder: &mut crate::text::Builder,
         text_renderer: &crate::text::renderer::monochrome::Renderer,
         document_data: &mut PerDocumentData,
         state: &impl queue::state_reader::CommandQueueStateReader,
@@ -315,7 +315,7 @@ impl Renderer {
                         text_renderer,
                         image,
                         *px_per_em,
-                        &text,
+                        text,
                     )?);
                 }
                 Some(LeafType::Note) | None => (),
@@ -395,7 +395,7 @@ impl Renderer {
     }
     fn render_text(
         context: &crate::render_device::RenderContext,
-        builder: &mut crate::text::TextBuilder,
+        builder: &mut crate::text::Builder,
         renderer: &crate::text::renderer::monochrome::Renderer,
         image: &RenderData,
         px_per_em: f32,
@@ -516,7 +516,7 @@ impl Renderer {
 }
 async fn render_changes(
     renderer: Arc<crate::render_device::RenderContext>,
-    document_preview: Arc<crate::document_viewport_proxy::DocumentViewportPreviewProxy>,
+    document_preview: Arc<crate::document_viewport_proxy::Proxy>,
 ) -> anyhow::Result<()> {
     // Sync -> Async bridge for change notification. Bleh..
     let (send, mut changes_recv) = tokio::sync::mpsc::unbounded_channel();
@@ -595,7 +595,7 @@ async fn render_changes(
 pub async fn render_worker(
     renderer: Arc<crate::render_device::RenderContext>,
     request_reciever: tokio::sync::mpsc::Receiver<requests::RenderRequest>,
-    document_preview: Arc<crate::document_viewport_proxy::DocumentViewportPreviewProxy>,
+    document_preview: Arc<crate::document_viewport_proxy::Proxy>,
 ) -> anyhow::Result<()> {
     tokio::try_join!(
         async {

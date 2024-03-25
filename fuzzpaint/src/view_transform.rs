@@ -333,26 +333,10 @@ impl ViewInfo {
         ];
         // Unwrap ok - of course this array isn't empty!
         // Use total ordering to silently ignore NaN/Inf
-        let min_x = points
-            .iter()
-            .map(|p| p.x)
-            .min_by(|a, b| a.total_cmp(&b))
-            .unwrap();
-        let max_x = points
-            .iter()
-            .map(|p| p.x)
-            .max_by(|a, b| a.total_cmp(&b))
-            .unwrap();
-        let min_y = points
-            .iter()
-            .map(|p| p.y)
-            .min_by(|a, b| a.total_cmp(&b))
-            .unwrap();
-        let max_y = points
-            .iter()
-            .map(|p| p.y)
-            .max_by(|a, b| a.total_cmp(&b))
-            .unwrap();
+        let min_x = points.iter().map(|p| p.x).min_by(f32::total_cmp).unwrap();
+        let max_x = points.iter().map(|p| p.x).max_by(f32::total_cmp).unwrap();
+        let min_y = points.iter().map(|p| p.y).min_by(f32::total_cmp).unwrap();
+        let max_y = points.iter().map(|p| p.y).max_by(f32::total_cmp).unwrap();
 
         Some((
             cgmath::Point2 { x: min_x, y: min_y },

@@ -34,6 +34,9 @@ fn justify(available_size: f32, base_size: f32, base_margin: f32) -> (f32, f32) 
 
     (just_size, base_margin)
 }
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 enum JustifyAxis {
     Horizontal,
     Vertical,
@@ -41,7 +44,7 @@ enum JustifyAxis {
 /// Adjusts UI style to be justified according to [`justify`].
 ///
 /// Returns the size at which items should be drawn, margin is applied in-place
-/// to the Ui via Style::spacing::item_spacing.
+/// to the Ui via `Style::spacing::item_spacing`
 fn justify_mut(ui: &mut Ui, axis: JustifyAxis, base_size: f32, base_margin: f32) -> f32 {
     let available = match axis {
         JustifyAxis::Horizontal => ui.available_width(),
@@ -238,7 +241,7 @@ impl MainUI {
                 egui::TopBottomPanel::bottom("tools-panel")
                     .show_inside(ui, |ui| tools_panel(ui, &action_frame, &self.requests_send));
                 // Brush panel takes the rest
-                brush_panel(ui, &action_frame);
+                brush_panel(ui, self.cur_document, &action_frame);
             });
 
         egui::TopBottomPanel::top("document-bar").show(ctx, |ui| self.document_bar(ui));
@@ -942,7 +945,11 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
     });
 }
 /// Side panel showing layer tree and layer options
-fn brush_panel(ui: &mut Ui, actions: &crate::actions::ActionFrame) {
+fn brush_panel(
+    ui: &mut Ui,
+    current_doc: Option<state::DocumentID>,
+    actions: &crate::actions::ActionFrame,
+) {
     use az::SaturatingAs;
 
     let mut globals = crate::AdHocGlobals::get().write();
@@ -973,6 +980,7 @@ fn brush_panel(ui: &mut Ui, actions: &crate::actions::ActionFrame) {
             color_palette::ColorPalette::new(&mut brush.color_modulate)
                 .scope(color_palette::HistoryScope::Global)
                 .in_flux(in_flux)
+                .id_source(current_doc)
                 .max_history(64),
         );
 
@@ -1056,13 +1064,13 @@ mod latch {
         /// The interaction is cancelled or hasn't started. State will not be reported nor persisted.
         None,
     }
-    pub struct LatchResponse<'ui, State> {
+    pub struct Response<'ui, State> {
         // Needed for cancellation functionality
         ui: &'ui mut egui::Ui,
         persisted_id: egui::Id,
         output: Option<State>,
     }
-    impl<State: 'static> LatchResponse<'_, State> {
+    impl<State: 'static> Response<'_, State> {
         /// Stop the interaction, preventing it from reporting Finished in the future.
         #[allow(dead_code)]
         pub fn cancel(self) {
@@ -1089,7 +1097,7 @@ mod latch {
         id_src: impl std::hash::Hash,
         state: State,
         f: F,
-    ) -> LatchResponse<'_, State>
+    ) -> Response<'_, State>
     where
         F: FnOnce(&mut egui::Ui, &mut State) -> Latch,
         // bounds implied by insert_temp
@@ -1105,7 +1113,7 @@ mod latch {
             // Intern the state.
             Latch::Continue => {
                 ui.data_mut(|data| data.insert_temp::<State>(persisted_id, mutable_state));
-                LatchResponse {
+                Response {
                     ui,
                     persisted_id,
                     output: None,
@@ -1114,7 +1122,7 @@ mod latch {
             // Return the state and clear it
             Latch::Finish => {
                 ui.data_mut(|data| data.remove::<State>(persisted_id));
-                LatchResponse {
+                Response {
                     ui,
                     persisted_id,
                     output: Some(mutable_state),
@@ -1123,7 +1131,7 @@ mod latch {
             // Nothing to do, clear it if it exists.
             Latch::None => {
                 ui.data_mut(|data| data.remove::<State>(persisted_id));
-                LatchResponse {
+                Response {
                     ui,
                     persisted_id,
                     output: None,
@@ -1140,7 +1148,7 @@ fn ui_layer_blend(
     id: impl std::hash::Hash,
     blend: Blend,
     disable: bool,
-) -> self::latch::LatchResponse<'_, Blend> {
+) -> self::latch::Response<'_, Blend> {
     // Get the persisted blend, or use the caller's blend if none.
     latch::latch(ui, (&id, "blend-state"), blend, |ui, blend| {
         let mut finished = false;
@@ -1191,7 +1199,7 @@ fn ui_passthrough_or_blend(
     id: impl std::hash::Hash,
     blend: Option<Blend>,
     disable: bool,
-) -> self::latch::LatchResponse<'_, Option<Blend>> {
+) -> self::latch::Response<'_, Option<Blend>> {
     latch::latch(ui, (&id, "blend-state"), blend, |ui, blend| {
         let mut finished = false;
         let mut changed = false;

@@ -26,7 +26,7 @@ use vulkano::buffer::Subbuffer;
 
 use crate::vulkano_prelude::*;
 mod cache;
-pub use cache::{CacheInsertError, ColorInsertError};
+pub use cache::{ColorInsertError, InsertError};
 mod tessellator;
 pub use tessellator::{ColorError, TessellateError};
 pub mod renderer;
@@ -199,7 +199,7 @@ pub enum DrawError {
     #[error(transparent)]
     Tessellation(#[from] TessellateError),
     #[error(transparent)]
-    InsertError(#[from] CacheInsertError),
+    InsertError(#[from] InsertError),
 }
 #[derive(thiserror::Error, Debug)]
 pub enum DrawMultilineError {
@@ -240,6 +240,7 @@ impl DrawOutput {
     /// E.g. Left-to-right + start will give the left edge,
     ///
     /// None if the direction is `Invalid` or `self.bound.is_none()`
+    #[must_use]
     pub fn anchor(&self, direction: rustybuzz::Direction, align: Align) -> Option<i32> {
         let (min, max) = self.bound?;
         let (start, end) = match direction {
@@ -298,6 +299,7 @@ impl DrawOutput {
         self.translate(offs);
     }
     /// Tight extent of the rendered output, in font units.
+    #[must_use]
     pub fn extent(&self) -> [u32; 2] {
         if let Some((min, max)) = self.bound {
             // We assume max >= min.
@@ -430,11 +432,11 @@ pub struct MultilineInfo<'a> {
     pub cross_direction: rustybuzz::Direction,
 }
 
-pub struct TextBuilder {
+pub struct Builder {
     tessellator: lyon_tessellation::FillTessellator,
-    cache: cache::GlyphCache,
+    cache: cache::Cache,
 }
-impl TextBuilder {
+impl Builder {
     /// Create a new text builder with default allocated mem.
     pub fn allocate_new(
         memory: std::sync::Arc<dyn vulkano::memory::allocator::MemoryAllocator>,
@@ -442,7 +444,7 @@ impl TextBuilder {
         const BASE_SIZE: u64 = 512 * 1024;
         // Assume 2:1 ratio of indices to vertices. This is a total guess :P
         const INDEX_SIZE: u64 = BASE_SIZE * 2 * std::mem::size_of::<u16>() as u64;
-        const VERTEX_SIZE: u64 = BASE_SIZE * 1 * std::mem::size_of::<interface::Vertex>() as u64;
+        const VERTEX_SIZE: u64 = BASE_SIZE * std::mem::size_of::<interface::Vertex>() as u64;
         const TOTAL_SIZE: u64 = INDEX_SIZE + VERTEX_SIZE;
         let buffer = vk::Buffer::new(
             memory,
@@ -475,10 +477,11 @@ impl TextBuilder {
     }
     /// Create a text renderer with the given backing mem.
     /// Consider the ownership of this mem to be taken by this renderer!
+    #[must_use]
     pub fn new(vertices: Subbuffer<[interface::Vertex]>, indices: Subbuffer<[u16]>) -> Self {
         Self {
             tessellator: lyon_tessellation::FillTessellator::new(),
-            cache: cache::GlyphCache::new(vertices, indices),
+            cache: cache::Cache::new(vertices, indices),
         }
     }
     /*pub fn tess_draw_rich<'faces, 'face: 'faces, 'rich, Faces>(
@@ -802,7 +805,7 @@ impl TextBuilder {
             };
 
             match res {
-                Err(CacheInsertError::AlreadyExists) => (),
+                Err(InsertError::AlreadyExists) => (),
                 Err(e) => return Err(e.into()),
                 _ => (),
             }

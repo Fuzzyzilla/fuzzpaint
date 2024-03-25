@@ -1,7 +1,7 @@
 /// The origin of the gizmo will be pinned according to it's position and this value.
 ///
 /// As of right now, no viewport pinning - that's a non-goal of this API. use egui for that ;)
-pub enum GizmoOriginPinning {
+pub enum OriginPinning {
     /// The origin of the gizmo is pinned to a specific pixel location on the document
     Document,
     /// Position is in parent's coordinate space.
@@ -12,7 +12,7 @@ pub enum GizmoOriginPinning {
 }
 /// The coordinate system of the gizmo will be calculated according to it's size, rotation and this value.
 /// Size and rotation are pinned separately, but use the same logic.
-pub enum GizmoTransformPinning {
+pub enum BasisPinning {
     /// Size is in document pixels. Rotation is relative to the document space.
     Document,
     /// Size is in viewport logical pixels, rotation is absolute.
@@ -23,14 +23,14 @@ pub enum GizmoTransformPinning {
     Inherit,
 }
 
-pub struct GizmoTransform {
+pub struct Transform {
     pub position: ultraviolet::Vec2,
-    pub origin_pinning: GizmoOriginPinning,
-    pub scale_pinning: GizmoTransformPinning,
+    pub origin_pinning: OriginPinning,
+    pub scale_pinning: BasisPinning,
     pub rotation: f32,
-    pub rotation_pinning: GizmoTransformPinning,
+    pub rotation_pinning: BasisPinning,
 }
-impl GizmoTransform {
+impl Transform {
     /// Apply this gizmo transform to the given document and parent gizmo transforms, returning a new transform representing
     /// this gizmo transform's local space. For top level gizmos, it is valid for `parent_transform` to equal `document_transform`.
     #[must_use]
@@ -42,26 +42,26 @@ impl GizmoTransform {
         use cgmath::{EuclideanSpace, Rotation2};
 
         let disp = match self.origin_pinning {
-            GizmoOriginPinning::Document => {
+            OriginPinning::Document => {
                 let pos = cgmath::point2(self.position.x, self.position.y);
                 document_transform.project(pos)
             }
-            GizmoOriginPinning::Inherit => {
+            OriginPinning::Inherit => {
                 let pos = cgmath::point2(self.position.x, self.position.y);
                 parent_transform.project(pos)
             }
         }
         .to_vec();
         let scale = match self.scale_pinning {
-            GizmoTransformPinning::Document => document_transform.decomposed.scale,
-            GizmoTransformPinning::Inherit => parent_transform.decomposed.scale,
-            GizmoTransformPinning::Viewport => 1.0,
+            BasisPinning::Document => document_transform.decomposed.scale,
+            BasisPinning::Inherit => parent_transform.decomposed.scale,
+            BasisPinning::Viewport => 1.0,
         };
         let rotation = cgmath::Basis2::from_angle(cgmath::Rad(self.rotation));
         let rot = match self.rotation_pinning {
-            GizmoTransformPinning::Document => document_transform.decomposed.rot * rotation,
-            GizmoTransformPinning::Inherit => parent_transform.decomposed.rot * rotation,
-            GizmoTransformPinning::Viewport => rotation,
+            BasisPinning::Document => document_transform.decomposed.rot * rotation,
+            BasisPinning::Inherit => parent_transform.decomposed.rot * rotation,
+            BasisPinning::Viewport => rotation,
         };
 
         crate::view_transform::ViewTransform {
@@ -71,9 +71,9 @@ impl GizmoTransform {
     #[must_use]
     pub fn inherit_all() -> Self {
         Self {
-            origin_pinning: GizmoOriginPinning::Inherit,
-            rotation_pinning: GizmoTransformPinning::Inherit,
-            scale_pinning: GizmoTransformPinning::Inherit,
+            origin_pinning: OriginPinning::Inherit,
+            rotation_pinning: BasisPinning::Inherit,
+            scale_pinning: BasisPinning::Inherit,
             position: ultraviolet::Vec2 { x: 0.0, y: 0.0 },
             rotation: 0.0,
         }
