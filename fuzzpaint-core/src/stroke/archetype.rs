@@ -67,3 +67,49 @@ impl Archetype {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::Archetype;
+    #[test]
+    /// Tests [`Archetype::offset_of`] and indirectly [`Archetype::elements`]
+    fn all_offsets() {
+        let test = Archetype::all();
+
+        // flag, offset
+        let expected = [
+            (Archetype::POSITION, Some(0)),
+            (Archetype::TIME, Some(2)),
+            (Archetype::ARC_LENGTH, Some(3)),
+            (Archetype::PRESSURE, Some(4)),
+            (Archetype::TILT, Some(5)),
+            (Archetype::DISTANCE, Some(7)),
+            (Archetype::ROLL, Some(8)),
+            (Archetype::WHEEL, Some(9)),
+        ];
+
+        for (flag, offs) in expected {
+            assert_eq!(test.offset_of(flag), offs);
+        }
+    }
+    #[test]
+    fn offsets_gap() {
+        // Some selections with gaps between
+        let test = Archetype::POSITION | Archetype::TILT | Archetype::WHEEL;
+        // flag, offset
+        let expected = [
+            (Archetype::POSITION, Some(0)),
+            (Archetype::TIME, None),
+            (Archetype::ARC_LENGTH, None),
+            (Archetype::PRESSURE, None),
+            (Archetype::TILT, Some(2)),
+            (Archetype::DISTANCE, None),
+            (Archetype::ROLL, None),
+            (Archetype::WHEEL, Some(4)),
+        ];
+
+        for (flag, offs) in expected {
+            assert_eq!(test.offset_of(flag), offs);
+        }
+    }
+}
