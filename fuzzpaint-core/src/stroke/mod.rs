@@ -129,7 +129,7 @@ pub struct StrokeSlice<'a> {
 impl<'a> StrokeSlice<'a> {
     /// Create an empty borrow of the given archetype.
     #[must_use]
-    pub fn empty(archetype: Archetype) -> Self {
+    pub const fn empty(archetype: Archetype) -> Self {
         Self {
             archetype,
             elements: &[],
@@ -240,6 +240,8 @@ impl<'a> StrokeSlice<'a> {
 impl std::fmt::Debug for StrokeSlice<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut d = f.debug_struct("StrokeSlice");
+        // Redundant with values of `points`, HOWEVER points could be empty!
+        d.field("archetype", &self.archetype);
         d.field(
             "points",
             // Grr.. `field_with` would fix this, but unstable. eh.

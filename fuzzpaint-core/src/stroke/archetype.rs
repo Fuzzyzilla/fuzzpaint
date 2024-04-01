@@ -48,7 +48,7 @@ impl Archetype {
     }
     #[must_use]
     pub const fn len_bytes(self) -> usize {
-        self.elements() * std::mem::size_of::<f32>()
+        self.elements() * std::mem::size_of::<u32>()
     }
     /// Fetch the offset of the given property. None if the property isn't included.
     /// *`other` should have just one bit set.* Otherwise, the returned value is meaningless.
