@@ -6,37 +6,42 @@
 //! however, the API is constructed to allow for smart in-memory compression or dumping old
 //! data to disk in the future.
 
-pub mod archetype;
-pub use archetype::PointArchetype;
 pub mod io;
-
 mod slab;
 use slab::Slab;
+
+use crate::stroke::{Archetype, StrokeSlice};
+
+fn summarize(stroke: StrokeSlice) -> CollectionSummary {
+    // Funny `try`
+    // Calc arc length by observing arc length at end minus start.
+    let arc_length = || -> Option<f32> {
+        let last = stroke.last()?.arc_length()?;
+        // Unwraps ok since first succeeded
+        Some(last - stroke.first().unwrap().arc_length().unwrap())
+    }();
+
+    CollectionSummary {
+        archetype: stroke.archetype(),
+        len: stroke.len(),
+        arc_length,
+    }
+}
 
 #[derive(Copy, Clone)]
 pub struct CollectionSummary {
     /// The archetype of the points of the collection.
-    pub archetype: PointArchetype,
+    pub archetype: Archetype,
     /// Count of points within the collection
     pub len: usize,
-    /// final arc length of the collected points, available if the archetype includes PointArchetype::ARC_LENGTH bit.
+    /// final arc length of the collected points, available if the archetype includes Archetype::ARC_LENGTH bit.
     pub arc_length: Option<f32>,
 }
 impl CollectionSummary {
     /// Gets the number of elements represented by this summary.
     #[must_use]
     pub fn elements(&self) -> usize {
-        self.len.saturating_mul(self.archetype.elements())
-    }
-}
-
-impl From<&[crate::stroke::Point]> for CollectionSummary {
-    fn from(value: &[crate::stroke::Point]) -> Self {
-        CollectionSummary {
-            archetype: crate::stroke::Point::archetype(),
-            len: value.len(),
-            arc_length: value.last().map_or(0.0, |point| point.dist).into(),
-        }
+        self.len * self.archetype.elements()
     }
 }
 
@@ -47,20 +52,14 @@ pub type PointCollectionID = crate::FuzzID<PointCollectionIDMarker>;
 /// however take care not to allow it to become leaked - it will not allow the resources
 /// to be reclaimed by the repository for the duration of the lock's lifetime.
 #[derive(Clone)]
-pub struct PointCollectionReadLock {
-    points: &'static [f32],
+pub struct BorrowedStrokeReadLock {
+    stroke: StrokeSlice<'static>,
 }
-impl AsRef<[f32]> for PointCollectionReadLock {
-    // seal the detail that this is secretly 'static (shhhh...)
-    fn as_ref(&'_ self) -> &'_ [f32] {
-        self.points
-    }
-}
-impl std::ops::Deref for PointCollectionReadLock {
-    type Target = [f32];
-    // seal the detail that this is secretly 'static (shhhh...)
-    fn deref(&'_ self) -> &'_ Self::Target {
-        self.points
+impl BorrowedStrokeReadLock {
+    // we want to seal the fact that this is 'static. Can't be done with deref!
+    #[must_use]
+    pub fn get<'a>(&'a self) -> StrokeSlice<'a> {
+        self.stroke
     }
 }
 
@@ -90,7 +89,7 @@ struct PointCollectionAllocInfo {
 }
 // 4MiB of floats
 pub const SLAB_ELEMENT_COUNT: usize = 1024 * 1024;
-type ElementSlab = slab::Slab<f32, SLAB_ELEMENT_COUNT>;
+type ElementSlab = slab::Slab<u32, SLAB_ELEMENT_COUNT>;
 
 #[derive(Default)]
 pub struct Points {
@@ -113,53 +112,54 @@ impl Points {
     /// Insert the collection into the repository, yielding a unique ID.
     /// Fails if the length of the collection caintains > [`SLAB_ELEMENT_COUNT`] f32 elements
     #[must_use = "the returned ID is needed to fetch the data in the future"]
-    pub fn insert(&self, collection: &[crate::stroke::Point]) -> Option<PointCollectionID> {
-        let elements = bytemuck::cast_slice(collection);
-        if elements.len() <= SLAB_ELEMENT_COUNT {
-            let slab_reads = self.slabs.upgradable_read();
-            // Find a slab where `try_bump_write` succeeds.
-            if let Some((slab_id, start)) = slab_reads
-                .iter()
-                .enumerate()
-                .find_map(|(idx, slab)| Some((idx, slab.shared_bump_write(elements)?)))
-            {
-                // We don't need this lock anymore!
-                drop(slab_reads);
+    pub fn insert(&self, collection: StrokeSlice) -> Option<PointCollectionID> {
+        let elements = collection.elements();
+        if elements.len() > SLAB_ELEMENT_COUNT {
+            // Too long to ever fit!
+            return None;
+        }
 
-                // populate info
-                let info = PointCollectionAllocInfo {
-                    summary: collection.into(),
-                    slab_id,
-                    start,
-                };
-                // generate a new id and write metadata
-                let id = PointCollectionID::default();
-                self.allocs.write().insert(id, info);
-                Some(id)
-            } else {
-                // No slabs were found with space to bump. Make a new one
-                let new_slab = ElementSlab::new();
-                // Unwrap is infallible - we checked the size requirement, so there's certainly room!
-                let start = new_slab.shared_bump_write(elements).unwrap();
-                // put the slab into self, getting it's index
-                let slab_id = {
-                    let mut write = parking_lot::RwLockUpgradableReadGuard::upgrade(slab_reads);
-                    write.push(new_slab);
-                    write.len() - 1
-                };
-                // populate info
-                let info = PointCollectionAllocInfo {
-                    summary: collection.into(),
-                    slab_id,
-                    start,
-                };
-                // generate a new id and write metadata
-                let id = PointCollectionID::default();
-                self.allocs.write().insert(id, info);
-                Some(id)
-            }
+        let slab_reads = self.slabs.upgradable_read();
+        // Find a slab where `try_bump_write` succeeds.
+        if let Some((slab_id, start)) = slab_reads
+            .iter()
+            .enumerate()
+            .find_map(|(idx, slab)| Some((idx, slab.shared_bump_write(elements)?)))
+        {
+            // We don't need this lock anymore!
+            drop(slab_reads);
+
+            // populate info
+            let info = PointCollectionAllocInfo {
+                summary: summarize(collection),
+                slab_id,
+                start,
+            };
+            // generate a new id and write metadata
+            let id = PointCollectionID::default();
+            self.allocs.write().insert(id, info);
+            Some(id)
         } else {
-            None
+            // No slabs were found with space to bump. Make a new one
+            let new_slab = ElementSlab::new();
+            // Unwrap is infallible - we checked the size requirement, so there's certainly room!
+            let start = new_slab.shared_bump_write(elements).unwrap();
+            // put the slab into self, getting it's index
+            let slab_id = {
+                let mut write = parking_lot::RwLockUpgradableReadGuard::upgrade(slab_reads);
+                write.push(new_slab);
+                write.len() - 1
+            };
+            // populate info
+            let info = PointCollectionAllocInfo {
+                summary: summarize(collection),
+                slab_id,
+                start,
+            };
+            // generate a new id and write metadata
+            let id = PointCollectionID::default();
+            self.allocs.write().insert(id, info);
+            Some(id)
         }
     }
 
@@ -175,7 +175,7 @@ impl Points {
     pub fn try_get(
         &self,
         id: PointCollectionID,
-    ) -> Result<PointCollectionReadLock, super::TryRepositoryError> {
+    ) -> Result<BorrowedStrokeReadLock, super::TryRepositoryError> {
         let alloc = self
             .alloc_of(id)
             .ok_or(super::TryRepositoryError::NotFound)?;
@@ -202,8 +202,8 @@ impl Points {
             log::debug!("{id} allocation found, but out of bounds within it's slab!");
             return Err(super::TryRepositoryError::NotFound);
         };
-        Ok(PointCollectionReadLock {
-            points: bytemuck::cast_slice(slice),
+        Ok(BorrowedStrokeReadLock {
+            stroke: StrokeSlice::new(slice, alloc.summary.archetype).unwrap(),
         })
     }
 }

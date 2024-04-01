@@ -9,7 +9,7 @@ use super::*;
 struct DictMetadata {
     offset: u32,
     len: u32,
-    arch: PointArchetype,
+    arch: crate::stroke::Archetype,
 }
 
 // Collect all subsequent ones that will also fit
@@ -94,6 +94,7 @@ impl super::Points {
         ids: impl Iterator<Item = PointCollectionID>,
         writer: impl std::io::Write,
     ) -> Result<crate::io::id::FileLocalInterner<PointCollectionIDMarker>, WriteError> {
+        /*
         use crate::io::{
             riff::{encode::SizedBinaryChunkWriter, ChunkID},
             OrphanMode, Version,
@@ -216,7 +217,8 @@ impl super::Points {
         // Pad, if needed (shouldn't be)
         chunk.pad_slow()?;
 
-        Ok(file_ids)
+        Ok(file_ids)*/
+        todo!()
     }
     /// Intern all the data from the given `DICT ptls`, returning a map of the newly allocated
     /// IDs.
@@ -227,6 +229,7 @@ impl super::Points {
     where
         R: std::io::Read + crate::io::common::SoftSeek,
     {
+        /*
         use crate::io::{common::SoftSeek, id::ProcessLocalInterner, Version};
         use az::CheckedAs;
         use std::io::{Error as IOError, Read};
@@ -508,6 +511,7 @@ impl super::Points {
             }
         }
         // Report back the FileID->FuzzID mapping
-        Ok(file_ids)
+        Ok(file_ids)*/
+        todo!()
     }
 }
