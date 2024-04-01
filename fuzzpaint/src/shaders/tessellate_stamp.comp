@@ -5,8 +5,10 @@ const float PI = 3.1415926535897932384;
 
 struct InputStrokeInfo {
     // Indices into inputStrokeVertices buffer
-    uint start_point_idx;
+    uint base_element_offset;
     uint num_points;
+    // Structure of input data. Determines size of each point.
+    uint archetype;
 
     // Indices into outputStrokeVertices
     uint out_vert_offset;
@@ -30,6 +32,44 @@ struct InputStrokeVertex {
     float dist;
 };
 
+// Bitmasks for archetype flags. Matches constants of [`fuzzpaint_core::stroke::Archetype`]
+const uint ARCH_POSITION = 1;
+const uint ARCH_TIME = 2;
+const uint ARCH_ARC_LENGTH = 4;
+const uint ARCH_PRESSURE = 8;
+const uint ARCH_TILT = 16;
+const uint ARCH_DISTANCE = 32;
+const uint ARCH_ROLL = 64;
+const uint ARCH_WHEEL = 128;
+
+/// Count the number of bits set.
+uint popcnt(in uint i) {
+    // https://stackoverflow.com/a/109025
+
+    i = i - ((i >> 1) & 0x55555555);                // add pairs of bits
+    i = (i & 0x33333333) + ((i >> 2) & 0x33333333); // quads
+    i = (i + (i >> 4)) & 0x0F0F0F0F;                // groups of 8
+    i *= 0x01010101;                                // horizontal sum of bytes
+    return  i >> 24;                                // return just that top byte (after truncating to 32-bit even when int is wider than uint32_t)
+}
+
+/// Calc the number of 32-bit elements in a single point of the given archetype
+uint archetype_elements(in uint archetype) {
+    // Every bit adds one elem...
+    return popcnt(archetype) + \
+        // POS, TILT add an extra!
+        ((archetype & ARCH_POSITION) != 0 ? 1 : 0) + \
+        ((archetype & ARCH_TILT) != 0 ? 1 : 0);
+}
+
+/// Find the index where `which` is located within a point of type `archetype`.
+/// `which` must contain a single bit. Meaningless if `archetype` doesn't contain `which`.
+uint archetype_offset_of(in uint archetype, in uint which) {
+    // index of x == length of all elems that come before x
+    // (which - 1) yields a bitmask of all elems before, given that it has a single bit set.
+    return archetype_elements(archetype & (which - 1));
+}
+
 // Corresponds to VkDrawIndirectCommand
 const uint OUTPUT_INFO_SIZE = 4;
 const uint OUTPUT_INFO_VERTEX_COUNT = 0;
@@ -51,8 +91,9 @@ layout(set = 0, binding = 0) restrict readonly buffer inputStrokeInfo {
 layout(set = 0, binding = 1) restrict readonly buffer inputWorkgroupAssignments {
     uint in_assignments[];
 };
-layout(set = 0, binding = 2) restrict readonly buffer inputStrokeVertices {
-    InputStrokeVertex in_vertices[];
+// Packed elements of the points of strokes. Interpretation is based on the archetype of each stroke.
+layout(set = 0, binding = 2) restrict readonly buffer inputStrokePoints {
+    uint in_elements[];
 };
 
 // Input data - corresponding to [tess::TessellatedStrokeInfo] and [tess::TessellatedStrokeVertex]
@@ -125,6 +166,26 @@ void main() {
     const InputStrokeInfo info = in_info[stroke_idx];
     if (info.num_points <= 2) return;
 
+    // Calculate the sizes and offsets of properties based on the archetype.
+    // These two are currently required. Enforced by the CPU-side.
+    const uint position_element_offset = archetype_offset_of(info.archetype, ARCH_POSITION);
+    const uint arclen_element_offset = archetype_offset_of(info.archetype, ARCH_ARC_LENGTH);
+    // Pressure is optional
+    const bool has_pressure = (info.archetype & ARCH_PRESSURE) != 0;
+    // Meaningless (+maybe OOB!) if has_pressure is false
+    const uint pressure_element_offset = archetype_offset_of(info.archetype, ARCH_PRESSURE);
+    const uint point_element_len = archetype_elements(info.archetype);
+
+    // Macros to fetch and decode data of the nth point of this workgroup's stroke.
+    // These rely on local constants, unsanitary!
+    #define LOCAL_PRESSURE_ELEMENT_OR_ONE(idx) (\
+        has_pressure ? uintBitsToFloat(in_elements[info.base_element_offset + ((idx) * point_element_len) + pressure_element_offset]) : 1.0\
+    )
+    #define LOCAL_POSITION_ELEMENT(idx) vec2(\
+        uintBitsToFloat(in_elements[info.base_element_offset + ((idx) * point_element_len) + position_element_offset]),\
+        uintBitsToFloat(in_elements[info.base_element_offset + ((idx) * point_element_len) + position_element_offset + 1])\
+    )
+    #define LOCAL_ARCLEN_ELEMENT(idx) uintBitsToFloat(in_elements[info.base_element_offset + ((idx) * point_element_len) + arclen_element_offset])
 
     // 0 at the start of the stroke given by `info`
     const uint stroke_local_id = (workgroup_idx - info.start_group) * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
@@ -141,14 +202,14 @@ void main() {
     // One worker per group is the local leader, coordinates writes to vertex_count in infos.
     const bool is_local_leader = gl_LocalInvocationID.x == 0;
 
-    const float end_dist = in_vertices[info.start_point_idx + info.num_points - 1].dist;
+    // const float end_arclen = in_elements[info.base_element_offset + info.num_points * point_element_len + arclen_element_offset];
 
-    // const float local_dist = float(stroke_local_id) * (end_dist / float(info.num_groups * gl_WorkGroupSize.x));
-    const float local_dist = float(stroke_local_id) * info.density;
+    // const float local_arclen = float(stroke_local_id) * (end_arclen / float(info.num_groups * gl_WorkGroupSize.x));
+    const float local_arclen = float(stroke_local_id) * info.density;
 
     // Binary search for the vertex this worker starts from
     // A worker cannot work after the last vertex, so -2 here.
-    uint bail = 0, low = info.start_point_idx, high = info.start_point_idx + info.num_points - 2;
+    uint bail = 0, low = 0, high = info.num_points - 2;
     uint before_vert = 0;
     while (true) {
         if (low > high || bail++ > 32) {
@@ -158,9 +219,9 @@ void main() {
 
         // Next point exists and is too early
         // (mid+1 is safe because upper bound is num_points-2)
-        const bool strictly_less = (in_vertices[mid + 1].dist < local_dist);
+        const bool strictly_less = LOCAL_ARCLEN_ELEMENT(mid + 1) < local_arclen;
         // This point is too far
-        const bool strictly_greater = in_vertices[mid].dist > local_dist;
+        const bool strictly_greater = LOCAL_ARCLEN_ELEMENT(mid) > local_arclen;
 
         if (strictly_less) {
             low = mid + 1;
@@ -174,12 +235,20 @@ void main() {
 
     // We've now done all the very expensive work to figure out what to work on.
     // Now to do some bulk work to amortize that expense xP
-    const InputStrokeVertex a_vert = in_vertices[before_vert];
-    const InputStrokeVertex b_vert = in_vertices[before_vert + 1];
+    const InputStrokeVertex a_vert = InputStrokeVertex(
+        LOCAL_POSITION_ELEMENT(before_vert),
+        LOCAL_PRESSURE_ELEMENT_OR_ONE(before_vert),
+        LOCAL_ARCLEN_ELEMENT(before_vert)
+    );
+    const InputStrokeVertex b_vert = InputStrokeVertex(
+        LOCAL_POSITION_ELEMENT(before_vert + 1),
+        LOCAL_PRESSURE_ELEMENT_OR_ONE(before_vert + 1),
+        LOCAL_ARCLEN_ELEMENT(before_vert + 1)
+    );
     const vec4 a = vert_to_simd(a_vert);
     const vec4 b = vert_to_simd(b_vert);
     // 0.0..1.0 range of where this worker falls between previous and next vert
-    const float factor = (local_dist - a_vert.dist) / (b_vert.dist - a_vert.dist);
+    const float factor = (local_arclen - a_vert.dist) / (b_vert.dist - a_vert.dist);
     const InputStrokeVertex interp = simd_to_vert(mix(a, b, factor));
 
     // Create a stamp

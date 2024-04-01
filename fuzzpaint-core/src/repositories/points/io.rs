@@ -7,9 +7,11 @@ use super::*;
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C, packed)]
 struct DictMetadata {
+    // Offset, in *bytes*
     offset: u32,
+    // Len, in *bytes*
     len: u32,
-    arch: PointArchetype,
+    arch: crate::stroke::Archetype,
 }
 
 // Collect all subsequent ones that will also fit
@@ -200,6 +202,7 @@ impl super::Points {
 
                     let Some(slice) = slab.try_read(
                         entry.start,
+                        // len in points -> len in elems
                         entry.summary.len * entry.summary.archetype.elements(),
                     ) else {
                         // Implementation bug!
@@ -255,14 +258,14 @@ impl super::Points {
         let reported_len = unstructured.data_len_unsanitized();
         // Make sure none surpass the end of the data chunk
         // AND make sure none surpass the limit of allocatable points, `SLAB_SIZE`
-        if !metas.iter().all(|m| {
-            m.1.len
-                .checked_add(m.1.offset)
+        if !metas.iter().all(|(_id, meta)| {
+            meta.len
+                .checked_add(meta.offset)
                 .is_some_and(|end| end <= reported_len as u32)
                 // Check small enough to even fit in a slab
-                && m.1.len as usize <= SLAB_ELEMENT_COUNT * std::mem::size_of::<f32>()
-                // Check is StrokePoint (relax this when other types available)
-                && m.1.len as usize % std::mem::size_of::<crate::stroke::Point>() == 0
+                && meta.len as usize <= SLAB_ELEMENT_COUNT * std::mem::size_of::<u32>()
+                // Check len matches reported archetype
+                && meta.len as usize % meta.arch.len_bytes() == 0
         }) {
             return Err(IOError::other(anyhow::anyhow!("point list data too long")));
         }
@@ -308,18 +311,18 @@ impl super::Points {
         // Todos: existing new slabs are not considered when searching for a slab to write in
         //   resulting in  a bunch of extra slabs being made
         let mut try_read_points = || -> Result<(), IOError> {
-            while let Some(first_meta) = metas.pop_front() {
+            while let Some((first_id, first_meta)) = metas.pop_front() {
                 // Find a block that fits it
                 let slabs = self.slabs.read();
                 let mut slab = {
                     let slab_info = slabs.iter().enumerate().find_map(|(idx, slab)| {
                         // Check if it *might* fit (can still fail)
                         // bytes -> elements
-                        if slab.hint_remaining() >= first_meta.1.len as usize / 4 {
+                        if slab.hint_remaining() >= first_meta.len as usize / 4 {
                             let lock = slab.lock();
                             // Check if it actually fits
                             // bytes -> elements
-                            if lock.remaining() >= first_meta.1.len as usize / 4 {
+                            if lock.remaining() >= first_meta.len as usize / 4 {
                                 Some((idx, lock))
                             } else {
                                 None
@@ -336,30 +339,30 @@ impl super::Points {
                 };
 
                 // Immutable - they're sorted, so the start point never needs to move.
-                let range_start_bytes = first_meta.1.offset;
-                let mut range_past_end_bytes = range_start_bytes + first_meta.1.len;
+                let range_start_bytes = first_meta.offset;
+                let mut range_past_end_bytes = range_start_bytes + first_meta.len;
 
                 // Keep track of free space
-                let mut remaining_elements = slab.remaining() - first_meta.1.len as usize / 4;
+                let mut remaining_elements = slab.remaining() - first_meta.len as usize / 4;
                 // First element we're writing into
                 let start_element = slab.position();
 
                 // We know metas only has a first slice because we never push!
-                let also_fit = take_while(metas.as_slices().0, |meta| {
+                let also_fit = take_while(metas.as_slices().0, |(_id, meta)| {
                     // Discontiguous!
                     // (dont need to check < start, they're sorted!)
-                    if meta.1.offset > range_past_end_bytes {
+                    if meta.offset > range_past_end_bytes {
                         return false;
                     }
                     // Unaligned!
-                    if (meta.1.offset - range_start_bytes) % 4 != 0 {
+                    if (meta.offset - range_start_bytes) % 4 != 0 {
                         return false;
                     }
                     // Fits?
-                    if meta.1.len as usize / 4 <= remaining_elements {
-                        remaining_elements -= meta.1.len as usize / 4;
+                    if meta.len as usize / 4 <= remaining_elements {
+                        remaining_elements -= meta.len as usize / 4;
                         // Push forward, if needed
-                        range_past_end_bytes = range_past_end_bytes.max(meta.1.offset + meta.1.len);
+                        range_past_end_bytes = range_past_end_bytes.max(meta.offset + meta.len);
                         true
                     } else {
                         false
@@ -391,9 +394,9 @@ impl super::Points {
                 slab.bump(count_elements).unwrap();
                 // Summarize (we could lower to read-only access on the slab but lifetimes are nightmare)
                 let summaries: Vec<CollectionSummary> = std::iter::once(&first_meta)
-                    .chain(also_fit.iter())
-                    .map(|(_, meta)| {
-                        let last_point = if meta.len == 0 {
+                    .chain(also_fit.iter().map(|(_, meta)| meta))
+                    .map(|meta| {
+                        let stroke = if meta.len == 0 {
                             None
                         } else {
                             let (immutable, _) = slab.parts_mut();
@@ -402,30 +405,13 @@ impl super::Points {
                                 start_element + (meta.offset - range_start_bytes) as usize / 4;
                             // Find where the past-the-end point in the slab
                             let past_the_end = start_idx + meta.len as usize / 4;
-                            // Step back one point
-                            let last_point_start = past_the_end - meta.arch.elements();
                             // Make sure we didn't step back past the start
-                            if last_point_start >= start_idx {
-                                // Try to read elements+cast to point
-                                let opt_last_point = immutable
-                                    .get(last_point_start..last_point_start + meta.arch.elements())
-                                    .and_then(|slice| {
-                                        bytemuck::try_cast_slice::<_, crate::stroke::Point>(slice)
-                                            .ok()
-                                    })
-                                    .and_then(|slice| slice.first());
-                                opt_last_point
-                            } else {
-                                None
-                            }
+                            immutable
+                                .get(start_idx..past_the_end)
+                                .and_then(|slice| StrokeSlice::new(slice, meta.arch))
                         };
-                        CollectionSummary {
-                            archetype: meta.arch,
-                            len: meta.len as usize / std::mem::size_of::<crate::stroke::Point>(),
-                            // Option into Optional panics on none? silly dubious
-                            // Some if available and non-nan, None otherwise.
-                            arc_length: last_point.map(|l| l.dist),
-                        }
+
+                        super::summarize(stroke.unwrap_or(StrokeSlice::empty(meta.arch)))
                     })
                     .collect();
 
@@ -440,7 +426,7 @@ impl super::Points {
                 };
 
                 // Create alloc infos
-                std::iter::once(&first_meta)
+                std::iter::once(&(first_id, first_meta))
                     .chain(also_fit.iter())
                     .zip(summaries.into_iter())
                     .for_each(|((id, meta), summary)| {

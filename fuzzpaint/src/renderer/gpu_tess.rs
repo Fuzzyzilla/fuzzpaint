@@ -1,3 +1,5 @@
+use fuzzpaint_core::stroke::Archetype;
+
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
 pub mod interface {
@@ -24,16 +26,6 @@ mod shaders {
         vulkano_shaders::shader! {
             ty: "compute",
             path: "./src/shaders/tessellate_stamp.comp",
-        }
-
-        impl From<fuzzpaint_core::stroke::Point> for InputStrokeVertex {
-            fn from(value: fuzzpaint_core::stroke::Point) -> Self {
-                Self {
-                    dist: value.dist,
-                    pos: value.pos,
-                    pressure: value.pressure,
-                }
-            }
         }
     }
 }
@@ -146,7 +138,7 @@ impl GpuStampTess {
         vk::Subbuffer<[interface::OutputStrokeVertex]>,
         vk::Subbuffer<[interface::OutputStrokeInfo]>,
     )> {
-        let mut point_index_counter = 0;
+        #![allow(clippy::too_many_lines)]
         let mut group_index_counter = 0;
         let mut vertex_output_index_counter = 0;
 
@@ -164,41 +156,38 @@ impl GpuStampTess {
                 ..Default::default()
             },
             batch.allocs.iter().map(|alloc| {
-                // Can't handle other archetypes yet
-                assert_eq!(
-                    alloc.summary.archetype,
-                    fuzzpaint_core::stroke::Point::archetype()
-                );
+                // Can't handle archetypes without Pos or Arclen
+                assert!(alloc
+                    .summary
+                    .archetype
+                    .contains(Archetype::POSITION | Archetype::ARC_LENGTH));
 
                 let density = alloc.src.brush.spacing_px;
-                let (num_expected_stamps, num_points) = {
-                    // If not found, ignore by claiming 0 stamps.
-                    let dist = alloc
-                        .summary
-                        .arc_length
-                        .map_or(0, |dist| (dist / density).ceil() as u32);
-                    let num_points = alloc.summary.len as u32;
+                // If not found, ignore by claiming 0 stamps.
+                let num_expected_stamps = alloc
+                    .summary
+                    .arc_length
+                    .map_or(0, |arc_length| (arc_length / density).ceil() as u32);
 
-                    (dist, num_points)
-                };
+                let num_points = alloc.summary.len as u32;
                 let num_expected_verts = num_expected_stamps * 6;
                 let num_groups = num_expected_stamps.div_ceil(self.work_size);
 
                 let info = shaders::tessellate::InputStrokeInfo {
-                    start_point_idx: point_index_counter,
+                    base_element_offset: alloc.offset as u32,
                     num_points,
+                    archetype: u32::from(alloc.summary.archetype.bits()),
                     out_vert_offset: vertex_output_index_counter,
                     out_vert_limit: num_expected_verts,
                     start_group: group_index_counter,
                     num_groups,
                     modulate: alloc.src.brush.color_modulate,
                     density,
-                    size_mul: alloc.src.brush.size_mul,
+                    size_mul: alloc.src.brush.size_mul.into(),
                     is_eraser: if alloc.src.brush.is_eraser { 1.0 } else { 0.0 },
                 };
 
                 num_groups_per_info.push(num_groups);
-                point_index_counter += num_points;
                 group_index_counter += num_groups;
                 vertex_output_index_counter += num_expected_verts;
 

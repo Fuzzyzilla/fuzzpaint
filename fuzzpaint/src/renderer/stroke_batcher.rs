@@ -10,9 +10,8 @@ pub enum SyncOutput<InnerFuture: vk::sync::GpuFuture> {
     Fence(vk::FenceSignalFuture<InnerFuture>),
 }
 pub struct StrokeAlloc {
-    /// Offset into the `elements` buffer, in f32 elements
+    /// Offset into the `elements` buffer, in u32 elements
     pub offset: usize,
-    /// Summary of the collection.
     pub summary: points::CollectionSummary,
     /// which stroke does this data come from?
     pub src: ImmutableStroke,
@@ -21,14 +20,14 @@ pub struct StrokeBatch {
     /// Filled portion of the buffer.
     ///
     /// All read/write usage must be finished by the time the `SyncOutput` is signaled.
-    pub elements: vk::Subbuffer<[f32]>,
+    pub elements: vk::Subbuffer<[u32]>,
     /// Unfilled portion of the same buffer, for arbitrary use.
     /// Contents are undefined - guarunteed to be aligned and sized as `f32`, however.
     ///
     /// Beware of `NonCoherentAtomSize` - this is not pre-aligned to that!
     ///
     /// All read/write usage must be finished by the time the `SyncOutput` is signaled.
-    pub residual: Option<vk::Subbuffer<[f32]>>,
+    pub residual: Option<vk::Subbuffer<[u32]>>,
     pub allocs: Vec<StrokeAlloc>,
 }
 
@@ -76,7 +75,7 @@ impl StrokeBatcher {
             },
             // Unwrap ok - we checked that capacity != 0 (and `array` catches arithmetic errors)
             vulkano::memory::allocator::DeviceLayout::from_layout(
-                std::alloc::Layout::array::<f32>(capacity)?,
+                std::alloc::Layout::array::<u32>(capacity)?,
             )
             .unwrap(),
         )?;
@@ -132,8 +131,8 @@ impl StrokeBatcher {
         F: FnMut(&mut StrokeBatch) -> Result<SyncOutput<Future>, InnerError>,
         InnerError: std::fmt::Debug,
     {
-        // Alignment is a NOP - we required align to f32 on alloc
-        let subbuffer = vk::Subbuffer::new(self.buffer.clone()).cast_aligned::<f32>();
+        // we required align to u32 on alloc
+        let subbuffer = vk::Subbuffer::new(self.buffer.clone()).reinterpret::<[u32]>();
         let after_end_idx = {
             let mut write = subbuffer.write().map_err(BatchError::AccessError)?;
             // As OK - length of buf is never larger than u64.
@@ -166,7 +165,7 @@ impl StrokeBatcher {
         strokes: &mut std::iter::Peekable<Strokes>,
         into_allocs: &mut Vec<StrokeAlloc>,
         // Name is a hint that we have preferential access to *sequential* elements, not random access!
-        into_sequential_elems: &mut [f32],
+        into_sequential_elems: &mut [u32],
     ) -> usize
     where
         Strokes: Iterator<Item = ImmutableStroke>,
@@ -192,10 +191,11 @@ impl StrokeBatcher {
             let Ok(read) = crate::global::points().try_get(next.point_collection) else {
                 panic!("bad id!")
             };
-            assert_eq!(read.len(), info.elements());
+            let stroke = read.get();
 
             // Copy over
-            into_sequential_elems[next_pos..(next_pos + read.len())].clone_from_slice(&read);
+            into_sequential_elems[next_pos..(next_pos + stroke.elements().len())]
+                .clone_from_slice(stroke.elements());
             // Describe allocation
             into_allocs.push(StrokeAlloc {
                 offset: next_pos,
@@ -203,7 +203,7 @@ impl StrokeBatcher {
                 src: next,
             });
             // Advance to next
-            next_pos += read.len();
+            next_pos += stroke.elements().len();
             let _ = strokes.next();
         }
 

@@ -61,24 +61,6 @@ impl AdHocGlobals {
     }
 }
 
-pub struct Stroke {
-    brush: fuzzpaint_core::state::StrokeBrushSettings,
-    points: Vec<fuzzpaint_core::stroke::Point>,
-}
-impl Stroke {
-    fn make_immutable(&self) -> fuzzpaint_core::state::stroke_collection::ImmutableStroke {
-        let points = crate::global::points();
-        let point_collection = points
-            .insert(&self.points)
-            .expect("Failed to upload stroke data");
-        fuzzpaint_core::state::stroke_collection::ImmutableStroke {
-            id: FuzzID::default(),
-            brush: self.brush,
-            point_collection,
-        }
-    }
-}
-
 async fn stylus_event_collector(
     mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     ui_requests: crossbeam::channel::Receiver<ui::requests::UiRequest>,
