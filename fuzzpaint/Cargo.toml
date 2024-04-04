@@ -54,5 +54,10 @@ winit = { version = "0.29.15", features = ["serde", "rwh_05", "rwh_06"] }
 bus = "2.4.1"
 strum = { version = "0.26.2", features = ["derive"] }
 
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.5.4", optional = true, default-features = false }
+
 [features]
-dhat_heap = ["dhat"]
+default = ["jemallocator"]
+dhat_heap = ["dep:dhat"]
+jemallocator = ["dep:tikv-jemallocator"]

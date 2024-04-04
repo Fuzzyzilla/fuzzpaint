@@ -30,6 +30,14 @@ use fuzzpaint_core::id::FuzzID;
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+// Use jemalloc global if enabled + supported playform + not mem profiling
+#[cfg(all(
+    not(any(feature = "dhat_heap", target_env = "msvc")),
+    feature = "jemallocator"
+))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 /// Obviously will be user specified on a per-document basis, but for now...
 const DOCUMENT_DIMENSION: u32 = 1080;
 /// Premultiplied RGBA16F for interesting effects (negative + overbright colors and alpha) with
@@ -112,8 +120,9 @@ fn main() -> AnyResult<()> {
     let has_term = std::io::IsTerminal::is_terminal(&std::io::stdin());
     // Log to a terminal, if available. Else, log to "log.out" in the working directory.
     if has_term {
-        env_logger::builder()
+        env_logger::Builder::new()
             .filter_level(log::LevelFilter::Debug)
+            .parse_default_env()
             .init();
     } else {
         let _ = simple_logging::log_to_file("log.out", log::LevelFilter::Debug);
