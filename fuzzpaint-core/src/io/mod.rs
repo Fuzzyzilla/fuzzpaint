@@ -227,7 +227,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
                     id: crate::FuzzID::default(),
                     brush: crate::state::StrokeBrushSettings {
                         is_eraser: false,
-                        brush: crate::brush::todo_brush().id(),
+                        brush: crate::brush::default_brush(),
                         color_modulate: [0.0, 0.0, 0.0, 1.0],
                         size_mul: 10.0,
                         spacing_px: 0.5,

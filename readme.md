@@ -43,7 +43,7 @@ To declare **0.2.0**, I would like to be able to freely doodle a thing and save 
  - [ ] Brushes
    - [ ] Make and manage textured brushes from inside fuzzpaint
    - [ ] Save brushes to file
-     - To document or to global repo? - resolved: both, with UUIDs! That way, files can be freely shared, and brushes can be easily re-used.
+     - To document or to global repo? - resolved: both, with ~~UUIDs~~ cryptographic hashes! That way, files can be freely shared, and brushes can be easily re-used.
    - [X] Tesselation engine capable of mixed brushes
    - [X] Stamped brushes
    - [X] Efficient erasers

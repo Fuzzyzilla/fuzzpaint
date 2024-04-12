@@ -53,6 +53,7 @@ vulkano-shaders = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vul
 winit = { version = "0.29.15", features = ["serde", "rwh_05", "rwh_06"] }
 bus = "2.4.1"
 strum = { version = "0.26.2", features = ["derive"] }
+png = "0.17.13"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.5.4", optional = true, default-features = false }

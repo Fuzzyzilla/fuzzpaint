@@ -1,4 +1,6 @@
+#![deny(unsafe_op_in_unsafe_fn)]
 #![feature(write_all_vectored)]
+#![warn(clippy::pedantic)]
 
 pub mod blend;
 pub mod brush;
