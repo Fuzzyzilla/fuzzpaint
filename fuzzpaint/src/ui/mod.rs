@@ -1,10 +1,14 @@
+mod brush_ui;
 mod color_palette;
+mod modal;
 pub mod requests;
+
+use modal::Modal;
 
 use egui::Ui;
 use fuzzpaint_core::{
     blend::{Blend, BlendMode},
-    brush, io, queue, state,
+    brush, io, queue, state, util,
 };
 
 const STROKE_LAYER_ICON: &str = "✏";
@@ -91,17 +95,10 @@ impl ResponseExt for egui::Response {
     }
 }
 
-trait UILayer {
-    /// Perform UI operations. If `is_background`, a layer is open above this layer - display
-    /// as greyed out and ignore input!
-    /// Return true to dismiss.
-    fn do_ui(
-        &mut self,
-        ctx: &egui::Context,
-        requests_channel: &mut crossbeam::channel::Sender<requests::UiRequest>,
-        is_background: bool,
-    ) -> bool;
+enum CurrentModal {
+    BrushCreation(brush_ui::CreationModal),
 }
+
 #[derive(Clone)]
 struct PerDocumentData {
     id: state::DocumentID,
@@ -112,14 +109,10 @@ struct PerDocumentData {
     name: String,
 }
 pub struct MainUI {
-    // Could totally be static dispatch, but for simplicity:
-    /// Displayed on top of everything, disabling all behind it in a stack-like manner
-    modals: Vec<Box<dyn UILayer>>,
-    /// Displayed as windows on the document viewport.
-    inlays: Vec<Box<dyn UILayer>>,
-
     documents: Vec<PerDocumentData>,
     cur_document: Option<state::DocumentID>,
+
+    modal: Option<CurrentModal>,
 
     requests_send: crossbeam::channel::Sender<requests::UiRequest>,
     requests_recv: crossbeam::channel::Receiver<requests::UiRequest>,
@@ -142,10 +135,13 @@ impl MainUI {
 
         let (requests_send, requests_recv) = crossbeam::channel::unbounded();
         Self {
-            modals: Vec::new(),
-            inlays: Vec::new(),
             documents,
             cur_document,
+
+            modal: Some(CurrentModal::BrushCreation(
+                brush_ui::CreationModal::default(),
+            )),
+
             requests_send,
             requests_recv,
             action_listener,
@@ -159,22 +155,10 @@ impl MainUI {
     /// Returns the size of the document's viewport space - that is, the size of the rect not covered by any side/top/bottom panels.
     pub fn ui(&mut self, ctx: &egui::Context) -> (ultraviolet::Vec2, ultraviolet::Vec2) {
         // Display modals before main. Egui will place the windows without regard for free area.
-        let mut is_background = false;
-        for modal in self.modals.iter_mut().rev() {
-            // todo: handle dismiss
-            let _ = modal.do_ui(ctx, &mut self.requests_send, is_background);
-            // Show all remaining elements as background.
-            is_background = true;
-        }
-        // is_background set if at least one modal exists.
-        let ret_value = self.main_ui(ctx, is_background);
-        // Display windows after main. Egui will place the windows inside the free area
-        for inlay in &mut self.inlays {
-            // todo: handle dismiss
-            let _ = inlay.do_ui(ctx, &mut self.requests_send, is_background);
-        }
+        self.do_modal(ctx);
 
-        ret_value
+        // Show, but disable if modal exists.
+        self.main_ui(ctx, self.modal.is_none())
     }
     fn get_cur_interface(&mut self) -> Option<&mut PerDocumentData> {
         // Get the document's interface, or reset to none if not found.
@@ -191,25 +175,63 @@ impl MainUI {
             None
         }
     }
+    /// Execute the current modal's logic and window.
+    fn do_modal(&mut self, ctx: &egui::Context) {
+        let Some(modal) = self.modal.as_mut() else {
+            return;
+        };
+
+        let title = match modal {
+            CurrentModal::BrushCreation(_) => brush_ui::CreationModal::NAME,
+        };
+
+        let mut is_open = true;
+
+        egui::Window::new(title)
+            .collapsible(false)
+            .open(&mut is_open)
+            .show(ctx, |ui| match modal {
+                CurrentModal::BrushCreation(b) => b.do_ui(ui),
+            });
+
+        // Closed :3
+        if !is_open {
+            self.modal = None;
+        }
+    }
     /// Render just self. Modals and insets handled separately.
     fn main_ui(
         &mut self,
         ctx: &egui::Context,
-        _is_background: bool,
+        enabled: bool,
     ) -> (ultraviolet::Vec2, ultraviolet::Vec2) {
         let Ok(action_frame) = self.action_listener.frame() else {
-            return (ultraviolet::Vec2::zero(), ultraviolet::Vec2::zero());
+            let viewport = ctx.available_rect();
+            let pos = viewport.left_top();
+            let size = viewport.size();
+            return (
+                ultraviolet::Vec2 { x: pos.x, y: pos.y },
+                ultraviolet::Vec2 {
+                    x: size.x,
+                    y: size.y,
+                },
+            );
         };
         let interface = self.get_cur_interface().cloned();
 
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| self.menu_bar(ui));
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            ui.set_enabled(enabled);
+            self.menu_bar(ui)
+        });
         egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
+            ui.set_enabled(enabled);
             if let Some(interface) = interface {
                 Self::nav_bar(ui, interface.id, &self.requests_send, &action_frame);
             }
         });
 
         egui::SidePanel::right("layers").show(ctx, |ui| {
+            ui.set_enabled(enabled);
             ui.label("Layers");
             ui.separator();
             if let Some(interface) = self.get_cur_interface() {
@@ -222,10 +244,10 @@ impl MainUI {
                     document: interface.id,
                     brush: old_brush.unwrap_or(state::StrokeBrushSettings {
                         is_eraser: false,
-                        brush: brush::todo_brush().id(),
-                        color_modulate: [0.0, 0.0, 0.0, 1.0],
-                        size_mul: 10.0,
-                        spacing_px: 0.5,
+                        brush: fuzzpaint_core::brush::default_brush(),
+                        color_modulate: util::Color::BLACK,
+                        size_mul: util::FiniteF32::new(10.0).unwrap(),
+                        spacing_px: util::FiniteF32::new(0.5).unwrap(),
                     }),
                     node: interface.graph_selection,
                 });
@@ -235,16 +257,20 @@ impl MainUI {
         egui::SidePanel::left("inspector")
             .resizable(true)
             .show(ctx, |ui| {
+                ui.set_enabled(enabled);
                 // Stats at bottom
                 egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
                 // Toolbox above that
                 egui::TopBottomPanel::bottom("tools-panel")
                     .show_inside(ui, |ui| tools_panel(ui, &action_frame, &self.requests_send));
                 // Brush panel takes the rest
-                brush_panel(ui, self.cur_document, &action_frame);
+                self.colors_panel(ui, self.cur_document, &action_frame);
             });
 
-        egui::TopBottomPanel::top("document-bar").show(ctx, |ui| self.document_bar(ui));
+        egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
+            ui.set_enabled(enabled);
+            self.document_bar(ui)
+        });
 
         let viewport = ctx.available_rect();
         let pos = viewport.left_top();
@@ -528,6 +554,109 @@ impl MainUI {
                 crate::global::provider().inspect(document, |document| document.undo_n(undos));
             }
         });
+    }
+
+    fn colors_panel(
+        &mut self,
+        ui: &mut Ui,
+        current_doc: Option<state::DocumentID>,
+        actions: &crate::actions::ActionFrame,
+    ) {
+        use az::SaturatingAs;
+
+        let mut globals = crate::AdHocGlobals::get().write();
+        if let Some(brush) = globals.as_mut().map(|globals| &mut globals.brush) {
+            ui.label("Color");
+            ui.separator();
+
+            let color_arr = brush.color_modulate.as_array();
+            // Why..
+            let mut color = egui::Rgba::from_rgba_premultiplied(
+                color_arr[0],
+                color_arr[1],
+                color_arr[2],
+                color_arr[3],
+            );
+            if egui::color_picker::color_edit_button_rgba(
+                ui,
+                &mut color,
+                egui::color_picker::Alpha::OnlyBlend,
+            )
+            .changed()
+            {
+                brush.color_modulate =
+                    util::Color::from_array_lossy(color.to_array()).unwrap_or(util::Color::BLACK);
+            };
+            // VERY hacky way to tell if user is modifying color.
+            // There is no way to actually tell. >:V
+            let in_flux = ui.input(|r| r.pointer.any_down());
+            // Small buttons with color history
+            ui.add(
+                color_palette::ColorPalette::new(&mut brush.color_modulate)
+                    .scope(color_palette::HistoryScope::Global)
+                    .in_flux(in_flux)
+                    .id_source(current_doc)
+                    .max_history(64),
+            );
+
+            ui.horizontal(|ui| {
+                ui.label("Brush");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("wawa").clicked() {
+                        todo!()
+                    }
+                })
+            });
+            ui.separator();
+
+            let mut size_mul = brush.size_mul.get();
+            let mut spacing_px = brush.spacing_px.get();
+            // Apply size up/down actions
+            // - for down, + for up
+            'size_steps: {
+                let size_steps = actions
+                    .action_trigger_count(crate::actions::Action::BrushSizeUp)
+                    .saturating_as::<i32>()
+                    .saturating_sub(
+                        actions
+                            .action_trigger_count(crate::actions::Action::BrushSizeDown)
+                            .saturating_as(),
+                    );
+                if size_steps == 0 {
+                    break 'size_steps;
+                }
+                // Usually editors supply some kind of snapping here to snap to
+                // common values instead. Todo!
+                let factor = 2.0f32.powf(size_steps as f32 / 4.0);
+                size_mul *= factor;
+                spacing_px *= factor;
+            }
+            ui.add(
+                egui::Slider::new(&mut spacing_px, 0.25..=10.0)
+                    .text("Spacing")
+                    .suffix("px")
+                    .max_decimals(2)
+                    .clamp_to_range(false),
+            );
+            // Prevent negative
+            spacing_px = spacing_px.max(0.1);
+            ui.add(
+                egui::Slider::new(&mut size_mul, spacing_px..=50.0)
+                    .text("Size")
+                    .suffix("px")
+                    .max_decimals(2)
+                    .clamp_to_range(false),
+            );
+            // Prevent negative
+            size_mul = size_mul.max(0.1);
+
+            if let Ok(size_mul) = util::FiniteF32::new(size_mul) {
+                brush.size_mul = size_mul;
+            }
+            if let Ok(spacing_px) = util::FiniteF32::new(spacing_px) {
+                brush.spacing_px = spacing_px;
+            }
+        }
     }
 }
 /// For any tool, `(icon string, tooltip, opt_hotkey)`
@@ -943,89 +1072,6 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                 });
         });
     });
-}
-/// Side panel showing layer tree and layer options
-fn brush_panel(
-    ui: &mut Ui,
-    current_doc: Option<state::DocumentID>,
-    actions: &crate::actions::ActionFrame,
-) {
-    use az::SaturatingAs;
-
-    let mut globals = crate::AdHocGlobals::get().write();
-    if let Some(brush) = globals.as_mut().map(|globals| &mut globals.brush) {
-        ui.label("Color");
-        ui.separator();
-        // Why..
-        let mut color = egui::Rgba::from_rgba_premultiplied(
-            brush.color_modulate[0],
-            brush.color_modulate[1],
-            brush.color_modulate[2],
-            brush.color_modulate[3],
-        );
-        if egui::color_picker::color_edit_button_rgba(
-            ui,
-            &mut color,
-            egui::color_picker::Alpha::OnlyBlend,
-        )
-        .changed()
-        {
-            brush.color_modulate = color.to_array();
-        };
-        // VERY hacky way to tell if user is modifying color.
-        // There is no way to actually tell. >:V
-        let in_flux = ui.input(|r| r.pointer.any_down());
-        // Small buttons with color history
-        ui.add(
-            color_palette::ColorPalette::new(&mut brush.color_modulate)
-                .scope(color_palette::HistoryScope::Global)
-                .in_flux(in_flux)
-                .id_source(current_doc)
-                .max_history(64),
-        );
-
-        ui.label("Brush");
-        ui.separator();
-
-        // Apply size up/down actions
-        // - for down, + for up
-        'size_steps: {
-            let size_steps = actions
-                .action_trigger_count(crate::actions::Action::BrushSizeUp)
-                .saturating_as::<i32>()
-                .saturating_sub(
-                    actions
-                        .action_trigger_count(crate::actions::Action::BrushSizeDown)
-                        .saturating_as(),
-                );
-            if size_steps == 0 {
-                break 'size_steps;
-            }
-            // Usually editors supply some kind of snapping here to snap to
-            // common values instead. Todo!
-            let factor = 2.0f32.powf(size_steps as f32 / 4.0);
-            brush.size_mul *= factor;
-            brush.spacing_px *= factor;
-        }
-        ui.add(
-            egui::Slider::new(&mut brush.spacing_px, 0.25..=10.0)
-                .text("Spacing")
-                .suffix("px")
-                .max_decimals(2)
-                .clamp_to_range(false),
-        );
-        // Prevent negative
-        brush.spacing_px = brush.spacing_px.max(0.1);
-        ui.add(
-            egui::Slider::new(&mut brush.size_mul, brush.spacing_px..=50.0)
-                .text("Size")
-                .suffix("px")
-                .max_decimals(2)
-                .clamp_to_range(false),
-        );
-        // Prevent negative
-        brush.size_mul = brush.size_mul.max(0.1);
-    }
 }
 /// Panel showing debug stats
 fn stats_panel(ui: &mut Ui) {

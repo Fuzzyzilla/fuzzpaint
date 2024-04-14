@@ -706,6 +706,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono"
+version = "0.4.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a0d04d43504c61aa6c7531f1871dd0d418d91130162063b789da00fd7057a5e"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1461,6 +1470,7 @@ dependencies = [
  "bitvec",
  "blake3",
  "bytemuck",
+ "chrono",
  "crc",
  "dirs",
  "fontdb",

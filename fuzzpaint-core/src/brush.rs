@@ -340,7 +340,7 @@ pub struct Tip {
 }
 
 pub fn default_brush() -> UniqueID {
-    todo!()
+    UniqueID([0; 32])
 }
 
 pub struct Brush {

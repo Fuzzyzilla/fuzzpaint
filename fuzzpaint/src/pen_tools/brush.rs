@@ -395,13 +395,13 @@ fn brush(
         ));
         super::RenderAs::None
     } else {
-        let base_size = brush.spacing_px;
-        let size_factor = brush.size_mul - brush.spacing_px;
+        let base_size = brush.spacing_px.get();
+        let size_factor = brush.size_mul.get() - base_size;
         let last_pos = builder.position.last().unwrap();
         let last_size = if let Some(pressure) = builder.pressure.last() {
             pressure * size_factor + base_size
         } else {
-            brush.size_mul
+            brush.size_mul.get()
         };
 
         let brush_tip = crate::gizmos::Gizmo {
@@ -445,7 +445,7 @@ fn make_trail(
     stroke: &StrokeBuilder,
     min_size: f32,
     size_factor: f32,
-    color: Option<[f32; 4]>,
+    color: Option<fuzzpaint_core::util::Color>,
 ) -> crate::gizmos::Gizmo {
     use crate::gizmos::{transform::Transform, Gizmo, MeshMode, TextureMode, Visual};
 
@@ -475,7 +475,7 @@ fn make_trail(
             });
     }
 
-    let texture = match color {
+    let texture = match color.map(|c| c.as_array()) {
         Some([r, g, b, a]) => {
             // unmultiply
             let color = if a.abs() > 0.001 {

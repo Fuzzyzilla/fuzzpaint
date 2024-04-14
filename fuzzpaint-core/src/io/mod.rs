@@ -228,9 +228,9 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
                     brush: crate::state::StrokeBrushSettings {
                         is_eraser: false,
                         brush: crate::brush::default_brush(),
-                        color_modulate: [0.0, 0.0, 0.0, 1.0],
-                        size_mul: 10.0,
-                        spacing_px: 0.5,
+                        color_modulate: crate::util::Color::BLACK,
+                        size_mul: crate::util::FiniteF32::new(10.0).unwrap(),
+                        spacing_px: crate::util::FiniteF32::new(0.5).unwrap(),
                     },
                 },
             )

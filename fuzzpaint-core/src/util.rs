@@ -95,7 +95,11 @@ impl Color {
             Ok(raw)
         }
     }
-    pub fn get(&self) -> [f32; 4] {
+    /// Create a new color from premul linear channels. Normalizes all fully transparent colors to 0.0.
+    pub fn from_array_lossy([r, g, b, a]: [f32; 4]) -> Result<Self, FiniteF32Error> {
+        Self::new_lossy(r, g, b, a)
+    }
+    pub fn as_array(&self) -> [f32; 4] {
         [
             self.0[0].get(),
             self.0[1].get(),

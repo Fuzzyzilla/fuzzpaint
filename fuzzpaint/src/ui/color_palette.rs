@@ -1,4 +1,5 @@
 use egui::Color32;
+use fuzzpaint_core::util::{Color as FColor, FiniteF32};
 
 const GROW_FACTOR: f32 = 1.5;
 
@@ -59,7 +60,7 @@ fn needs_contrasting(
 /// Square button-like element with a solid color that does... nothing except report clicks :P
 #[derive(Copy, Clone)]
 struct ColorSquare {
-    color: [f32; 4],
+    color: FColor,
     size: f32,
 }
 impl egui::Widget for ColorSquare {
@@ -86,12 +87,17 @@ impl egui::Widget for ColorSquare {
         });
 
         // false if all in the normal range of colors
-        let out_of_gammut = self.color.iter().any(|&v| !(0.0..=1.0).contains(&v));
+        let out_of_gammut = self
+            .color
+            .as_slice()
+            .iter()
+            .any(|&v| !(FiniteF32::ZERO..=FiniteF32::ONE).contains(&v));
+        let color_arr = self.color.as_array();
         let color = egui::Rgba::from_rgba_premultiplied(
-            self.color[0],
-            self.color[1],
-            self.color[2],
-            self.color[3],
+            color_arr[0],
+            color_arr[1],
+            color_arr[2],
+            color_arr[3],
         );
         // Red border if out-of-gamut. Negative border if hovered. Default contrasting border
         let stroke_color = match (out_of_gammut, this.hovered()) {
@@ -149,11 +155,11 @@ pub enum HistoryScope {
 #[repr(transparent)]
 struct ColorPaletteQueue(
     // front = new, back = old
-    std::collections::VecDeque<[f32; 4]>,
+    std::collections::VecDeque<FColor>,
 );
 impl ColorPaletteQueue {
     /// Move or insert the color to the most recent.
-    fn hoist(&mut self, color: [f32; 4]) {
+    fn hoist(&mut self, color: FColor) {
         self.remove(color);
         // Add as most recent
         self.0.push_front(color);
@@ -163,7 +169,7 @@ impl ColorPaletteQueue {
             let _ = self.0.drain(max..);
         }
     }
-    fn remove(&mut self, color: [f32; 4]) {
+    fn remove(&mut self, color: FColor) {
         // Delete this color from mem
         // We care not for the numeric value of these floats!
         self.0
@@ -172,7 +178,7 @@ impl ColorPaletteQueue {
 }
 // Thin wrapper, inherit iters and such.
 impl std::ops::Deref for ColorPaletteQueue {
-    type Target = std::collections::VecDeque<[f32; 4]>;
+    type Target = std::collections::VecDeque<FColor>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -183,18 +189,18 @@ struct ColorPaletteState {
     history: ColorPaletteQueue,
 }
 impl ColorPaletteState {
-    fn hoist(&mut self, color: [f32; 4]) {
+    fn hoist(&mut self, color: FColor) {
         // We do *not* reorder pinned if it already contains!
         if self.pinned.contains(&color) {
             return;
         }
         self.history.hoist(color);
     }
-    fn pin(&mut self, color: [f32; 4]) {
+    fn pin(&mut self, color: FColor) {
         self.history.remove(color);
         self.pinned.hoist(color);
     }
-    fn unpin(&mut self, color: [f32; 4]) {
+    fn unpin(&mut self, color: FColor) {
         self.pinned.remove(color);
         self.history.hoist(color);
     }
@@ -203,7 +209,7 @@ impl ColorPaletteState {
 /// Widget that remembers color history, displaying a compact grid of previous selected colors
 /// that can be re-applied.
 pub struct ColorPalette<'color> {
-    color: &'color mut [f32; 4],
+    color: &'color mut FColor,
     max_history: Option<usize>,
     history_scope: HistoryScope,
     in_flux: bool,
@@ -211,7 +217,7 @@ pub struct ColorPalette<'color> {
 }
 impl<'color> ColorPalette<'color> {
     #[must_use]
-    pub fn new(color: &'color mut [f32; 4]) -> Self {
+    pub fn new(color: &'color mut FColor) -> Self {
         Self {
             color,
             max_history: None,
@@ -300,7 +306,7 @@ impl egui::Widget for ColorPalette<'_> {
                         let needs_separator =
                             !palette.history.is_empty() && !palette.pinned.is_empty();
 
-                        let mut new_unpins = smallvec::SmallVec::<[[f32; 4]; 1]>::new();
+                        let mut new_unpins = smallvec::SmallVec::<[FColor; 1]>::new();
                         if !palette.pinned.is_empty() {
                             ui.horizontal_wrapped(|ui| {
                                 for color in palette.pinned.0 {
@@ -321,7 +327,7 @@ impl egui::Widget for ColorPalette<'_> {
                         if needs_separator {
                             ui.separator();
                         }
-                        let mut new_pins = smallvec::SmallVec::<[[f32; 4]; 1]>::new();
+                        let mut new_pins = smallvec::SmallVec::<[FColor; 1]>::new();
                         if !palette.history.is_empty() {
                             ui.horizontal_wrapped(|ui| {
                                 for color in palette.history.0 {
