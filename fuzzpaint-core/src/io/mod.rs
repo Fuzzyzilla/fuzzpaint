@@ -1,6 +1,7 @@
 /// IO utilities not specific to the format.
 pub mod common;
 pub mod id;
+pub mod resource;
 pub mod riff;
 
 /// Fields read from a file that were not understood, either due to unrecognized

@@ -11,7 +11,7 @@
 // that ever observes both the genuine and fake brushes.
 #[derive(Clone, Copy, Hash, bytemuck::Pod, bytemuck::Zeroable, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
-pub struct UniqueID([u8; 32]);
+pub struct UniqueID(pub [u8; 32]);
 impl std::fmt::Debug for UniqueID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let parts = [
