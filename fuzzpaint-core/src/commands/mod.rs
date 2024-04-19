@@ -3,8 +3,9 @@
 //! Commands are the way the shared state of the document are modified. Every (nontrivial, like renaming a layer) change
 //! is recorded automatically as a command by a [`queue::writer`].
 
-pub use state::graph::commands::GraphCommand;
-pub use state::stroke_collection::commands::StrokeCollectionCommand;
+pub use state::graph::commands::Command as GraphCommand;
+pub use state::palette::commands::Command as PaletteCommand;
+pub use state::stroke_collection::commands::Command as StrokeCollectionCommand;
 
 use crate::state;
 
@@ -45,6 +46,7 @@ pub enum MetaCommand {
 pub enum Command {
     Meta(MetaCommand),
     Graph(GraphCommand),
+    Palette(PaletteCommand),
     StrokeCollection(StrokeCollectionCommand),
     // We need a dummy command to serve as the root of the command tree. :V
     // Invalid anywhere else.
@@ -58,6 +60,11 @@ impl From<MetaCommand> for Command {
 impl From<GraphCommand> for Command {
     fn from(value: GraphCommand) -> Self {
         Self::Graph(value)
+    }
+}
+impl From<PaletteCommand> for Command {
+    fn from(value: PaletteCommand) -> Self {
+        Self::Palette(value)
     }
 }
 impl From<StrokeCollectionCommand> for Command {
@@ -84,6 +91,13 @@ impl Command {
     pub fn graph(&self) -> Option<&GraphCommand> {
         match self {
             Self::Graph(m) => Some(m),
+            _ => None,
+        }
+    }
+    #[must_use]
+    pub fn palette(&self) -> Option<&PaletteCommand> {
+        match self {
+            Self::Palette(m) => Some(m),
             _ => None,
         }
     }

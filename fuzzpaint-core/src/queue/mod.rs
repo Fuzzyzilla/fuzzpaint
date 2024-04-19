@@ -64,6 +64,7 @@ impl DocumentCommandQueue {
         document: state::Document,
         blend_graph: state::graph::BlendGraph,
         stroke_state: state::stroke_collection::StrokeCollectionState,
+        palette: state::palette::Palette,
     ) -> Self {
         let command_tree = slab_tree::TreeBuilder::new()
             .with_root(commands::Command::Dummy)
@@ -76,6 +77,7 @@ impl DocumentCommandQueue {
                         document,
                         graph: blend_graph,
                         stroke_state,
+                        palette,
                         present: root,
                     },
                     command_tree,

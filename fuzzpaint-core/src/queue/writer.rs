@@ -94,6 +94,14 @@ impl CommandQueueWriter<'_> {
             &mut self.lock.state.stroke_state,
         )
     }
+    pub fn palette(
+        &'_ mut self,
+    ) -> crate::state::palette::writer::Writer<
+        '_,
+        &mut smallvec::SmallVec<[crate::commands::Command; 1]>,
+    > {
+        crate::state::palette::writer::Writer::new(&mut self.commands, &mut self.lock.state.palette)
+    }
 }
 
 // Any subcommand that can be wrapped in Command can be written into any

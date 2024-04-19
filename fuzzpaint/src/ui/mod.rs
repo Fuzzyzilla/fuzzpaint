@@ -734,7 +734,7 @@ fn leaf_props_panel(
     ui: &mut Ui,
     leaf_id: state::graph::LeafID,
     leaf: &mut state::graph::LeafType,
-    stroke_collections: &state::stroke_collection::StrokeCollectionState,
+    stroke_collections: &state::stroke_collection::StrokeCollection,
 ) -> bool {
     use state::graph::LeafType;
     ui.separator();
@@ -1307,7 +1307,7 @@ fn ui_passthrough_or_blend(
 }
 fn graph_edit_recurse<
     // Well that's.... not great...
-    W: queue::writer::CommandWrite<state::graph::commands::GraphCommand>,
+    W: queue::writer::CommandWrite<state::graph::commands::Command>,
 >(
     ui: &mut Ui,
     graph: &mut state::graph::writer::GraphWriter<'_, W>,
