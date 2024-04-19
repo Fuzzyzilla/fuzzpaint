@@ -2,36 +2,110 @@
 //!
 //! Readers and writers for the resource format. See "resource-fileschema.md".
 
-use std::io::{Read, Result as IOResult, Take};
+use std::io::{Read, Result as IOResult, Write};
 
 use crate::brush::UniqueID;
 
-use super::common::SoftSeek;
+use super::common::{MyTake, SoftSeek};
 
 // Repr (C) for matching layout in file. Take care for endianness!
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
 #[repr(C)]
 struct Node {
     pub id: UniqueID,
+    pub len_offset: LenOffset,
+}
+impl PartialEq for Node {
+    fn eq(&self, other: &Self) -> bool {
+        self.id.eq(&other.id)
+    }
+}
+impl Eq for Node {}
+impl PartialOrd for Node {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Node {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
+#[repr(C)]
+struct LenOffset {
     /// One bit has-left-node flag, 63 bit data offset.
     pub left_offset: u64,
     /// One bit has-right-node flag, 63 bit data len.
-    pub right_length: u64,
+    pub right_len: u64,
 }
 impl Node {
     const SIZE: u64 = std::mem::size_of::<Self>() as u64;
-    const COMMON_PREFIX_SIZE: u64 = std::mem::size_of::<Self>() as u64 - 1;
+    const COMMON_PREFIX_SIZE: u64 = Self::SIZE - 1;
+}
+impl LenOffset {
+    const FLAG_BIT: u64 = 0x8000_0000_0000_0000;
+    const FIELD_MASK: u64 = !Self::FLAG_BIT;
+    /// Create new length/offset bitfields. Returns `None` if either `len` or `offset` are too large (top bit set).
+    fn new(len: u64, offset: u64, has_left: bool, has_right: bool) -> Option<Self> {
+        if len & Self::FLAG_BIT != 0 || offset & Self::FLAG_BIT != 0 {
+            return None;
+        }
+
+        Some(Self {
+            left_offset: offset | if has_left { Self::FLAG_BIT } else { 0 },
+            right_len: len | if has_right { Self::FLAG_BIT } else { 0 },
+        })
+    }
     fn has_left(&self) -> bool {
-        self.left_offset & 0x8000_0000_0000_0000 != 0
+        self.left_offset & Self::FLAG_BIT != 0
     }
     fn offset(&self) -> u64 {
-        self.left_offset & 0x7FFF_FFFF_FFFF_FFFF
+        self.left_offset & Self::FIELD_MASK
     }
     fn has_right(&self) -> bool {
-        self.right_length & 0x8000_0000_0000_0000 != 0
+        self.right_len & Self::FLAG_BIT != 0
     }
     fn len(&self) -> u64 {
-        self.right_length & 0x7FFF_FFFF_FFFF_FFFF
+        self.right_len & Self::FIELD_MASK
+    }
+    fn set_has_left(&mut self, left: bool) {
+        if left {
+            self.left_offset |= Self::FLAG_BIT;
+        } else {
+            self.left_offset &= Self::FIELD_MASK;
+        }
+    }
+    fn set_has_right(&mut self, right: bool) {
+        if right {
+            self.right_len |= Self::FLAG_BIT;
+        } else {
+            self.right_len &= Self::FIELD_MASK;
+        }
+    }
+    /// Set the bitfield. Returns `Err` if too large (top bit set).
+    fn set_offset(&mut self, offset: u64) -> Result<(), ()> {
+        if offset & Self::FLAG_BIT != 0 {
+            Err(())
+        } else {
+            // Clear those bits
+            self.left_offset ^= self.left_offset & Self::FIELD_MASK;
+            self.left_offset |= offset;
+
+            Ok(())
+        }
+    }
+    /// Set the bitfield. Returns `Err` if too large (top bit set).
+    fn set_len(&mut self, len: u64) -> Result<(), ()> {
+        if len & Self::FLAG_BIT != 0 {
+            Err(())
+        } else {
+            // Clear those bits
+            self.right_len ^= self.right_len & Self::FIELD_MASK;
+            self.right_len |= len;
+
+            Ok(())
+        }
     }
 }
 
@@ -53,13 +127,13 @@ fn read_node<R: Read>(common_prefix: Option<u8>, mut r: R) -> IOResult<Node> {
     r.read_exact(slice)?;
 
     // Change endianness from le -> native.
-    node.left_offset = u64::from_le_bytes(node.left_offset.to_ne_bytes());
-    node.right_length = u64::from_le_bytes(node.right_length.to_ne_bytes());
+    node.len_offset.left_offset = u64::from_le_bytes(node.len_offset.left_offset.to_ne_bytes());
+    node.len_offset.right_len = u64::from_le_bytes(node.len_offset.right_len.to_ne_bytes());
 
     Ok(node)
 }
 
-/// Find a resource from the given reader. Returns a [`Take`] over the resource's data, or `Ok(Err(r))` if the
+/// Find a resource from the given reader. Returns a [`MyTake`] over the resource's data, or `Ok(Err(r))` if the
 /// resource is not contained.
 /// Does not assume the reader starts at position 0 - a resource tree inside another stream is accounted for.
 /// If `common_prefix` is set, all entries are taken to have the same start (`[0]`) byte as the requested `resource`.
@@ -70,7 +144,7 @@ pub fn fetch<R: Read + SoftSeek>(
     resource: UniqueID,
     common_prefix: bool,
     mut r: R,
-) -> IOResult<Result<Take<R>, R>> {
+) -> IOResult<Result<MyTake<R>, R>> {
     let mut tree_depth: u8 = 0;
 
     if tree_depth & 0b1100_0000 != 0 {
@@ -108,12 +182,13 @@ pub fn fetch<R: Read + SoftSeek>(
             std::cmp::Ordering::Equal => {
                 // Found it~!
                 // Special case: zero-len resource. Offset may be bogus.
-                if node.len() == 0 {
-                    return Ok(Ok(r.take(0)));
+                if node.len_offset.len() == 0 {
+                    return Ok(Ok(MyTake::new(r, 0)));
                 }
 
                 // Where are we going? `offset` is from end-of-tree
                 let dest_stream_pos = node
+                    .len_offset
                     .offset()
                     // Data from outside world, check check check!
                     // offset of `tree_depth` gives past-the-end ptr of whole tree.
@@ -125,11 +200,11 @@ pub fn fetch<R: Read + SoftSeek>(
                 r.soft_seek(i64::try_from(forward_by).unwrap())?;
 
                 // Woohoo!
-                return Ok(Ok(r.take(node.len())));
+                return Ok(Ok(MyTake::new(r, node.len_offset.len())));
             }
             std::cmp::Ordering::Greater => {
                 // Go right..
-                if node.has_right() {
+                if node.len_offset.has_right() {
                     // (silly opt: this math can be weakened into seek (WIDTH+1)*node_size but it'd make things icky)
                     current_x = current_x * 2 + 1;
                 } else {
@@ -139,7 +214,7 @@ pub fn fetch<R: Read + SoftSeek>(
             }
             std::cmp::Ordering::Less => {
                 // Go left..
-                if node.has_left() {
+                if node.len_offset.has_left() {
                     current_x *= 2;
                 } else {
                     // No nodes to the left, fail!
@@ -160,10 +235,13 @@ pub fn fetch<R: Read + SoftSeek>(
 }
 
 /// Enumerate all resources in the given stream. Order of read objects is arbitrary.
+/// # Errors
+/// Returns error that occurs if the header byte could not be read.
+/// Further errors are returned by the iterator itself.
 pub fn enumerate<R: Read + SoftSeek>(
     common_prefix: Option<u8>,
     mut reader: R,
-) -> IOResult<ResourceIter<R>> {
+) -> IOResult<IDIter<R>> {
     let mut depth = 0u8;
     reader.read_exact(std::slice::from_mut(&mut depth))?;
 
@@ -184,7 +262,7 @@ pub fn enumerate<R: Read + SoftSeek>(
 
     let next_active_mask = bitvec::vec::BitVec::with_capacity(max_width_hint);
 
-    Ok(ResourceIter {
+    Ok(IDIter {
         active_mask,
         next_active_mask,
         cur_node: 0,
@@ -195,7 +273,10 @@ pub fn enumerate<R: Read + SoftSeek>(
     })
 }
 
-pub struct ResourceIter<R> {
+/// Iterator over all object IDs in a resource file.
+/// IDs are visited in arbitrary order. If any IO error occurs, it is returned and the iterator
+/// permanently short circuits to `None`.
+pub struct IDIter<R> {
     // A lotttt of fields. This is a pretty complex co-routine, oof.
 
     // Subtrees may terminate before iteration finishes.
@@ -212,7 +293,7 @@ pub struct ResourceIter<R> {
     common_prefix: Option<u8>,
     reader: R,
 }
-impl<R: Read + SoftSeek> Iterator for ResourceIter<R> {
+impl<R: Read + SoftSeek> Iterator for IDIter<R> {
     type Item = IOResult<UniqueID>;
     fn next(&mut self) -> Option<Self::Item> {
         // Finished :3
@@ -225,8 +306,8 @@ impl<R: Read + SoftSeek> Iterator for ResourceIter<R> {
                 // Check if this passes the mask!
                 let is_real = self.active_mask.pop().unwrap();
 
-                let left = is_real && node.has_left();
-                let right = is_real && node.has_right();
+                let left = is_real && node.len_offset.has_left();
+                let right = is_real && node.len_offset.has_right();
 
                 // Push new mask flags. (needs to be reversed at the end)
                 self.next_active_mask.push(left);
@@ -236,6 +317,13 @@ impl<R: Read + SoftSeek> Iterator for ResourceIter<R> {
                 // End-of-line
                 // Magic numbers work out since width grows in powers of two!
                 if self.cur_node == self.cur_width * 2 - 1 {
+                    if self.next_active_mask.not_any() {
+                        // Whole next row is masked out - done here! Tree may be oversized.
+                        // Short circuit:
+                        self.cur_node = self.num_nodes;
+                        return Ok(None);
+                    }
+
                     self.cur_width *= 2;
                     // Reverse and set next to current. Re-use alloc by clearing it and swapping :3.
                     self.next_active_mask.reverse();
@@ -273,6 +361,200 @@ impl<R: Read + SoftSeek> Iterator for ResourceIter<R> {
         (0, remaining)
     }
 }
+impl<R> IDIter<R> {
+    /// Take the reader back. It will be left at it's current position, with no guarantees as to where that's at!
+    pub fn into_inner(self) -> R {
+        self.reader
+    }
+}
+
+/// Map of [`UniqueID`] -> [`LenOffset`], in a representation (somewhat) efficiently convertible to/from a resource file header.
+struct DenseBinaryTree {
+    /// Nodes, sorted and deduplicated by ID.
+    nodes: Vec<Node>,
+}
+impl DenseBinaryTree {
+    /// # Safety
+    /// The given vector must be sorted and deduplicated by `node.id`.
+    #[must_use]
+    pub unsafe fn from_sorted(mut nodes: Vec<Node>) -> Self {
+        // Check unsafe preconditions
+        #[cfg(debug_assertions)]
+        {
+            let mut windows = nodes.windows(2);
+            while let Some([a, b]) = windows.next() {
+                // Strictly less checks dedup as well.
+                debug_assert!(
+                    a.id < b.id,
+                    "DenseBinaryTree::from_sorted unsafe precondition"
+                );
+            }
+        }
+        Self { nodes }
+    }
+    /// Convert internal repr into file-ready representation.
+    /// That is, balanced left-to-right, root-to-branch tree with empty spaces zeroed.
+    pub fn into_dense_tree(self) -> Vec<Node> {
+        let Self { mut nodes } = self;
+        // Convert sorted into our dense tree repr.
+        // Sorted tail that hasn't been tree-ified yet:
+        // (self invariant guarantees sorted!)
+        let mut unsifted_slice = &mut nodes[..];
+        // Iterate root-to-branch. This is how many nodes "wide" the tree layer is at current.
+        let mut width = 1usize;
+
+        while !unsifted_slice.is_empty() {
+            // split into `width` subslices.
+            let elems_per_subslice = unsifted_slice.len() / width;
+            if elems_per_subslice != 0 {
+                for i in 0..width - 1 {
+                    // Take middle elem of this subslice, rotate it to the front.
+                    let midpoint = i * elems_per_subslice + elems_per_subslice / 2;
+
+                    // Midpoint indexes by original unsifted_slice len, but it
+                    // gets one shorter each iter, hence -i. weird!
+                    let front = &mut unsifted_slice[..=midpoint - i];
+
+                    // Rotate right takes `midpoint` elem, puts it at front, and
+                    // keeps tail sorted.
+                    front.rotate_right(1);
+
+                    // Pop the node we inserted into the tree off the front.
+                    unsifted_slice = &mut unsifted_slice[1..];
+                }
+            }
+
+            // Do one more with the rest of the slice
+            // This is never empty - for loop above would have never run if len < width, which is the only
+            // case where it could be drained.
+            // Same op, see above.
+            let middle = unsifted_slice.len() / 2;
+            let front = &mut unsifted_slice[..=middle];
+            front.rotate_right(1);
+
+            unsifted_slice = &mut unsifted_slice[1..];
+
+            width *= 2;
+        }
+
+        //todo: set left/right flags.
+        //todo: populate zeroes.
+        todo!()
+    }
+    /// Make from a vector of nodes. Returns an error if any node ID appears more than once.
+    pub fn from_vec(mut nodes: Vec<Node>) -> Result<Self, ()> {
+        nodes.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+
+        if nodes.windows(2).any(|arr| {
+            let [a, b] = arr else { unreachable!() };
+            a.id == b.id
+        }) {
+            // Had duplicates.
+            return Err(());
+        }
+
+        // Safety: We just sorted and asserted that it's deduplicated :P
+        Ok(unsafe { Self::from_sorted(nodes) })
+    }
+    #[must_use]
+    pub fn get(&mut self, id: &UniqueID) -> Option<&LenOffset> {
+        self.nodes
+            .binary_search_by(|node| node.id.cmp(id))
+            .ok()
+            .map(|idx| &self.nodes[idx].len_offset)
+    }
+    #[must_use]
+    pub fn get_mut(&mut self, id: &UniqueID) -> Option<&mut LenOffset> {
+        self.nodes
+            .binary_search_by(|node| node.id.cmp(id))
+            .ok()
+            .map(|idx| &mut self.nodes[idx].len_offset)
+    }
+    pub fn get_or_insert(&mut self, or_insert: Node) -> &mut LenOffset {
+        match self.nodes.binary_search(&or_insert) {
+            Err(into_idx) => {
+                self.nodes.insert(into_idx, or_insert);
+                &mut self.nodes[into_idx].len_offset
+            }
+            Ok(found_idx) => &mut self.nodes[found_idx].len_offset,
+        }
+    }
+    pub fn insert(&mut self, node: Node) -> Result<&mut LenOffset, Node> {
+        match self.nodes.binary_search(&node) {
+            Err(into_idx) => {
+                self.nodes.insert(into_idx, node);
+                Ok(&mut self.nodes[into_idx].len_offset)
+            }
+            Ok(_) => Err(node),
+        }
+    }
+    pub fn remove(&mut self, id: &UniqueID) -> Option<Node> {
+        self.nodes
+            .binary_search_by(|node| node.id.cmp(id))
+            .ok()
+            .map(|idx| self.nodes.remove(idx))
+    }
+    pub fn iter(&self) -> std::slice::Iter<'_, Node> {
+        self.nodes.iter()
+    }
+    // This type *is* nameable but I don't uhhhh wanna (would be needed for `IntoIterator for &mut Self`)
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&UniqueID, &mut LenOffset)> + '_ {
+        self.nodes
+            .iter_mut()
+            .map(|node| (&node.id, &mut node.len_offset))
+    }
+    #[must_use]
+    /// Get the "depth" or "height" of the contained tree.
+    pub fn depth(&self) -> u8 {
+        // Unwrap ok - I mean, if you have a arch with 256 bit pointers, im all for changing this.
+        u8::try_from(usize::BITS - self.nodes.len().trailing_zeros()).unwrap()
+    }
+}
+impl<'a> IntoIterator for &'a DenseBinaryTree {
+    type IntoIter = std::slice::Iter<'a, Node>;
+    type Item = &'a Node;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// File updater that caches the node tree, providing read/write access to the tree and
+/// data.
+pub struct CachedUpdater<RW> {
+    // We need Read functionality to initially load tree.
+    // We need Read + Seek for fetch.
+    // We need Write for initial bulk write
+    // We need Write + Seek functionality to add new entries.
+    // These requirements are imposed on the impls themselves for flexibility :3
+    stream: RW,
+    cached_tree: DenseBinaryTree,
+    /// After-end index of the data region.
+    after_end: u64,
+}
+/// Updaters
+impl<W: Write + SoftSeek> CachedUpdater<W> {
+    /// Update a record. None if the record doesn't exist.
+    /// API Limitation - records may not grow nor shrink in size. This is fine for all forseeable needs.
+    pub fn update(&mut self, id: &UniqueID) -> Option<MyTake<&mut W>> {
+        let entry = self.cached_tree.get(id)?;
+        let offset = entry.offset();
+        let len = entry.len();
+        todo!()
+    }
+    /// Insert data into the collection, where the ID is taken from the `blake3` hash of the data.
+    /// Returns `None` without doing any changes if the ID is already contained.
+    pub fn insert_new(&mut self, id: UniqueID, data: &[u8]) -> Option<IOResult<UniqueID>> {
+        let initial_offset = self.after_end;
+        let len = u64::try_from(data.len()).unwrap();
+        self.cached_tree
+            .insert(Node {
+                id,
+                len_offset: LenOffset::new(len, initial_offset, false, false).unwrap(),
+            })
+            .ok()?;
+        todo!()
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -280,15 +562,34 @@ mod test {
 
     use super::{enumerate, fetch, UniqueID};
 
-    /// Resource with two data values.
+    // A buncha hand-written binary files for testing lol
+    /// Resource with two data values. See [`smol_load`] for contents.
     const SMOL_RESOURCE: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/test-data/resource/smol.bin"
     ));
-    /// Resource with no tree, no data.
+    /// Resource with no tree, no data. (literally a single zero byte)
     const EMPTY_RESOURCE: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/test-data/resource/empty.bin"
+    ));
+    /// Big tree structure.
+    /// Non-prefixed IDs, all zero with their first byte as follows:
+    /// Each has one byte of attached data, matching that ID byte.
+    /// <pre>
+    ///         80
+    ///        /  \
+    ///       /    \
+    ///      /      \
+    ///     40      C0
+    ///    /  \    /  \
+    ///   20   X  A0   X
+    ///  /  \    /  \
+    /// X   30  90   X
+    /// </pre>
+    const BIG_TREE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/test-data/resource/bigtree.bin"
     ));
 
     const CONSECUTIVE_ID: UniqueID = UniqueID([
@@ -296,6 +597,7 @@ mod test {
         25, 26, 27, 28, 29, 30, 31,
     ]);
 
+    /// Resource fetching.
     #[test]
     fn smol_load() {
         let read = std::io::Cursor::new(SMOL_RESOURCE);
@@ -322,6 +624,7 @@ mod test {
             .is_err());
     }
 
+    /// List resources on a file with large IDs
     #[test]
     fn smol_list_ids() {
         let read = std::io::Cursor::new(SMOL_RESOURCE);
@@ -333,7 +636,6 @@ mod test {
 
         for id in iter {
             let id = id.unwrap();
-            println!("{id:?}");
             // Should exist.
             assert!(set.remove(&id));
         }
@@ -341,11 +643,60 @@ mod test {
         assert!(set.is_empty());
     }
 
+    /// Ensure no spurious reads on an empty tree
     #[test]
     fn empty_list_ids() {
         let read = std::io::Cursor::new(EMPTY_RESOURCE);
         let mut iter = enumerate(None, read).unwrap();
         // Empty resource file.
         assert_eq!(format!("{:?}", iter.next()), "None");
+    }
+
+    /// Bigger tree with voids, ensures that masking behavior is workin.
+    #[test]
+    fn big_tree_list_ids() {
+        let read = std::io::Cursor::new(BIG_TREE);
+        let iter = enumerate(None, read).unwrap();
+
+        let mut set = [0x80, 0x40, 0xC0, 0x20, 0xA0, 0x30, 0x90]
+            .into_iter()
+            .map(|low_byte| {
+                // Struct update syntax for arrays please please please please
+                let mut id = UniqueID([0; 32]);
+                id.0[0] = low_byte;
+                id
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for id in iter {
+            let id = id.unwrap();
+            // Should exist.
+            assert!(set.remove(&id));
+        }
+        // Should have found them all!
+        assert!(set.is_empty());
+    }
+
+    /// Visit all nodes in big tree! The data is empty, but that's still a success :3
+    #[test]
+    fn big_tree_load() {
+        let read = std::io::Cursor::new(BIG_TREE);
+
+        for low_byte in [0x80, 0x40, 0xC0, 0x20, 0xA0, 0x30, 0x90] {
+            // Struct update syntax for arrays please please please please
+            let mut id = UniqueID([0; 32]);
+            id.0[0] = low_byte;
+
+            let mut r = fetch(id, false, read.clone()).unwrap().unwrap();
+
+            // All resources have one byte - their own ID's first byte.
+            // Try to read an extra, too (to make sure it fails!)
+            let mut bytes = [0, 0];
+            let num_read = r.read(&mut bytes).unwrap();
+
+            assert_eq!(num_read, 1);
+
+            assert_eq!(bytes[0], low_byte);
+        }
     }
 }

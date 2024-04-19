@@ -7,6 +7,8 @@ Because these resources come from untrusted sources, the format requires extra c
 over the IDs used in their resources - If, for example, the structure was implemented as a linear scan, the attacker could insert an arbitrary number of bogus
 entries near the start and then repeatedly request a resource near the end.
 
+Lengths and offsets are not clamped by the format, and the reader must ensure that past-the-end reads are caught accordingly.
+
 ## Data types
 All values are stored in little-endian order.
 
