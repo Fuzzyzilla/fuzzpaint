@@ -181,7 +181,14 @@ impl GpuStampTess {
                     out_vert_limit: num_expected_verts,
                     start_group: group_index_counter,
                     num_groups,
-                    modulate: alloc.src.brush.color_modulate.as_array(),
+                    modulate: alloc
+                        .src
+                        .brush
+                        .color_modulate
+                        .get()
+                        .left()
+                        .unwrap()
+                        .as_array(),
                     density,
                     size_mul: alloc.src.brush.size_mul.get().into(),
                     is_eraser: if alloc.src.brush.is_eraser { 1.0 } else { 0.0 },

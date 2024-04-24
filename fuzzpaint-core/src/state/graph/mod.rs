@@ -20,8 +20,7 @@ pub enum LeafType {
     },
     SolidColor {
         blend: Blend,
-        // Crate-wide color type would be nice :O
-        source: [f32; 4],
+        source: crate::color::ColorOrPalette,
     },
     Text {
         blend: Blend,

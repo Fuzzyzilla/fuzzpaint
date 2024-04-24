@@ -76,7 +76,7 @@ impl Palette {
     pub fn push(&mut self, color: Color) -> PaletteIndex {
         self.colors.push((true, color));
 
-        PaletteIndex(u64::try_from(self.colors.len()).unwrap())
+        PaletteIndex(u64::try_from(self.colors.len() - 1).unwrap())
     }
     /// Mutate a color from it's index.
     pub fn get_mut(&mut self, idx: PaletteIndex) -> Option<&mut (bool, Color)> {
@@ -91,10 +91,14 @@ impl Palette {
 
         self.colors.get(idx).map(|&(_, color)| color)
     }
-    pub fn iter(&self) -> impl Iterator<Item = &Color> {
+    pub fn iter(&self) -> impl Iterator<Item = (PaletteIndex, &Color)> {
         self.colors
             .iter()
-            .filter_map(|(exists, color)| exists.then_some(color))
+            .enumerate()
+            .filter_map(|(idx, (exists, color))| {
+                let idx = PaletteIndex(u64::try_from(idx).ok()?);
+                exists.then_some((idx, color))
+            })
     }
 }
 

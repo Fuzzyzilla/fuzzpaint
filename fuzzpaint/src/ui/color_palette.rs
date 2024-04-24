@@ -1,10 +1,10 @@
 use egui::Color32;
-use fuzzpaint_core::util::{Color as FColor, FiniteF32};
+use fuzzpaint_core::{color::Color as FColor, util::FiniteF32};
 
 const GROW_FACTOR: f32 = 1.5;
 
 /// If the contrast between two colors is too low, choose a stroke color to contrast both.
-fn needs_contrasting(
+fn contrasting_stroke(
     background: impl Into<egui::Rgba>,
     foreground: impl Into<egui::Rgba>,
     contrast_target: f32,
@@ -56,12 +56,30 @@ fn needs_contrasting(
     // In light mode it's practically invisible. So, we square the intensity...
     intensity.map(|i| egui::Rgba::from_luminance_alpha(i * i, 1.0))
 }
+fn grayscale_contrasting(
+    foreground: impl Into<egui::Rgba>,
+    background: impl Into<egui::Rgba>,
+) -> egui::Color32 {
+    // Hella scuffed implementation. :V
+    let color: egui::Rgba = foreground.into();
+    let background: egui::Rgba = background.into();
+    let color = background.multiply(1.0 - color.a()) + color;
+
+    let intensity = color.intensity();
+    if intensity > 0.5 {
+        egui::Color32::BLACK
+    } else {
+        egui::Color32::WHITE
+    }
+}
 
 /// Square button-like element with a solid color that does... nothing except report clicks :P
 #[derive(Copy, Clone)]
-struct ColorSquare {
-    color: FColor,
-    size: f32,
+pub struct ColorSquare {
+    pub color: FColor,
+    pub size: f32,
+    pub selected: bool,
+    pub palette_idx: Option<fuzzpaint_core::color::PaletteIndex>,
 }
 impl egui::Widget for ColorSquare {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
@@ -101,19 +119,19 @@ impl egui::Widget for ColorSquare {
         );
         // Red border if out-of-gamut. Negative border if hovered. Default contrasting border
         let stroke_color = match (out_of_gammut, this.hovered()) {
-            (true, _) => Some(Color32::DARK_RED),
+            (true, _) => Color32::DARK_RED,
             // Use maximally-contrasty color (not correct impl lol)
-            (false, true) => Some(egui::Rgba::from_gray(1.0 - color.intensity()).into()),
+            (false, true) => egui::Rgba::from_gray(1.0 - color.intensity()).into(),
             (false, false) => {
                 const MIN_CONTRAST: f32 = 0.3;
                 // Check contrast against assumed (FIXME) `canvas` style background, outline with
                 // contrast-y color if not high enough.
-                needs_contrasting(ui.style().visuals.extreme_bg_color, color, MIN_CONTRAST)
-                    .map(Into::into)
+                contrasting_stroke(ui.style().visuals.extreme_bg_color, color, MIN_CONTRAST)
+                    .map_or(ui.style().visuals.extreme_bg_color, Into::into)
             }
         };
         // Increase in size and show ontop when hovered.
-        let (expansion, layer) = if this.hovered() {
+        let (expansion, layer) = if this.hovered() || self.selected {
             // Additive expansion, not multiplicative - subtract one
             (
                 self.size * (GROW_FACTOR - 1.0),
@@ -130,14 +148,15 @@ impl egui::Widget for ColorSquare {
         let expansion =
             ui.ctx()
                 .animate_value_with_time(this.id, expansion, ui.style().animation_time);
-        ui.painter().clone().with_layer_id(layer).rect(
+        let painter = ui.painter().clone().with_layer_id(layer);
+        painter.rect(
             rect.expand(expansion),
             0.0,
             color,
-            stroke_color.map_or(egui::Stroke::NONE, |color| egui::Stroke {
-                color,
+            egui::Stroke {
+                color: stroke_color,
                 width: 1.0,
-            }),
+            },
         );
 
         this
@@ -310,7 +329,12 @@ impl egui::Widget for ColorPalette<'_> {
                         if !palette.pinned.is_empty() {
                             ui.horizontal_wrapped(|ui| {
                                 for color in palette.pinned.0 {
-                                    let color_btn = ColorSquare { color, size };
+                                    let color_btn = ColorSquare {
+                                        color,
+                                        size,
+                                        selected: false,
+                                        palette_idx: None,
+                                    };
                                     let response = ui.add(color_btn);
                                     response.context_menu(|ui| {
                                         if ui.small_button("Unpin").clicked() {
@@ -331,7 +355,12 @@ impl egui::Widget for ColorPalette<'_> {
                         if !palette.history.is_empty() {
                             ui.horizontal_wrapped(|ui| {
                                 for color in palette.history.0 {
-                                    let color_btn = ColorSquare { color, size };
+                                    let color_btn = ColorSquare {
+                                        color,
+                                        size,
+                                        selected: false,
+                                        palette_idx: None,
+                                    };
                                     let response = ui.add(color_btn);
                                     response.context_menu(|ui| {
                                         if ui.small_button("Pin").clicked() {

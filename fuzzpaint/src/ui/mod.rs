@@ -5,10 +5,15 @@ pub mod requests;
 
 use modal::Modal;
 
-use egui::Ui;
+use egui::{RichText, Ui};
 use fuzzpaint_core::{
     blend::{Blend, BlendMode},
-    brush, io, queue, state, util,
+    brush,
+    color::{self as fcolor, PaletteIndex},
+    io,
+    queue::{self, state_reader::CommandQueueStateReader},
+    state,
+    util::FiniteF32,
 };
 
 const STROKE_LAYER_ICON: &str = "✏";
@@ -108,6 +113,84 @@ struct PerDocumentData {
     yanked_node: Option<state::graph::AnyID>,
     name: String,
 }
+/* // screams
+/// Read, which can be transitioned to a write when needed.
+struct DocumentAccess<'d> {
+    id: state::DocumentID,
+    rw: ReadOrWrite<'d>,
+}
+impl<'d> DocumentAccess<'d> {
+    fn make_write<'a: 'd>(
+        &'a mut self,
+    ) -> &'a mut fuzzpaint_core::queue::writer::CommandQueueWriter<'a> {
+        // Safety: init at rest.
+        match self.rw {
+            ReadOrWrite::Reader(r) => todo!(),
+            ReadOrWrite::Writer(w) => w,
+        }
+    }
+}
+impl CommandQueueStateReader for DocumentAccess<'_> {
+    fn changes(
+        &'_ self,
+    ) -> impl Iterator<Item = fuzzpaint_core::commands::DoUndo<'_, fuzzpaint_core::commands::Command>> + '_
+    {
+        self.rw.changes()
+    }
+    fn graph(&self) -> &state::graph::BlendGraph {
+        self.rw.graph()
+    }
+    fn has_changes(&self) -> bool {
+        self.rw.has_changes()
+    }
+    fn palette(&self) -> &state::palette::Palette {
+        self.rw.palette()
+    }
+    fn stroke_collections(&self) -> &state::stroke_collection::StrokeCollectionState {
+        self.rw.stroke_collections()
+    }
+}
+
+enum ReadOrWrite<'d> {
+    Reader(fuzzpaint_core::queue::state_reader::CommandQueueCloneLock),
+    Writer(fuzzpaint_core::queue::writer::CommandQueueWriter<'d>),
+}
+
+impl CommandQueueStateReader for ReadOrWrite<'_> {
+    fn changes(
+        &'_ self,
+    ) -> impl Iterator<Item = fuzzpaint_core::commands::DoUndo<'_, fuzzpaint_core::commands::Command>> + '_
+    {
+        // Need an enum dispatch ty for this :V
+        // Seems kinda useless in this scenario anyway.
+        [todo!()].into_iter()
+    }
+    fn graph(&self) -> &state::graph::BlendGraph {
+        match self {
+            Self::Reader(r) => r.graph(),
+            Self::Writer(w) => w.graph(),
+        }
+    }
+    fn has_changes(&self) -> bool {
+        match self {
+            Self::Reader(r) => r.has_changes(),
+            Self::Writer(w) => w.has_changes(),
+        }
+    }
+    fn palette(&self) -> &state::palette::Palette {
+        match self {
+            Self::Reader(r) => r.palette(),
+            Self::Writer(w) => w.palette(),
+        }
+    }
+    fn stroke_collections(&self) -> &state::stroke_collection::StrokeCollectionState {
+        match self {
+            Self::Reader(r) => r.stroke_collections(),
+            Self::Writer(w) => w.stroke_collections(),
+        }
+    }
+}*/
+
 pub struct MainUI {
     documents: Vec<PerDocumentData>,
     cur_document: Option<state::DocumentID>,
@@ -245,9 +328,9 @@ impl MainUI {
                     brush: old_brush.unwrap_or(state::StrokeBrushSettings {
                         is_eraser: false,
                         brush: fuzzpaint_core::brush::default_brush(),
-                        color_modulate: util::Color::BLACK,
-                        size_mul: util::FiniteF32::new(10.0).unwrap(),
-                        spacing_px: util::FiniteF32::new(0.5).unwrap(),
+                        color_modulate: fcolor::ColorOrPalette::BLACK,
+                        size_mul: FiniteF32::new(10.0).unwrap(),
+                        spacing_px: FiniteF32::new(0.5).unwrap(),
                     }),
                     node: interface.graph_selection,
                 });
@@ -569,7 +652,90 @@ impl MainUI {
             ui.label("Color");
             ui.separator();
 
-            let color_arr = brush.color_modulate.as_array();
+            // The current PaletteIndex and/or actual color.
+            // These are not mutually exclusive.
+            let mut current_idx = None;
+            let mut current_color = None;
+
+            match brush.color_modulate.get() {
+                either::Either::Left(color) => current_color = Some(color),
+                either::Either::Right(idx) => current_idx = Some(idx),
+            };
+
+            if let Some(current_doc) = current_doc {
+                // Show palette
+                // Between AdHocGlobals and this, two locks are held. Recipe for a deadlock.
+                crate::global::provider().inspect(current_doc, |doc| {
+                    // Unfortunately this is the second `write_with` this frame. I need a way for this to work better..
+                    // A retained mode UI is probably the solution as well as just a good idea for the future.
+                    doc.write_with(|w| {
+                        let mut palette = w.palette();
+                        let mut writes =
+                            smallvec::SmallVec::<[(PaletteIndex, fcolor::Color); 1]>::new();
+                        egui::ScrollArea::new([false, true]).show(ui, |ui| {
+                            egui::Grid::new("palette").num_columns(2).show(ui, |ui| {
+                                for (idx, &color) in palette.iter() {
+                                    // Selected right now!
+                                    let is_current = Some(idx) == current_idx;
+
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add(color_palette::ColorSquare {
+                                                color,
+                                                size: 12.0,
+                                                selected: is_current,
+                                                palette_idx: Some(idx),
+                                            })
+                                            .clicked()
+                                        {
+                                            // Chosen.
+                                            current_idx = Some(idx);
+                                            current_color = Some(color);
+                                        };
+
+                                        let name = format!("{idx:?}");
+                                        let name = if is_current {
+                                            current_color = Some(color);
+                                            RichText::new(name)
+                                        } else {
+                                            RichText::new(name).weak()
+                                        };
+                                        ui.label(name);
+                                    });
+
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.button("set").clicked() {
+                                                if let Some(current_color) = current_color {
+                                                    writes.push((idx, current_color));
+                                                }
+                                            }
+                                        },
+                                    );
+
+                                    ui.end_row();
+                                }
+
+                                if let Some(current_color) = current_color {
+                                    if ui.button("Add").clicked() {
+                                        current_idx = Some(palette.insert(current_color));
+                                    };
+                                }
+                            });
+                        });
+
+                        for (idx, color) in writes {
+                            let _ = palette.set(idx, color);
+                        }
+                    });
+                });
+            }
+
+            let initial_color = current_color.unwrap_or(fcolor::Color::BLACK);
+            let mut picker_color = initial_color;
+
+            let color_arr = picker_color.as_array();
             // Why..
             let mut color = egui::Rgba::from_rgba_premultiplied(
                 color_arr[0],
@@ -584,20 +750,27 @@ impl MainUI {
             )
             .changed()
             {
-                brush.color_modulate =
-                    util::Color::from_array_lossy(color.to_array()).unwrap_or(util::Color::BLACK);
+                picker_color = fcolor::Color::from_array_lossy(color.to_array())
+                    .unwrap_or(fcolor::Color::BLACK);
             };
             // VERY hacky way to tell if user is modifying color.
             // There is no way to actually tell. >:V
             let in_flux = ui.input(|r| r.pointer.any_down());
             // Small buttons with color history
             ui.add(
-                color_palette::ColorPalette::new(&mut brush.color_modulate)
+                color_palette::ColorPalette::new(&mut picker_color)
                     .scope(color_palette::HistoryScope::Global)
                     .in_flux(in_flux)
                     .id_source(current_doc)
                     .max_history(64),
             );
+
+            // Changeddd
+            if picker_color != initial_color {
+                brush.color_modulate = picker_color.into();
+            } else if let Some(idx) = current_idx {
+                brush.color_modulate = idx.into();
+            }
 
             ui.horizontal(|ui| {
                 ui.label("Brush");
@@ -650,10 +823,10 @@ impl MainUI {
             // Prevent negative
             size_mul = size_mul.max(0.1);
 
-            if let Ok(size_mul) = util::FiniteF32::new(size_mul) {
+            if let Ok(size_mul) = FiniteF32::new(size_mul) {
                 brush.size_mul = size_mul;
             }
-            if let Ok(spacing_px) = util::FiniteF32::new(spacing_px) {
+            if let Ok(spacing_px) = FiniteF32::new(spacing_px) {
                 brush.spacing_px = spacing_px;
             }
         }
@@ -734,7 +907,7 @@ fn leaf_props_panel(
     ui: &mut Ui,
     leaf_id: state::graph::LeafID,
     leaf: &mut state::graph::LeafType,
-    stroke_collections: &state::stroke_collection::StrokeCollection,
+    stroke_collections: &state::stroke_collection::StrokeCollectionState,
 ) -> bool {
     use state::graph::LeafType;
     ui.separator();
@@ -743,34 +916,18 @@ fn leaf_props_panel(
         LeafType::Note => false,
         // Color picker
         LeafType::SolidColor { source, .. } => {
-            ui.horizontal(|ui| {
-                ui.label("Fill color:");
-                // Latch onto fill color, to submit update only when selection is finished.
-                latch::latch(ui, (leaf_id, "fill-color"), *source, |ui, [r, g, b, a]| {
-                    let mut rgba = egui::Rgba::from_rgba_premultiplied(*r, *g, *b, *a);
-                    egui::color_picker::color_edit_button_rgba(
-                        ui,
-                        &mut rgba,
-                        // If the user wants Add they should use the blend modes mwuahaha
-                        egui::color_picker::Alpha::OnlyBlend,
-                    );
-                    *r = rgba.r();
-                    *b = rgba.b();
-                    *g = rgba.g();
-                    *a = rgba.a();
+            let current_color = crate::AdHocGlobals::get().upgradable_read();
 
-                    // None of the response fields for color pickers seem to indicate
-                    // a finished interaction TwT
-                    if ui.button("Apply").clicked() {
-                        latch::Latch::Finish
-                    } else {
-                        latch::Latch::Continue
+            ui.horizontal(|ui| {
+                /*
+                ui.add_enabled(enabled, widget)
+                ui.add(
+                    color_palette::ColorSquare{
+                        color:
                     }
-                })
-                // Set color on completion
-                .on_finish(|color| *source = color)
-                // Return true if set occured
-                .is_some()
+                ).clicked()*/
+                ui.label("Fill color:");
+                false
             })
             .inner
         }
@@ -906,7 +1063,7 @@ fn layer_buttons(
                 .add_leaf(
                     state::graph::LeafType::SolidColor {
                         blend: Blend::default(),
-                        source: [1.0; 4],
+                        source: fcolor::ColorOrPalette::WHITE,
                     },
                     add_location!(),
                     "Fill".to_string(),

@@ -103,6 +103,25 @@ impl CommandQueueWriter<'_> {
         crate::state::palette::writer::Writer::new(&mut self.commands, &mut self.lock.state.palette)
     }
 }
+impl super::state_reader::CommandQueueStateReader for CommandQueueWriter<'_> {
+    fn changes(
+        &'_ self,
+    ) -> impl Iterator<Item = crate::commands::DoUndo<'_, crate::commands::Command>> + '_ {
+        self.commands.iter().map(crate::commands::DoUndo::Do)
+    }
+    fn graph(&self) -> &crate::state::graph::BlendGraph {
+        &self.lock.state.graph
+    }
+    fn has_changes(&self) -> bool {
+        !self.commands.is_empty()
+    }
+    fn palette(&self) -> &crate::state::palette::Palette {
+        &self.lock.state.palette
+    }
+    fn stroke_collections(&self) -> &crate::state::stroke_collection::StrokeCollectionState {
+        &self.lock.state.stroke_state
+    }
+}
 
 // Any subcommand that can be wrapped in Command can be written into any
 // smallvec of Command.
