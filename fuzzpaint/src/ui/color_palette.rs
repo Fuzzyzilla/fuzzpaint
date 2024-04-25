@@ -1,7 +1,11 @@
 use egui::Color32;
-use fuzzpaint_core::{color::Color as FColor, util::FiniteF32};
+use either::Either;
+use fuzzpaint_core::{
+    color::{Color as FColor, ColorOrPalette, PaletteIndex},
+    util::FiniteF32,
+};
 
-const GROW_FACTOR: f32 = 1.5;
+const GROW_FACTOR: f32 = 1.25;
 
 /// If the contrast between two colors is too low, choose a stroke color to contrast both.
 fn contrasting_stroke(
@@ -66,26 +70,33 @@ fn grayscale_contrasting(
     let color = background.multiply(1.0 - color.a()) + color;
 
     let intensity = color.intensity();
-    if intensity > 0.5 {
-        egui::Color32::BLACK
-    } else {
-        egui::Color32::WHITE
-    }
+    let contrasting = (intensity + 0.7) % 1.0;
+    egui::Color32::from_gray((contrasting * 255.999) as u8)
 }
 
-/// Square button-like element with a solid color that does... nothing except report clicks :P
+/// Square button-like element with a solid color that does nothing except report interactions and grow on hover.
 #[derive(Copy, Clone)]
 pub struct ColorSquare {
     pub color: FColor,
-    pub size: f32,
+    /// Display as selected, larger and highlighted. Also triggered on hover and focus.
     pub selected: bool,
-    pub palette_idx: Option<fuzzpaint_core::color::PaletteIndex>,
+    pub icon: Option<char>,
+}
+impl Default for ColorSquare {
+    fn default() -> Self {
+        Self {
+            color: FColor::TRANSPARENT,
+            selected: false,
+            icon: None,
+        }
+    }
 }
 impl egui::Widget for ColorSquare {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         let enabled = ui.is_enabled();
+        let size = ui.style().spacing.interact_size.min_elem();
         let (rect, this) = ui.allocate_exact_size(
-            egui::Vec2::splat(self.size),
+            egui::Vec2::splat(size),
             egui::Sense {
                 click: enabled,
                 drag: false,
@@ -117,8 +128,9 @@ impl egui::Widget for ColorSquare {
             color_arr[2],
             color_arr[3],
         );
+        let selected = this.hovered() || self.selected || this.has_focus();
         // Red border if out-of-gamut. Negative border if hovered. Default contrasting border
-        let stroke_color = match (out_of_gammut, this.hovered()) {
+        let stroke_color = match (out_of_gammut, selected) {
             (true, _) => Color32::DARK_RED,
             // Use maximally-contrasty color (not correct impl lol)
             (false, true) => egui::Rgba::from_gray(1.0 - color.intensity()).into(),
@@ -131,10 +143,10 @@ impl egui::Widget for ColorSquare {
             }
         };
         // Increase in size and show ontop when hovered.
-        let (expansion, layer) = if this.hovered() || self.selected {
+        let (expansion, layer) = if selected {
             // Additive expansion, not multiplicative - subtract one
             (
-                self.size * (GROW_FACTOR - 1.0),
+                size * (GROW_FACTOR - 1.0),
                 egui::LayerId {
                     // Wont work when this button is added to foreground already :V
                     order: egui::Order::Foreground,
@@ -158,6 +170,56 @@ impl egui::Widget for ColorSquare {
                 width: 1.0,
             },
         );
+        if let Some(icon) = self.icon {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icon,
+                egui::FontId::default(),
+                grayscale_contrasting(color, ui.style().visuals.extreme_bg_color),
+            );
+        }
+
+        this
+    }
+}
+
+/// An icon of identical layout to [`ColorSquare`] that provides a simple icon.
+pub struct IconSquare {
+    icon: char,
+}
+impl egui::Widget for IconSquare {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        let enabled = ui.is_enabled();
+        let size = ui.style().spacing.interact_size.min_elem();
+        let (rect, this) = ui.allocate_exact_size(
+            egui::Vec2::splat(size),
+            egui::Sense {
+                click: enabled,
+                drag: false,
+                focusable: false,
+            },
+        );
+        this.widget_info(|| egui::WidgetInfo {
+            typ: egui::WidgetType::Button,
+            enabled,
+            // Todo: text description of color
+            label: None,
+            current_text_value: None,
+            prev_text_value: None,
+            selected: None,
+            value: None,
+            text_selection: None,
+        });
+
+        let painter = ui.painter();
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            self.icon,
+            egui::FontId::default(),
+            ui.style().visuals.text_color(),
+        );
 
         this
     }
@@ -174,11 +236,11 @@ pub enum HistoryScope {
 #[repr(transparent)]
 struct ColorPaletteQueue(
     // front = new, back = old
-    std::collections::VecDeque<FColor>,
+    std::collections::VecDeque<ColorOrPalette>,
 );
 impl ColorPaletteQueue {
     /// Move or insert the color to the most recent.
-    fn hoist(&mut self, color: FColor) {
+    fn hoist(&mut self, color: ColorOrPalette) {
         self.remove(color);
         // Add as most recent
         self.0.push_front(color);
@@ -188,7 +250,7 @@ impl ColorPaletteQueue {
             let _ = self.0.drain(max..);
         }
     }
-    fn remove(&mut self, color: FColor) {
+    fn remove(&mut self, color: ColorOrPalette) {
         // Delete this color from mem
         // We care not for the numeric value of these floats!
         self.0
@@ -197,7 +259,7 @@ impl ColorPaletteQueue {
 }
 // Thin wrapper, inherit iters and such.
 impl std::ops::Deref for ColorPaletteQueue {
-    type Target = std::collections::VecDeque<FColor>;
+    type Target = std::collections::VecDeque<ColorOrPalette>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -208,37 +270,39 @@ struct ColorPaletteState {
     history: ColorPaletteQueue,
 }
 impl ColorPaletteState {
-    fn hoist(&mut self, color: FColor) {
-        // We do *not* reorder pinned if it already contains!
-        if self.pinned.contains(&color) {
-            return;
-        }
+    fn hoist(&mut self, color: ColorOrPalette) {
         self.history.hoist(color);
+        // We do *not* reorder pinned!
     }
-    fn pin(&mut self, color: FColor) {
-        self.history.remove(color);
+    fn pin(&mut self, color: ColorOrPalette) {
+        self.history.hoist(color);
         self.pinned.hoist(color);
     }
-    fn unpin(&mut self, color: FColor) {
-        self.pinned.remove(color);
+    fn unpin(&mut self, color: ColorOrPalette) {
         self.history.hoist(color);
+        self.pinned.remove(color);
     }
 }
 
 /// Widget that remembers color history, displaying a compact grid of previous selected colors
 /// that can be re-applied.
-pub struct ColorPalette<'color> {
-    color: &'color mut FColor,
+pub struct ColorPalette<'a, Writer> {
+    color: &'a mut ColorOrPalette,
+    palette: fuzzpaint_core::state::palette::writer::Writer<'a, Writer>,
     max_history: Option<usize>,
     history_scope: HistoryScope,
     in_flux: bool,
     id: Option<egui::Id>,
 }
-impl<'color> ColorPalette<'color> {
+impl<'a, Writer> ColorPalette<'a, Writer> {
     #[must_use]
-    pub fn new(color: &'color mut FColor) -> Self {
+    pub fn new(
+        color: &'a mut ColorOrPalette,
+        palette: fuzzpaint_core::state::palette::writer::Writer<'a, Writer>,
+    ) -> Self {
         Self {
             color,
+            palette,
             max_history: None,
             history_scope: HistoryScope::Local,
             in_flux: false,
@@ -274,8 +338,14 @@ impl<'color> ColorPalette<'color> {
         }
     }
 }
-impl egui::Widget for ColorPalette<'_> {
-    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+// Ewwwww.. Traits that make the undo/redo system tick, that usually need not be seen by mortal eyes, but alas here we are...
+impl<
+        Writer: fuzzpaint_core::queue::writer::CommandWrite<
+            fuzzpaint_core::state::palette::commands::Command,
+        >,
+    > egui::Widget for ColorPalette<'_, Writer>
+{
+    fn ui(mut self, ui: &mut egui::Ui) -> egui::Response {
         const BTN_BASE_SIZE: f32 = 12.0;
         let width = ui.available_width();
         egui::Frame::canvas(ui.style())
@@ -306,6 +376,8 @@ impl egui::Widget for ColorPalette<'_> {
                             let palette =
                                 mem.get_temp_mut_or_default::<ColorPaletteState>(palette_id);
                             if !self.in_flux {
+                                // Pull the active color up in the list.
+                                // Funny syntax!
                                 palette.hoist(*self.color);
                             }
                             if let Some(max) = self.max_history {
@@ -321,19 +393,92 @@ impl egui::Widget for ColorPalette<'_> {
                         );
                         ui.style_mut().spacing.interact_size.y = size;
 
-                        // Both are showing, add an hrule to separate
+                        let mut new_pins = smallvec::SmallVec::<[ColorOrPalette; 1]>::new();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add(IconSquare {
+                                icon: super::PALETTE_ICON
+                            }).on_hover_text("Paletted colors")
+                            .on_hover_text("Colors used from here allow you to modify the color definition after-the-fact and have these changes reflected everywhere it is used.");
+                            // Current color, with indexed color collapsed into a real color.
+                            let mut deref_color = self
+                                .color
+                                .get()
+                                .left_or_else(|idx| self.palette.get(idx).unwrap_or(FColor::BLACK));
+
+                            // if a palette write has been issued.
+                            let mut replace_color = None;
+
+                            for (idx, &color) in self.palette.iter() {
+                                // Show each palette color, if clicked then select it.
+                                let selected = self
+                                    .color
+                                    .get()
+                                    .right()
+                                    .is_some_and(|selected| selected == idx);
+
+                                let color_square = ui.add(ColorSquare {
+                                    color,
+                                    icon: None,
+                                    selected,
+                                });
+
+                                color_square.context_menu(|ui| {
+                                    ui.label(format!("{idx:?}"));
+                                    ui.separator();
+                                    if ui.small_button("Pin").clicked() {
+                                        new_pins.push(idx.into());
+                                        ui.close_menu();
+                                    }
+                                    if ui.small_button("Replace contents with active color").clicked() {
+                                        replace_color = Some((idx, deref_color));
+                                        ui.close_menu();
+                                    }
+                                });
+
+                                if color_square.clicked() {
+                                    *self.color = idx.into();
+                                    deref_color = self.palette.get(idx).unwrap_or(deref_color);
+                                }
+                            }
+                            // "Add" button at the end, with a plus symbol
+                            if ui
+                                .add(ColorSquare {
+                                    color: deref_color,
+                                    icon: Some(super::PLUS_ICON),
+                                    ..Default::default()
+                                })
+                                .on_hover_text("Create a paletted color from active color")
+                                .clicked()
+                            {
+                                *self.color = self.palette.insert(deref_color).into();
+                            };
+
+                            // Issue write, if requested.
+                            if let Some((idx, color)) = replace_color {
+                                let _ = self.palette.set(idx, color);
+                            }
+                        });
+                        ui.separator();
+
+                        // If both recent and pinned colors are shown similtaneously, add an hrule to separate
                         let needs_separator =
                             !palette.history.is_empty() && !palette.pinned.is_empty();
-
-                        let mut new_unpins = smallvec::SmallVec::<[FColor; 1]>::new();
+                        let mut new_unpins = smallvec::SmallVec::<[ColorOrPalette; 1]>::new();
                         if !palette.pinned.is_empty() {
                             ui.horizontal_wrapped(|ui| {
-                                for color in palette.pinned.0 {
+                                ui.add(IconSquare {
+                                    icon: super::PIN_ICON
+                                }).on_hover_text("Pinned colors").on_hover_text("Pin colors from your history to keep them here.");
+                                for &color in &palette.pinned.0 {
+                                    let is_paletted = color.is_palette();
                                     let color_btn = ColorSquare {
-                                        color,
-                                        size,
-                                        selected: false,
-                                        palette_idx: None,
+                                        color: color.get().left_or_else(|idx| {
+                                            self.palette.get(idx).unwrap_or(FColor::TRANSPARENT)
+                                        }),
+                                        icon: is_paletted.then_some(super::PALETTE_ICON),
+                                        // I have experimented with setting `selected` here based on whether it's current, but no
+                                        // combination of logic makes it *feel* right. Always just looks like the selection is jumping around wildly x3
+                                        ..Default::default()
                                     };
                                     let response = ui.add(color_btn);
                                     response.context_menu(|ui| {
@@ -343,7 +488,7 @@ impl egui::Widget for ColorPalette<'_> {
                                         }
                                     });
                                     if response.clicked() {
-                                        *self.color = color_btn.color;
+                                        *self.color = color;
                                     }
                                 }
                             });
@@ -351,15 +496,21 @@ impl egui::Widget for ColorPalette<'_> {
                         if needs_separator {
                             ui.separator();
                         }
-                        let mut new_pins = smallvec::SmallVec::<[FColor; 1]>::new();
                         if !palette.history.is_empty() {
                             ui.horizontal_wrapped(|ui| {
-                                for color in palette.history.0 {
+
+                            ui.add(IconSquare {
+                                icon: super::HISTORY_ICON
+                            }).on_hover_text("Recent colors");
+                                for &color in &palette.history.0 {
+                                    let is_paletted = color.is_palette();
                                     let color_btn = ColorSquare {
-                                        color,
-                                        size,
-                                        selected: false,
-                                        palette_idx: None,
+                                        color: color.get().left_or_else(|idx| {
+                                            self.palette.get(idx).unwrap_or(FColor::TRANSPARENT)
+                                        }),
+                                        // Show if it's paletted or pinned.
+                                        icon: is_paletted.then_some(super::PALETTE_ICON).or_else(|| palette.pinned.contains(&color).then_some(super::PIN_ICON)),
+                                        ..Default::default()
                                     };
                                     let response = ui.add(color_btn);
                                     response.context_menu(|ui| {
@@ -369,7 +520,7 @@ impl egui::Widget for ColorPalette<'_> {
                                         }
                                     });
                                     if response.clicked() {
-                                        *self.color = color_btn.color;
+                                        *self.color = color;
                                     }
                                 }
                             });
