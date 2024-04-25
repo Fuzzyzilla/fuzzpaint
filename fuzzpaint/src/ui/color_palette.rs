@@ -292,6 +292,8 @@ pub struct ColorPalette<'a, Writer> {
     max_history: Option<usize>,
     history_scope: HistoryScope,
     in_flux: bool,
+    /// Swap top two colors in the history.
+    do_swap: bool,
     id: Option<egui::Id>,
 }
 impl<'a, Writer> ColorPalette<'a, Writer> {
@@ -306,6 +308,7 @@ impl<'a, Writer> ColorPalette<'a, Writer> {
             max_history: None,
             history_scope: HistoryScope::Local,
             in_flux: false,
+            do_swap: false,
             id: None,
         }
     }
@@ -334,6 +337,14 @@ impl<'a, Writer> ColorPalette<'a, Writer> {
     pub fn id_source(self, id: impl std::hash::Hash) -> Self {
         Self {
             id: Some(egui::Id::new(id)),
+            ..self
+        }
+    }
+    /// Swap the first and second most recent colors.
+    #[must_use]
+    pub fn swap(self, swap: bool) -> Self {
+        Self {
+            do_swap: swap,
             ..self
         }
     }
@@ -539,6 +550,19 @@ impl<
                                     palette.pin(pin);
                                 }
                             });
+                        }
+                        // Perform swap
+                        if self.do_swap {
+                            ui.data_mut(|mem| {
+                                let palette =
+                                    mem.get_temp_mut_or_default::<ColorPaletteState>(palette_id);
+                                let Some(&swap_with) = palette.history.get(1) else {
+                                    // History too smol to swap :3
+                                    return;
+                                };
+                                palette.hoist(swap_with);
+                                *self.color = swap_with;
+                        });
                         }
                     });
             })

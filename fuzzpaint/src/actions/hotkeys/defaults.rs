@@ -158,6 +158,15 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
         }],
     ),
     (
+        Action::ColorSwap,
+        &[KeyboardHotkey {
+            alt: false,
+            ctrl: false,
+            shift: false,
+            key: KeyCode::KeyX,
+        }],
+    ),
+    (
         Action::Lasso,
         &[KeyboardHotkey {
             alt: false,

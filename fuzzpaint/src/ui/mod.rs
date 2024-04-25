@@ -638,6 +638,12 @@ impl MainUI {
                                 .scope(color_palette::HistoryScope::Local)
                                 .in_flux(in_flux)
                                 .id_source(current_doc)
+                                .swap(
+                                    // Swap top colors if requested.
+                                    actions.action_trigger_count(crate::actions::Action::ColorSwap)
+                                        % 2
+                                        == 1,
+                                )
                                 .max_history(64),
                         );
                     });

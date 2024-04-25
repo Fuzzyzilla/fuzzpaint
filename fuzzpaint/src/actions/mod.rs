@@ -36,6 +36,8 @@ pub enum Action {
     BrushSizeUp,
     BrushSizeDown,
 
+    ColorSwap,
+
     LayerUp,
     LayerDown,
     LayerNew,
