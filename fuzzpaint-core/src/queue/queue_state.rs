@@ -10,6 +10,7 @@ pub struct State {
     pub document: state::Document,
     pub graph: state::graph::BlendGraph,
     pub stroke_state: state::stroke_collection::StrokeCollectionState,
+    pub palette: state::palette::Palette,
     /// The node in the command tree that this state corresponds to
     pub present: slab_tree::NodeId,
 }
@@ -19,6 +20,7 @@ impl State {
             document: state::Document::default(),
             graph: state::graph::BlendGraph::default(),
             stroke_state: state::stroke_collection::StrokeCollectionState::default(),
+            palette: state::palette::Palette::default(),
             present: root,
         }
     }
@@ -30,6 +32,7 @@ impl State {
             document: self.document.clone(),
             graph: self.graph.clone(),
             stroke_state: self.stroke_state.clone(),
+            palette: self.palette.clone(),
             present: self.present,
         }
     }
@@ -46,6 +49,11 @@ impl CommandConsumer<Command> for State {
                 // Unwrap ok - guarded by match arm.
                 self.stroke_state
                     .apply(action.filter_map(Command::stroke_collection).unwrap())
+            }
+            DoUndo::Do(Command::Palette(..)) | DoUndo::Undo(Command::Palette(..)) => {
+                // Unwrap ok - guarded by match arm.
+                self.palette
+                    .apply(action.filter_map(Command::palette).unwrap())
             }
             // Recursively do each of the commands in the scope, in order.
             DoUndo::Do(Command::Meta(MetaCommand::Scope(_, commands))) => commands

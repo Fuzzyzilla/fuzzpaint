@@ -167,13 +167,10 @@ impl CommandConsumer<commands::StrokeCommand> for StrokeCollection {
 }
 
 use crate::commands::{CommandConsumer, CommandError, DoUndo};
-impl CommandConsumer<commands::StrokeCollectionCommand> for StrokeCollectionState {
-    fn apply(
-        &mut self,
-        command: DoUndo<'_, commands::StrokeCollectionCommand>,
-    ) -> Result<(), CommandError> {
+impl CommandConsumer<commands::Command> for StrokeCollectionState {
+    fn apply(&mut self, command: DoUndo<'_, commands::Command>) -> Result<(), CommandError> {
         match command {
-            DoUndo::Do(commands::StrokeCollectionCommand::Created(id)) => {
+            DoUndo::Do(commands::Command::Created(id)) => {
                 let collection = self.get_mut(*id).ok_or(CommandError::UnknownResource)?;
                 if collection.active {
                     Err(CommandError::MismatchedState)
@@ -183,7 +180,7 @@ impl CommandConsumer<commands::StrokeCollectionCommand> for StrokeCollectionStat
                     Ok(())
                 }
             }
-            DoUndo::Undo(commands::StrokeCollectionCommand::Created(id)) => {
+            DoUndo::Undo(commands::Command::Created(id)) => {
                 let collection = self.get_mut(*id).ok_or(CommandError::UnknownResource)?;
                 if collection.active {
                     collection.active = false;
@@ -193,8 +190,8 @@ impl CommandConsumer<commands::StrokeCollectionCommand> for StrokeCollectionStat
                     Err(CommandError::MismatchedState)
                 }
             }
-            DoUndo::Do(commands::StrokeCollectionCommand::Stroke { target, .. })
-            | DoUndo::Undo(commands::StrokeCollectionCommand::Stroke { target, .. }) => {
+            DoUndo::Do(commands::Command::Stroke { target, .. })
+            | DoUndo::Undo(commands::Command::Stroke { target, .. }) => {
                 let collection = self.get_mut(*target).ok_or(CommandError::UnknownResource)?;
                 // Unwrap OK - we checked via the match arm.
                 collection.apply(command.filter_map(|command| command.stroke()).unwrap())

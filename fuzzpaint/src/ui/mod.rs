@@ -5,10 +5,15 @@ pub mod requests;
 
 use modal::Modal;
 
-use egui::Ui;
+use egui::{RichText, Ui};
 use fuzzpaint_core::{
     blend::{Blend, BlendMode},
-    brush, io, queue, state, util,
+    brush,
+    color::{self as fcolor, PaletteIndex},
+    io,
+    queue::{self, state_reader::CommandQueueStateReader},
+    state,
+    util::FiniteF32,
 };
 
 const STROKE_LAYER_ICON: &str = "✏";
@@ -17,6 +22,10 @@ const NOTE_LAYER_ICON: &str = "🖹";
 const FILL_LAYER_ICON: &str = "⬛";
 const GROUP_ICON: &str = "🗀";
 const SCISSOR_ICON: &str = "✂";
+const PLUS_ICON: char = '➕';
+const PALETTE_ICON: char = '🎨';
+const HISTORY_ICON: char = '🕒';
+const PIN_ICON: char = '📌';
 
 /// Justify `(available_size, size, margin)` -> `(size', margin')`, such that `count` elements
 /// will fill available space completely.
@@ -245,9 +254,9 @@ impl MainUI {
                     brush: old_brush.unwrap_or(state::StrokeBrushSettings {
                         is_eraser: false,
                         brush: fuzzpaint_core::brush::default_brush(),
-                        color_modulate: util::Color::BLACK,
-                        size_mul: util::FiniteF32::new(10.0).unwrap(),
-                        spacing_px: util::FiniteF32::new(0.5).unwrap(),
+                        color_modulate: fcolor::ColorOrPalette::BLACK,
+                        size_mul: FiniteF32::new(10.0).unwrap(),
+                        spacing_px: FiniteF32::new(0.5).unwrap(),
                     }),
                     node: interface.graph_selection,
                 });
@@ -566,38 +575,80 @@ impl MainUI {
 
         let mut globals = crate::AdHocGlobals::get().write();
         if let Some(brush) = globals.as_mut().map(|globals| &mut globals.brush) {
-            ui.label("Color");
-            ui.separator();
+            if let Some(current_doc) = current_doc {
+                // Show palette
+                // Between AdHocGlobals and this, two locks are held. Recipe for a deadlock.
+                crate::global::provider().inspect(current_doc, |doc| {
+                    // Unfortunately this is the second `write_with` this frame. I need a way for this to work better..
+                    // A retained mode UI is probably the solution as well as just a good idea for the future.
+                    doc.write_with(|w| {
+                        let palette = w.palette();
 
-            let color_arr = brush.color_modulate.as_array();
-            // Why..
-            let mut color = egui::Rgba::from_rgba_premultiplied(
-                color_arr[0],
-                color_arr[1],
-                color_arr[2],
-                color_arr[3],
-            );
-            if egui::color_picker::color_edit_button_rgba(
-                ui,
-                &mut color,
-                egui::color_picker::Alpha::OnlyBlend,
-            )
-            .changed()
-            {
-                brush.color_modulate =
-                    util::Color::from_array_lossy(color.to_array()).unwrap_or(util::Color::BLACK);
-            };
-            // VERY hacky way to tell if user is modifying color.
-            // There is no way to actually tell. >:V
-            let in_flux = ui.input(|r| r.pointer.any_down());
-            // Small buttons with color history
-            ui.add(
-                color_palette::ColorPalette::new(&mut brush.color_modulate)
-                    .scope(color_palette::HistoryScope::Global)
-                    .in_flux(in_flux)
-                    .id_source(current_doc)
-                    .max_history(64),
-            );
+                        // Get the brush's color, dereferencing paletted colors.
+                        let deref_color = brush
+                            .color_modulate
+                            .get()
+                            .left_or_else(|idx| palette.get(idx).unwrap_or(fcolor::Color::BLACK));
+
+                        // Show a colorpicker. If this changes, the brush becomes a regular color if it was paletted.
+                        ui.scope(|ui| {
+                            let mut picker_color = deref_color;
+
+                            let color_arr = picker_color.as_array();
+                            // Why..
+                            let color = egui::Rgba::from_rgba_premultiplied(
+                                color_arr[0],
+                                color_arr[1],
+                                color_arr[2],
+                                color_arr[3],
+                            );
+                            let mut color = egui::ecolor::Hsva::from(color);
+                            // From looking at source, picker is sized based on the Ui's "slider" size.
+                            // Also demolish margins, otherwise margins + available width blows up to entire screen within a few frames x3
+                            // Resets at end-of-scope!
+                            let desired_width = ui.available_width();
+                            let style = ui.style_mut();
+                            style.spacing.slider_width = desired_width;
+                            style.spacing.window_margin = 0.0.into();
+                            style.override_text_style = Some(egui::TextStyle::Small);
+                            // Sliders in header use this style over override.
+                            style.drag_value_text_style = egui::TextStyle::Small;
+                            // Make buttons along top smoler.
+                            style.spacing.interact_size.x *= 0.75;
+                            if egui::color_picker::color_picker_hsva_2d(
+                                ui,
+                                &mut color,
+                                egui::color_picker::Alpha::OnlyBlend,
+                            ) {
+                                // `true` means the color is different from last frame, not that the interaction is finished.
+                                picker_color = fcolor::Color::from_array_lossy(
+                                    egui::Rgba::from(color).to_array(),
+                                )
+                                .unwrap_or(fcolor::Color::BLACK);
+                                brush.color_modulate = picker_color.into();
+                            };
+                        });
+
+                        // VERY hacky way to tell if user is modifying color.
+                        // There is no way to actually tell. >:V
+                        let in_flux = ui.input(|r| r.pointer.any_down());
+                        // Small buttons with color history, pins, and palettes.
+                        ui.add(
+                            color_palette::ColorPalette::new(&mut brush.color_modulate, palette)
+                                .scope(color_palette::HistoryScope::Local)
+                                .in_flux(in_flux)
+                                .id_source(current_doc)
+                                .swap(
+                                    // Swap top colors if requested.
+                                    actions.action_trigger_count(crate::actions::Action::ColorSwap)
+                                        % 2
+                                        == 1,
+                                )
+                                .max_history(64),
+                        );
+                    });
+                });
+            }
 
             ui.horizontal(|ui| {
                 ui.label("Brush");
@@ -650,10 +701,10 @@ impl MainUI {
             // Prevent negative
             size_mul = size_mul.max(0.1);
 
-            if let Ok(size_mul) = util::FiniteF32::new(size_mul) {
+            if let Ok(size_mul) = FiniteF32::new(size_mul) {
                 brush.size_mul = size_mul;
             }
-            if let Ok(spacing_px) = util::FiniteF32::new(spacing_px) {
+            if let Ok(spacing_px) = FiniteF32::new(spacing_px) {
                 brush.spacing_px = spacing_px;
             }
         }
@@ -743,34 +794,49 @@ fn leaf_props_panel(
         LeafType::Note => false,
         // Color picker
         LeafType::SolidColor { source, .. } => {
-            ui.horizontal(|ui| {
-                ui.label("Fill color:");
-                // Latch onto fill color, to submit update only when selection is finished.
-                latch::latch(ui, (leaf_id, "fill-color"), *source, |ui, [r, g, b, a]| {
-                    let mut rgba = egui::Rgba::from_rgba_premultiplied(*r, *g, *b, *a);
-                    egui::color_picker::color_edit_button_rgba(
-                        ui,
-                        &mut rgba,
-                        // If the user wants Add they should use the blend modes mwuahaha
-                        egui::color_picker::Alpha::OnlyBlend,
-                    );
-                    *r = rgba.r();
-                    *b = rgba.b();
-                    *g = rgba.g();
-                    *a = rgba.a();
+            let mut globals = crate::AdHocGlobals::get().write();
+            let mut current_color = globals.as_mut().map(|g| &mut g.brush.color_modulate);
 
-                    // None of the response fields for color pickers seem to indicate
-                    // a finished interaction TwT
-                    if ui.button("Apply").clicked() {
-                        latch::Latch::Finish
+            ui.horizontal(|ui| {
+                ui.set_enabled(current_color.is_some());
+                // Add a preview button that also allows the user to select this color.
+                if ui
+                    .add_enabled(
+                        current_color.is_some(),
+                        color_palette::ColorSquare {
+                            // Todo: Display paletted.
+                            color: source.get().left_or(fcolor::Color::BLACK),
+                            icon: source.is_palette().then_some(PALETTE_ICON),
+                            ..Default::default()
+                        },
+                    )
+                    .on_hover_text("Use this color")
+                    .clicked()
+                {
+                    match &mut current_color {
+                        Some(current) => **current = *source,
+                        // UI disabled if None, unreachable :D
+                        None => unreachable!(),
+                    }
+                }
+                ui.label("Fill color");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button("Replace")
+                        .on_hover_text("Replace layer color with active color")
+                        .clicked()
+                    {
+                        match current_color {
+                            Some(current) => *source = *current,
+                            // UI disabled if None, unreachable :D
+                            None => unreachable!(),
+                        }
+                        true
                     } else {
-                        latch::Latch::Continue
+                        false
                     }
                 })
-                // Set color on completion
-                .on_finish(|color| *source = color)
-                // Return true if set occured
-                .is_some()
+                .inner
             })
             .inner
         }
@@ -906,7 +972,7 @@ fn layer_buttons(
                 .add_leaf(
                     state::graph::LeafType::SolidColor {
                         blend: Blend::default(),
-                        source: [1.0; 4],
+                        source: fcolor::ColorOrPalette::WHITE,
                     },
                     add_location!(),
                     "Fill".to_string(),
@@ -1307,7 +1373,7 @@ fn ui_passthrough_or_blend(
 }
 fn graph_edit_recurse<
     // Well that's.... not great...
-    W: queue::writer::CommandWrite<state::graph::commands::GraphCommand>,
+    W: queue::writer::CommandWrite<state::graph::commands::Command>,
 >(
     ui: &mut Ui,
     graph: &mut state::graph::writer::GraphWriter<'_, W>,

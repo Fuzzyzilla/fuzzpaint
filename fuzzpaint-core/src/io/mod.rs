@@ -229,7 +229,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
                     brush: crate::state::StrokeBrushSettings {
                         is_eraser: false,
                         brush: crate::brush::default_brush(),
-                        color_modulate: crate::util::Color::BLACK,
+                        color_modulate: crate::color::ColorOrPalette::BLACK,
                         size_mul: crate::util::FiniteF32::new(10.0).unwrap(),
                         spacing_px: crate::util::FiniteF32::new(0.5).unwrap(),
                     },
@@ -285,5 +285,6 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
         document_info,
         my_graph,
         stroke_state,
+        crate::state::palette::Palette::default(),
     ))
 }

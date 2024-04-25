@@ -1,4 +1,4 @@
-use super::{commands::GraphCommand, TargetError};
+use super::{commands::Command, TargetError};
 use crate::queue::writer::CommandWrite;
 
 #[derive(thiserror::Error, Debug)]
@@ -11,19 +11,19 @@ pub enum CommandError<Err: std::error::Error> {
 
 type Result<T, Err> = std::result::Result<T, CommandError<Err>>;
 
-pub struct GraphWriter<'a, Write: CommandWrite<GraphCommand>> {
+pub struct GraphWriter<'a, Write: CommandWrite<Command>> {
     writer: Write,
     graph: &'a mut super::BlendGraph,
 }
 // Inherit immutable methods from the graph, so that the writing code can read the graph
 // to inform it's modifications.
-impl<'a, Write: CommandWrite<GraphCommand>> std::ops::Deref for GraphWriter<'a, Write> {
+impl<'a, Write: CommandWrite<Command>> std::ops::Deref for GraphWriter<'a, Write> {
     type Target = super::BlendGraph;
     fn deref(&self) -> &Self::Target {
         self.graph
     }
 }
-impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
+impl<'a, Write: CommandWrite<Command>> GraphWriter<'a, Write> {
     pub fn new(writer: Write, graph: &'a mut super::BlendGraph) -> Self {
         Self { writer, graph }
     }
@@ -60,7 +60,7 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
             *blend = to;
             // Insert command
             self.writer
-                .write(GraphCommand::BlendChanged { from, to, target });
+                .write(Command::BlendChanged { from, to, target });
         }
         Ok(())
     }
@@ -95,7 +95,7 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
 
         // Only write if changed
         if (new_parent, new_idx) != (old_parent, old_idx) {
-            self.writer.write(GraphCommand::Reparent {
+            self.writer.write(Command::Reparent {
                 target,
                 new_parent,
                 new_child_idx: new_idx,
@@ -119,7 +119,7 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
         // Allows the graph to determine Location behavior rather than duplicating it :3
         let (parent, idx) = self.graph.location_of(new_id).unwrap();
 
-        self.writer.write(GraphCommand::LeafCreated {
+        self.writer.write(Command::LeafCreated {
             target: new_id,
             ty: leaf_ty,
             destination: parent,
@@ -149,7 +149,7 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
         // Perform the change if it's not already matching:
         if to != from {
             *leaf_ty = to.clone();
-            self.writer.write(GraphCommand::LeafTyChanged {
+            self.writer.write(Command::LeafTyChanged {
                 target,
                 old_ty: from,
                 ty: to,
@@ -171,7 +171,7 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
         // Allows the graph to determine Location behavior rather than duplicating it :3
         let (parent, idx) = self.graph.location_of(new_id).unwrap();
 
-        self.writer.write(GraphCommand::NodeCreated {
+        self.writer.write(Command::NodeCreated {
             target: new_id,
             ty: node_ty,
             destination: parent,
@@ -201,7 +201,7 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
         // Perform the change if it's not already matching:
         if to != from {
             *node_ty = to.clone();
-            self.writer.write(GraphCommand::NodeTyChanged {
+            self.writer.write(Command::NodeTyChanged {
                 target,
                 old_ty: from,
                 ty: to,
@@ -220,7 +220,7 @@ impl<'a, Write: CommandWrite<GraphCommand>> GraphWriter<'a, Write> {
         }
         node.deleted = true;
 
-        self.writer.write(GraphCommand::AnyDeleted { target });
+        self.writer.write(Command::AnyDeleted { target });
 
         Ok(())
     }

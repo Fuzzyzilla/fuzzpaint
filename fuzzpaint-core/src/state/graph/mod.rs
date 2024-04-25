@@ -20,8 +20,7 @@ pub enum LeafType {
     },
     SolidColor {
         blend: Blend,
-        // Crate-wide color type would be nice :O
-        source: [f32; 4],
+        source: crate::color::ColorOrPalette,
     },
     Text {
         blend: Blend,
@@ -537,16 +536,17 @@ impl Clone for BlendGraph {
     }
 }
 
-impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGraph {
+impl crate::commands::CommandConsumer<commands::Command> for BlendGraph {
     fn apply(
         &mut self,
-        command: crate::commands::DoUndo<'_, crate::commands::GraphCommand>,
+        command: crate::commands::DoUndo<'_, commands::Command>,
     ) -> Result<(), crate::commands::CommandError> {
-        use crate::commands::{CommandError, DoUndo, GraphCommand};
+        use crate::commands::{CommandError, DoUndo};
+        use commands::Command;
 
         match command {
-            DoUndo::Do(GraphCommand::BlendChanged { from, to, target })
-            | DoUndo::Undo(GraphCommand::BlendChanged {
+            DoUndo::Do(Command::BlendChanged { from, to, target })
+            | DoUndo::Undo(Command::BlendChanged {
                 to: from,
                 from: to,
                 target,
@@ -570,8 +570,8 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 *blend = *to;
                 Ok(())
             }
-            DoUndo::Do(GraphCommand::LeafTyChanged { target, old_ty, ty })
-            | DoUndo::Undo(GraphCommand::LeafTyChanged {
+            DoUndo::Do(Command::LeafTyChanged { target, old_ty, ty })
+            | DoUndo::Undo(Command::LeafTyChanged {
                 old_ty: ty,
                 ty: old_ty,
                 target,
@@ -587,8 +587,8 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 *node = ty.clone();
                 Ok(())
             }
-            DoUndo::Do(GraphCommand::NodeTyChanged { target, old_ty, ty })
-            | DoUndo::Undo(GraphCommand::NodeTyChanged {
+            DoUndo::Do(Command::NodeTyChanged { target, old_ty, ty })
+            | DoUndo::Undo(Command::NodeTyChanged {
                 old_ty: ty,
                 ty: old_ty,
                 target,
@@ -604,7 +604,7 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 *node = ty.clone();
                 Ok(())
             }
-            DoUndo::Do(GraphCommand::NodeCreated {
+            DoUndo::Do(Command::NodeCreated {
                 target,
                 ty,
                 child_idx: _, // FIXME!
@@ -624,7 +624,7 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 node.deleted = false;
                 Ok(())
             }
-            DoUndo::Undo(GraphCommand::NodeCreated {
+            DoUndo::Undo(Command::NodeCreated {
                 target,
                 ty,
                 child_idx: _, // FIXME!
@@ -642,7 +642,7 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 node.deleted = true;
                 Ok(())
             }
-            DoUndo::Do(GraphCommand::LeafCreated {
+            DoUndo::Do(Command::LeafCreated {
                 target,
                 ty,
                 child_idx: _, // FIXME!
@@ -662,7 +662,7 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 node.deleted = false;
                 Ok(())
             }
-            DoUndo::Undo(GraphCommand::LeafCreated {
+            DoUndo::Undo(Command::LeafCreated {
                 target,
                 ty,
                 child_idx: _, // FIXME!
@@ -680,14 +680,14 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 node.deleted = true;
                 Ok(())
             }
-            DoUndo::Do(GraphCommand::Reparent {
+            DoUndo::Do(Command::Reparent {
                 target,
                 new_parent,
                 new_child_idx,
                 old_parent,
                 old_child_idx: _, // FIXME!
             })
-            | DoUndo::Undo(GraphCommand::Reparent {
+            | DoUndo::Undo(Command::Reparent {
                 target,
                 old_parent: new_parent,
                 old_child_idx: new_child_idx,
@@ -743,7 +743,7 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                     Ok(()) => Ok(()),
                 }
             }
-            DoUndo::Do(GraphCommand::AnyDeleted { target }) => {
+            DoUndo::Do(Command::AnyDeleted { target }) => {
                 let Some(node) = self.get_mut(*target) else {
                     return Err(CommandError::UnknownResource);
                 };
@@ -754,7 +754,7 @@ impl crate::commands::CommandConsumer<crate::commands::GraphCommand> for BlendGr
                 node.deleted = true;
                 Ok(())
             }
-            DoUndo::Undo(GraphCommand::AnyDeleted { target }) => {
+            DoUndo::Undo(Command::AnyDeleted { target }) => {
                 let Some(node) = self.get_mut(*target) else {
                     return Err(CommandError::UnknownResource);
                 };

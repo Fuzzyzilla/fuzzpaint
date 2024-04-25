@@ -431,7 +431,8 @@ fn brush(
                     if is_eraser {
                         None
                     } else {
-                        Some(brush.color_modulate)
+                        // Todo: fetch if paletted.
+                        brush.color_modulate.get().left()
                     },
                 ),
                 brush_tip,
@@ -445,7 +446,7 @@ fn make_trail(
     stroke: &StrokeBuilder,
     min_size: f32,
     size_factor: f32,
-    color: Option<fuzzpaint_core::util::Color>,
+    color: Option<fuzzpaint_core::color::Color>,
 ) -> crate::gizmos::Gizmo {
     use crate::gizmos::{transform::Transform, Gizmo, MeshMode, TextureMode, Visual};
 

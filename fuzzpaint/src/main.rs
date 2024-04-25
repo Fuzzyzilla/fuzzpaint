@@ -5,6 +5,9 @@
 #![feature(new_uninit)]
 #![feature(float_next_up_down)]
 #![warn(clippy::pedantic)]
+// I know it's bad but while working on a focus it's not really something I wanna be bugged about
+// with a full screen of yellow lol.
+#![allow(clippy::too_many_lines)]
 
 use std::sync::Arc;
 mod egui_impl;

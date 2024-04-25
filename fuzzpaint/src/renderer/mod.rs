@@ -275,8 +275,15 @@ impl Renderer {
                             "Expected image to be created by allocate_prune_graph for {id:?}"
                         )
                     })?;
+                    let color = source.get().left_or_else(|p| {
+                        state
+                            .palette()
+                            .get(p)
+                            // Err, uh oh!
+                            .unwrap_or(fuzzpaint_core::color::Color::TRANSPARENT)
+                    });
                     // Fill image, store semaphore.
-                    fences.push(Self::render_color(context.as_ref(), image, *source)?);
+                    fences.push(Self::render_color(context.as_ref(), image, color)?);
                 }
                 // Render stroke image
                 Some(LeafType::StrokeLayer { collection, .. }) => {
@@ -288,13 +295,33 @@ impl Renderer {
                     let strokes = state.stroke_collections().get(*collection).ok_or_else(|| {
                         anyhow::anyhow!("Missing stroke collection {collection:?}")
                     })?;
-                    let strokes: Vec<_> = strokes.iter_active().collect();
+                    let strokes: Vec<_> = strokes
+                        .iter_active()
+                        .map(|stroke| {
+                            // Convert paletted color into concrete color.
+                            // THIS LOGIC SHOULD NOT BE HERE X3
+                            let color_modulate =
+                                stroke.brush.color_modulate.get().left_or_else(|idx| {
+                                    state
+                                        .palette()
+                                        .get(idx)
+                                        .unwrap_or(fuzzpaint_core::color::Color::BLACK)
+                                });
+                            fuzzpaint_core::state::stroke_collection::ImmutableStroke {
+                                brush: state::StrokeBrushSettings {
+                                    color_modulate: color_modulate.into(),
+                                    ..stroke.brush
+                                },
+                                ..*stroke
+                            }
+                        })
+                        .collect();
                     if strokes.is_empty() {
                         //FIXME: Renderer doesn't know how to handle zero strokes.
                         fences.push(Self::render_color(
                             context.as_ref(),
                             image,
-                            [0.0, 0.0, 0.0, 0.0],
+                            fuzzpaint_core::color::Color::TRANSPARENT,
                         )?);
                     } else {
                         renderer.draw(strokes.as_ref(), image, true)?;
@@ -370,7 +397,7 @@ impl Renderer {
     fn render_color(
         context: &crate::render_device::RenderContext,
         image: &RenderData,
-        color: [f32; 4],
+        color: fuzzpaint_core::color::Color,
     ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn GpuFuture>>> {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             context.allocators().command_buffer(),
@@ -380,7 +407,7 @@ impl Renderer {
             vk::CommandBufferUsage::OneTimeSubmit,
         )?;
         command_buffer.clear_color_image(vk::ClearColorImageInfo {
-            clear_value: color.into(),
+            clear_value: color.as_array().into(),
             regions: smallvec::smallvec![image.view.subresource_range().clone()],
             image_layout: vk::ImageLayout::General,
             ..vk::ClearColorImageInfo::image(image.image.clone())
@@ -893,7 +920,7 @@ mod stroke_renderer {
         }
         pub fn draw(
             &self,
-            strokes: &[&fuzzpaint_core::state::stroke_collection::ImmutableStroke],
+            strokes: &[fuzzpaint_core::state::stroke_collection::ImmutableStroke],
             renderbuf: &super::RenderData,
             clear: bool,
         ) -> AnyResult<()> {
@@ -908,7 +935,7 @@ mod stroke_renderer {
                 vk::BufferUsage::STORAGE_BUFFER,
                 vulkano::sync::Sharing::Exclusive,
             )?;
-            batch.batch(strokes.iter().map(|&&i| i), |batch| -> AnyResult<_> {
+            batch.batch(strokes.iter().copied(), |batch| -> AnyResult<_> {
                 let (future, vertices, indirects) = self.gpu_tess.tess_batch(batch, true)?;
 
                 let mut command_buffer = vk::AutoCommandBufferBuilder::primary(

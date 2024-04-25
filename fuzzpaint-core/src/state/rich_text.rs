@@ -12,10 +12,10 @@
 //! It is up to the editor to handle the fact that a single visually contiguous seleciton *can be up to three
 //! discontinuous spans* in a bidi context.
 
-use crate::util::{Color, FiniteF32};
+use crate::{color::ColorOrPalette, util::FiniteF32};
 
 pub struct FullProperties {
-    pub color: crate::util::Color,
+    pub color: ColorOrPalette,
     pub px_per_em: crate::util::FiniteF32,
     pub style: Style,
     pub face: Face,
@@ -41,7 +41,7 @@ pub struct Face {
     pub face: crate::repositories::fonts::VariedFaceID,
 }
 struct TextProperties {
-    color: rangemap::RangeMap<usize, Color>,
+    color: rangemap::RangeMap<usize, ColorOrPalette>,
     face: rangemap::RangeMap<usize, Face>,
     px_per_em: rangemap::RangeMap<usize, FiniteF32>,
     style: rangemap::RangeMap<usize, Style>,
@@ -123,7 +123,7 @@ impl TextProperties {
     fn set(
         &mut self,
         range: std::ops::Range<usize>,
-        color: Option<Color>,
+        color: Option<ColorOrPalette>,
         px_per_em: Option<FiniteF32>,
         face: Option<Face>,
         style: Option<Style>,
@@ -215,7 +215,7 @@ impl RichTextParagraph {
     pub fn set(
         &mut self,
         grapheme_range: impl std::ops::RangeBounds<usize>,
-        color: Option<Color>,
+        color: Option<ColorOrPalette>,
         px_per_em: Option<FiniteF32>,
         face: Option<Face>,
         style: Option<Style>,
@@ -281,7 +281,7 @@ pub struct RichTextSpan<'a> {
     pub span: &'a str,
     /// Post-context, if available. Not available at the end of a line or paragraph.
     pub post: Option<&'a str>,
-    pub color: Option<&'a Color>,
+    pub color: Option<&'a ColorOrPalette>,
     pub px_per_em: Option<&'a FiniteF32>,
     pub face: Option<&'a Face>,
     pub style: Option<&'a Style>,
@@ -309,7 +309,7 @@ pub struct RichTextParagraphSpans<'a> {
     /// Full text of the RichText
     text: &'a str,
     // A bunch of iters to deal with in parallel
-    color: Peekable<PropertyIter<'a, Color>>,
+    color: Peekable<PropertyIter<'a, ColorOrPalette>>,
     px_per_em: Peekable<PropertyIter<'a, FiniteF32>>,
     face: Peekable<PropertyIter<'a, Face>>,
     style: Peekable<PropertyIter<'a, Style>>,
@@ -412,6 +412,7 @@ impl<'a> Iterator for RichTextParagraphSpans<'a> {
 
 #[cfg(test)]
 mod test {
+    use crate::color::ColorOrPalette;
     #[test]
     fn iter_nostyles() {
         let rt = super::RichTextParagraph::new("Uwu!!".to_owned());
@@ -447,7 +448,7 @@ mod test {
     fn context() {
         let mut rt = super::RichTextParagraph::new("Wow".to_owned());
         // Setting the style of the "o" forces this into three spans:
-        rt.set(1..2, Some(super::Color::BLACK), None, None, None);
+        rt.set(1..2, Some(ColorOrPalette::BLACK), None, None, None);
 
         // Check each span has proper context:
         assert_eq!(
@@ -466,7 +467,7 @@ mod test {
                     pre: Some("W"),
                     span: "o",
                     post: Some("w"),
-                    color: Some(&super::Color::BLACK),
+                    color: Some(&ColorOrPalette::BLACK),
                     face: None,
                     px_per_em: None,
                     style: None,
@@ -488,11 +489,11 @@ mod test {
     #[test]
     fn overlapping_spans() {
         let mut rt = super::RichTextParagraph::new("0123456789".to_owned());
-        rt.set(1..5, Some(super::Color::BLACK), None, None, None);
+        rt.set(1..5, Some(ColorOrPalette::BLACK), None, None, None);
         // API aint great at time of writing lol
         rt.set(
             3..8,
-            Some(super::Color::BLACK),
+            Some(ColorOrPalette::BLACK),
             Some(super::FiniteF32::ONE),
             None,
             None,
@@ -519,7 +520,7 @@ mod test {
                     pre: Some("0"),
                     span: "12",
                     post: Some("3456789"),
-                    color: Some(&super::Color::BLACK),
+                    color: Some(&ColorOrPalette::BLACK),
                     face: None,
                     px_per_em: None,
                     style: None,
@@ -528,7 +529,7 @@ mod test {
                     pre: Some("012"),
                     span: "34",
                     post: Some("56789"),
-                    color: Some(&super::Color::BLACK),
+                    color: Some(&ColorOrPalette::BLACK),
                     face: None,
                     px_per_em: Some(&super::FiniteF32::ONE),
                     style: None,
