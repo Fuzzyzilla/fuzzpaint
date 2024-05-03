@@ -906,123 +906,158 @@ fn layer_buttons(
     writer: &mut queue::writer::CommandQueueWriter,
 ) {
     ui.horizontal(|ui| {
-        // Copied logic since we can't borrow test_graph_selection throughout this whole
-        // ui section
-        macro_rules! add_location {
-            () => {
-                match interface.graph_selection.as_ref() {
-                    Some(state::graph::AnyID::Node(id)) => {
-                        state::graph::Location::IndexIntoNode(id, 0)
-                    }
-                    Some(any) => state::graph::Location::AboveSelection(any),
-                    // No selection, add into the root of the viewed subree
-                    None => match interface.graph_focused_subtree.as_ref() {
-                        Some(root) => state::graph::Location::IndexIntoNode(root, 0),
-                        None => state::graph::Location::IndexIntoRoot(0),
-                    },
+        // Have a button for adding a layer of any type.
+        // Doing it with an enum in this way makes the lifetimes work (too many borrows if each button
+        // had the layer addition inline) and we obviously don't expect two of these to be triggered in one frame!
+        enum NewLayerType {
+            Stroke,
+            Text,
+            Fill,
+            Note,
+            Group,
+        }
+        let new_layer_button = egui::ComboBox::from_id_source("layer-add")
+            .selected_text(PLUS_ICON.to_string())
+            // Minimize size to fit around the icon.
+            .width(0.0)
+            .show_ui(ui, |ui| {
+                let mut selection = None;
+                if ui
+                    .add(egui::Button::new("Stroke Layer").shortcut_text(STROKE_LAYER_ICON))
+                    .clicked()
+                {
+                    selection = Some(NewLayerType::Stroke);
                 }
+                if ui
+                    .add_enabled(
+                        false,
+                        egui::Button::new("Text Layer").shortcut_text(TEXT_LAYER_ICON),
+                    )
+                    .clicked()
+                {
+                    selection = Some(NewLayerType::Text);
+                }
+                if ui
+                    .add(egui::Button::new("Fill Layer").shortcut_text(FILL_LAYER_ICON))
+                    .clicked()
+                {
+                    selection = Some(NewLayerType::Fill);
+                }
+                if ui
+                    .add(egui::Button::new("Note").shortcut_text(NOTE_LAYER_ICON))
+                    .clicked()
+                {
+                    selection = Some(NewLayerType::Note);
+                }
+                ui.separator();
+                if ui
+                    .add(egui::Button::new("Blend Group").shortcut_text(GROUP_ICON))
+                    .clicked()
+                {
+                    selection = Some(NewLayerType::Group);
+                }
+
+                selection
+            });
+
+        new_layer_button.response.on_hover_text("Add layer");
+
+        // Option<Option<...>>, but we only care when Some(Some(...))
+        let new_layer = new_layer_button.inner.flatten();
+
+        // Add the layer if one was requested.
+        if let Some(new_layer) = new_layer {
+            let addition_location = match interface.graph_selection.as_ref() {
+                // If a group is selected, we insert as the topmost child.
+                Some(state::graph::AnyID::Node(id)) => state::graph::Location::IndexIntoNode(id, 0),
+                // Otherwise, we insert as the sibling directly above selected.
+                Some(any) => state::graph::Location::AboveSelection(any),
+                // No selection, add into the root of the viewed subree
+                None => match interface.graph_focused_subtree.as_ref() {
+                    Some(root) => state::graph::Location::IndexIntoNode(root, 0),
+                    None => state::graph::Location::IndexIntoRoot(0),
+                },
             };
-        }
-
-        if ui
-            .button(STROKE_LAYER_ICON)
-            .on_hover_text("Add Stroke Layer")
-            .clicked()
-        {
-            let new_stroke_collection = writer.stroke_collections().insert();
-            interface.graph_selection = writer
-                .graph()
-                .add_leaf(
-                    state::graph::LeafType::StrokeLayer {
-                        blend: Blend::default(),
-                        collection: new_stroke_collection,
-                    },
-                    add_location!(),
-                    "Stroke Layer".to_string(),
-                )
-                .ok()
-                .map(Into::into);
-        }
-        // Borrow graph for the rest of the time.
-        let mut graph = writer.graph();
-        if ui
-            .add_enabled(false, egui::Button::new(TEXT_LAYER_ICON))
-            .on_hover_text("Add Text Layer")
-            .clicked()
-        {
-            interface.graph_selection = graph
-                .add_leaf(
-                    state::graph::LeafType::Text {
-                        blend: Blend::default(),
-                        text: "Hello, world!".to_owned(),
-                        px_per_em: 50.0,
-                    },
-                    add_location!(),
-                    "Text".to_string(),
-                )
-                .ok()
-                .map(Into::into);
-        }
-        if ui
-            .button(FILL_LAYER_ICON)
-            .on_hover_text("Add Fill Layer")
-            .clicked()
-        {
-            interface.graph_selection = graph
-                .add_leaf(
-                    state::graph::LeafType::SolidColor {
-                        blend: Blend::default(),
-                        source: fcolor::ColorOrPalette::WHITE,
-                    },
-                    add_location!(),
-                    "Fill".to_string(),
-                )
-                .ok()
-                .map(Into::into);
-        }
-        if ui
-            .button(NOTE_LAYER_ICON)
-            .on_hover_text("Add Note")
-            .clicked()
-        {
-            interface.graph_selection = graph
-                .add_leaf(
-                    state::graph::LeafType::Note,
-                    add_location!(),
-                    "Note".to_string(),
-                )
-                .ok()
-                .map(Into::into);
-        }
-
-        ui.add(egui::Separator::default().vertical());
-
-        if ui.button(GROUP_ICON).on_hover_text("Add Group").clicked() {
-            interface.graph_selection = graph
-                .add_node(
-                    state::graph::NodeType::Passthrough,
-                    add_location!(),
-                    "Group Layer".to_string(),
-                )
-                .ok()
-                .map(Into::into);
+            interface.graph_selection = match new_layer {
+                NewLayerType::Stroke => {
+                    let new_stroke_collection = writer.stroke_collections().insert();
+                    writer
+                        .graph()
+                        .add_leaf(
+                            state::graph::LeafType::StrokeLayer {
+                                blend: Blend::default(),
+                                collection: new_stroke_collection,
+                            },
+                            addition_location,
+                            "Stroke Layer".to_string(),
+                        )
+                        .ok()
+                        .map(Into::into)
+                }
+                NewLayerType::Fill => writer
+                    .graph()
+                    .add_leaf(
+                        state::graph::LeafType::SolidColor {
+                            blend: Blend::default(),
+                            source: fcolor::ColorOrPalette::WHITE,
+                        },
+                        addition_location,
+                        "Fill".to_string(),
+                    )
+                    .ok()
+                    .map(Into::into),
+                NewLayerType::Text => writer
+                    .graph()
+                    .add_leaf(
+                        state::graph::LeafType::Text {
+                            blend: Blend::default(),
+                            text: "Hello, world!".to_owned(),
+                            px_per_em: 50.0,
+                        },
+                        addition_location,
+                        "Text".to_string(),
+                    )
+                    .ok()
+                    .map(Into::into),
+                NewLayerType::Note => writer
+                    .graph()
+                    .add_leaf(
+                        state::graph::LeafType::Note,
+                        addition_location,
+                        "Note".to_string(),
+                    )
+                    .ok()
+                    .map(Into::into),
+                NewLayerType::Group => writer
+                    .graph()
+                    .add_node(
+                        state::graph::NodeType::GroupedBlend(Blend::default()),
+                        addition_location,
+                        "Group".to_string(),
+                    )
+                    .ok()
+                    .map(Into::into),
+            };
         };
+
+        let mut graph = writer.graph();
 
         ui.add(egui::Separator::default().vertical());
 
         let merge_button = egui::Button::new("⤵");
-        ui.add_enabled(false, merge_button);
+        ui.add_enabled(false, merge_button)
+            .on_hover_text("Merge down");
 
-        let delete_button = egui::Button::new("✖");
-        if let Some(selection) = interface.graph_selection {
-            if ui.add_enabled(true, delete_button).clicked() {
-                // Explicitly ignore error.
-                let _ = graph.delete(selection);
-                interface.graph_selection = None;
-            }
-        } else {
-            ui.add_enabled(false, delete_button);
-        }
+        if ui
+            .add_enabled(interface.graph_selection.is_some(), egui::Button::new("✖"))
+            .on_hover_text("Delete layer")
+            .clicked()
+        {
+            // Explicitly ignore error.
+            let _ = graph.delete(interface.graph_selection.unwrap());
+            interface.graph_selection = None;
+        };
+
         if let Some(yanked) = interface.yanked_node {
             // Display an insert button
             if ui
@@ -1031,7 +1066,23 @@ fn layer_buttons(
                 .clicked()
             {
                 // Explicitly ignore error. There are many invalid options, in that case do nothing!
-                let _ = graph.reparent(yanked, add_location!());
+                let _ = graph.reparent(
+                    yanked,
+                    // Place using same logic as new layer.
+                    match interface.graph_selection.as_ref() {
+                        // If a group is selected, we insert as the topmost child.
+                        Some(state::graph::AnyID::Node(id)) => {
+                            state::graph::Location::IndexIntoNode(id, 0)
+                        }
+                        // Otherwise, we insert as the sibling directly above selected.
+                        Some(any) => state::graph::Location::AboveSelection(any),
+                        // No selection, add into the root of the viewed subree
+                        None => match interface.graph_focused_subtree.as_ref() {
+                            Some(root) => state::graph::Location::IndexIntoNode(root, 0),
+                            None => state::graph::Location::IndexIntoRoot(0),
+                        },
+                    },
+                );
                 interface.yanked_node = None;
             }
         } else {
