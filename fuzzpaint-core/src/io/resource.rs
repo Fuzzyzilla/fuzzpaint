@@ -133,6 +133,16 @@ fn read_node<R: Read>(common_prefix: Option<u8>, mut r: R) -> IOResult<Node> {
     Ok(node)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum FetchError {
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+    #[error("id not found in file")]
+    NotFound,
+    #[error("invalid file header")]
+    BadMagic,
+}
+
 /// Find a resource from the given reader. Returns a [`MyTake`] over the resource's data, or `Ok(Err(r))` if the
 /// resource is not contained.
 /// Does not assume the reader starts at position 0 - a resource tree inside another stream is accounted for.
@@ -144,11 +154,11 @@ pub fn fetch<R: Read + SoftSeek>(
     resource: UniqueID,
     common_prefix: bool,
     mut r: R,
-) -> IOResult<Result<MyTake<R>, R>> {
+) -> Result<MyTake<R>, FetchError> {
     let mut tree_depth: u8 = 0;
 
     if tree_depth & 0b1100_0000 != 0 {
-        unimplemented!("reserved flags");
+        return Err(FetchError::BadMagic);
     }
     r.read_exact(std::slice::from_mut(&mut tree_depth))?;
 
@@ -170,7 +180,7 @@ pub fn fetch<R: Read + SoftSeek>(
     // "X-position" of current read, from left-to-right on current level.
     // On every new level, this doubles and increases by zero (for left) or one (for right)
     let mut current_x = 0u64;
-    'bail: for current_depth in 0..tree_depth {
+    for current_depth in 0..tree_depth {
         // We can assume we're at the right place to read the relavent node.
         // (starts at node 0, and the row-advance logic below seeks to next relavent node).
         let node = read_node(common_prefix, &mut r)?;
@@ -183,7 +193,7 @@ pub fn fetch<R: Read + SoftSeek>(
                 // Found it~!
                 // Special case: zero-len resource. Offset may be bogus.
                 if node.len_offset.len() == 0 {
-                    return Ok(Ok(MyTake::new(r, 0)));
+                    return Ok(MyTake::new(r, 0));
                 }
 
                 // Where are we going? `offset` is from end-of-tree
@@ -200,7 +210,7 @@ pub fn fetch<R: Read + SoftSeek>(
                 r.soft_seek(i64::try_from(forward_by).unwrap())?;
 
                 // Woohoo!
-                return Ok(Ok(MyTake::new(r, node.len_offset.len())));
+                return Ok(MyTake::new(r, node.len_offset.len()));
             }
             std::cmp::Ordering::Greater => {
                 // Go right..
@@ -209,7 +219,7 @@ pub fn fetch<R: Read + SoftSeek>(
                     current_x = current_x * 2 + 1;
                 } else {
                     // No nodes to the right, fail!
-                    break 'bail;
+                    return Err(FetchError::NotFound);
                 }
             }
             std::cmp::Ordering::Less => {
@@ -218,7 +228,7 @@ pub fn fetch<R: Read + SoftSeek>(
                     current_x *= 2;
                 } else {
                     // No nodes to the left, fail!
-                    break 'bail;
+                    return Err(FetchError::NotFound);
                 }
             }
         };
@@ -231,7 +241,7 @@ pub fn fetch<R: Read + SoftSeek>(
     }
 
     // Fell through, not found :<
-    Ok(Err(r))
+    Err(FetchError::NotFound)
 }
 
 /// Enumerate all resources in the given stream. Order of read objects is arbitrary.
@@ -560,7 +570,7 @@ impl<W: Write + SoftSeek> CachedUpdater<W> {
 mod test {
     use std::io::Read;
 
-    use super::{enumerate, fetch, UniqueID};
+    use super::{enumerate, fetch, FetchError, UniqueID};
 
     // A buncha hand-written binary files for testing lol
     /// Resource with two data values. See [`smol_load`] for contents.
@@ -602,16 +612,14 @@ mod test {
     fn smol_load() {
         let read = std::io::Cursor::new(SMOL_RESOURCE);
         // Item with consecutive values as it's id maps to the data "owo"
-        let mut result = fetch(CONSECUTIVE_ID, false, read.clone()).unwrap().unwrap();
+        let mut result = fetch(CONSECUTIVE_ID, false, read.clone()).unwrap();
 
         let mut str = String::new();
         result.read_to_string(&mut str).unwrap();
         assert_eq!(str, "owo");
 
         // Item with 0s as it's id maps to the data "uwu"
-        let mut result = fetch(UniqueID([0; 32]), false, read.clone())
-            .unwrap()
-            .unwrap();
+        let mut result = fetch(UniqueID([0; 32]), false, read.clone()).unwrap();
 
         let mut str = String::new();
         result.read_to_string(&mut str).unwrap();
@@ -619,9 +627,10 @@ mod test {
 
         // This item does not exist, but points to an empty node - tests that
         // left-right flags work.
-        assert!(fetch(UniqueID([0xff; 32]), false, read.clone())
-            .unwrap()
-            .is_err());
+        assert!(matches!(
+            fetch(UniqueID([0xff; 32]), false, read.clone()).err(),
+            Some(FetchError::NotFound),
+        ));
     }
 
     /// List resources on a file with large IDs
@@ -687,7 +696,7 @@ mod test {
             let mut id = UniqueID([0; 32]);
             id.0[0] = low_byte;
 
-            let mut r = fetch(id, false, read.clone()).unwrap().unwrap();
+            let mut r = fetch(id, false, read.clone()).unwrap();
 
             // All resources have one byte - their own ID's first byte.
             // Try to read an extra, too (to make sure it fails!)

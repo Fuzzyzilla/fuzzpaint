@@ -1,29 +1,27 @@
 //! # Brushes and Brush textures
 
-use crate::brush::{self, UniqueID};
+use crate::brush::{self, UniqueID, UniqueIDMap};
 
 /// Metadata about *this installation* of a brush/texture resource.
 pub struct RetainedMetadata {
     /// A name the user has given this resource, over it's original name.
-    user_alias: Option<String>,
+    pub user_alias: Option<String>,
     /// The time the resource was last read or written. Defaults to `installed.`
-    last_accessed: chrono::DateTime<chrono::offset::Utc>,
+    pub last_accessed: chrono::DateTime<chrono::offset::Utc>,
     /// The time the resource was last explicitly used by the user.
-    last_used: Option<chrono::DateTime<chrono::offset::Utc>>,
+    pub last_used: Option<chrono::DateTime<chrono::offset::Utc>>,
     /// The time that the resource was interned.
-    installed: chrono::DateTime<chrono::offset::Utc>,
+    pub installed: chrono::DateTime<chrono::offset::Utc>,
 }
 
 /// A collection of brushes. This is because the brush retention system has several layers -
 /// temporary imports from opened files that the user *doesn't* want to retain to disk,
 /// work-in-progress ones (created in an unsaved doc), main library from disk...
-///
 #[derive(Default)]
 struct BrushSet {
-    // These ought to use a custom hasher which just truncates the UniqueID to 64 bit. The key is already
-    // a high-quality hash, to hash it again will make the quality *worse* in all likelihood :P
-    brushes: std::collections::HashMap<UniqueID, ()>,
-    textures: std::collections::HashMap<UniqueID, ()>,
+    // Since the key is a high quality hash already, use a custom no-op hasher.
+    brushes: UniqueIDMap<RetainedMetadata>,
+    textures: UniqueIDMap<&'static [u8]>,
 }
 
 #[derive(Default)]
@@ -31,7 +29,26 @@ pub struct Brushes {
     primary: BrushSet,
 }
 impl Brushes {
-    pub fn new() -> Self {
+    #[must_use]
+    pub fn empty() -> Self {
         Self::default()
+    }
+    #[must_use]
+    pub fn new() -> Self {
+        const DEFAULT: &[u8] =
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/default/circle.png"));
+
+        // Single threaded- this should not be in the lib, it should be in the client where threading is possible.
+        // this is just placeholder.
+        let id = blake3::hash(DEFAULT);
+
+        let mut this = Self::empty();
+        this.primary.textures.insert(id.into(), DEFAULT);
+
+        this
+    }
+    #[must_use]
+    pub fn iter_textures(&self) -> std::collections::hash_map::Iter<'_, UniqueID, &'static [u8]> {
+        self.primary.textures.iter()
     }
 }
