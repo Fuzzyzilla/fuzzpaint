@@ -161,7 +161,8 @@ impl MainUI {
     }
     /// Main UI and any modals, with the top bar, layers, brushes, color, etc. To be displayed in front of the document and it's gizmos.
     /// Returns the size of the document's viewport space - that is, the size of the rect not covered by any side/top/bottom panels.
-    pub fn ui(&mut self, ctx: &egui::Context) -> (ultraviolet::Vec2, ultraviolet::Vec2) {
+    /// None if a full-screen menu is shown.
+    pub fn ui(&mut self, ctx: &egui::Context) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
         // Display modals before main. Egui will place the windows without regard for free area.
         self.do_modal(ctx);
 
@@ -263,18 +264,18 @@ impl MainUI {
         &mut self,
         ctx: &egui::Context,
         enabled: bool,
-    ) -> (ultraviolet::Vec2, ultraviolet::Vec2) {
+    ) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
         let Ok(action_frame) = self.action_listener.frame() else {
             let viewport = ctx.available_rect();
             let pos = viewport.left_top();
             let size = viewport.size();
-            return (
+            return Some((
                 ultraviolet::Vec2 { x: pos.x, y: pos.y },
                 ultraviolet::Vec2 {
                     x: size.x,
                     y: size.y,
                 },
-            );
+            ));
         };
         let interface = self.get_cur_interface().cloned();
 
@@ -294,6 +295,9 @@ impl MainUI {
                 });
             }
             self.welcome_screen(ctx);
+
+            // When the welcome screen is shown, there is no space for the document view.
+            None
         } else {
             egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
                 ui.set_enabled(enabled);
@@ -341,18 +345,18 @@ impl MainUI {
                 ui.set_enabled(enabled);
                 self.document_bar(ui);
             });
-        }
 
-        let viewport = ctx.available_rect();
-        let pos = viewport.left_top();
-        let size = viewport.size();
-        (
-            ultraviolet::Vec2 { x: pos.x, y: pos.y },
-            ultraviolet::Vec2 {
-                x: size.x,
-                y: size.y,
-            },
-        )
+            let viewport = ctx.available_rect();
+            let pos = viewport.left_top();
+            let size = viewport.size();
+            Some((
+                ultraviolet::Vec2 { x: pos.x, y: pos.y },
+                ultraviolet::Vec2 {
+                    x: size.x,
+                    y: size.y,
+                },
+            ))
+        }
     }
     /// File, Edit, ect
     fn menu_bar(&mut self, ui: &mut Ui) {
