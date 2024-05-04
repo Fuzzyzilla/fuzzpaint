@@ -25,6 +25,7 @@ const SCISSOR_ICON: &str = "✂";
 const PLUS_ICON: char = '➕';
 const PALETTE_ICON: char = '🎨';
 const HISTORY_ICON: char = '🕒';
+const HOME_ICON: char = '🏠';
 const PIN_ICON: char = '📌';
 
 /// Justify `(available_size, size, margin)` -> `(size', margin')`, such that `count` elements
@@ -147,9 +148,7 @@ impl MainUI {
             documents,
             cur_document,
 
-            modal: Some(CurrentModal::BrushCreation(
-                brush_ui::CreationModal::default(),
-            )),
+            modal: None,
 
             requests_send,
             requests_recv,
@@ -208,6 +207,57 @@ impl MainUI {
             self.modal = None;
         }
     }
+    fn new_document(&mut self) {
+        let new_doc = queue::DocumentCommandQueue::new();
+        let new_id = new_doc.id();
+        // Can't fail
+        let _ = crate::global::provider().insert(new_doc);
+        let interface = PerDocumentData {
+            id: new_id,
+            graph_focused_subtree: None,
+            graph_selection: None,
+            yanked_node: None,
+            name: "Unknown".into(),
+        };
+        let _ = self.requests_send.send(requests::UiRequest::Document {
+            target: new_id,
+            request: requests::DocumentRequest::Opened,
+        });
+        self.cur_document = Some(new_id);
+        self.documents.push(interface);
+    }
+    fn open_documents(&mut self) {
+        // Synchronous and bad just for now.
+        if let Some(files) = rfd::FileDialog::new().pick_files() {
+            let point_repository = crate::global::points();
+            let provider = crate::global::provider();
+
+            // Keep track of the last successful loaded id
+            let mut recent_success = None;
+            for file in files {
+                match io::read_path(file, point_repository) {
+                    Ok(doc) => {
+                        let id = doc.id();
+                        if provider.insert(doc).is_ok() {
+                            recent_success = Some(id);
+                            self.documents.push(PerDocumentData {
+                                id,
+                                graph_focused_subtree: None,
+                                graph_selection: None,
+                                yanked_node: None,
+                                name: "Unknown".into(),
+                            });
+                        }
+                    }
+                    Err(e) => log::error!("Failed to load: {e:#}"),
+                }
+            }
+            // Select last one, if any succeeded.
+            if let Some(new_doc) = recent_success {
+                self.cur_document = Some(new_doc);
+            }
+        }
+    }
     /// Render just self. Modals and insets handled separately.
     fn main_ui(
         &mut self,
@@ -230,56 +280,68 @@ impl MainUI {
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             ui.set_enabled(enabled);
-            self.menu_bar(ui)
-        });
-        egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
-            ui.set_enabled(enabled);
-            if let Some(interface) = interface {
-                Self::nav_bar(ui, interface.id, &self.requests_send, &action_frame);
-            }
+            self.menu_bar(ui);
         });
 
-        egui::SidePanel::right("layers").show(ctx, |ui| {
-            ui.set_enabled(enabled);
-            ui.label("Layers");
-            ui.separator();
-            if let Some(interface) = self.get_cur_interface() {
-                layers_panel(ui, interface);
-
-                // Update selections.
-                let mut globals = crate::AdHocGlobals::get().write();
-                let old_brush = globals.take().map(|globals| globals.brush);
-                *globals = Some(crate::AdHocGlobals {
-                    document: interface.id,
-                    brush: old_brush.unwrap_or(state::StrokeBrushSettings {
-                        is_eraser: false,
-                        brush: fuzzpaint_core::brush::default_brush(),
-                        color_modulate: fcolor::ColorOrPalette::BLACK,
-                        size_mul: FiniteF32::new(10.0).unwrap(),
-                        spacing_px: FiniteF32::new(0.5).unwrap(),
-                    }),
-                    node: interface.graph_selection,
+        // If there's a document, show relavent tool panels. Otherwise,
+        // show a big splash screen.
+        if self.cur_document.is_none() {
+            // Don't show the bar if it has nothing to say!
+            if !self.documents.is_empty() {
+                egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
+                    ui.set_enabled(enabled);
+                    self.document_bar(ui);
                 });
             }
-        });
-
-        egui::SidePanel::left("inspector")
-            .resizable(true)
-            .show(ctx, |ui| {
+            self.welcome_screen(ctx);
+        } else {
+            egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
                 ui.set_enabled(enabled);
-                // Stats at bottom
-                egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
-                // Toolbox above that
-                egui::TopBottomPanel::bottom("tools-panel")
-                    .show_inside(ui, |ui| tools_panel(ui, &action_frame, &self.requests_send));
-                // Brush panel takes the rest
-                self.colors_panel(ui, self.cur_document, &action_frame);
+                if let Some(interface) = interface {
+                    Self::nav_bar(ui, interface.id, &self.requests_send, &action_frame);
+                }
+            });
+            egui::SidePanel::right("layers").show(ctx, |ui| {
+                ui.set_enabled(enabled);
+                ui.label("Layers");
+                ui.separator();
+                if let Some(interface) = self.get_cur_interface() {
+                    layers_panel(ui, interface);
+
+                    // Update selections.
+                    let mut globals = crate::AdHocGlobals::get().write();
+                    let old_brush = globals.take().map(|globals| globals.brush);
+                    *globals = Some(crate::AdHocGlobals {
+                        document: interface.id,
+                        brush: old_brush.unwrap_or(state::StrokeBrushSettings {
+                            is_eraser: false,
+                            brush: fuzzpaint_core::brush::default_brush(),
+                            color_modulate: fcolor::ColorOrPalette::BLACK,
+                            size_mul: FiniteF32::new(10.0).unwrap(),
+                            spacing_px: FiniteF32::new(0.5).unwrap(),
+                        }),
+                        node: interface.graph_selection,
+                    });
+                }
             });
 
-        egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
-            ui.set_enabled(enabled);
-            self.document_bar(ui)
-        });
+            egui::SidePanel::left("inspector")
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.set_enabled(enabled);
+                    // Stats at bottom
+                    egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
+                    // Toolbox above that
+                    egui::TopBottomPanel::bottom("tools-panel")
+                        .show_inside(ui, |ui| tools_panel(ui, &action_frame, &self.requests_send));
+                    // Brush panel takes the rest
+                    self.colors_panel(ui, self.cur_document, &action_frame);
+                });
+            egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
+                ui.set_enabled(enabled);
+                self.document_bar(ui);
+            });
+        }
 
         let viewport = ctx.available_rect();
         let pos = viewport.left_top();
@@ -307,23 +369,7 @@ impl MainUI {
                         ui.add(button)
                     };
                     if add_button(ui, "New", Some("Ctrl+N")).clicked() {
-                        let new_doc = queue::DocumentCommandQueue::new();
-                        let new_id = new_doc.id();
-                        // Can't fail
-                        let _ = crate::global::provider().insert(new_doc);
-                        let interface = PerDocumentData {
-                            id: new_id,
-                            graph_focused_subtree: None,
-                            graph_selection: None,
-                            yanked_node: None,
-                            name: "Unknown".into(),
-                        };
-                        let _ = self.requests_send.send(requests::UiRequest::Document {
-                            target: new_id,
-                            request: requests::DocumentRequest::Opened,
-                        });
-                        self.cur_document = Some(new_id);
-                        self.documents.push(interface);
+                        self.new_document();
                     };
                     if add_button(ui, "Save", Some("Ctrl+S")).clicked() {
                         // Dirty testing implementation!
@@ -368,41 +414,50 @@ impl MainUI {
                             });
                         }
                     }
-                    let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
+                    // let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
                     if add_button(ui, "Open", Some("Ctrl+O")).clicked() {
-                        // Synchronous and bad just for testing.
-                        if let Some(files) = rfd::FileDialog::new().pick_files() {
-                            let point_repository = crate::global::points();
-                            let provider = crate::global::provider();
-
-                            // Keep track of the last successful loaded id
-                            let mut recent_success = None;
-                            for file in files {
-                                match io::read_path(file, point_repository) {
-                                    Ok(doc) => {
-                                        let id = doc.id();
-                                        if provider.insert(doc).is_ok() {
-                                            recent_success = Some(id);
-                                            self.documents.push(PerDocumentData {
-                                                id,
-                                                graph_focused_subtree: None,
-                                                graph_selection: None,
-                                                yanked_node: None,
-                                                name: "Unknown".into(),
-                                            });
-                                        }
-                                    }
-                                    Err(e) => log::error!("Failed to load: {e:#}"),
-                                }
-                            }
-                            // Select last one, if any succeeded.
-                            if let Some(new_doc) = recent_success {
-                                self.cur_document = Some(new_doc);
-                            }
-                        }
+                        self.open_documents();
                     }
-                    let _ = add_button(ui, "Open as new", None);
-                    let _ = add_button(ui, "Export", None);
+                    //let _ = add_button(ui, "Open as new", None);
+                    //let _ = add_button(ui, "Export", None);
+                });
+            });
+        });
+    }
+    /// Show a center welcome/"home" panel when no document is selected.
+    fn welcome_screen(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered_justified(|ui| {
+                ui.label(
+                    RichText::new("🐑 Fuzzpaint").heading().size(
+                        // Use double-size heading.
+                        ui.style()
+                            .text_styles
+                            .get(&egui::TextStyle::Heading)
+                            .unwrap()
+                            .size
+                            * 2.5,
+                    ),
+                );
+
+                // Show big buttons for new and open.
+                let (size, _margin) = justify(ui.available_width(), 100.0, 10.0);
+                // Ensure they don't get *too* silly.
+                let size = size.min(ui.available_height() * 0.9);
+
+                ui.vertical_centered(|ui| {
+                    let big_button = |ui: &mut egui::Ui, name: &str| -> egui::Response {
+                        let button = egui::Button::new(name).min_size([size; 2].into());
+
+                        ui.add(button)
+                    };
+
+                    if big_button(ui, "➕ New").clicked() {
+                        self.new_document();
+                    }
+                    if big_button(ui, "🗀 Open").clicked() {
+                        self.open_documents();
+                    }
                 });
             });
         });
@@ -411,6 +466,17 @@ impl MainUI {
     fn document_bar(&mut self, ui: &mut Ui) {
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal(|ui| {
+                // if there is a selected doc, show a home button to get back to
+                // welcome screen. If there isn't, it shows anyway, so no need!
+                if self.cur_document.is_some()
+                    && ui
+                        .add(egui::Button::new(HOME_ICON.to_string()).frame(false))
+                        .on_hover_text("Return to welcome screen")
+                        .clicked()
+                {
+                    self.cur_document = None;
+                }
+                // Then show, a clicakble header for each document.
                 let mut deleted_ids = smallvec::SmallVec::<[state::DocumentID; 1]>::new();
                 for PerDocumentData { id, name, .. } in &self.documents {
                     egui::containers::Frame::group(ui.style())
@@ -419,7 +485,7 @@ impl MainUI {
                         .multiply_with_opacity(if self.cur_document == Some(*id) {
                             1.0
                         } else {
-                            0.0
+                            0.5
                         })
                         .rounding(egui::Rounding {
                             ne: 2.0,
@@ -428,7 +494,10 @@ impl MainUI {
                         })
                         .show(ui, |ui| {
                             ui.selectable_value(&mut self.cur_document, Some(*id), name);
-                            if ui.small_button("✖").clicked() {
+                            if ui
+                                .add(egui::Button::new("✖").small().frame(false))
+                                .clicked()
+                            {
                                 deleted_ids.push(*id);
                                 //Disselect if deleted.
                                 if self.cur_document == Some(*id) {
@@ -443,6 +512,13 @@ impl MainUI {
                 }
                 self.documents
                     .retain(|interface| !deleted_ids.contains(&interface.id));
+                // Finally, show an add button.
+                if ui
+                    .add(egui::Button::new(PLUS_ICON.to_string()).frame(false))
+                    .clicked()
+                {
+                    self.new_document();
+                }
             });
         });
     }
@@ -923,6 +999,8 @@ fn layer_buttons(
             .show_ui(ui, |ui| {
                 let mut selection = None;
                 if ui
+                    // A bit of an abuse of shortcut text. Screenreaders hate her!
+                    // Unsure of how to better achieve the effect...
                     .add(egui::Button::new("Stroke Layer").shortcut_text(STROKE_LAYER_ICON))
                     .clicked()
                 {
