@@ -209,16 +209,64 @@ impl MainUI {
         }
     }
     fn new_document(&mut self) {
-        let new_doc = queue::DocumentCommandQueue::new();
+        // When making a new document, start out with a white bg and stroke layer.
+        // (These additions are not included in the history, but that's Okay!)
+        let mut graph = fuzzpaint_core::state::graph::BlendGraph::default();
+        let _ = graph.add_leaf(
+            state::graph::Location::IndexIntoRoot(0),
+            "Background".to_owned(),
+            state::graph::LeafType::SolidColor {
+                blend: Blend::default(),
+                source: fuzzpaint_core::color::ColorOrPalette::WHITE,
+            },
+        );
+
+        let mut stroke_collection =
+            fuzzpaint_core::state::stroke_collection::StrokeCollectionState::default();
+        let new_collection = crate::FuzzID::default();
+        stroke_collection.0.insert(
+            new_collection,
+            state::stroke_collection::StrokeCollection::default(),
+        );
+
+        // Insert the stroke layer we just allocated a collection for.
+        let stroke_layer = graph
+            .add_leaf(
+                state::graph::Location::IndexIntoRoot(0),
+                "Stroke Layer".to_owned(),
+                state::graph::LeafType::StrokeLayer {
+                    blend: Blend::default(),
+                    collection: new_collection,
+                },
+            )
+            .ok();
+        if stroke_layer.is_none() {
+            // Uh oh, failed to make that layer. Remove the collection to not leave it orphaned.
+            stroke_collection.0.clear();
+        }
+
+        let name = "New Document".to_owned();
+
+        // Give this state to a queue
+        let new_doc = queue::DocumentCommandQueue::from_state(
+            state::Document {
+                path: None,
+                name: name.clone(),
+            },
+            graph,
+            stroke_collection,
+            fuzzpaint_core::state::palette::Palette::default(),
+        );
+
         let new_id = new_doc.id();
-        // Can't fail
+        // Can't fail, this is a newly allocated ID so it's unqieu
         let _ = crate::global::provider().insert(new_doc);
         let interface = PerDocumentData {
             id: new_id,
             graph_focused_subtree: None,
-            graph_selection: None,
+            graph_selection: stroke_layer.map(Into::into),
             yanked_node: None,
-            name: "Unknown".into(),
+            name,
         };
         let _ = self.requests_send.send(requests::UiRequest::Document {
             target: new_id,
@@ -483,10 +531,11 @@ impl MainUI {
                 // Then show, a clicakble header for each document.
                 let mut deleted_ids = smallvec::SmallVec::<[state::DocumentID; 1]>::new();
                 for PerDocumentData { id, name, .. } in &self.documents {
+                    let id = *id;
                     egui::containers::Frame::group(ui.style())
                         .outer_margin(egui::Margin::symmetric(0.0, 0.0))
                         .inner_margin(egui::Margin::symmetric(0.0, 0.0))
-                        .multiply_with_opacity(if self.cur_document == Some(*id) {
+                        .multiply_with_opacity(if self.cur_document == Some(id) {
                             1.0
                         } else {
                             0.5
@@ -497,14 +546,17 @@ impl MainUI {
                             ..0.0.into()
                         })
                         .show(ui, |ui| {
-                            ui.selectable_value(&mut self.cur_document, Some(*id), name);
+                            let middle_click_delete = ui
+                                .selectable_value(&mut self.cur_document, Some(id), name)
+                                .clicked_by(egui::PointerButton::Middle);
                             if ui
                                 .add(egui::Button::new("✖").small().frame(false))
                                 .clicked()
+                                || middle_click_delete
                             {
-                                deleted_ids.push(*id);
-                                //Disselect if deleted.
-                                if self.cur_document == Some(*id) {
+                                deleted_ids.push(id);
+                                //Disselect if deleted. This is poor behavior, it should have some sort of recent-ness stack!
+                                if self.cur_document == Some(id) {
                                     self.cur_document = None;
                                 }
                             }
