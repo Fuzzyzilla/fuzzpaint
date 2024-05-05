@@ -27,6 +27,7 @@ const PALETTE_ICON: char = '🎨';
 const HISTORY_ICON: char = '🕒';
 const HOME_ICON: char = '🏠';
 const PIN_ICON: char = '📌';
+const ALPHA_ICON: &str = "α";
 
 /// Justify `(available_size, size, margin)` -> `(size', margin')`, such that `count` elements
 /// will fill available space completely.
@@ -743,23 +744,21 @@ impl MainUI {
 
                         let mut color_modulate = brush.color_modulate;
 
+                        let palette_ui =
+                            color_palette::ColorPalette::new(&mut color_modulate, &mut palette)
+                                .scope(color_palette::HistoryScope::Local)
+                                .in_flux(self.picker_in_flux)
+                                .id_source(current_doc)
+                                .swap(
+                                    // Swap top colors if requested.
+                                    actions.action_trigger_count(crate::actions::Action::ColorSwap)
+                                        % 2
+                                        == 1,
+                                )
+                                .max_history(64);
+
                         // Small buttons with color history, pins, and palettes.
-                        let _color_changed = ui
-                            .add(
-                                color_palette::ColorPalette::new(&mut color_modulate, &mut palette)
-                                    .scope(color_palette::HistoryScope::Local)
-                                    .in_flux(self.picker_in_flux)
-                                    .id_source(current_doc)
-                                    .swap(
-                                        // Swap top colors if requested.
-                                        actions.action_trigger_count(
-                                            crate::actions::Action::ColorSwap,
-                                        ) % 2
-                                            == 1,
-                                    )
-                                    .max_history(64),
-                            )
-                            .changed();
+                        let _update_picker = ui.add(palette_ui).changed();
 
                         // Todo: set the picker if the brush was changed by the palette UI.
                         // There's a really weird lifetime issue though where seemingly both mutable borrows above
@@ -1441,7 +1440,7 @@ fn ui_layer_blend(
             finished |= ui
                 .toggle_value(
                     &mut blend.alpha_clip,
-                    egui::RichText::new("α").monospace().strong(),
+                    egui::RichText::new(ALPHA_ICON).monospace().strong(),
                 )
                 .on_hover_text("Alpha clip")
                 .clicked();
@@ -1492,7 +1491,7 @@ fn ui_passthrough_or_blend(
                 changed |= ui
                     .toggle_value(
                         &mut blend.alpha_clip,
-                        egui::RichText::new("α").monospace().strong(),
+                        egui::RichText::new(ALPHA_ICON).monospace().strong(),
                     )
                     .on_hover_text("Alpha clip")
                     .changed();

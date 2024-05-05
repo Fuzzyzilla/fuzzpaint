@@ -286,9 +286,9 @@ impl ColorPaletteState {
 
 /// Widget that remembers color history, displaying a compact grid of previous selected colors
 /// that can be re-applied.
-pub struct ColorPalette<'a, Writer> {
+pub struct ColorPalette<'w, 'a: 'w, Writer> {
     color: &'a mut ColorOrPalette,
-    palette: &'a mut fuzzpaint_core::state::palette::writer::Writer<'a, Writer>,
+    palette: &'a mut fuzzpaint_core::state::palette::writer::Writer<'w, Writer>,
     max_history: Option<usize>,
     history_scope: HistoryScope,
     in_flux: bool,
@@ -296,11 +296,11 @@ pub struct ColorPalette<'a, Writer> {
     do_swap: bool,
     id: Option<egui::Id>,
 }
-impl<'a, Writer> ColorPalette<'a, Writer> {
+impl<'w, 'a: 'w, Writer> ColorPalette<'w, 'a, Writer> {
     #[must_use]
     pub fn new(
         color: &'a mut ColorOrPalette,
-        palette: &'a mut fuzzpaint_core::state::palette::writer::Writer<'a, Writer>,
+        palette: &'a mut fuzzpaint_core::state::palette::writer::Writer<'w, Writer>,
     ) -> Self {
         Self {
             color,
@@ -354,7 +354,7 @@ impl<
         Writer: fuzzpaint_core::queue::writer::CommandWrite<
             fuzzpaint_core::state::palette::commands::Command,
         >,
-    > egui::Widget for ColorPalette<'_, Writer>
+    > egui::Widget for ColorPalette<'_, '_, Writer>
 {
     fn ui(mut self, ui: &mut egui::Ui) -> egui::Response {
         let mut changed = false;
@@ -584,11 +584,12 @@ impl<
 }
 
 pub struct PickerResponse {
-    // The color is actively being changed.
+    /// The color is actively being changed.
     pub in_flux: bool,
     pub response: egui::Response,
 }
 
+/// Show a collapsing color picker in the top left of the free area.
 pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> PickerResponse {
     egui::containers::Area::new("color-picker")
         .anchor(egui::Align2::LEFT_TOP, [0.0f32; 2])
@@ -647,13 +648,19 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
                 // Start or continue interaction...
                 match last_target {
                     Some(ClickTarget::Hover) | None => {
+                        const MAIN_RADIUS: f32 = EXPANDED_RADIUS + RADIAL_MARGIN / 2.0;
+                        const HUE_RADIUS: f32 = MAIN_RADIUS + HUE_WIDTH;
                         // A new interaction. Find out which type...
                         // Unwrap ok, we know are sure it's interacted.
                         let delta = response.interact_pointer_pos().unwrap() - origin;
-                        if delta.length_sq() < EXPANDED_RADIUS * EXPANDED_RADIUS {
+                        let dist_sq = delta.length_sq();
+                        if dist_sq < MAIN_RADIUS * MAIN_RADIUS {
                             Some(ClickTarget::SaturationValue)
-                        } else {
+                        } else if dist_sq < HUE_RADIUS * HUE_RADIUS {
                             Some(ClickTarget::Hue)
+                        } else {
+                            // Miss.
+                            None
                         }
                     }
                     // Interaction ongoing, continue it.
@@ -678,26 +685,34 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
 
             let painter = ui.painter();
 
-            // Default mesh uses "no" texture, just vertex colors. (well, a white texture, same difference).
             let mesh = not_closed.then(|| {
+                // Reserve exact amount of space. We do this all every frame so any bit of extra perf is nice.
+                // First step has a single shared vertex for all. Every ray then has STEPS more verts on it.
+                const MAIN_VERTICES: usize = 1 + (MAIN_RAYS + 1) * MAIN_STEPS;
+                // Inner circle (Step 0-1) has RAYS tris. All further step regions have 2 per ray pair.
+                const MAIN_TRIANGLES: usize = MAIN_RAYS + MAIN_RAYS * (MAIN_STEPS - 1) * 2;
+                // Much simpler, just a quad between each step.
+                const HUE_VERTICES: usize = 2 * (HUE_STEPS + 1);
+                const HUE_TRIANGLES: usize = 2 * HUE_STEPS;
+
+                // Default mesh uses "no" texture, just vertex colors. (well, a white texture, same difference).
                 let mut mesh = egui::Mesh::default();
+                // Use reserve exact to prevent oversizing - we know the exact amount of stuff we're adding.
+                mesh.vertices.reserve_exact(MAIN_VERTICES + HUE_VERTICES);
+                // Three indices per tri.
+                mesh.indices
+                    .reserve_exact((MAIN_TRIANGLES + HUE_TRIANGLES) * 3);
 
                 //======================================= Main arc =======================================
                 // Build the main body of the picker, a quarter circle which displays
                 // lightness on it's radius and saturation on it's circumference.
-
-                // Fixme: reservations too small by a tiny and baffling amount, making it substantially less performant lol.
-                // First step has a single shared vertex for all. Every ray then has STEPS more verts on it.
-                mesh.reserve_vertices(1 + MAIN_RAYS * MAIN_STEPS);
-                // Inner circle (Step 0-1) has RAYS - 1 tris. All further step regions have 2 per ray pair.
-                mesh.reserve_triangles((MAIN_RAYS - 1) + (MAIN_RAYS - 1) * (MAIN_STEPS - 1) * 2);
 
                 // Origin point shared by all rays! Black under any hue.
                 mesh.colored_vertex(mesh_origin, egui::Color32::BLACK);
 
                 // Create vertices.
                 for ray in 0..=MAIN_RAYS {
-                    // [0, 1], how bright is this?
+                    // [0, 1], how saturated?
                     let saturation = ray as f32 / MAIN_RAYS as f32;
                     // Quarter turn, from x axis to y axis, across the rays.
                     let ray_dir = egui::Vec2::angled(saturation * std::f32::consts::FRAC_PI_2);
@@ -749,7 +764,7 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
                 }
 
                 // =================================== Hue wheel =============================================
-                let hue_base_vertex = mesh.vertices.len() as u32;
+                let hue_base_index = mesh.vertices.len() as u32;
                 for hue in 0..=HUE_STEPS {
                     let hue = hue as f32 / HUE_STEPS as f32;
                     let quarter_angle = hue * std::f32::consts::FRAC_PI_2;
@@ -771,14 +786,15 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
                     const VERTICES_PER_HUE: u32 = 2;
                     let next_hue = hue + 1;
 
-                    let a = hue_base_vertex + hue * VERTICES_PER_HUE;
-                    let b = hue_base_vertex + hue * VERTICES_PER_HUE + 1;
-                    let c = hue_base_vertex + next_hue * VERTICES_PER_HUE;
-                    let d = hue_base_vertex + next_hue * VERTICES_PER_HUE + 1;
+                    let a = hue_base_index + hue * VERTICES_PER_HUE;
+                    let b = hue_base_index + hue * VERTICES_PER_HUE + 1;
+                    let c = hue_base_index + next_hue * VERTICES_PER_HUE;
+                    let d = hue_base_index + next_hue * VERTICES_PER_HUE + 1;
 
                     mesh.add_triangle(a, b, c);
                     mesh.add_triangle(b, c, d);
                 }
+
                 mesh
             });
             let mut sv_radius = hsva.v * radius;
@@ -820,16 +836,30 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
             if let Some(mesh) = mesh {
                 painter.add(egui::Shape::mesh(mesh));
                 // Show a stroke around the picker meshes.
-                let stroke = egui::Stroke {
+                let selected_stroke = ui.style().interact_selectable(&response, true).bg_stroke;
+                let unselected_stroke = egui::Stroke {
                     color: egui::Color32::BLACK,
                     width: 2.0,
                 };
+
+                let main_stroke = match click_target {
+                    Some(ClickTarget::SaturationValue) => selected_stroke,
+                    _ => unselected_stroke,
+                };
+                let hue_stroke = match click_target {
+                    Some(ClickTarget::Hue) => selected_stroke,
+                    _ => unselected_stroke,
+                };
                 // Main picker
-                painter.circle_stroke(mesh_origin, mesh_radius, stroke);
+                painter.circle_stroke(mesh_origin, mesh_radius, main_stroke);
                 // Inner for hue circle
-                painter.circle_stroke(mesh_origin, mesh_radius + RADIAL_MARGIN, stroke);
+                painter.circle_stroke(mesh_origin, mesh_radius + RADIAL_MARGIN, hue_stroke);
                 // outer
-                painter.circle_stroke(mesh_origin, mesh_radius + RADIAL_MARGIN + HUE_WIDTH, stroke);
+                painter.circle_stroke(
+                    mesh_origin,
+                    mesh_radius + RADIAL_MARGIN + HUE_WIDTH,
+                    hue_stroke,
+                );
 
                 painter.circle(
                     mesh_origin
@@ -837,21 +867,31 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
                             * (mesh_radius + RADIAL_MARGIN + HUE_WIDTH / 2.0),
                     PICKER_SIZE,
                     egui::ecolor::Hsva::new(hsva.h, 1.0, 1.0, 1.0),
-                    stroke,
+                    hue_stroke,
                 );
             }
+
             // Show the selected color in a bubble.
             // When the selector is collapsed, this is what the user interacts with to open it, it moves out to
             // it's position on the wheel when expanded.
             painter.circle(
                 origin + expanded_proportion * egui::Vec2::angled(sv_angle) * sv_radius,
                 egui::lerp(CONTRACTED_RADIUS..=PICKER_SIZE, expanded_proportion),
-                *hsva,
+                egui::ecolor::HsvaGamma { a: 1.0, ..*hsva },
                 egui::Stroke {
                     color: grayscale_contrasting(*hsva, egui::Rgba::WHITE),
                     width: 1.0,
                 },
             );
+
+            // Hide cursor while interacting.
+            if matches!(
+                click_target,
+                Some(ClickTarget::Hue | ClickTarget::SaturationValue)
+            ) {
+                // We do this only conditionally since we dont want missed clicks to hide the cursor, then they look like hits!
+                response = response.on_hover_and_drag_cursor(egui::CursorIcon::None);
+            }
             // Double not here makes sense, i swear--
             // This means fully closed, not animating.
             // Would be good to show an icon here, an eyedropper specifically.
@@ -867,11 +907,40 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
                     grayscale_contrasting(*hsva, egui::Rgba::BLACK),
                 );
             }*/
+
+            // Include accessibility info
+            if response.changed() {
+                match click_target {
+                    Some(ClickTarget::Hue) => {
+                        response.widget_info(|| egui::WidgetInfo {
+                            typ: egui::WidgetType::Slider,
+                            enabled: true,
+                            label: Some("Hue".into()),
+                            current_text_value: None,
+                            prev_text_value: None,
+                            selected: None,
+                            value: Some(hsva.h.into()),
+                            text_selection: None,
+                        });
+                    }
+                    Some(ClickTarget::SaturationValue) => {
+                        response.widget_info(|| egui::WidgetInfo {
+                            typ: egui::WidgetType::Other,
+                            enabled: true,
+                            label: Some("Saturation/Value".into()),
+                            current_text_value: None,
+                            prev_text_value: None,
+                            selected: None,
+                            value: None,
+                            text_selection: None,
+                        });
+                    }
+                    _ => (),
+                }
+            }
+
             PickerResponse {
-                in_flux: matches!(
-                    click_target,
-                    Some(ClickTarget::Hue | ClickTarget::SaturationValue)
-                ),
+                in_flux: click_target.is_some(),
                 response,
             }
         })
