@@ -288,7 +288,7 @@ impl ColorPaletteState {
 /// that can be re-applied.
 pub struct ColorPalette<'a, Writer> {
     color: &'a mut ColorOrPalette,
-    palette: fuzzpaint_core::state::palette::writer::Writer<'a, Writer>,
+    palette: &'a mut fuzzpaint_core::state::palette::writer::Writer<'a, Writer>,
     max_history: Option<usize>,
     history_scope: HistoryScope,
     in_flux: bool,
@@ -300,7 +300,7 @@ impl<'a, Writer> ColorPalette<'a, Writer> {
     #[must_use]
     pub fn new(
         color: &'a mut ColorOrPalette,
-        palette: fuzzpaint_core::state::palette::writer::Writer<'a, Writer>,
+        palette: &'a mut fuzzpaint_core::state::palette::writer::Writer<'a, Writer>,
     ) -> Self {
         Self {
             color,
@@ -357,9 +357,11 @@ impl<
     > egui::Widget for ColorPalette<'_, Writer>
 {
     fn ui(mut self, ui: &mut egui::Ui) -> egui::Response {
+        let mut changed = false;
         const BTN_BASE_SIZE: f32 = 12.0;
         let width = ui.available_width();
-        egui::Frame::canvas(ui.style())
+
+        let mut response = egui::Frame::canvas(ui.style())
             .shadow(egui::epaint::Shadow::NONE)
             .stroke(egui::Stroke::NONE)
             .rounding(0.0)
@@ -448,6 +450,7 @@ impl<
 
                                 if color_square.clicked() {
                                     *self.color = idx.into();
+                                    changed = true;
                                     deref_color = self.palette.get(idx).unwrap_or(deref_color);
                                 }
                             }
@@ -499,6 +502,7 @@ impl<
                                         }
                                     });
                                     if response.clicked() {
+                                        changed = true;
                                         *self.color = color;
                                     }
                                 }
@@ -531,6 +535,7 @@ impl<
                                         }
                                     });
                                     if response.clicked() {
+                                        changed = true;
                                         *self.color = color;
                                     }
                                 }
@@ -560,6 +565,7 @@ impl<
                                     // History too smol to swap :3
                                     return;
                                 };
+                                changed = true;
                                 palette.hoist(swap_with);
                                 *self.color = swap_with;
                         });
@@ -567,6 +573,307 @@ impl<
                     });
             })
             .response
-            .on_hover_cursor(egui::CursorIcon::Crosshair)
+            .on_hover_cursor(egui::CursorIcon::Crosshair);
+
+        if changed {
+            response.mark_changed()
+        }
+
+        response
     }
+}
+
+pub struct PickerResponse {
+    // The color is actively being changed.
+    pub in_flux: bool,
+    pub response: egui::Response,
+}
+
+pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> PickerResponse {
+    egui::containers::Area::new("color-picker")
+        .anchor(egui::Align2::LEFT_TOP, [0.0f32; 2])
+        .show(ctx, |ui| {
+            /// number of edge "rays" from the center of the picker arc to the edge.
+            const MAIN_RAYS: usize = 16;
+            /// Number of steps along each ray from the center to the edge.
+            /// Step 0 is special in that it's a triangular section while the others are quads.
+            const MAIN_STEPS: usize = 8;
+            /// Number of segments of the hue arc. Should be a multiple of six to hit all hue peaks!
+            const HUE_STEPS: usize = 24;
+            /// Spacing between main SV picker and H picker
+            const RADIAL_MARGIN: f32 = 10.0;
+            /// Witdth of the H picker
+            const HUE_WIDTH: f32 = 15.0;
+            /// When the circle is small, shift it out of it's corner.
+            const CONTRACTED_OFFSET: f32 = 10.0;
+            const EXPANDED_RADIUS: f32 = 150.0;
+            const PICKER_SIZE: f32 = 10.0;
+            const CONTRACTED_RADIUS: f32 = 20.0;
+            const STEP_DIST: f32 = 1.0 / MAIN_STEPS as f32;
+
+            #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
+            enum ClickTarget {
+                #[default]
+                Hover,
+                SaturationValue,
+                Hue,
+            };
+
+            // Remember if we were expanded last frame, make the interact area much larger.
+            let click_marker = ui.id().with("click");
+            let last_target = ui.memory(|w| w.data.get_temp::<ClickTarget>(click_marker));
+
+            let (rect, mut response) = ui.allocate_exact_size(
+                // Be a small or large area depending on whether it's been opened yet.
+                if last_target.is_some() {
+                    [EXPANDED_RADIUS + RADIAL_MARGIN + HUE_WIDTH; 2].into()
+                } else {
+                    [CONTRACTED_OFFSET + CONTRACTED_RADIUS; 2].into()
+                },
+                egui::Sense::click_and_drag(),
+            );
+
+            let expanded_proportion = ctx.animate_bool(response.id, last_target.is_some());
+            let not_closed = expanded_proportion > 0.0;
+            let radius = egui::lerp(CONTRACTED_RADIUS..=EXPANDED_RADIUS, expanded_proportion);
+            let origin_offset = egui::lerp(CONTRACTED_OFFSET..=0.0, expanded_proportion);
+            let origin = rect.left_top() + [origin_offset; 2].into();
+
+            let mesh_origin = rect.left_top();
+            let mesh_radius = radius + origin_offset;
+
+            // Store expand state for next frame.
+            let click_target = if response.is_pointer_button_down_on() {
+                // Start or continue interaction...
+                match last_target {
+                    Some(ClickTarget::Hover) | None => {
+                        // A new interaction. Find out which type...
+                        // Unwrap ok, we know are sure it's interacted.
+                        let delta = response.interact_pointer_pos().unwrap() - origin;
+                        if delta.length_sq() < EXPANDED_RADIUS * EXPANDED_RADIUS {
+                            Some(ClickTarget::SaturationValue)
+                        } else {
+                            Some(ClickTarget::Hue)
+                        }
+                    }
+                    // Interaction ongoing, continue it.
+                    other => other,
+                }
+            } else if response.hovered() {
+                Some(ClickTarget::Hover)
+            } else {
+                None
+            };
+
+            if click_target != last_target {
+                ui.memory_mut(|w| {
+                    if let Some(click_target) = click_target {
+                        w.data
+                            .insert_temp::<ClickTarget>(click_marker, click_target);
+                    } else {
+                        w.data.remove_temp::<ClickTarget>(click_marker);
+                    }
+                });
+            }
+
+            let painter = ui.painter();
+
+            // Default mesh uses "no" texture, just vertex colors. (well, a white texture, same difference).
+            let mesh = not_closed.then(|| {
+                let mut mesh = egui::Mesh::default();
+
+                //======================================= Main arc =======================================
+                // Build the main body of the picker, a quarter circle which displays
+                // lightness on it's radius and saturation on it's circumference.
+
+                // Fixme: reservations too small by a tiny and baffling amount, making it substantially less performant lol.
+                // First step has a single shared vertex for all. Every ray then has STEPS more verts on it.
+                mesh.reserve_vertices(1 + MAIN_RAYS * MAIN_STEPS);
+                // Inner circle (Step 0-1) has RAYS - 1 tris. All further step regions have 2 per ray pair.
+                mesh.reserve_triangles((MAIN_RAYS - 1) + (MAIN_RAYS - 1) * (MAIN_STEPS - 1) * 2);
+
+                // Origin point shared by all rays! Black under any hue.
+                mesh.colored_vertex(mesh_origin, egui::Color32::BLACK);
+
+                // Create vertices.
+                for ray in 0..=MAIN_RAYS {
+                    // [0, 1], how bright is this?
+                    let saturation = ray as f32 / MAIN_RAYS as f32;
+                    // Quarter turn, from x axis to y axis, across the rays.
+                    let ray_dir = egui::Vec2::angled(saturation * std::f32::consts::FRAC_PI_2);
+                    // Skip first step, it's the origin point we pushed first
+                    for step in 1..=MAIN_STEPS {
+                        // [0, 1], how saturated is this?
+                        let value = step as f32 / MAIN_STEPS as f32;
+                        mesh.colored_vertex(
+                            mesh_origin + mesh_radius * ray_dir * (step as f32 * STEP_DIST),
+                            egui::ecolor::HsvaGamma {
+                                h: hsva.h,
+                                // Sqrt accounts for perceptual nonlinearity due to area growing with square of radius,
+                                // leading to most of the area being muddy grays. With my understanding, this means the
+                                // *lightness* should be sqrt-ed, but this looks more correct to me. Weird!
+                                s: (1.0 - saturation).sqrt(),
+                                v: value,
+                                a: 1.0,
+                            }
+                            .into(),
+                        );
+                    }
+                }
+                // Create triangles.
+                for ray in 0..(MAIN_RAYS as u32) {
+                    const VERTICES_PER_RAY: u32 = MAIN_STEPS as u32;
+
+                    let next_ray = ray + 1;
+                    // Inner circle, shared by all rays, filled with a triangle fan.
+                    // Zero is the origin, need to math for the other two.
+                    // Draw between the origin, and first steps of two adjactent rays, to make triangle fan.
+                    mesh.add_triangle(
+                        0,
+                        1 + ray * VERTICES_PER_RAY,
+                        1 + next_ray * VERTICES_PER_RAY,
+                    );
+
+                    // Outer sectors, space between the rays is filled by a quad.
+                    for step in 0..(MAIN_STEPS as u32 - 1) {
+                        let next_step = step + 1;
+
+                        let a = 1 + ray * VERTICES_PER_RAY + step;
+                        let b = 1 + ray * VERTICES_PER_RAY + next_step;
+                        let c = 1 + next_ray * VERTICES_PER_RAY + step;
+                        let d = 1 + next_ray * VERTICES_PER_RAY + next_step;
+
+                        mesh.add_triangle(a, b, c);
+                        mesh.add_triangle(b, c, d);
+                    }
+                }
+
+                // =================================== Hue wheel =============================================
+                let hue_base_vertex = mesh.vertices.len() as u32;
+                for hue in 0..=HUE_STEPS {
+                    let hue = hue as f32 / HUE_STEPS as f32;
+                    let quarter_angle = hue * std::f32::consts::FRAC_PI_2;
+
+                    let ray_dir = egui::Vec2::angled(quarter_angle);
+
+                    let color = egui::ecolor::Hsva::new(hue, 1.0, 1.0, 1.0).into();
+
+                    mesh.colored_vertex(
+                        mesh_origin + ray_dir * (mesh_radius + RADIAL_MARGIN),
+                        color,
+                    );
+                    mesh.colored_vertex(
+                        mesh_origin + ray_dir * (mesh_radius + RADIAL_MARGIN + HUE_WIDTH),
+                        color,
+                    );
+                }
+                for hue in 0..(HUE_STEPS as u32) {
+                    const VERTICES_PER_HUE: u32 = 2;
+                    let next_hue = hue + 1;
+
+                    let a = hue_base_vertex + hue * VERTICES_PER_HUE;
+                    let b = hue_base_vertex + hue * VERTICES_PER_HUE + 1;
+                    let c = hue_base_vertex + next_hue * VERTICES_PER_HUE;
+                    let d = hue_base_vertex + next_hue * VERTICES_PER_HUE + 1;
+
+                    mesh.add_triangle(a, b, c);
+                    mesh.add_triangle(b, c, d);
+                }
+                mesh
+            });
+            let mut sv_radius = hsva.v * radius;
+            let mut sv_angle = (1.0 - hsva.s.powi(2)) * std::f32::consts::FRAC_PI_2;
+            let mut hue_angle = hsva.h * std::f32::consts::FRAC_PI_2;
+
+            if let Some(click_point) = response.interact_pointer_pos() {
+                match click_target {
+                    Some(ClickTarget::Hover) | None => (),
+                    Some(ClickTarget::SaturationValue) => {
+                        response.mark_changed();
+                        let mut delta = click_point - origin;
+                        delta = delta.max(egui::Vec2::ZERO);
+
+                        sv_radius = delta.length().min(radius);
+                        sv_angle = delta.angle();
+
+                        let selection_angle = sv_angle / std::f32::consts::FRAC_PI_2;
+
+                        let selection_radius = sv_radius / radius;
+
+                        *hsva = egui::ecolor::HsvaGamma {
+                            s: (1.0 - selection_angle).sqrt(),
+                            v: selection_radius,
+                            ..*hsva
+                        }
+                    }
+                    Some(ClickTarget::Hue) => {
+                        response.mark_changed();
+                        let mut delta = click_point - origin;
+                        delta = delta.max(egui::Vec2::ZERO);
+                        hue_angle = delta.angle();
+                        hsva.h = hue_angle / std::f32::consts::FRAC_PI_2;
+                    }
+                }
+            }
+
+            // Show the picker mesh, if one was made.
+            if let Some(mesh) = mesh {
+                painter.add(egui::Shape::mesh(mesh));
+                // Show a stroke around the picker meshes.
+                let stroke = egui::Stroke {
+                    color: egui::Color32::BLACK,
+                    width: 2.0,
+                };
+                // Main picker
+                painter.circle_stroke(mesh_origin, mesh_radius, stroke);
+                // Inner for hue circle
+                painter.circle_stroke(mesh_origin, mesh_radius + RADIAL_MARGIN, stroke);
+                // outer
+                painter.circle_stroke(mesh_origin, mesh_radius + RADIAL_MARGIN + HUE_WIDTH, stroke);
+
+                painter.circle(
+                    mesh_origin
+                        + egui::Vec2::angled(hue_angle)
+                            * (mesh_radius + RADIAL_MARGIN + HUE_WIDTH / 2.0),
+                    PICKER_SIZE,
+                    egui::ecolor::Hsva::new(hsva.h, 1.0, 1.0, 1.0),
+                    stroke,
+                );
+            }
+            // Show the selected color in a bubble.
+            // When the selector is collapsed, this is what the user interacts with to open it, it moves out to
+            // it's position on the wheel when expanded.
+            painter.circle(
+                origin + expanded_proportion * egui::Vec2::angled(sv_angle) * sv_radius,
+                egui::lerp(CONTRACTED_RADIUS..=PICKER_SIZE, expanded_proportion),
+                *hsva,
+                egui::Stroke {
+                    color: grayscale_contrasting(*hsva, egui::Rgba::WHITE),
+                    width: 1.0,
+                },
+            );
+            // Double not here makes sense, i swear--
+            // This means fully closed, not animating.
+            // Would be good to show an icon here, an eyedropper specifically.
+            // There is no such glyph, and the palette icon is confusing given the same
+            // iconography is used elsewhere for a different purpose. Uh oh!
+            /*
+            if !not_closed {
+                painter.text(
+                    origin,
+                    egui::Align2::CENTER_CENTER,
+                    super::PALETTE_ICON,
+                    egui::FontId::default(),
+                    grayscale_contrasting(*hsva, egui::Rgba::BLACK),
+                );
+            }*/
+            PickerResponse {
+                in_flux: matches!(
+                    click_target,
+                    Some(ClickTarget::Hue | ClickTarget::SaturationValue)
+                ),
+                response,
+            }
+        })
+        .inner
 }

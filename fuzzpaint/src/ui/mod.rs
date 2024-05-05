@@ -123,6 +123,9 @@ pub struct MainUI {
     cur_document: Option<state::DocumentID>,
 
     modal: Option<CurrentModal>,
+    picker_color: egui::ecolor::HsvaGamma,
+    picker_in_flux: bool,
+    picker_changed: bool,
 
     requests_send: crossbeam::channel::Sender<requests::UiRequest>,
     requests_recv: crossbeam::channel::Receiver<requests::UiRequest>,
@@ -149,6 +152,14 @@ impl MainUI {
             cur_document,
 
             modal: None,
+            picker_color: egui::ecolor::HsvaGamma {
+                h: 0.0,
+                s: 0.0,
+                v: 0.0,
+                a: 1.0,
+            },
+            picker_in_flux: false,
+            picker_changed: false,
 
             requests_send,
             requests_recv,
@@ -393,6 +404,12 @@ impl MainUI {
                 ui.set_enabled(enabled);
                 self.document_bar(ui);
             });
+
+            {
+                let response = color_palette::picker_dock(ctx, &mut self.picker_color);
+                self.picker_changed = response.response.changed();
+                self.picker_in_flux = response.in_flux;
+            }
 
             let viewport = ctx.available_rect();
             let pos = viewport.left_top();
@@ -714,70 +731,39 @@ impl MainUI {
                     // Unfortunately this is the second `write_with` this frame. I need a way for this to work better..
                     // A retained mode UI is probably the solution as well as just a good idea for the future.
                     doc.write_with(|w| {
-                        let palette = w.palette();
+                        let mut palette = w.palette();
 
-                        // Get the brush's color, dereferencing paletted colors.
-                        let deref_color = brush
-                            .color_modulate
-                            .get()
-                            .left_or_else(|idx| palette.get(idx).unwrap_or(fcolor::Color::BLACK));
+                        if std::mem::take(&mut self.picker_changed) {
+                            let picker_color = egui::Rgba::from(self.picker_color);
+                            brush.color_modulate =
+                                fcolor::Color::from_array_lossy(picker_color.to_array())
+                                    .unwrap_or(fcolor::Color::BLACK)
+                                    .into();
+                        }
 
-                        // Show a colorpicker. If this changes, the brush becomes a regular color if it was paletted.
-                        ui.scope(|ui| {
-                            let mut picker_color = deref_color;
+                        let mut color_modulate = brush.color_modulate;
 
-                            let color_arr = picker_color.as_array();
-                            // Why..
-                            let color = egui::Rgba::from_rgba_premultiplied(
-                                color_arr[0],
-                                color_arr[1],
-                                color_arr[2],
-                                color_arr[3],
-                            );
-                            let mut color = egui::ecolor::Hsva::from(color);
-                            // From looking at source, picker is sized based on the Ui's "slider" size.
-                            // Also demolish margins, otherwise margins + available width blows up to entire screen within a few frames x3
-                            // Resets at end-of-scope!
-                            let desired_width = ui.available_width();
-                            let style = ui.style_mut();
-                            style.spacing.slider_width = desired_width;
-                            style.spacing.window_margin = 0.0.into();
-                            style.override_text_style = Some(egui::TextStyle::Small);
-                            // Sliders in header use this style over override.
-                            style.drag_value_text_style = egui::TextStyle::Small;
-                            // Make buttons along top smoler.
-                            style.spacing.interact_size.x *= 0.75;
-                            if egui::color_picker::color_picker_hsva_2d(
-                                ui,
-                                &mut color,
-                                egui::color_picker::Alpha::OnlyBlend,
-                            ) {
-                                // `true` means the color is different from last frame, not that the interaction is finished.
-                                picker_color = fcolor::Color::from_array_lossy(
-                                    egui::Rgba::from(color).to_array(),
-                                )
-                                .unwrap_or(fcolor::Color::BLACK);
-                                brush.color_modulate = picker_color.into();
-                            };
-                        });
-
-                        // VERY hacky way to tell if user is modifying color.
-                        // There is no way to actually tell. >:V
-                        let in_flux = ui.input(|r| r.pointer.any_down());
                         // Small buttons with color history, pins, and palettes.
-                        ui.add(
-                            color_palette::ColorPalette::new(&mut brush.color_modulate, palette)
-                                .scope(color_palette::HistoryScope::Local)
-                                .in_flux(in_flux)
-                                .id_source(current_doc)
-                                .swap(
-                                    // Swap top colors if requested.
-                                    actions.action_trigger_count(crate::actions::Action::ColorSwap)
-                                        % 2
-                                        == 1,
-                                )
-                                .max_history(64),
-                        );
+                        let _color_changed = ui
+                            .add(
+                                color_palette::ColorPalette::new(&mut color_modulate, &mut palette)
+                                    .scope(color_palette::HistoryScope::Local)
+                                    .in_flux(self.picker_in_flux)
+                                    .id_source(current_doc)
+                                    .swap(
+                                        // Swap top colors if requested.
+                                        actions.action_trigger_count(
+                                            crate::actions::Action::ColorSwap,
+                                        ) % 2
+                                            == 1,
+                                    )
+                                    .max_history(64),
+                            )
+                            .changed();
+
+                        // Todo: set the picker if the brush was changed by the palette UI.
+                        // There's a really weird lifetime issue though where seemingly both mutable borrows above
+                        // are intertwined and continue indefinitely - thus the color can't be read...?
                     });
                 });
             }
