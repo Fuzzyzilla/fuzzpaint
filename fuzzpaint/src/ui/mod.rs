@@ -497,35 +497,103 @@ impl MainUI {
     /// Show a center welcome/"home" panel when no document is selected.
     fn welcome_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered_justified(|ui| {
-                ui.label(
-                    RichText::new("🐑 Fuzzpaint").heading().size(
-                        // Use double-size heading.
-                        ui.style()
-                            .text_styles
-                            .get(&egui::TextStyle::Heading)
-                            .unwrap()
-                            .size
-                            * 2.5,
-                    ),
-                );
+            ui.vertical_centered(|ui| {
+                const BIG_BUTTON_MAX_SIZE: f32 = 125.0;
+                const BIG_BUTTON_MIN_SIZE: f32 = 75.0;
+                const BIG_BUTTON_MARGIN: f32 = 10.0;
+
+                // Use double-size heading.
+                let header_height = ui
+                    .style()
+                    .text_styles
+                    .get(&egui::TextStyle::Heading)
+                    .unwrap()
+                    .size
+                    * 2.5;
 
                 // Show big buttons for new and open.
-                let (size, _margin) = justify(ui.available_width(), 100.0, 10.0);
-                // Ensure they don't get *too* silly.
-                let size = size.min(ui.available_height() * 0.9);
+                let available_for_buttons = ui.available_size() - egui::vec2(0.0, header_height);
 
-                ui.vertical_centered(|ui| {
-                    let big_button = |ui: &mut egui::Ui, name: &str| -> egui::Response {
-                        let button = egui::Button::new(name).min_size([size; 2].into());
+                // Too wide to show side by side, do a vertical layout.
+                let (buttons_vertical, button_size) =
+                    if BIG_BUTTON_MIN_SIZE * 2.0 + BIG_BUTTON_MARGIN > available_for_buttons.x {
+                        (
+                            true,
+                            available_for_buttons
+                                .x
+                                .min(BIG_BUTTON_MAX_SIZE - BIG_BUTTON_MARGIN),
+                        )
+                    } else {
+                        let biggest_possible_size =
+                            (available_for_buttons.x - BIG_BUTTON_MARGIN * 3.0) / 2.0;
+                        let size = biggest_possible_size
+                            .min(BIG_BUTTON_MAX_SIZE)
+                            .min(available_for_buttons.y);
 
-                        ui.add(button)
+                        (false, size)
                     };
 
-                    if big_button(ui, "➕ New").clicked() {
+                // Vertical center by discarding half the region not used by header or buttons.
+                let button_height = if buttons_vertical {
+                    2.0 * button_size + BIG_BUTTON_MARGIN
+                } else {
+                    button_size + BIG_BUTTON_MARGIN
+                };
+                let dead_space = available_for_buttons.y
+                    - button_height
+                    - 2.0 * ui.style().spacing.interact_size.y;
+                ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                    ui.next_widget_position(),
+                    egui::vec2(0.0, dead_space / 2.0),
+                ));
+
+                ui.label(RichText::new("🐑 Fuzzpaint").heading().size(header_height));
+
+                ui.vertical_centered(|ui| {
+                    let big_button =
+                        |ui: &mut egui::Ui, at: egui::Rect, name: &str| -> egui::Response {
+                            // Create a UI in the rect, "justify" (fill) in both axes
+                            let mut ui = ui.child_ui(
+                                at,
+                                egui::Layout::left_to_right(egui::Align::Center)
+                                    .with_main_justify(true)
+                                    .with_cross_justify(true),
+                            );
+                            let button = egui::Button::new(name);
+
+                            ui.add(button)
+                        };
+
+                    let top_center = ui.next_widget_position();
+
+                    let (a, b) = if buttons_vertical {
+                        let top = egui::Rect::from_min_size(
+                            top_center + egui::vec2(-button_size, 0.0),
+                            [button_size; 2].into(),
+                        );
+                        let bottom = egui::Rect::from_min_size(
+                            top_center + egui::vec2(-button_size, button_size + BIG_BUTTON_MARGIN),
+                            [button_size; 2].into(),
+                        );
+
+                        (top, bottom)
+                    } else {
+                        let left = egui::Rect::from_min_size(
+                            top_center - egui::vec2(BIG_BUTTON_MARGIN + button_size, 0.0),
+                            [button_size; 2].into(),
+                        );
+                        let right = egui::Rect::from_min_size(
+                            top_center + egui::vec2(BIG_BUTTON_MARGIN, 0.0),
+                            [button_size; 2].into(),
+                        );
+
+                        (left, right)
+                    };
+
+                    if big_button(ui, a, "➕ New").clicked() {
                         self.new_document();
                     }
-                    if big_button(ui, "🗀 Open").clicked() {
+                    if big_button(ui, b, "🗀 Open").clicked() {
                         self.open_documents();
                     }
                 });
