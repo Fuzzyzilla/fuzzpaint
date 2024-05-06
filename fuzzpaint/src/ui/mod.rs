@@ -1,5 +1,6 @@
 mod brush_ui;
 mod color_palette;
+mod drag;
 mod modal;
 pub mod requests;
 
@@ -115,8 +116,6 @@ struct PerDocumentData {
     id: state::DocumentID,
     graph_selection: Option<state::graph::AnyID>,
     graph_focused_subtree: Option<state::graph::NodeID>,
-    /// Yanked node during a reparent operation
-    yanked_node: Option<state::graph::AnyID>,
     name: String,
 }
 pub struct MainUI {
@@ -141,7 +140,6 @@ impl MainUI {
                 id,
                 graph_focused_subtree: None,
                 graph_selection: None,
-                yanked_node: None,
                 name: "Unknown".into(),
             })
             .collect();
@@ -277,7 +275,6 @@ impl MainUI {
             id: new_id,
             graph_focused_subtree: None,
             graph_selection: stroke_layer.map(Into::into),
-            yanked_node: None,
             name,
         };
         let _ = self.requests_send.send(requests::UiRequest::Document {
@@ -305,7 +302,6 @@ impl MainUI {
                                 id,
                                 graph_focused_subtree: None,
                                 graph_selection: None,
-                                yanked_node: None,
                                 name: "Unknown".into(),
                             });
                         }
@@ -1244,46 +1240,6 @@ fn layer_buttons(
             let _ = graph.delete(interface.graph_selection.unwrap());
             interface.graph_selection = None;
         };
-
-        if let Some(yanked) = interface.yanked_node {
-            // Display an insert button
-            if ui
-                .button(egui::RichText::new("↪").monospace())
-                .on_hover_text("Insert yanked node here")
-                .clicked()
-            {
-                // Explicitly ignore error. There are many invalid options, in that case do nothing!
-                let _ = graph.reparent(
-                    yanked,
-                    // Place using same logic as new layer.
-                    match interface.graph_selection.as_ref() {
-                        // If a group is selected, we insert as the topmost child.
-                        Some(state::graph::AnyID::Node(id)) => {
-                            state::graph::Location::IndexIntoNode(id, 0)
-                        }
-                        // Otherwise, we insert as the sibling directly above selected.
-                        Some(any) => state::graph::Location::AboveSelection(any),
-                        // No selection, add into the root of the viewed subree
-                        None => match interface.graph_focused_subtree.as_ref() {
-                            Some(root) => state::graph::Location::IndexIntoNode(root, 0),
-                            None => state::graph::Location::IndexIntoRoot(0),
-                        },
-                    },
-                );
-                interface.yanked_node = None;
-            }
-        } else {
-            // Display a cut button
-            let button = egui::Button::new(egui::RichText::new(SCISSOR_ICON).monospace());
-            // Disable if no selection.
-            if ui
-                .add_enabled(interface.graph_selection.is_some(), button)
-                .on_hover_text("Reparent")
-                .clicked()
-            {
-                interface.yanked_node = interface.graph_selection;
-            }
-        }
     });
 }
 /// Side panel showing layer add buttons, layer tree, and layer options
@@ -1296,7 +1252,6 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
             let node_props = interface
                 .graph_selection
                 // Ignore if there is a yanked node.
-                .filter(|_| interface.yanked_node.is_none())
                 .and_then(|node| graph.get(node))
                 .cloned();
 
@@ -1333,10 +1288,9 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                     }
                 },
             );
-            // Buttons
+
             layer_buttons(ui, interface, writer);
 
-            ui.separator();
             let mut graph = writer.graph();
 
             // Strange visual flicker when this button is clicked,
@@ -1362,18 +1316,57 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                     );
                 });
             }
-            egui::ScrollArea::new([false, true])
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    graph_edit_recurse(
-                        ui,
-                        &mut graph,
-                        interface.graph_focused_subtree,
-                        &mut interface.graph_selection,
-                        &mut interface.graph_focused_subtree,
-                        interface.yanked_node,
-                    );
-                });
+            latch::latch(ui, "dnd-state", None, |ui, dnd_state| {
+                egui::ScrollArea::new([false, true])
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        graph_edit_recurse(
+                            ui,
+                            &mut graph,
+                            interface.graph_focused_subtree,
+                            &mut interface.graph_selection,
+                            &mut interface.graph_focused_subtree,
+                            dnd_state,
+                        );
+                    });
+
+                match dnd_state {
+                    None => latch::Latch::None,
+                    Some(DndState {
+                        released: false, ..
+                    }) => latch::Latch::Continue,
+                    Some(_) => latch::Latch::Finish,
+                }
+            })
+            .on_finish(|dnd| {
+                // Drop just occured. Do move!
+                let Some(dnd) = dnd else {
+                    return;
+                };
+
+                let Some(drop_target) = dnd.drop_target else {
+                    return;
+                };
+
+                // It is OK if this err - likely, in fact. If the user eg. places it in the same place it already was,
+                // or tries to make a group a child of itself
+                let _ = graph.reparent(
+                    dnd.drag_target,
+                    match &drop_target {
+                        DroppedAt::Before(before) => state::graph::Location::AboveSelection(before),
+                        DroppedAt::FirstChild(parent) => {
+                            state::graph::Location::IndexIntoNode(parent, 0)
+                        }
+                        // After - index too large is clamped to the end, perfect!
+                        DroppedAt::LastChild(None) => {
+                            state::graph::Location::IndexIntoRoot(usize::MAX)
+                        }
+                        DroppedAt::LastChild(Some(parent)) => {
+                            state::graph::Location::IndexIntoNode(parent, usize::MAX)
+                        }
+                    },
+                );
+            })
         });
     });
 }
@@ -1609,38 +1602,92 @@ fn ui_passthrough_or_blend(
         }
     })
 }
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum DroppedAt {
+    // Last child of group, or None for last child of root.
+    LastChild(Option<state::graph::NodeID>),
+    /// Sibling above id
+    Before(state::graph::AnyID),
+    /// First child of id
+    FirstChild(state::graph::NodeID),
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+struct DndState {
+    drag_target: state::graph::AnyID,
+    drop_target: Option<DroppedAt>,
+    released: bool,
+}
+impl DndState {
+    fn drag_target(&self) -> state::graph::AnyID {
+        self.drag_target
+    }
+    fn drop_target(&self) -> Option<DroppedAt> {
+        self.drop_target
+    }
+}
+
 fn graph_edit_recurse<
     // Well that's.... not great...
     W: queue::writer::CommandWrite<state::graph::commands::Command>,
 >(
     ui: &mut Ui,
     graph: &mut state::graph::writer::GraphWriter<'_, W>,
-    root: Option<state::graph::NodeID>,
+    parent: Option<state::graph::NodeID>,
     selected_node: &mut Option<state::graph::AnyID>,
     focused_node: &mut Option<state::graph::NodeID>,
-    yanked_node: Option<state::graph::AnyID>,
+    dnd_state: &mut Option<DndState>,
 ) {
-    let node_ids: Vec<_> = match root {
+    let node_ids: Vec<_> = match parent {
         Some(root) => graph.iter_node(root).unwrap().map(|(id, _)| id).collect(),
         None => graph.iter_top_level().map(|(id, _)| id).collect(),
     };
 
-    let mut first = true;
+    // Keep track of who the last child was.
+    let mut is_empty = true;
     // Iterate!
     for id in node_ids {
-        if !first {
-            ui.separator();
-        }
+        is_empty = false;
+
+        let dnd_target = DroppedAt::Before(id);
+        // Drag-n-drop target for inserting above this node
+        let head_separator = drag::DropSeparator {
+            active: dnd_state.is_some(),
+            already_selected: dnd_state.as_ref().and_then(DndState::drop_target)
+                == Some(dnd_target),
+        };
+        if head_separator.show(ui).selected {
+            // Unwrap OK - isn't available for selection if None.
+            dnd_state.as_mut().unwrap().drop_target = Some(dnd_target);
+        };
+
         // Name and selection
         let header_response = ui.horizontal(|ui| {
             let data = graph.get(id).unwrap();
-            // Choose an icon based on the type of the node:
-            // Yanked (if any) gets a scissor icon.
-            let icon = if Some(id) == yanked_node {
-                SCISSOR_ICON
-            } else {
-                icon_of_node(data)
-            };
+
+            // Disable everything if dragging a layer around.
+            ui.set_enabled(dnd_state.is_none());
+
+            // Drag-n-drop handle
+            let dragged = ui
+                .add(drag::Handle)
+                .on_hover_text("Drag to reorder")
+                .dragged();
+            if !dragged && dnd_state.is_some_and(|dnd| dnd.drag_target == id) {
+                // No longer dragged and we were the target, end drag.
+                dnd_state.as_mut().unwrap().released = true;
+            } else if dragged && dnd_state.is_none() {
+                // Start drag!
+                *dnd_state = Some(DndState {
+                    drag_target: id,
+                    drop_target: None,
+                    released: false,
+                });
+            }
+
+            // Choose an icon based on the type of the node
+            let icon = icon_of_node(data);
             // Selection radio button + toggle function.
             let is_selected = *selected_node == Some(id);
             if ui
@@ -1653,9 +1700,6 @@ fn graph_edit_recurse<
                     *selected_node = Some(id);
                 }
             }
-
-            // Only show if not in reparent mode.
-            ui.set_enabled(yanked_node.is_none());
 
             let name = graph.name_mut(id).unwrap();
 
@@ -1679,7 +1723,7 @@ fn graph_edit_recurse<
                 // Blend, if any.
                 if let Some(old_blend) = data.blend() {
                     // Reports new blend when interaction is finished, disabled in yank mode.
-                    ui_layer_blend(ui, (&id, "blend"), old_blend, yanked_node.is_some())
+                    ui_layer_blend(ui, (&id, "blend"), old_blend, dnd_state.is_some())
                         .on_finish(|new_blend| graph.change_blend(id, new_blend).unwrap());
                 }
             }
@@ -1697,7 +1741,7 @@ fn graph_edit_recurse<
                 // Display node type - passthrough or grouped blend
                 let old_blend = n.blend();
                 // Reports new blend when interaction finished, disabled in yank mode.
-                ui_passthrough_or_blend(ui, (&id, "blend"), old_blend, yanked_node.is_some())
+                ui_passthrough_or_blend(ui, (&id, "blend"), old_blend, dnd_state.is_some())
                     .on_finish(|new_blend| match (old_blend, new_blend) {
                         (Some(from), Some(to)) if from != to => {
                             // Simple blend change
@@ -1731,18 +1775,46 @@ fn graph_edit_recurse<
                             Some(node_id),
                             selected_node,
                             focused_node,
-                            yanked_node,
+                            dnd_state,
                         );
                     });
             }
             (None, None) => (),
             (Some(_), Some(_)) => panic!("Node is both a leaf and node???"),
         }
-        first = false;
     }
 
-    // (roundabout way to determine that) it's empty!
-    if first {
-        ui.label(egui::RichText::new("Nothing here...").italics().weak());
+    if is_empty {
+        // Show a hint to add stuff.
+        // this also occurs when an empty group is unrolled, show a drop target for first-child of this group.
+        if let Some(group) = parent {
+            let target = DroppedAt::FirstChild(group);
+            let first_child_separator = drag::DropSeparator {
+                active: dnd_state.is_some(),
+                already_selected: dnd_state.as_ref().and_then(DndState::drop_target)
+                    == Some(target),
+            };
+            if first_child_separator.show(ui).selected {
+                // Unwrap OK - isn't available for selection if None.
+                dnd_state.as_mut().unwrap().drop_target = Some(target);
+            };
+        }
+
+        ui.label(
+            egui::RichText::new("Nothing here... Add some layers!")
+                .italics()
+                .weak(),
+        );
+    } else {
+        let target = DroppedAt::LastChild(parent);
+        // Show a drag-n-drop target at the footer too, below the last target.
+        let tail_separator = drag::DropSeparator {
+            active: dnd_state.is_some(),
+            already_selected: dnd_state.as_ref().and_then(DndState::drop_target) == Some(target),
+        };
+        if tail_separator.show(ui).selected {
+            // Unwrap OK - isn't available for selection if None.
+            dnd_state.as_mut().unwrap().drop_target = Some(target);
+        };
     }
 }
