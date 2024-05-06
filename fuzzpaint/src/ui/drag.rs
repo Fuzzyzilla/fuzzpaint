@@ -17,14 +17,16 @@ impl egui::Widget for Handle {
         let base_position =
             response.rect.left_top() + egui::vec2(width_spacing, heigh_spacing) / 2.0;
 
+        let color = if response.dragged() {
+            ui.style().visuals.selection.bg_fill
+        } else {
+            ui.style().interact(&response).fg_stroke.color
+        };
+
         for x in 0..=1u8 {
             for y in 0..=2u8 {
                 let offset = egui::vec2(f32::from(x) * width_spacing, f32::from(y) * heigh_spacing);
-                painter.circle_filled(
-                    base_position + offset,
-                    dot_size,
-                    ui.style().interact(&response).fg_stroke.color,
-                );
+                painter.circle_filled(base_position + offset, dot_size, color);
             }
         }
 
