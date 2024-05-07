@@ -1,4 +1,7 @@
-# <p style="text-align:center;"><a href="#" onclick="return false;"><img src="https://raw.githubusercontent.com/googlefonts/noto-emoji/main/svg/emoji_u1f411.svg" alt="Baa" title="Baa" style="position:relative;bottom: -0.2em;width:1em;"/></a> Fuzzpaint</p>
+<h1 style="text-align:center;"><a href="#" onclick="return false;"><img src="https://raw.githubusercontent.com/googlefonts/noto-emoji/main/svg/emoji_u1f411.svg" alt="Baa" title="Baa" style="position:relative;bottom: -0.2em;width:1em;"/></a> Fuzzpaint</h1>
+
+![a screenshot of the app, with a sheep mascot drawn](demo-images/full.png)
+
 ## What's all this?
 A graphics accelerated paint program combining the simplicity of raster with all the lossless quality of vector!
 

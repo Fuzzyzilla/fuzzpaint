@@ -53,6 +53,7 @@ impl Surface {
             egui_ctx,
             tablet_manager,
             ui: crate::ui::MainUI::new(stream.listen()),
+            enable_document_view: true,
             preview_renderer,
             action_collector:
                 crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
@@ -71,6 +72,8 @@ pub struct Renderer {
     render_context: Arc<render_device::RenderContext>,
     egui_ctx: egui_impl::Ctx,
     ui: crate::ui::MainUI,
+
+    enable_document_view: bool,
 
     action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector,
     action_stream: crate::actions::ActionStream,
@@ -267,8 +270,13 @@ impl Renderer {
             .update(self.win.as_ref(), |ctx| viewport = self.ui.ui(ctx));
 
         // Todo: only change if... actually changed :P
-        self.preview_renderer
-            .viewport_changed(viewport.0, viewport.1);
+        if let Some(viewport) = viewport {
+            self.enable_document_view = true;
+            self.preview_renderer
+                .viewport_changed(viewport.0, viewport.1);
+        } else {
+            self.enable_document_view = false;
+        }
     }
     fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =
@@ -298,15 +306,16 @@ impl Renderer {
         //Wait for previous frame to end. (required for safety of preview render proxy)
         self.last_frame_fence.take().map(|fence| fence.wait(None));
 
-        let preview_commands = unsafe {
+        let preview_commands = self.enable_document_view.then(|| unsafe {
             self.preview_renderer.render(
                 self.render_surface.as_ref().unwrap().swapchain_images()[idx as usize].clone(),
                 idx,
             )
-        };
+        });
         let preview_commands = match preview_commands {
-            Ok(commands) => commands,
-            Err(e) => {
+            Some(Ok(commands)) => commands,
+            None => smallvec::SmallVec::new(),
+            Some(Err(e)) => {
                 log::warn!("Failed to build preview commands {e:?}");
                 smallvec::SmallVec::new()
             }
