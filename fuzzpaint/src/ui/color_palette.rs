@@ -349,14 +349,18 @@ impl<'w, 'a: 'w, Writer> ColorPalette<'w, 'a, Writer> {
         }
     }
 }
+pub struct ColorPaletteResponse {
+    pub dereferenced_color: FColor,
+    pub response: egui::Response,
+}
 // Ewwwww.. Traits that make the undo/redo system tick, that usually need not be seen by mortal eyes, but alas here we are...
 impl<
         Writer: fuzzpaint_core::queue::writer::CommandWrite<
             fuzzpaint_core::state::palette::commands::Command,
         >,
-    > egui::Widget for ColorPalette<'_, '_, Writer>
+    > ColorPalette<'_, '_, Writer>
 {
-    fn ui(mut self, ui: &mut egui::Ui) -> egui::Response {
+    pub fn show(self, ui: &mut egui::Ui) -> ColorPaletteResponse {
         let mut changed = false;
         const BTN_BASE_SIZE: f32 = 12.0;
         let width = ui.available_width();
@@ -579,7 +583,13 @@ impl<
             response.mark_changed()
         }
 
-        response
+        ColorPaletteResponse {
+            dereferenced_color: self
+                .color
+                .get()
+                .left_or_else(|idx| self.palette.get(idx).unwrap_or(FColor::BLACK)),
+            response,
+        }
     }
 }
 

@@ -806,27 +806,33 @@ impl MainUI {
                                     .into();
                         }
 
-                        let mut color_modulate = brush.color_modulate;
-
-                        let palette_ui =
-                            color_palette::ColorPalette::new(&mut color_modulate, &mut palette)
-                                .scope(color_palette::HistoryScope::Local)
-                                .in_flux(self.picker_in_flux)
-                                .id_source(current_doc)
-                                .swap(
-                                    // Swap top colors if requested.
-                                    actions.action_trigger_count(crate::actions::Action::ColorSwap)
-                                        % 2
-                                        == 1,
-                                )
-                                .max_history(64);
-
                         // Small buttons with color history, pins, and palettes.
-                        let _update_picker = ui.add(palette_ui).changed();
+                        let palette_response = color_palette::ColorPalette::new(
+                            &mut brush.color_modulate,
+                            &mut palette,
+                        )
+                        .scope(color_palette::HistoryScope::Local)
+                        .in_flux(self.picker_in_flux)
+                        .id_source(current_doc)
+                        .swap(
+                            // Swap top colors if requested.
+                            actions.action_trigger_count(crate::actions::Action::ColorSwap) % 2
+                                == 1,
+                        )
+                        .max_history(64)
+                        .show(ui);
 
-                        // Todo: set the picker if the brush was changed by the palette UI.
+                        // set the picker if the brush was changed by the palette UI.
                         // There's a really weird lifetime issue though where seemingly both mutable borrows above
                         // are intertwined and continue indefinitely - thus the color can't be read...?
+                        // So instead, it has it's own return type that uses those borrows to find
+                        // the color for us. Weird werid werid.
+                        // Do this unconditionally - so that the picker is always sync'd, even if
+                        // ssome code runs that changes the brushes modulate without announcing it.
+                        let [r, g, b, a] = palette_response.dereferenced_color.as_array();
+                        let rgba = egui::Rgba::from_rgba_premultiplied(r, g, b, a);
+
+                        self.picker_color = rgba.into();
                     });
                 });
             }
