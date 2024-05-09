@@ -8,6 +8,55 @@ pub enum StylusAxis {
     Pressure,
     Dist,
 }
+
+/// Emulate pointer input from octotablet. This is stateless - that is, the function doesn't remember states of buttons or what is the "current"
+/// device. All buttons other than the nib are reported as right-clicks.
+/// # Safety
+/// Any winit event that reports a device id will use the `dummy` ID. See [`winit::event::DeviceId`] for safe treatment of this special Id.
+#[must_use]
+pub unsafe fn winit_event_from_octotablet(
+    event: &octotablet::events::ToolEvent,
+    scale_factor: f64,
+) -> Option<winit::event::WindowEvent> {
+    use octotablet::events::ToolEvent;
+    use winit::event::{DeviceId, ElementState, WindowEvent};
+
+    // Safety: forwarded to this fn's contract. Any user of this return value must be sure to not use
+    // the returned event for evil.
+    let device_id = unsafe { DeviceId::dummy() };
+
+    Some(match event {
+        ToolEvent::Down => WindowEvent::MouseInput {
+            device_id,
+            state: ElementState::Pressed,
+            button: winit::event::MouseButton::Left,
+        },
+        ToolEvent::Up => WindowEvent::MouseInput {
+            device_id,
+            state: ElementState::Released,
+            button: winit::event::MouseButton::Left,
+        },
+        ToolEvent::Button { pressed, .. } => WindowEvent::MouseInput {
+            device_id,
+            state: if *pressed {
+                ElementState::Pressed
+            } else {
+                ElementState::Released
+            },
+            button: winit::event::MouseButton::Left,
+        },
+        ToolEvent::Pose(octotablet::axis::Pose { position, .. }) => WindowEvent::CursorMoved {
+            device_id,
+            position: winit::dpi::PhysicalPosition::from_logical(
+                winit::dpi::LogicalPosition::new(position[0], position[1]),
+                scale_factor,
+            ),
+        },
+
+        ToolEvent::Out => WindowEvent::CursorLeft { device_id },
+        _ => return None,
+    })
+}
 trait StylusAxes {
     fn get_axis(&self, axis: StylusAxis) -> Option<f32>;
     fn set_axis(&mut self, axis: StylusAxis, value: f32) -> Result<(), ()>;

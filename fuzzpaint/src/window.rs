@@ -213,7 +213,33 @@ impl Renderer {
                     {
                         let mut has_tablet_update = false;
                         for event in tab_events {
-                            if let octotablet::events::Event::Tool { event, .. } = event {
+                            if let octotablet::events::Event::Tool { event, tool } = event {
+                                // If the event isn't emulated from some other device, send the event to winit_egui
+                                // so that the stylus can be used to interact with the egui layers.
+                                if !matches!(tool.tool_type, Some(octotablet::tool::Type::Emulated))
+                                {
+                                    // Safety: we must not pass the returned event deviceID into any winit functions.
+                                    if let Some(winit_event) = unsafe {
+                                        crate::stylus_events::winit_event_from_octotablet(
+                                            &event,
+                                            self.win.scale_factor(),
+                                        )
+                                    } {
+                                        // Safety: Looking into the code of this, there is no path where the device ID is taken and given to winit.
+                                        // If that occurs, it's UB - MAKE SURE TO CHECK BEFORE UPDATING VERS ;3
+                                        let ignore = self
+                                            .egui_ctx
+                                            .push_winit_event(&self.win, &winit_event)
+                                            .consumed;
+
+                                        // Egui ate the event, skip further processing.
+                                        if ignore {
+                                            continue;
+                                        };
+                                    }
+                                }
+
+                                // Wasn't consumed, forward it to the event stream for the tools to use.
                                 match event {
                                     octotablet::events::ToolEvent::Pose(p) => {
                                         if let Some(p) = p.pressure.get() {
@@ -221,6 +247,7 @@ impl Renderer {
                                         }
                                         self.stylus_events
                                             .push_position((p.position[0], p.position[1]));
+
                                         has_tablet_update = true;
                                     }
                                     octotablet::events::ToolEvent::Up
