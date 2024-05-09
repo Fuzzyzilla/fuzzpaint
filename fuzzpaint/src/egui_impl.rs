@@ -24,8 +24,10 @@ pub struct Ctx {
     state: egui_winit::State,
     renderer: Render,
 
-    redraw_requested: bool,
+    redraw_this_frame: bool,
+    redraw_next_frame: bool,
     full_output: Option<egui::FullOutput>,
+    repaint_times: std::collections::VecDeque<std::time::Instant>,
 }
 impl Ctx {
     pub fn new(
@@ -49,8 +51,10 @@ impl Ctx {
         Ok(Self {
             state,
             renderer,
-            redraw_requested: true,
+            redraw_this_frame: false,
+            redraw_next_frame: true,
             full_output: None,
+            repaint_times: std::collections::VecDeque::new(),
         })
     }
     pub fn wants_pointer_input(&self) -> bool {
@@ -66,14 +70,40 @@ impl Ctx {
     ) -> egui_winit::EventResponse {
         let response = self.state.on_window_event(window, winit_event);
         if response.repaint {
-            self.redraw_requested = true;
+            self.redraw_this_frame = true;
         }
         response
     }
-    pub fn update(&'_ mut self, window: &winit::window::Window, f: impl FnOnce(&'_ egui::Context)) {
+    /// Update the UI, regardless of if a frame was requested.
+    pub fn update<T>(
+        &'_ mut self,
+        window: &winit::window::Window,
+        f: impl FnOnce(&'_ egui::Context) -> T,
+    ) -> T {
         let input = self.state.take_egui_input(window);
+
+        let mut user_output = None;
         //Call into user code to draw
-        let mut output = self.state.egui_ctx().run(input, f);
+        let mut output = self
+            .state
+            .egui_ctx()
+            .run(input, |ctx| user_output = Some(f(ctx)));
+
+        // Schedule repaints. This doesn't handle multi-view.
+        let now = std::time::Instant::now();
+        output
+            .viewport_output
+            .iter()
+            .for_each(|(_, viewport_output)| {
+                let delay = viewport_output.repaint_delay;
+                if delay.is_zero() {
+                    // Wants immediate changes. mark next frame for redraw.
+                    self.redraw_next_frame = true;
+                } else if let Some(time) = now.checked_add(delay) {
+                    // Egui gives absurd time delay if it doesn't want a repaint. Otherwise, enqueue it.
+                    self.insert_repaint(time);
+                }
+            });
 
         //If there were outstanding deltas, accumulate those
         if let Some(old) = self.full_output.take() {
@@ -84,9 +114,50 @@ impl Ctx {
             .handle_platform_output(window, output.platform_output.clone());
         //return platform outputs
         self.full_output = Some(output);
+
+        // Closure always runs, this is not presented on a type level though.
+        user_output.unwrap()
     }
-    pub fn needs_redraw(&self) -> bool {
-        self.redraw_requested
+    /// Wants to re-draw the screen. Check this after you've checked [`Self::wants_update`] and updated accordingly, but repaints may
+    /// be requested even if an update is not. Check this frequently, but note that querying this destroys the flag.
+    pub fn take_wants_update(&mut self) -> bool {
+        // If redraw requests come from any source, return true.
+
+        // Hey future self, I was and am very confused at how this is supposed to work. There is limited documentation for it
+        // and I couldn't reverse-engineer the existing implementations.
+        // For when you come back here to fix this crime (which may incur the odd extra render for no reason), here's some notes that
+        // involved significant distress in order to discover:
+        // * Re-running UI and re-rendering UI are *not* distinct events in egui and are referred to jointly as "repainting"
+        // * a repaint delay of 0ms means "rerun ui logic again ASAP" (the most painful to figure out lmao)
+        self.redraw_this_frame || self.take_past_repaints().is_some()
+    }
+    /// Insert a repaint time into the queue.
+    fn insert_repaint(&mut self, when: std::time::Instant) {
+        // Err means not found and gives where it *would* be.
+        // Ignore OK, a redraw is already scheduled, despite how unlikely that case would be :P
+        if let Err(idx) = self.repaint_times.binary_search(&when) {
+            self.repaint_times.insert(idx, when);
+        }
+    }
+    /// Take from the repaint time queue. All past times will be popped, and the latest will
+    /// be returned, or None if no repaint times have passed.
+    fn take_past_repaints(&mut self) -> Option<std::time::Instant> {
+        let now = std::time::Instant::now();
+        let first_in_future_idx = self.repaint_times.partition_point(|elem| elem <= &now);
+        if first_in_future_idx != 0 {
+            // Some are in the past!
+            let last = self
+                .repaint_times
+                .get(first_in_future_idx - 1)
+                .copied()
+                .unwrap();
+            // Delete all in the past
+            self.repaint_times.drain(..first_in_future_idx);
+            // Return the latest past time.
+            Some(last)
+        } else {
+            None
+        }
     }
     pub fn build_commands(
         &mut self,
@@ -95,8 +166,7 @@ impl Ctx {
         Option<Arc<vk::PrimaryAutoCommandBuffer>>,
         Arc<vk::PrimaryAutoCommandBuffer>,
     )> {
-        self.redraw_requested = false;
-
+        self.redraw_this_frame = std::mem::take(&mut self.redraw_next_frame);
         // Check if there's anything to draw!
         let output = self.full_output.take()?;
 

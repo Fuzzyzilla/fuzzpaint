@@ -240,14 +240,15 @@ impl Renderer {
                     } else {
                         false
                     };
+                    let egui_wants_update = self.egui_ctx.take_wants_update();
                     // run UI logics
-                    self.do_ui();
+                    if egui_wants_update {
+                        self.do_ui();
+                    }
                     self.apply_document_cursor();
 
                     // Request draw if any interactive element wants it (UI, document, or tablet)
-                    if has_tablet_update
-                        || self.egui_ctx.needs_redraw()
-                        || self.preview_renderer.has_update()
+                    if has_tablet_update || egui_wants_update || self.preview_renderer.has_update()
                     {
                         self.window().request_redraw();
                     }
@@ -265,9 +266,9 @@ impl Renderer {
         })
     }
     fn do_ui(&mut self) {
-        let mut viewport = Default::default();
-        self.egui_ctx
-            .update(self.win.as_ref(), |ctx| viewport = self.ui.ui(ctx));
+        let viewport = self
+            .egui_ctx
+            .update(self.win.as_ref(), |ctx| self.ui.ui(ctx));
 
         // Todo: only change if... actually changed :P
         if let Some(viewport) = viewport {
