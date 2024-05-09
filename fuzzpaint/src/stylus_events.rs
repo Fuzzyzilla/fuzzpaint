@@ -43,7 +43,7 @@ pub unsafe fn winit_event_from_octotablet(
             } else {
                 ElementState::Released
             },
-            button: winit::event::MouseButton::Left,
+            button: winit::event::MouseButton::Right,
         },
         ToolEvent::Pose(octotablet::axis::Pose { position, .. }) => WindowEvent::CursorMoved {
             device_id,
