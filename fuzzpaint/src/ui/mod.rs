@@ -895,6 +895,8 @@ impl MainUI {
                 brush.spacing_px = spacing_px;
             }
         }
+
+        brush_ui::test(ui);
     }
 }
 /// For any tool, `(icon string, tooltip, opt_hotkey)`

@@ -664,7 +664,7 @@ mod stroke_renderer {
 
     pub struct StrokeLayerRenderer {
         context: Arc<crate::render_device::RenderContext>,
-        texture_descriptor: Arc<vk::PersistentDescriptorSet>,
+        texture_descriptors: fuzzpaint_core::brush::UniqueIDMap<Arc<vk::PersistentDescriptorSet>>,
         gpu_tess: super::gpu_tess::GpuStampTess,
         pipeline: Arc<vk::GraphicsPipeline>,
     }
@@ -674,11 +674,7 @@ mod stroke_renderer {
             let (image, sampler, _defer) = {
                 let brush_image =
                     image::load_from_memory(include_bytes!("../../brushes/splotch.png"))?
-                        .into_luma_alpha8();
-
-                // Iter over opacities. Weird/inefficient way to do this hehe
-                // Idealy it'd just be an Alpha image but nothing suports that file layout :V
-                let brush_image_alphas = brush_image.iter().skip(1).step_by(2);
+                        .into_luma8();
 
                 let device_image = vk::Image::new(
                     context.allocators().memory().clone(),
@@ -713,11 +709,9 @@ mod stroke_renderer {
                     // Unwrap ok - the device can't possibly be using it,
                     // and we don't read from it from host.
                     let mut write = image_stage.write().unwrap();
+
                     // Copy pixel-by-pixel
-                    write
-                        .iter_mut()
-                        .zip(brush_image_alphas)
-                        .for_each(|(into, from)| *into = *from);
+                    write.copy_from_slice(&brush_image);
                 }
                 let mut cb = vk::AutoCommandBufferBuilder::primary(
                     context.allocators().command_buffer(),
@@ -886,7 +880,9 @@ mod stroke_renderer {
                 context,
                 pipeline,
                 gpu_tess: tess,
-                texture_descriptor: descriptor_set,
+                texture_descriptors: [(fuzzpaint_core::brush::UniqueID([0; 32]), descriptor_set)]
+                    .into_iter()
+                    .collect(),
             })
         }
         /// Allocate a new `RenderData` object. Initial contents are undefined!
@@ -980,7 +976,10 @@ mod stroke_renderer {
                         vk::PipelineBindPoint::Graphics,
                         self.pipeline.layout().clone(),
                         0,
-                        self.texture_descriptor.clone(),
+                        self.texture_descriptors
+                            .get(&fuzzpaint_core::brush::UniqueID([0; 32]))
+                            .unwrap()
+                            .clone(),
                     )?
                     .bind_vertex_buffers(0, vertices)?
                     .draw_indirect(indirects)?
