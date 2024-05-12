@@ -1,20 +1,39 @@
 use fuzzpaint_core::brush::{Brush, Texture, UniqueID};
 
+use super::ResponseExt;
+
+const FULL_UV: egui::Rect = egui::Rect {
+    min: egui::Pos2::ZERO,
+    max: egui::Pos2 { x: 1.0, y: 1.0 },
+};
+
+#[derive(Copy, Clone, Default, PartialEq, Eq)]
+enum CreationTab {
+    #[default]
+    Settings,
+    Texture,
+}
+
 pub struct CreationOutput {
     pub texture_data: Option<Vec<u8>>,
     pub brush: Brush,
 }
 pub struct CreationModal {
-    // Imported texture + handle, egui tex frees on drop!
-    texture_data: Option<Vec<u8>>,
+    tab: CreationTab,
+    // Imported texture handle, frees on drop!
     texture: Option<egui::TextureHandle>,
+    uv_rect: egui::Rect,
+    name: String,
+    spacing_proportion: f32,
 }
 impl Default for CreationModal {
     fn default() -> Self {
-        let () = ();
         Self {
-            texture_data: None,
+            tab: CreationTab::default(),
             texture: None,
+            uv_rect: FULL_UV,
+            name: "New Brush".to_owned(),
+            spacing_proportion: 5.0,
         }
     }
 }
@@ -27,14 +46,255 @@ impl super::Modal for CreationModal {
         &mut self,
         ui: &mut egui::Ui,
     ) -> super::modal::Response<Self::Cancel, Self::Confirm, Self::Error> {
-        ui.label("OwO");
-        if ui.button("Leave me be, foul beeste.").clicked() {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.tab, CreationTab::Settings, "Settings");
+            ui.selectable_value(&mut self.tab, CreationTab::Texture, "Texture");
+        });
+        ui.separator();
+
+        match self.tab {
+            CreationTab::Settings => {
+                ui.text_edit_singleline(&mut self.name);
+                ui.add(
+                    egui::Slider::new(&mut self.spacing_proportion, 2.0..=100.0)
+                        .text("Spacing")
+                        .clamp_to_range(true)
+                        .suffix("%"),
+                );
+            }
+            CreationTab::Texture => {
+                if ui.button(super::GROUP_ICON).clicked() {
+                    if let Some(file) = rfd::FileDialog::default().pick_file() {
+                        let try_load = || -> anyhow::Result<egui::TextureHandle> {
+                            // `image` crate is probably not the choice here. It sweeps a lot of details under the rug and doesn't
+                            // exactly do those details justice lol (colorspaces are wayy off)
+                            let image = image::open(file)?.to_luma32f();
+                            let manager = ui.ctx().tex_manager();
+                            let mut write = manager.write();
+
+                            let size = [image.width() as usize, image.height() as usize];
+
+                            // Create a reference-counted image out of it, refs = 1
+                            let texture_id = write.alloc(
+                                "Preview brush texture".to_owned(),
+                                egui::ImageData::Font(egui::FontImage {
+                                    pixels: image.to_vec(),
+                                    size,
+                                }),
+                                egui::TextureOptions {
+                                    magnification: egui::TextureFilter::Nearest,
+                                    minification: egui::TextureFilter::Linear,
+                                    wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                                },
+                            );
+
+                            drop(write);
+
+                            // This handle takes the only existing ref, dropping it destroys the image.
+                            Ok(egui::TextureHandle::new(manager, texture_id))
+                        };
+
+                        match try_load() {
+                            Ok(image) => self.texture = Some(image),
+                            Err(err) => log::error!("Failed to load image: {err}"),
+                        }
+                    }
+                }
+
+                if let Some(texture) = self.texture.as_ref() {
+                    let width = ui.available_width();
+
+                    uv_picker(
+                        ui,
+                        egui::Vec2::splat(width),
+                        &mut self.uv_rect,
+                        FULL_UV,
+                        texture.id(),
+                    );
+                }
+            }
+        }
+        if let Some(texture) = self.texture.as_ref() {
+            let width = ui.available_width();
+            let height = width / 3.0;
+            let size = egui::vec2(width, height);
+
+            let (response, painter) = ui.allocate_painter(
+                size,
+                egui::Sense {
+                    click: false,
+                    drag: false,
+                    focusable: false,
+                },
+            );
+
+            let mesh = tessellate(
+                texture.id(),
+                self.uv_rect,
+                egui::Color32::WHITE,
+                response.rect,
+                self.spacing_proportion / 100.0 * 10.0,
+                10.0,
+            );
+            painter.rect_filled(response.rect, 0.0, egui::Color32::BLACK);
+            painter.add(egui::Shape::mesh(mesh));
+        }
+        ui.separator();
+        if ui.button("Cancel").clicked_or_escape() {
             super::modal::Response::Cancel(())
         } else {
             super::modal::Response::Continue
         }
     }
 }
+
+enum RGBAChannel {
+    R,
+    G,
+    B,
+    A,
+}
+enum RGBChannel {
+    R,
+    G,
+    B,
+}
+enum LAChannel {
+    L,
+    A,
+}
+enum LChannel {
+    L,
+}
+
+struct Swizzle<Channel> {
+    channel: Channel,
+    invert: bool,
+}
+
+struct ImageManager {
+    image: image::DynamicImage,
+}
+/// Provides many buttons letting the user customize how their image is to be interpreted.
+/// When a change is made that effects the image, it will be destroyed and rebuilt and the new handle will be
+/// left in it's place. Returns `true` if the handle changed in this way.
+fn image_mode(
+    ui: &mut egui::Ui,
+    image: &image::DynamicImage,
+    handle: &mut egui::TextureHandle,
+) -> bool {
+    false
+}
+
+/// A picker showing an image background and allowing the user to pick a UV rectangle from it.
+fn uv_picker(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    uv: &mut egui::Rect,
+    max_uv: egui::Rect,
+    texture: egui::TextureId,
+) -> egui::Response {
+    let (mut response, painter) = ui.allocate_painter(
+        size,
+        egui::Sense {
+            click: false,
+            drag: true,
+            focusable: true,
+        },
+    );
+    let rect = response.rect;
+    if response.drag_started() {
+        uv.min = egui::Pos2::ZERO
+            + (response.interact_pointer_pos().unwrap() - rect.left_top()) / rect.size();
+        uv.min = uv.min.clamp(max_uv.min, max_uv.max);
+        uv.max = uv.min.clamp(max_uv.min, max_uv.max);
+        response.mark_changed();
+    } else if response.dragged() {
+        uv.max = egui::Pos2::ZERO
+            + (response.interact_pointer_pos().unwrap() - rect.left_top()) / rect.size();
+        uv.max = uv.max.clamp(max_uv.min, max_uv.max);
+        response.mark_changed();
+    }
+
+    let mut mesh = egui::Mesh::with_texture(texture);
+    mesh.add_rect_with_uv(rect, FULL_UV, egui::Color32::WHITE);
+
+    painter.add(egui::Shape::Mesh(mesh));
+
+    // Where the current UV area is in UI space.
+    let mut visual_uv_rect = egui::Rect::from_min_max(
+        egui::pos2(
+            egui::remap(uv.min.x, 0.0..=1.0, rect.min.x..=rect.max.x),
+            egui::remap(uv.min.y, 0.0..=1.0, rect.min.y..=rect.max.y),
+        ),
+        egui::pos2(
+            egui::remap(uv.max.x, 0.0..=1.0, rect.min.x..=rect.max.x),
+            egui::remap(uv.max.y, 0.0..=1.0, rect.min.y..=rect.max.y),
+        ),
+    );
+
+    // Round to px so that tiny gaps don't show up (very obvious lol)
+    visual_uv_rect.min = painter.round_pos_to_pixels(visual_uv_rect.min);
+    visual_uv_rect.max = painter.round_pos_to_pixels(visual_uv_rect.max);
+
+    // Inverted UV rect is fine, but avoid visual artifacting with the below logic!
+    if visual_uv_rect.min.x > visual_uv_rect.max.x {
+        std::mem::swap(&mut visual_uv_rect.min.x, &mut visual_uv_rect.max.x);
+    }
+    if visual_uv_rect.min.y > visual_uv_rect.max.y {
+        std::mem::swap(&mut visual_uv_rect.min.y, &mut visual_uv_rect.max.y);
+    }
+
+    // Draw an outline for the selected rect.
+    painter.rect_stroke(
+        visual_uv_rect,
+        0.0,
+        egui::Stroke {
+            color: egui::Color32::BLACK,
+            width: 1.0,
+        },
+    );
+    // Darken the region outside the selection.
+    let ghost_color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 200);
+    // Left margin
+    painter.rect_filled(rect.with_max_x(visual_uv_rect.min.x), 0.0, ghost_color);
+    // right margin
+    painter.rect_filled(rect.with_min_x(visual_uv_rect.max.x), 0.0, ghost_color);
+    // Covers top and bottom region.
+    let vertical_area = rect
+        .with_min_x(visual_uv_rect.min.x)
+        .with_max_x(visual_uv_rect.max.x);
+    // Top center margin
+    painter.rect_filled(
+        vertical_area.with_max_y(visual_uv_rect.min.y),
+        0.0,
+        ghost_color,
+    );
+    // Bottom center margin
+    painter.rect_filled(
+        vertical_area.with_min_y(visual_uv_rect.max.y),
+        0.0,
+        ghost_color,
+    );
+
+    response
+}
+
+/// Changes the texture UVs of a tessellated demo stroke in-place.
+fn change_tessellated_uv(mesh: &mut egui::Mesh, uv: egui::Rect) {
+    // Mesh consists of many quads, all in order.
+    mesh.vertices.chunks_exact_mut(4).for_each(|verts| {
+        let [a, b, c, d] = verts else {
+            unreachable!();
+        };
+        a.uv = uv.left_top();
+        b.uv = uv.left_bottom();
+        c.uv = uv.right_bottom();
+        d.uv = uv.right_top();
+    });
+}
+/// Remap a mesh from the given size to a new size in-place.
+fn resize(mesh: &mut egui::Mesh, from: egui::Rect, to: egui::Rect) {}
 
 /// Should be in same layout as specified in `archetype`!
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
@@ -49,7 +309,7 @@ struct DemoStrokePoint {
 /// to `[-width/2, width/2]` and `[-height/2, height/2]` respectively.
 #[must_use]
 fn make_demo_stroke(width: f32, height: f32) -> Vec<DemoStrokePoint> {
-    const NUM_SAMPLES: u8 = 15;
+    const NUM_SAMPLES: u8 = 31;
 
     let xt = |t: f32| -> f32 {
         let offs = 1.25 * t + 0.5;

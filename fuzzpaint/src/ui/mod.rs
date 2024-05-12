@@ -79,6 +79,7 @@ trait ResponseExt {
         frame: &crate::actions::ActionFrame,
         action: crate::actions::Action,
     ) -> Self;
+    fn clicked_or_escape(self) -> bool;
 }
 impl ResponseExt for egui::Response {
     fn or_action_clicked(
@@ -104,6 +105,11 @@ impl ResponseExt for egui::Response {
 
             ..if held { self.highlight() } else { self }
         }
+    }
+    /// Returns true if [`egui::Response::clicked`] or `Escape` key is pressed, useful for cancel buttons.
+    /// This does not take into account focus.
+    fn clicked_or_escape(self) -> bool {
+        self.clicked() || self.ctx.input(|input| input.key_pressed(egui::Key::Escape))
     }
 }
 
@@ -206,15 +212,21 @@ impl MainUI {
 
         let mut is_open = true;
 
-        egui::Window::new(title)
+        let cancelled = egui::Window::new(title)
             .collapsible(false)
             .open(&mut is_open)
             .show(ctx, |ui| match modal {
-                CurrentModal::BrushCreation(b) => b.do_ui(ui),
-            });
+                CurrentModal::BrushCreation(b) => match b.do_ui(ui) {
+                    modal::Response::Cancel(()) => true,
+                    modal::Response::Continue => false,
+                    _ => unimplemented!(),
+                },
+            })
+            .and_then(|resp| resp.inner)
+            .unwrap_or(false);
 
         // Closed :3
-        if !is_open {
+        if !is_open || cancelled {
             self.modal = None;
         }
     }
@@ -840,8 +852,10 @@ impl MainUI {
             ui.horizontal(|ui| {
                 ui.label("Brush");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("wawa").clicked() {
-                        todo!()
+                    if ui.button(PLUS_ICON.to_string()).clicked() {
+                        self.modal = Some(CurrentModal::BrushCreation(
+                            brush_ui::CreationModal::default(),
+                        ));
                     }
                 })
             });
