@@ -860,6 +860,8 @@ impl MainUI {
                 })
             });
             ui.separator();
+            ui.selectable_value(&mut brush.brush.0[0], 0, "Test brush A");
+            ui.selectable_value(&mut brush.brush.0[0], 1, "Test brush B");
 
             let mut size_mul = brush.size_mul.get();
             let mut spacing_px = brush.spacing_px.get();
@@ -909,8 +911,6 @@ impl MainUI {
                 brush.spacing_px = spacing_px;
             }
         }
-
-        brush_ui::test(ui);
     }
 }
 /// For any tool, `(icon string, tooltip, opt_hotkey)`
