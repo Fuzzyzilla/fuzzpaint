@@ -181,13 +181,17 @@ impl MainUI {
     }
     /// Marks that a close has been requested by the windower
     pub fn close_requested(&mut self) {
-        // If there are open documents, ask the user if they really want to exit.
-        // Otherwise, just exit.
-        self.close_state = if self.documents.is_empty() {
-            CloseState::Confirmed
-        } else {
-            CloseState::Modal
-        }
+        // Close unconditionally if
+        // * A close was requested again even though the modal is up.
+        //   (Either we crashed and the modal isn't seen or the user *really* wants us to close lol)
+        // * No open documents to save anyway.
+        self.close_state =
+            if matches!(self.close_state, CloseState::Modal) || self.documents.is_empty() {
+                CloseState::Confirmed
+            } else {
+                // There are open docs, prompt
+                CloseState::Modal
+            }
     }
     /// Returns true if the app should close.
     #[must_use]
