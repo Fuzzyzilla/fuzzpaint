@@ -159,7 +159,8 @@ impl Renderer {
                     }
                     match event {
                         WindowEvent::CloseRequested => {
-                            target.exit();
+                            // Mark the UI, allowing it to veto this close.
+                            self.ui.close_requested();
                         }
                         WindowEvent::Resized(..) => {
                             self.recreate_surface().expect("Failed to rebuild surface");
@@ -208,6 +209,13 @@ impl Renderer {
                     // 5 -> unknown, always zero (barrel rotation?)
                 }
                 Event::AboutToWait => {
+                    // The UI has requested the app exit. Do so!
+                    if self.ui.should_close() {
+                        target.exit();
+                        // No need to redraw.
+                        return;
+                    }
+
                     let has_tablet_update = if let Some(tab_events) =
                         self.tablet_manager.as_mut().and_then(|m| m.pump().ok())
                     {

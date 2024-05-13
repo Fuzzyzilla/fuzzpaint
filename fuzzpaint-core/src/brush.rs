@@ -446,10 +446,6 @@ pub struct Tip {
     pub filter: Filter,
 }
 
-pub fn default_brush() -> UniqueID {
-    UniqueID([0; 32])
-}
-
 pub struct Brush {
     name: String,
     // Todo: multitip

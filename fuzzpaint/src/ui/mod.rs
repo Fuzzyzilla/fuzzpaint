@@ -117,6 +117,12 @@ enum CurrentModal {
     BrushCreation(brush_ui::CreationModal),
 }
 
+enum CloseState {
+    None,
+    Modal,
+    Confirmed,
+}
+
 #[derive(Clone)]
 struct PerDocumentData {
     id: state::DocumentID,
@@ -125,6 +131,7 @@ struct PerDocumentData {
     name: String,
 }
 pub struct MainUI {
+    close_state: CloseState,
     documents: Vec<PerDocumentData>,
     cur_document: Option<state::DocumentID>,
 
@@ -153,6 +160,7 @@ impl MainUI {
 
         let (requests_send, requests_recv) = crossbeam::channel::unbounded();
         Self {
+            close_state: CloseState::None,
             documents,
             cur_document,
 
@@ -171,6 +179,31 @@ impl MainUI {
             action_listener,
         }
     }
+    /// Marks that a close has been requested by the windower
+    pub fn close_requested(&mut self) {
+        // If there are open documents, ask the user if they really want to exit.
+        // Otherwise, just exit.
+        self.close_state = if self.documents.is_empty() {
+            CloseState::Confirmed
+        } else {
+            CloseState::Modal
+        }
+    }
+    /// Returns true if the app should close.
+    #[must_use]
+    pub fn should_close(&self) -> bool {
+        matches!(self.close_state, CloseState::Confirmed)
+    }
+    /// Returns true if a top-level modal exists asking whether to close the app.
+    #[must_use]
+    fn has_close_modal(&self) -> bool {
+        matches!(self.close_state, CloseState::Modal)
+    }
+    /// Returns true if any modal is open.
+    #[must_use]
+    fn has_any_modal(&self) -> bool {
+        self.has_close_modal() || self.modal.is_some()
+    }
     #[must_use]
     pub fn listen_requests(&self) -> crossbeam::channel::Receiver<requests::UiRequest> {
         self.requests_recv.clone()
@@ -179,11 +212,14 @@ impl MainUI {
     /// Returns the size of the document's viewport space - that is, the size of the rect not covered by any side/top/bottom panels.
     /// None if a full-screen menu is shown.
     pub fn ui(&mut self, ctx: &egui::Context) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
+        if self.has_close_modal() {
+            self.do_close_modal(ctx);
+        }
         // Display modals before main. Egui will place the windows without regard for free area.
-        self.do_modal(ctx);
+        self.do_modal(ctx, !self.has_close_modal());
 
         // Show, but disable if modal exists.
-        self.main_ui(ctx, self.modal.is_none())
+        self.main_ui(ctx, !self.has_any_modal())
     }
     fn get_cur_interface(&mut self) -> Option<&mut PerDocumentData> {
         // Get the document's interface, or reset to none if not found.
@@ -200,8 +236,31 @@ impl MainUI {
             None
         }
     }
+    fn do_close_modal(&mut self, ctx: &egui::Context) {
+        let clicked_elsewhere = egui::Window::new("Exit")
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label("There are unsaved documents. Do you really want to exit?");
+                ui.horizontal(|ui| {
+                    // On first run-thru it would be nice for this cancel button to auto-focus itself.
+                    if ui.button("Cancel").clicked_or_escape() {
+                        self.close_state = CloseState::None;
+                    }
+                    if ui.button("Exit").clicked() {
+                        self.close_state = CloseState::Confirmed;
+                    }
+                });
+            })
+            .map_or(false, |resp| resp.response.clicked_elsewhere());
+
+        // If the user clicks away from the window assume they cancelled.
+        if clicked_elsewhere {
+            self.close_state = CloseState::None;
+        }
+    }
     /// Execute the current modal's logic and window.
-    fn do_modal(&mut self, ctx: &egui::Context) {
+    fn do_modal(&mut self, ctx: &egui::Context, enabled: bool) {
         let Some(modal) = self.modal.as_mut() else {
             return;
         };
@@ -214,6 +273,7 @@ impl MainUI {
 
         let cancelled = egui::Window::new(title)
             .collapsible(false)
+            .enabled(enabled)
             .open(&mut is_open)
             .show(ctx, |ui| match modal {
                 CurrentModal::BrushCreation(b) => match b.do_ui(ui) {
@@ -387,7 +447,7 @@ impl MainUI {
                         document: interface.id,
                         brush: old_brush.unwrap_or(state::StrokeBrushSettings {
                             is_eraser: false,
-                            brush: fuzzpaint_core::brush::default_brush(),
+                            brush: fuzzpaint_core::brush::UniqueID([0; 32]),
                             color_modulate: fcolor::ColorOrPalette::BLACK,
                             size_mul: FiniteF32::new(10.0).unwrap(),
                             spacing_px: FiniteF32::new(0.5).unwrap(),
