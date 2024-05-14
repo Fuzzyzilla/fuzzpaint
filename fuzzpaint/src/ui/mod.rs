@@ -3,6 +3,7 @@ mod color_palette;
 mod drag;
 mod modal;
 pub mod requests;
+mod settigns;
 
 use modal::Modal;
 
