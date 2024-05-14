@@ -23,6 +23,18 @@ pub fn preferences_dir() -> Option<std::path::PathBuf> {
     Some(base_dir)
 }
 
+#[derive(Debug, thiserror::Error)]
+/// If certain errors occur, we cannot automatically write new data to the file
+/// (otherwise it would clobber the user's preferences, nuh uh!)
+pub enum LoadBlockReason {
+    /// A parse error.
+    #[error("syntax error: {0}")]
+    Syntax(toml::de::Error),
+    /// An IO error that's *not* file-not-found.
+    #[error("IO error: {0}")]
+    Io(std::io::Error),
+}
+
 pub struct Hotkeys {
     failed_to_load: bool,
     pub actions_to_keys: actions::hotkeys::ActionsToKeys,
@@ -78,7 +90,10 @@ impl Hotkeys {
                 actions_to_keys,
                 keys_to_actions,
             },
-            Err(_) => Self::no_path(),
+            Err(e) => {
+                log::error!("Failed to load hotkeys: {e}");
+                Self::no_path()
+            }
         }
     }
     /// Return true if loading user's settings failed. This can be useful for

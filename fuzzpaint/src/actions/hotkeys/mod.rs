@@ -4,7 +4,6 @@
 //! Mapping in both directions is useful, but for disk storage the one-to-many relation of Actions to keys is
 //! easier to edit for the end user. Thus, the reverse many-to-one mapping of keys to actions will be built dynamically.
 
-use std::sync::Arc;
 mod defaults;
 pub mod enum_smuggler;
 
@@ -17,7 +16,7 @@ pub trait HotkeyShadow {
     fn shadows(&self, other: &Self::Other) -> bool;
 }
 
-#[derive(Hash, PartialEq, Eq, Clone, Debug, Copy)]
+#[derive(Hash, PartialEq, Eq, Clone, Debug, Copy, PartialOrd, Ord)]
 pub struct KeyboardHotkey {
     pub ctrl: bool,
     pub alt: bool,
@@ -112,13 +111,19 @@ impl HotkeyShadow for KeyboardHotkey {
     }
 }
 /// Todo: how to identify a pad across program invocations?
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug, Copy)]
+#[derive(
+    serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug, Copy, PartialOrd, Ord,
+)]
 pub struct PadID;
 /// Todo: how to identify a pen across program invocations?
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug, Copy)]
+#[derive(
+    serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug, Copy, PartialOrd, Ord,
+)]
 pub struct PenID;
 /// Pads are not yet implemented, but looking forward:
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug, Copy)]
+#[derive(
+    serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug, Copy, PartialOrd, Ord,
+)]
 pub struct PadHotkey {
     /// Which tablet does this come from? (if multiple)
     pub pad: PadID,
@@ -136,7 +141,9 @@ impl HotkeyShadow for PadHotkey {
 /// Pens are not yet implemented, but looking forward:
 /// Allows many pens, and different functionality per-pen
 /// depending on which pad it is interacting with. (wacom functionality)
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug, Copy)]
+#[derive(
+    serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, Clone, Debug, Copy, PartialOrd, Ord,
+)]
 pub struct PenHotkey {
     /// Which tablet does this come from? (if multiple)
     pub pad: PadID,
@@ -155,33 +162,24 @@ impl HotkeyShadow for PenHotkey {
 /// as it is not intended to change frequently.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct HotkeyCollection {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keyboard: Option<Arc<[KeyboardHotkey]>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pad: Option<Arc<[PadHotkey]>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pen: Option<Arc<[PenHotkey]>>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub keyboard: Vec<KeyboardHotkey>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub pad: Vec<PadHotkey>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub pen: Vec<PenHotkey>,
 }
 impl HotkeyCollection {
     pub fn iter(&self) -> impl Iterator<Item = AnyHotkey> + '_ {
-        let keyboard = self
-            .keyboard
-            .iter()
-            .flat_map(|keys| keys.iter().map(|key| AnyHotkey::Key(*key)));
-        let pad = self
-            .pad
-            .iter()
-            .flat_map(|keys| keys.iter().map(|key| AnyHotkey::Pad(*key)));
-        let pen = self
-            .pen
-            .iter()
-            .flat_map(|keys| keys.iter().map(|key| AnyHotkey::Pen(*key)));
+        let keyboard = self.keyboard.iter().copied().map(AnyHotkey::Key);
+        let pad = self.pad.iter().copied().map(AnyHotkey::Pad);
+        let pen = self.pen.iter().copied().map(AnyHotkey::Pen);
 
         keyboard.chain(pad).chain(pen)
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Debug, Copy)]
+#[derive(PartialEq, Eq, Hash, Clone, Debug, Copy, PartialOrd, Ord)]
 pub enum AnyHotkey {
     Key(KeyboardHotkey),
     Pad(PadHotkey),
@@ -216,18 +214,18 @@ impl From<PenHotkey> for AnyHotkey {
 }
 /// Maps each action onto potentially many hotkeys.
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct ActionsToKeys(hashbrown::HashMap<super::Action, HotkeyCollection>);
+pub struct ActionsToKeys(std::collections::BTreeMap<super::Action, HotkeyCollection>);
 impl Default for ActionsToKeys {
     fn default() -> Self {
-        let mut keys_map = hashbrown::HashMap::with_capacity(defaults::KEYBOARD.len());
+        let mut keys_map = std::collections::BTreeMap::new();
         // Collect the keys from the defaults array
         for (action, keys) in defaults::KEYBOARD {
             keys_map.insert(
                 *action,
                 HotkeyCollection {
-                    keyboard: Some((*keys).into()),
-                    pad: None,
-                    pen: None,
+                    keyboard: keys.to_vec(),
+                    pad: Vec::new(),
+                    pen: Vec::new(),
                 },
             );
         }
@@ -241,7 +239,7 @@ impl Default for ActionsToKeys {
 }
 
 /// Derived from [`ActionsToKeys`], maps each hotkey onto at most one action.
-pub struct KeysToActions(hashbrown::HashMap<AnyHotkey, super::Action>);
+pub struct KeysToActions(std::collections::BTreeMap<AnyHotkey, super::Action>);
 #[derive(thiserror::Error, Debug)]
 pub enum KeysToActionsError {
     /// A single key was bound to multiple actions.
@@ -255,7 +253,7 @@ pub enum KeysToActionsError {
 impl TryFrom<&ActionsToKeys> for KeysToActions {
     type Error = KeysToActionsError;
     fn try_from(value: &ActionsToKeys) -> Result<Self, Self::Error> {
-        let mut new = KeysToActions(hashbrown::HashMap::default());
+        let mut new = KeysToActions(std::collections::BTreeMap::new());
 
         for (action, keys) in &value.0 {
             for key in keys.iter() {
