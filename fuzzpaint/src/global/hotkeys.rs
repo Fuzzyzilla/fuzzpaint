@@ -1,5 +1,21 @@
 use crate::actions;
 
+const DOCUMENTATION: &str = r#"# Fuzzpaint hotkeys. You may edit this file, but be aware that formatting and comments will not
+# be preserved, and all keys and values are case sensitive.
+
+# See `actions::Action` for available actions, specified here in [brackets].
+# Keyboard hotkeys, specified by the "keyboard" field of an action, are case-sensitive and written `[ctrl+][alt+][shift+]<winit key code>`.
+# Each action may have many hotkeys associated with it, but each hotkey should only be used at most once.
+# See https://docs.rs/winit/latest/winit/keyboard/enum.KeyCode.html for a list of key codes.
+
+# Examples:
+# [Undo]
+# keyboard = ["ctrl+KeyZ"]
+# [Redo]
+# keyboard = ["ctrl+KeyY", "ctrl+shift+KeyZ"]
+
+"#;
+
 #[must_use]
 pub fn preferences_dir() -> Option<std::path::PathBuf> {
     let mut base_dir = dirs::preference_dir()?;
@@ -13,7 +29,7 @@ pub struct Hotkeys {
     pub keys_to_actions: actions::hotkeys::KeysToActions,
 }
 impl Hotkeys {
-    const FILENAME: &'static str = "hotkeys.ron";
+    const FILENAME: &'static str = "hotkeys.toml";
     /// Shared global hotkeys, saved and loaded from user preferences.
     /// (Or defaulted, if unavailable for some reason)
     #[must_use]
@@ -50,7 +66,7 @@ impl Hotkeys {
         use actions::hotkeys::{ActionsToKeys, KeysToActions};
         let mappings: anyhow::Result<(ActionsToKeys, KeysToActions)> = try_block::try_block! {
             let string = std::fs::read_to_string(path)?;
-            let actions_to_keys : ActionsToKeys = ron::from_str(&string)?;
+            let actions_to_keys : ActionsToKeys = toml::from_str(&string)?;
             let keys_to_actions : KeysToActions = (&actions_to_keys).try_into()?;
 
             Ok((actions_to_keys,keys_to_actions))
@@ -79,11 +95,10 @@ impl Hotkeys {
         let _ = std::fs::DirBuilder::new().create(&preferences);
 
         preferences.push(Self::FILENAME);
-        let writer = std::io::BufWriter::new(std::fs::File::create(&preferences)?);
-        Ok(ron::ser::to_writer_pretty(
-            writer,
-            &self.actions_to_keys,
-            ron::ser::PrettyConfig::default(),
-        )?)
+        let mut string = toml::ser::to_string_pretty(&self.actions_to_keys)?;
+        // Prefix some documentation.
+        string = DOCUMENTATION.to_owned() + &string;
+        std::fs::write(preferences, string)?;
+        Ok(())
     }
 }

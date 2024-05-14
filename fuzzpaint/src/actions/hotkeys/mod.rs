@@ -155,22 +155,25 @@ impl HotkeyShadow for PenHotkey {
 /// as it is not intended to change frequently.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct HotkeyCollection {
-    pub keyboard_hotkeys: Option<Arc<[KeyboardHotkey]>>,
-    pub pad_hotkeys: Option<Arc<[PadHotkey]>>,
-    pub pen_hotkeys: Option<Arc<[PenHotkey]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyboard: Option<Arc<[KeyboardHotkey]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pad: Option<Arc<[PadHotkey]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pen: Option<Arc<[PenHotkey]>>,
 }
 impl HotkeyCollection {
     pub fn iter(&self) -> impl Iterator<Item = AnyHotkey> + '_ {
         let keyboard = self
-            .keyboard_hotkeys
+            .keyboard
             .iter()
             .flat_map(|keys| keys.iter().map(|key| AnyHotkey::Key(*key)));
         let pad = self
-            .pad_hotkeys
+            .pad
             .iter()
             .flat_map(|keys| keys.iter().map(|key| AnyHotkey::Pad(*key)));
         let pen = self
-            .pen_hotkeys
+            .pen
             .iter()
             .flat_map(|keys| keys.iter().map(|key| AnyHotkey::Pen(*key)));
 
@@ -222,9 +225,9 @@ impl Default for ActionsToKeys {
             keys_map.insert(
                 *action,
                 HotkeyCollection {
-                    keyboard_hotkeys: Some((*keys).into()),
-                    pad_hotkeys: None,
-                    pen_hotkeys: None,
+                    keyboard: Some((*keys).into()),
+                    pad: None,
+                    pen: None,
                 },
             );
         }
