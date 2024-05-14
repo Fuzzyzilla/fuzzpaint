@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 mod defaults;
+pub mod enum_smuggler;
 
 pub trait HotkeyShadow {
     type Other;
@@ -16,12 +17,35 @@ pub trait HotkeyShadow {
     fn shadows(&self, other: &Self::Other) -> bool;
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq, Clone, Debug, Copy)]
+#[derive(Hash, PartialEq, Eq, Clone, Debug, Copy)]
 pub struct KeyboardHotkey {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
     pub key: winit::keyboard::KeyCode,
+}
+impl serde::Serialize for KeyboardHotkey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Crime #1: Use a string so that we can do human-readable formatting.
+        // This can be done heapless :V
+        serializer.serialize_str(&self.to_string())
+    }
+}
+impl<'de> serde::Deserialize<'de> for KeyboardHotkey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Crime #2: Custom parse-from-string underneath the deserializer lol
+        // That's a funny way to do it! :D
+        // delegate to FromStr from a borrowed or owned string, depending on capabilities of deserializer.
+        let str =
+            <std::borrow::Cow<'de, str> as serde::Deserialize<'de>>::deserialize(deserializer)?;
+        str.parse().map_err(serde::de::Error::custom)
+    }
 }
 impl KeyboardHotkey {
     /// Get an arbitrary score of how specific this key is -
@@ -29,6 +53,56 @@ impl KeyboardHotkey {
     #[must_use]
     pub fn specificity(&self) -> u8 {
         u8::from(self.ctrl) + u8::from(self.alt) + u8::from(self.shift)
+    }
+    /// Get a human-readable string. This string is formatted correctly for [`std::str::FromStr`].
+    #[must_use]
+    pub fn to_string(&self) -> String {
+        let key_name = enum_smuggler::smuggle_out(self.key).unwrap().variant;
+        let mut components = smallvec::SmallVec::<[&'static str; 4]>::new();
+        if self.ctrl {
+            components.push("ctrl");
+        }
+        if self.alt {
+            components.push("alt");
+        }
+        if self.shift {
+            components.push("shift");
+        };
+        components.push(key_name);
+        components.join("+")
+    }
+}
+#[derive(Debug, thiserror::Error)]
+pub enum KeyboardHotkeyFromStrError {
+    // Would be nice to have a ref to the name of the key here but FromStr errors can't have lifetimes :V
+    #[error("unrecognized key name")]
+    InvalidKeyName,
+}
+/// Parse from sytax `[ctrl+][alt+][shift+]<winit key name>`, case-sensitive.
+impl std::str::FromStr for KeyboardHotkey {
+    type Err = KeyboardHotkeyFromStrError;
+    fn from_str(mut str: &str) -> Result<Self, Self::Err> {
+        let mut take_if_has = |prefix: &str| -> bool {
+            if let Some(new_str) = str.strip_prefix(prefix) {
+                str = new_str;
+                true
+            } else {
+                false
+            }
+        };
+        let ctrl = take_if_has("ctrl+");
+        let alt = take_if_has("alt+");
+        let shift = take_if_has("shift+");
+        // str now contains only the key name.
+        let key = enum_smuggler::smuggle_in(str)
+            .map_err(|_| KeyboardHotkeyFromStrError::InvalidKeyName)?;
+
+        Ok(Self {
+            ctrl,
+            alt,
+            shift,
+            key,
+        })
     }
 }
 impl HotkeyShadow for KeyboardHotkey {
