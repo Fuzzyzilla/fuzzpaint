@@ -19,6 +19,7 @@ pub mod winit_action_collector;
     PartialEq,
     Eq,
     strum::AsRefStr,
+    strum::EnumIter,
     Clone,
     Copy,
     Debug,

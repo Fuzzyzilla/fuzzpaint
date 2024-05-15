@@ -119,6 +119,15 @@ pub fn clicked_hotkey(input: &egui::InputState) -> Option<crate::actions::hotkey
     })
 }
 
+pub fn test(ui: &mut egui::Ui) {
+    let mut write = crate::global::hotkeys::Hotkeys::write();
+
+    for action in <crate::actions::Action as strum::IntoEnumIterator>::iter() {
+        ui.label(action.as_ref());
+        ui.label(format!("{:#?}", write.actions_to_keys.get(action)));
+    }
+}
+
 const ALL_KEYS: &[winit::keyboard::KeyCode] = &[
     winit::keyboard::KeyCode::Backquote,
     winit::keyboard::KeyCode::Backslash,

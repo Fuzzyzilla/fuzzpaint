@@ -160,7 +160,7 @@ impl HotkeyShadow for PenHotkey {
 }
 /// A collection of many various hotkeys. Contained as Arc'd slices,
 /// as it is not intended to change frequently.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub struct HotkeyCollection {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub keyboard: Vec<KeyboardHotkey>,
@@ -235,6 +235,11 @@ impl Default for ActionsToKeys {
         // Would be nice if this was a static check.
         debug_assert!(TryInto::<KeysToActions>::try_into(&new).is_ok());
         new
+    }
+}
+impl ActionsToKeys {
+    pub fn get(&self, action: super::Action) -> Option<&HotkeyCollection> {
+        self.0.get(&action)
     }
 }
 

@@ -29,79 +29,114 @@ pub fn preferences_dir() -> Option<std::path::PathBuf> {
 pub enum LoadBlockReason {
     /// A parse error.
     #[error("syntax error: {0}")]
-    Syntax(toml::de::Error),
+    Syntax(#[from] toml::de::Error),
     /// An IO error that's *not* file-not-found.
     #[error("IO error: {0}")]
-    Io(std::io::Error),
+    Io(#[from] std::io::Error),
+    /// A logic error is present in the key specifications, e.g. one key bound to multiple.
+    #[error("logic error: {0}")]
+    KeysToActions(#[from] crate::actions::hotkeys::KeysToActionsError),
 }
 
 pub struct Hotkeys {
-    failed_to_load: bool,
+    pub load_blocker: Option<LoadBlockReason>,
     pub actions_to_keys: actions::hotkeys::ActionsToKeys,
     pub keys_to_actions: actions::hotkeys::KeysToActions,
 }
 impl Hotkeys {
     const FILENAME: &'static str = "hotkeys.toml";
+    /// Shared read access to the global hotkeys.
+    pub fn read() -> parking_lot::RwLockReadGuard<'static, Self> {
+        Self::global().read()
+    }
+    /// Exclusive write access to the global hotkeys
+    pub fn write() -> parking_lot::RwLockWriteGuard<'static, Self> {
+        Self::global().write()
+    }
     /// Shared global hotkeys, saved and loaded from user preferences.
     /// (Or defaulted, if unavailable for some reason)
-    #[must_use]
-    pub fn get() -> &'static Self {
-        static GLOBAL_HOTKEYS: std::sync::OnceLock<Hotkeys> = std::sync::OnceLock::new();
+    fn global() -> &'static parking_lot::RwLock<Self> {
+        static GLOBAL_HOTKEYS: std::sync::OnceLock<parking_lot::RwLock<Hotkeys>> =
+            std::sync::OnceLock::new();
 
         GLOBAL_HOTKEYS.get_or_init(|| {
             let mut dir = preferences_dir();
             match dir.as_mut() {
-                None => Self::no_path(),
+                None => Self::with_defaults(),
                 Some(dir) => {
                     dir.push(Self::FILENAME);
                     Self::load_or_default(dir)
                 }
             }
+            .into()
         })
     }
+    /// Load default hotkeys from static memory.
     #[must_use]
-    pub fn no_path() -> Self {
+    fn with_defaults() -> Self {
         use actions::hotkeys::ActionsToKeys;
-        log::warn!("Hotkeys weren't available, defaulting.");
         let default = ActionsToKeys::default();
         // Default action map is reversable - this is assured by the default impl when debugging.
         let reverse = (&default).try_into().unwrap();
 
         Self {
-            failed_to_load: true,
+            load_blocker: None,
             keys_to_actions: reverse,
             actions_to_keys: default,
         }
     }
+    /// Attempts to load the settings from the given path. On file-not-found, defaults. On other error, defaults with a load-blocking message for the user.
     #[must_use]
     fn load_or_default(path: &std::path::Path) -> Self {
         use actions::hotkeys::{ActionsToKeys, KeysToActions};
-        let mappings: anyhow::Result<(ActionsToKeys, KeysToActions)> = try_block::try_block! {
-            let string = std::fs::read_to_string(path)?;
+
+        // The parsed mappings, or an error. If the value is none, file not found - not actually an error.
+        let mappings: Result<Option<_>, LoadBlockReason> = try_block::try_block! {
+            let string = match std::fs::read_to_string(path) {
+                Ok(string) => string,
+                // File not found. This isn't an error, the file just doesn't exist. Write it!
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                // Other IO error, block loading.
+                Err(e) => return Err(e.into()),
+            };
+            // Parse and invert, reporting parse or inversion errors as necessary.
+            // Hehe, funny map syntax!
             let actions_to_keys : ActionsToKeys = toml::from_str(&string)?;
             let keys_to_actions : KeysToActions = (&actions_to_keys).try_into()?;
 
-            Ok((actions_to_keys,keys_to_actions))
+            Ok(Some((actions_to_keys,keys_to_actions)))
         };
 
         match mappings {
-            Ok((actions_to_keys, keys_to_actions)) => Self {
-                failed_to_load: false,
+            // All went well~!
+            Ok(Some((actions_to_keys, keys_to_actions))) => Self {
+                load_blocker: None,
                 actions_to_keys,
                 keys_to_actions,
             },
+            // File-not-found, write defaults.
+            Ok(None) => {
+                log::info!("hotkeys not found, defaulting");
+                Self::with_defaults()
+            }
+            // Some kind of error exists when parsing, load defaults and prevent writes until user clears the error.
             Err(e) => {
-                log::error!("Failed to load hotkeys: {e}");
-                Self::no_path()
+                log::error!("failed to load hotkeys: {e}");
+                // Take defaults but remember the error.
+                Self {
+                    load_blocker: Some(e),
+                    ..Self::with_defaults()
+                }
             }
         }
     }
-    /// Return true if loading user's settings failed. This can be useful for
-    /// displaying a warning.
+    /// Returns the reason for read/write blockage, if any.
     #[must_use]
-    pub fn did_fail_to_load(&self) -> bool {
-        self.failed_to_load
+    pub fn load_blocker(&self) -> Option<&LoadBlockReason> {
+        self.load_blocker.as_ref()
     }
+    /// Save the loaded keys to the default location, overwriting contents.
+    /// *This should not be called if [`Self::load_blocker`] is `Some` unless the user explicitly called for it.*
     pub fn save(&self) -> anyhow::Result<()> {
         let mut preferences =
             preferences_dir().ok_or_else(|| anyhow::anyhow!("No preferences dir found"))?;
