@@ -41,7 +41,8 @@ pub enum LoadBlockReason {
 pub struct Hotkeys {
     pub load_blocker: Option<LoadBlockReason>,
     pub actions_to_keys: actions::hotkeys::ActionsToKeys,
-    pub keys_to_actions: actions::hotkeys::KeysToActions,
+    // Has an invariant, so private! To create one, use the `TryFrom<ActionsToKeys> for Self` impl.
+    keys_to_actions: actions::hotkeys::KeysToActions,
 }
 impl Hotkeys {
     const FILENAME: &'static str = "hotkeys.toml";
@@ -53,23 +54,30 @@ impl Hotkeys {
     pub fn write() -> parking_lot::RwLockWriteGuard<'static, Self> {
         Self::global().write()
     }
+    #[must_use]
+    pub fn keys_to_actions(&self) -> &actions::hotkeys::KeysToActions {
+        &self.keys_to_actions
+    }
     /// Shared global hotkeys, saved and loaded from user preferences.
     /// (Or defaulted, if unavailable for some reason)
     fn global() -> &'static parking_lot::RwLock<Self> {
         static GLOBAL_HOTKEYS: std::sync::OnceLock<parking_lot::RwLock<Hotkeys>> =
             std::sync::OnceLock::new();
 
-        GLOBAL_HOTKEYS.get_or_init(|| {
-            let mut dir = preferences_dir();
-            match dir.as_mut() {
-                None => Self::with_defaults(),
-                Some(dir) => {
-                    dir.push(Self::FILENAME);
-                    Self::load_or_default(dir)
-                }
-            }
-            .into()
-        })
+        GLOBAL_HOTKEYS.get_or_init(|| Self::from_default_file().into())
+    }
+    #[must_use]
+    pub fn default_file_location() -> Option<std::path::PathBuf> {
+        let mut dir = preferences_dir()?;
+        dir.push(Self::FILENAME);
+        Some(dir)
+    }
+    /// Load from the default file location.
+    #[must_use]
+    pub fn from_default_file() -> Self {
+        Self::default_file_location()
+            .as_deref()
+            .map_or_else(Self::with_defaults, Self::load_or_default)
     }
     /// Load default hotkeys from static memory.
     #[must_use]
@@ -150,5 +158,18 @@ impl Hotkeys {
         string = DOCUMENTATION.to_owned() + &string;
         std::fs::write(preferences, string)?;
         Ok(())
+    }
+}
+impl TryFrom<crate::actions::hotkeys::ActionsToKeys> for Hotkeys {
+    type Error = crate::actions::hotkeys::KeysToActionsError;
+    fn try_from(
+        actions_to_keys: crate::actions::hotkeys::ActionsToKeys,
+    ) -> Result<Self, Self::Error> {
+        let keys_to_actions = crate::actions::hotkeys::KeysToActions::try_from(&actions_to_keys)?;
+        Ok(Self {
+            load_blocker: None,
+            actions_to_keys,
+            keys_to_actions,
+        })
     }
 }

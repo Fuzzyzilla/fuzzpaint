@@ -3,7 +3,7 @@ mod color_palette;
 mod drag;
 mod modal;
 pub mod requests;
-mod settigns;
+mod settings;
 
 use modal::Modal;
 
@@ -116,6 +116,7 @@ impl ResponseExt for egui::Response {
 
 enum CurrentModal {
     BrushCreation(brush_ui::CreationModal),
+    Settings(settings::Settings),
 }
 
 enum CloseState {
@@ -132,11 +133,16 @@ struct PerDocumentData {
     name: String,
 }
 pub struct MainUI {
-    close_state: CloseState,
-    documents: Vec<PerDocumentData>,
-    cur_document: Option<state::DocumentID>,
+    // Modal layers, in order. (There is no better way to represent this state, I have considered greatly!)
 
+    // On top of everything, a "do you want to exit" dialog.
+    close_state: CloseState,
+    // A Ui-defined modal (creating brushes, application settings, etc)
     modal: Option<CurrentModal>,
+    // Active document viewport
+    // + Implicit layer: welcome screen if no active document.
+    cur_document: Option<state::DocumentID>,
+    documents: Vec<PerDocumentData>,
     picker_color: egui::ecolor::HsvaGamma,
     picker_in_flux: bool,
     picker_changed: bool,
@@ -201,13 +207,13 @@ impl MainUI {
     }
     /// Returns true if a top-level modal exists asking whether to close the app.
     #[must_use]
-    fn has_close_modal(&self) -> bool {
+    fn modal_enable(&self) -> bool {
         matches!(self.close_state, CloseState::Modal)
     }
     /// Returns true if any modal is open.
     #[must_use]
-    fn has_any_modal(&self) -> bool {
-        self.has_close_modal() || self.modal.is_some()
+    fn background_enable(&self) -> bool {
+        self.modal_enable() || self.modal.is_some()
     }
     #[must_use]
     pub fn listen_requests(&self) -> crossbeam::channel::Receiver<requests::UiRequest> {
@@ -217,14 +223,16 @@ impl MainUI {
     /// Returns the size of the document's viewport space - that is, the size of the rect not covered by any side/top/bottom panels.
     /// None if a full-screen menu is shown.
     pub fn ui(&mut self, ctx: &egui::Context) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
-        if self.has_close_modal() {
+        // Close modal, on top of everything.
+        if self.modal_enable() {
             self.do_close_modal(ctx);
         }
+        // Show main viewport stuff. Open document, or splash, and document modals.
         // Display modals before main. Egui will place the windows without regard for free area.
-        self.do_modal(ctx, !self.has_close_modal());
+        self.do_modal(ctx, !self.modal_enable());
 
         // Show, but disable if modal exists.
-        self.main_ui(ctx, !self.has_any_modal())
+        self.main_ui(ctx, !self.background_enable())
     }
     fn get_cur_interface(&mut self) -> Option<&mut PerDocumentData> {
         // Get the document's interface, or reset to none if not found.
@@ -272,6 +280,7 @@ impl MainUI {
 
         let title = match modal {
             CurrentModal::BrushCreation(_) => brush_ui::CreationModal::NAME,
+            CurrentModal::Settings(_) => settings::Settings::NAME,
         };
 
         let mut is_open = true;
@@ -281,11 +290,8 @@ impl MainUI {
             .enabled(enabled)
             .open(&mut is_open)
             .show(ctx, |ui| match modal {
-                CurrentModal::BrushCreation(b) => match b.do_ui(ui) {
-                    modal::Response::Cancel(()) => true,
-                    modal::Response::Continue => false,
-                    _ => unimplemented!(),
-                },
+                CurrentModal::BrushCreation(b) => b.do_ui(ui).closed(),
+                CurrentModal::Settings(s) => s.do_ui(ui).closed(),
             })
             .and_then(|resp| resp.inner)
             .unwrap_or(false);
@@ -417,9 +423,8 @@ impl MainUI {
             self.menu_bar(ui);
         });
 
-        // If there's a document, show relavent tool panels. Otherwise,
-        // show a big splash screen.
         if self.cur_document.is_none() {
+            // No document view open, show a splash.
             // Don't show the bar if it has nothing to say!
             if !self.documents.is_empty() {
                 egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
@@ -432,6 +437,7 @@ impl MainUI {
             // When the welcome screen is shown, there is no space for the document view.
             None
         } else {
+            // A document is open, show the main view.
             egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
                 ui.set_enabled(enabled);
                 if let Some(interface) = interface {
@@ -563,6 +569,12 @@ impl MainUI {
                     }
                     //let _ = add_button(ui, "Open as new", None);
                     //let _ = add_button(ui, "Export", None);
+                });
+                ui.menu_button("Edit", |ui| {
+                    if ui.button("Settings").clicked() {
+                        self.modal = Some(CurrentModal::Settings(settings::Settings::default()));
+                        ui.close_menu();
+                    }
                 });
             });
         });

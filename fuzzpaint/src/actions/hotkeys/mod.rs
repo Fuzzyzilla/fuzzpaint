@@ -160,7 +160,7 @@ impl HotkeyShadow for PenHotkey {
 }
 /// A collection of many various hotkeys. Contained as Arc'd slices,
 /// as it is not intended to change frequently.
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 pub struct HotkeyCollection {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub keyboard: Vec<KeyboardHotkey>,
@@ -213,8 +213,8 @@ impl From<PenHotkey> for AnyHotkey {
     }
 }
 /// Maps each action onto potentially many hotkeys.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct ActionsToKeys(std::collections::BTreeMap<super::Action, HotkeyCollection>);
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct ActionsToKeys(pub std::collections::BTreeMap<super::Action, HotkeyCollection>);
 impl Default for ActionsToKeys {
     fn default() -> Self {
         let mut keys_map = std::collections::BTreeMap::new();
@@ -244,6 +244,7 @@ impl ActionsToKeys {
 }
 
 /// Derived from [`ActionsToKeys`], maps each hotkey onto at most one action.
+#[derive(Clone)]
 pub struct KeysToActions(std::collections::BTreeMap<AnyHotkey, super::Action>);
 #[derive(thiserror::Error, Debug)]
 pub enum KeysToActionsError {

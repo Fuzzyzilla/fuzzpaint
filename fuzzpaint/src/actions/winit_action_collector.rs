@@ -73,7 +73,7 @@ impl WinitKeyboardActionCollector {
                     })
                     .filter_map(|key| {
                         // find the action of each key, or skip if none.
-                        Some((hotkeys.keys_to_actions.action_of(key)?, key))
+                        Some((hotkeys.keys_to_actions().action_of(key)?, key))
                     });
 
                 match (was_pressed, event.state.is_pressed()) {
@@ -153,7 +153,7 @@ impl WinitKeyboardActionCollector {
 
         let hotkeys = crate::global::hotkeys::Hotkeys::read();
         for hotkey in to_remove {
-            if let Some(action) = hotkeys.keys_to_actions.action_of(hotkey) {
+            if let Some(action) = hotkeys.keys_to_actions().action_of(hotkey) {
                 self.pop_key(action, hotkey);
             }
         }
@@ -173,7 +173,7 @@ impl WinitKeyboardActionCollector {
         for (old_key, shadows) in &mut self.current_hotkeys {
             if new.shadows(old_key) {
                 if *shadows == 0 {
-                    if let Some(old_action) = hotkeys.keys_to_actions.action_of(*old_key) {
+                    if let Some(old_action) = hotkeys.keys_to_actions().action_of(*old_key) {
                         self.sender.shadow(old_action);
                     }
                 }
@@ -215,7 +215,7 @@ impl WinitKeyboardActionCollector {
                 });
                 if *shadows == 0 {
                     // <emit unshadow>
-                    if let Some(old_action) = hotkeys.keys_to_actions.action_of(*old_key) {
+                    if let Some(old_action) = hotkeys.keys_to_actions().action_of(*old_key) {
                         self.sender.unshadow(old_action);
                     }
                 }
