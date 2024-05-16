@@ -177,10 +177,6 @@ fn main() -> AnyResult<()> {
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
 
-    if let Err(e) = global::hotkeys::Hotkeys::get().save() {
-        log::warn!("Failed to save hotkey config:\n{e:?}");
-    };
-
     let document_view = Arc::new(document_viewport_proxy::Proxy::new(&render_surface)?);
     let window_renderer = window_surface.with_render_surface(
         render_surface,

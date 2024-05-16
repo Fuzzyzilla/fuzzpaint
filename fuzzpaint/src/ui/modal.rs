@@ -4,6 +4,12 @@ pub enum Response<Cancel, Confirm, Error> {
     Error(Error),
     Continue,
 }
+impl<Cancel, Confirm, Error> Response<Cancel, Confirm, Error> {
+    /// Returns true if the response is not [`Response::Continue`]
+    pub fn closed(&self) -> bool {
+        !matches!(self, Self::Continue)
+    }
+}
 pub trait Modal {
     type Cancel;
     type Confirm;

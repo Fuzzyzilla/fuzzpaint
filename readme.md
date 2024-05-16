@@ -63,7 +63,7 @@ To declare **0.2.0**, I would like to be able to freely doodle a thing and save 
    - [X] Initial layout
    - [X] A ~~simple~~ **✨robust and rebindable✨** hotkey system, with support for
          pen and pad buttons (although, pen+pad events are not yet wired up)
-   - [ ] Application settings menu
+   - [X] Application settings menu
    - [X] Infinite Undo/Redo
    - [X] Pan, Zoom, Scroll, Rotate
    - [ ] Mirror

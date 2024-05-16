@@ -13,7 +13,18 @@ pub mod hotkeys;
 pub mod winit_action_collector;
 
 #[derive(
-    serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq, strum::AsRefStr, Clone, Copy, Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    Hash,
+    PartialEq,
+    Eq,
+    strum::AsRefStr,
+    strum::EnumIter,
+    Clone,
+    Copy,
+    Debug,
+    PartialOrd,
+    Ord,
 )]
 pub enum Action {
     Undo,
