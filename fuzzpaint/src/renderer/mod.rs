@@ -275,8 +275,15 @@ impl Renderer {
                             "Expected image to be created by allocate_prune_graph for {id:?}"
                         )
                     })?;
+                    let color = source.get().left_or_else(|p| {
+                        state
+                            .palette()
+                            .get(p)
+                            // Err, uh oh!
+                            .unwrap_or(fuzzpaint_core::color::Color::TRANSPARENT)
+                    });
                     // Fill image, store semaphore.
-                    fences.push(Self::render_color(context.as_ref(), image, *source)?);
+                    fences.push(Self::render_color(context.as_ref(), image, color)?);
                 }
                 // Render stroke image
                 Some(LeafType::StrokeLayer { collection, .. }) => {
@@ -288,13 +295,33 @@ impl Renderer {
                     let strokes = state.stroke_collections().get(*collection).ok_or_else(|| {
                         anyhow::anyhow!("Missing stroke collection {collection:?}")
                     })?;
-                    let strokes: Vec<_> = strokes.iter_active().collect();
+                    let strokes: Vec<_> = strokes
+                        .iter_active()
+                        .map(|stroke| {
+                            // Convert paletted color into concrete color.
+                            // THIS LOGIC SHOULD NOT BE HERE X3
+                            let color_modulate =
+                                stroke.brush.color_modulate.get().left_or_else(|idx| {
+                                    state
+                                        .palette()
+                                        .get(idx)
+                                        .unwrap_or(fuzzpaint_core::color::Color::BLACK)
+                                });
+                            fuzzpaint_core::state::stroke_collection::ImmutableStroke {
+                                brush: state::StrokeBrushSettings {
+                                    color_modulate: color_modulate.into(),
+                                    ..stroke.brush
+                                },
+                                ..*stroke
+                            }
+                        })
+                        .collect();
                     if strokes.is_empty() {
                         //FIXME: Renderer doesn't know how to handle zero strokes.
                         fences.push(Self::render_color(
                             context.as_ref(),
                             image,
-                            [0.0, 0.0, 0.0, 0.0],
+                            fuzzpaint_core::color::Color::TRANSPARENT,
                         )?);
                     } else {
                         renderer.draw(strokes.as_ref(), image, true)?;
@@ -370,7 +397,7 @@ impl Renderer {
     fn render_color(
         context: &crate::render_device::RenderContext,
         image: &RenderData,
-        color: [f32; 4],
+        color: fuzzpaint_core::color::Color,
     ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn GpuFuture>>> {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             context.allocators().command_buffer(),
@@ -380,7 +407,7 @@ impl Renderer {
             vk::CommandBufferUsage::OneTimeSubmit,
         )?;
         command_buffer.clear_color_image(vk::ClearColorImageInfo {
-            clear_value: color.into(),
+            clear_value: color.as_array().into(),
             regions: smallvec::smallvec![image.view.subresource_range().clone()],
             image_layout: vk::ImageLayout::General,
             ..vk::ClearColorImageInfo::image(image.image.clone())
@@ -619,7 +646,7 @@ pub struct RenderData {
 }
 mod stroke_renderer {
 
-    use crate::vulkano_prelude::*;
+    use crate::{renderer::gpu_tess, vulkano_prelude::*};
     use anyhow::Result as AnyResult;
     use std::sync::Arc;
     mod vert {
@@ -637,29 +664,34 @@ mod stroke_renderer {
 
     pub struct StrokeLayerRenderer {
         context: Arc<crate::render_device::RenderContext>,
-        texture_descriptor: Arc<vk::PersistentDescriptorSet>,
+        texture_descriptors: fuzzpaint_core::brush::UniqueIDMap<Arc<vk::PersistentDescriptorSet>>,
         gpu_tess: super::gpu_tess::GpuStampTess,
         pipeline: Arc<vk::GraphicsPipeline>,
     }
     impl StrokeLayerRenderer {
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {
             // Begin uploading a brush image in the background while we continue setup
-            let (image, sampler, _defer) = {
-                let brush_image =
+            let (image_a, image_b, sampler, _defer) = {
+                let brush_a =
                     image::load_from_memory(include_bytes!("../../brushes/splotch.png"))?
-                        .into_luma_alpha8();
+                        .into_luma8();
+                let mut brush_b =
+                image::load_from_memory(include_bytes!("../../../fuzzpaint-core/default/circle.png"))?
+                    .into_luma8();
 
-                // Iter over opacities. Weird/inefficient way to do this hehe
-                // Idealy it'd just be an Alpha image but nothing suports that file layout :V
-                let brush_image_alphas = brush_image.iter().skip(1).step_by(2);
+                brush_b.iter_mut().for_each(|l| *l = 255 - *l);
+                assert_eq!(brush_a.width(), brush_b.width());
+                assert_eq!(brush_a.height(), brush_b.height());
+                let mips = brush_a.width().max(brush_a.height()).ilog2() + 1;
 
                 let device_image = vk::Image::new(
                     context.allocators().memory().clone(),
                     vk::ImageCreateInfo {
-                        extent: [brush_image.width(), brush_image.height(), 1],
-                        array_layers: 1,
+                        extent: [brush_a.width(), brush_a.height(), 1],
+                        array_layers: 2,
+                        mip_levels: mips,
                         format: vk::Format::R8_UNORM,
-                        usage: vk::ImageUsage::SAMPLED | vk::ImageUsage::TRANSFER_DST,
+                        usage: vk::ImageUsage::SAMPLED | vk::ImageUsage::TRANSFER_DST | vk::ImageUsage::TRANSFER_SRC,
 
                         ..Default::default()
                     },
@@ -678,19 +710,20 @@ mod stroke_renderer {
                         memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                         ..Default::default()
                     },
-                    vk::DeviceSize::from(brush_image.width())
-                        * vk::DeviceSize::from(brush_image.height()),
+                    vk::DeviceSize::from(brush_a.width())
+                        * vk::DeviceSize::from(brush_a.height())
+                        * 2,
                 )?;
                 // Write image into buffer
                 {
                     // Unwrap ok - the device can't possibly be using it,
                     // and we don't read from it from host.
                     let mut write = image_stage.write().unwrap();
+
+                    let partition = brush_a.width() as usize * brush_a.height() as usize;
                     // Copy pixel-by-pixel
-                    write
-                        .iter_mut()
-                        .zip(brush_image_alphas)
-                        .for_each(|(into, from)| *into = *from);
+                    write[..partition].copy_from_slice(&brush_a);
+                    write[partition..].copy_from_slice(&brush_b);
                 }
                 let mut cb = vk::AutoCommandBufferBuilder::primary(
                     context.allocators().command_buffer(),
@@ -700,7 +733,7 @@ mod stroke_renderer {
                 let region = vk::BufferImageCopy {
                     image_extent: device_image.extent(),
                     image_subresource: vk::ImageSubresourceLayers {
-                        array_layers: 0..1,
+                        array_layers: 0..2,
                         aspects: vk::ImageAspects::COLOR,
                         mip_level: 0,
                     },
@@ -711,12 +744,55 @@ mod stroke_renderer {
                     regions: smallvec::smallvec![region],
                     ..vk::CopyBufferToImageInfo::buffer_image(image_stage, device_image.clone())
                 })?;
+                // Generate mips.
+                {
+                    let mut src_width = brush_a.width();
+                    let mut src_height = brush_a.height();
+                    for src_mip in 0..mips-1 {
+                        let dst_mip = src_mip + 1;
+                        let dst_width = src_width / 2;
+                        let dst_height = src_height / 2;
+
+                        let blit = vk::ImageBlit {
+                            src_subresource: vk::ImageSubresourceLayers {
+                                array_layers: 0..2,
+                                aspects: vk::ImageAspects::COLOR,
+                                mip_level: src_mip,
+                            },
+                            dst_subresource: vk::ImageSubresourceLayers {
+                                array_layers: 0..2,
+                                aspects: vk::ImageAspects::COLOR,
+                                mip_level: dst_mip,
+                            },
+                            src_offsets: [
+                                [0, 0, 0],
+                                [src_width, src_height, 1],
+                            ],
+                            dst_offsets: [
+                                [0, 0, 0],
+                                [dst_width, dst_height, 1],
+                            ],
+                            ..Default::default()
+                        };
+
+                        cb.blit_image(vk::BlitImageInfo {
+                            filter: vk::Filter::Linear,
+                            regions: smallvec::smallvec![
+                                blit,
+                            ],
+                            ..vk::BlitImageInfo::images(device_image.clone(), device_image.clone())
+                        })?;
+
+                        src_width = dst_width;
+                        src_height = dst_height;
+                    }
+                }
                 let fence = context
                     .now()
                     .then_execute(context.queues().transfer().queue().clone(), cb.build()?)?
                     .then_signal_fence_and_flush()?;
 
-                let view = vk::ImageView::new(
+                let view_a = vk::ImageView::new(
                     device_image.clone(),
                     vk::ImageViewCreateInfo {
                         component_mapping: vk::ComponentMapping {
@@ -725,6 +801,29 @@ mod stroke_renderer {
                             r: vk::ComponentSwizzle::Red,
                             b: vk::ComponentSwizzle::Red,
                             g: vk::ComponentSwizzle::Red,
+                        },
+                        subresource_range: vk::ImageSubresourceRange {
+                            array_layers: 0..1,
+                            aspects: vk::ImageAspects::COLOR,
+                            mip_levels: 0..mips,
+                        },
+                        ..vk::ImageViewCreateInfo::from_image(&device_image)
+                    },
+                )?;
+                let view_b = vk::ImageView::new(
+                    device_image.clone(),
+                    vk::ImageViewCreateInfo {
+                        component_mapping: vk::ComponentMapping {
+                            //Red is coverage of white, with premul.
+                            a: vk::ComponentSwizzle::Red,
+                            r: vk::ComponentSwizzle::Red,
+                            b: vk::ComponentSwizzle::Red,
+                            g: vk::ComponentSwizzle::Red,
+                        },
+                        subresource_range: vk::ImageSubresourceRange {
+                            array_layers: 1..2,
+                            aspects: vk::ImageAspects::COLOR,
+                            mip_levels: 0..mips,
                         },
                         ..vk::ImageViewCreateInfo::from_image(&device_image)
                     },
@@ -735,12 +834,14 @@ mod stroke_renderer {
                     vk::SamplerCreateInfo {
                         min_filter: vk::Filter::Linear,
                         mag_filter: vk::Filter::Linear,
+                        mipmap_mode: vulkano::image::sampler::SamplerMipmapMode::Linear,
                         ..Default::default()
                     },
                 )?;
 
                 (
-                    view,
+                    view_a,
+                    view_b,
                     sampler,
                     // synchronizing at the end of init so other setup can happen in parallel.
                     defer::defer(move || fence.wait(None).unwrap()),
@@ -844,11 +945,19 @@ mod stroke_renderer {
                     ..vk::GraphicsPipelineCreateInfo::layout(layout)
                 },
             )?;
-            let descriptor_set = vk::PersistentDescriptorSet::new(
+            let descriptor_set_a = vk::PersistentDescriptorSet::new(
                 context.allocators().descriptor_set(),
                 pipeline.layout().set_layouts()[0].clone(),
                 [vk::WriteDescriptorSet::image_view_sampler(
-                    0, image, sampler,
+                    0, image_a, sampler.clone(),
+                )],
+                [],
+            )?;
+            let descriptor_set_b = vk::PersistentDescriptorSet::new(
+                context.allocators().descriptor_set(),
+                pipeline.layout().set_layouts()[0].clone(),
+                [vk::WriteDescriptorSet::image_view_sampler(
+                    0, image_b, sampler,
                 )],
                 [],
             )?;
@@ -859,7 +968,9 @@ mod stroke_renderer {
                 context,
                 pipeline,
                 gpu_tess: tess,
-                texture_descriptor: descriptor_set,
+                texture_descriptors: [(fuzzpaint_core::brush::UniqueID([0; 32]), descriptor_set_a), (fuzzpaint_core::brush::UniqueID([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), descriptor_set_b)]
+                    .into_iter()
+                    .collect(),
             })
         }
         /// Allocate a new `RenderData` object. Initial contents are undefined!
@@ -893,7 +1004,7 @@ mod stroke_renderer {
         }
         pub fn draw(
             &self,
-            strokes: &[&fuzzpaint_core::state::stroke_collection::ImmutableStroke],
+            strokes: &[fuzzpaint_core::state::stroke_collection::ImmutableStroke],
             renderbuf: &super::RenderData,
             clear: bool,
         ) -> AnyResult<()> {
@@ -908,20 +1019,42 @@ mod stroke_renderer {
                 vk::BufferUsage::STORAGE_BUFFER,
                 vulkano::sync::Sharing::Exclusive,
             )?;
-            batch.batch(strokes.iter().map(|&&i| i), |batch| -> AnyResult<_> {
-                let (future, vertices, indirects) = self.gpu_tess.tess_batch(batch, true)?;
+            batch.batch(strokes.iter().copied(), |batch| -> AnyResult<_> {
+                let gpu_tess::TessResult {
+                    ready_after,
+                    vertices,
+                    mut indirects,
+                    sources,
+                } = self.gpu_tess.tess_batch(batch, true)?;
+
+                let mut sources = &sources[..];
+                let mut next_indirects_by_brush_id = || -> Option<(fuzzpaint_core::brush::UniqueID, vk::Subbuffer<[vulkano::command_buffer::DrawIndirectCommand]>)> {
+                    let id = sources.first()?.brush.brush;
+                    let first_differ = sources[1..].iter().position(|source| source.brush.brush != id);
+
+                    if let Some(idx) = first_differ {
+                        // Position refers to index in 1..
+                        // Convert to index in 0..
+                        let idx = idx + 1;
+
+                        sources = &sources[idx..];
+                        let (taken_indirects, left_indirects) = indirects.clone().split_at(idx as u64);
+                        indirects = left_indirects;
+
+                        Some((id, taken_indirects))
+                    } else {
+                        sources = &[];
+                        // Take the rest.
+                        Some((id, indirects.clone()))
+                    }
+                    
+                };
 
                 let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
                     self.context.allocators().command_buffer(),
                     self.context.queues().graphics().idx(),
                     vk::CommandBufferUsage::OneTimeSubmit,
                 )?;
-
-                log::trace!(
-                    "Drawing {} vertices from {} indirects",
-                    vertices.len(),
-                    indirects.len()
-                );
 
                 command_buffer
                     .begin_rendering(vk::RenderingInfo {
@@ -949,26 +1082,40 @@ mod stroke_renderer {
                         0,
                         Into::<[[f32; 4]; 4]>::into(matrix),
                     )?
+                    .bind_vertex_buffers(0, vertices)?;
+
+                // Group together commands by brush ID and draw them!
+                while let Some((brush_id, indirects)) = next_indirects_by_brush_id() {
+                    let Some(descriptor) = 
+                    self.texture_descriptors
+                        .get(&brush_id)
+                        .cloned() else {
+                            continue
+                        };
+                    command_buffer
                     .bind_descriptor_sets(
                         vk::PipelineBindPoint::Graphics,
                         self.pipeline.layout().clone(),
                         0,
-                        self.texture_descriptor.clone(),
+                        descriptor,
                     )?
-                    .bind_vertex_buffers(0, vertices)?
-                    .draw_indirect(indirects)?
-                    .end_rendering()?;
+                    .draw_indirect(indirects)?;
+                }
+
+                command_buffer.end_rendering()?;
 
                 let command_buffer = command_buffer.build()?;
 
-                let fence = future
+                // After tessellation finishes, render.
+                let fence = ready_after
                     .then_execute(
                         self.context.queues().graphics().queue().clone(),
                         command_buffer,
                     )?
                     .then_signal_fence_and_flush()?;
 
-                // After tessellation finishes, render.
+                // Let the batcher know when we're done using the stage.
+                // (In reality, the stage is done after `ready_after` but vulkano sync currently lacks a way to represent this)
                 Ok(super::stroke_batcher::SyncOutput::Fence(fence))
             })?;
 

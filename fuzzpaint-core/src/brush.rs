@@ -1,87 +1,457 @@
 //! # Brush
 
-pub type BrushID = crate::id::FuzzID<Brush>;
+use base64::Engine;
 
-#[derive(PartialEq, Eq, Hash, strum::AsRefStr, strum::EnumIter, Copy, Clone)]
-pub enum BrushKind {
-    Stamped,
-    Rolled,
+/// A Globally-unique identifier, stable + sharable over the network or written to a file.
+///
+/// This is a 256-bit `blake3` hash of the data. - For a texture, this is a hash of the *packed* image data + meta.
+/// For a brush, it is the hash of the full settings that make it up.
+///
+/// *`*Ord` and `*Eq` are non-cryptographic*. This is desirable for our uses :3
+// * Originally, this was a randomized UUID. However, it occured to me that a bad actor could then trivially
+// make a brush conflict with an existing popular brush, leading to *permanent* strange behavior from any client
+// that ever observes both the genuine and fake brushes.
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct UniqueID(pub [u8; 32]);
+impl std::fmt::Debug for UniqueID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let parts = [
+            u128::from_be_bytes(self.0[..16].try_into().unwrap()),
+            u128::from_be_bytes(self.0[16..].try_into().unwrap()),
+        ];
+
+        write!(f, "UniqueID({:032X}{:032X})", parts[0], parts[1])
+    }
 }
-pub enum BrushStyle {
-    Stamped { spacing: f32 },
-    Rolled,
+impl From<blake3::Hash> for UniqueID {
+    fn from(value: blake3::Hash) -> Self {
+        Self(*value.as_bytes())
+    }
 }
-impl BrushStyle {
-    #[must_use]
-    pub fn default_for(brush_kind: BrushKind) -> Self {
-        match brush_kind {
-            BrushKind::Stamped => Self::Stamped { spacing: 2.0 },
-            BrushKind::Rolled => Self::Rolled,
+impl std::fmt::Display for UniqueID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use base64::Engine;
+
+        // I chose an alg at random UwU
+        // Use 8 bits, as that perfectly consumes the padding space that would be included in the Base64 repr.
+        // (actually, only two bits are spare, but a 1/4 chance for a typo to pass is *not great(tm)*)
+        let checksum = crc::Crc::<u8>::new(&crc::CRC_8_DARC).checksum(self.0.as_slice());
+        // -w-;;;;;;;
+        #[rustfmt::skip]
+        let input = [
+            self.0[0],  self.0[1],  self.0[2],  self.0[3],  self.0[4],  self.0[5],  self.0[6],  self.0[7],  self.0[8],  self.0[9],
+            self.0[10], self.0[11], self.0[12], self.0[13], self.0[14], self.0[15], self.0[16], self.0[17], self.0[18], self.0[19],
+            self.0[20], self.0[21], self.0[22], self.0[23], self.0[24], self.0[25], self.0[26], self.0[27], self.0[28], self.0[29],
+            self.0[30], self.0[31],
+            checksum
+        ];
+        let mut output = [0; 44];
+
+        // Base64 encoding is deterministic of course! 33 bytes in == exactly 44 bytes out
+        assert_eq!(
+            44,
+            base64::engine::general_purpose::STANDARD_NO_PAD
+                .encode_slice(input.as_slice(), &mut output)
+                .unwrap()
+        );
+
+        f.write_str(std::str::from_utf8(output.as_slice()).unwrap())
+    }
+}
+impl std::hash::Hash for UniqueID {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // No need for length prefix as we have a fixed-length repr.
+        // (AFAIK that's right?)
+        state.write(&self.0);
+    }
+    fn hash_slice<H: std::hash::Hasher>(data: &[Self], state: &mut H)
+    where
+        Self: Sized,
+    {
+        // Unstable?? Bruh?
+        // state.write_length_prefix(data.len());
+        state.write(bytemuck::cast_slice(data));
+    }
+}
+
+/// A special hasher that just takes the first 64 bits from a [`UniqueID`].
+/// Since [`UniqueID`]s are high quality hashes already, hashing them again with a real-time algorithm
+/// will make the quality of the result strictly worse.
+///
+/// Not for general use, will panic or give you awful results if you try - don't. :P
+///
+// How can I make this private? The name of the type must be exposed through the type alias [`UniqueIDMap`] so perhaps I cannot.
+#[derive(Default)]
+pub struct UniqueIDHasher {
+    first: u64,
+}
+impl std::hash::Hasher for UniqueIDHasher {
+    fn finish(&self) -> u64 {
+        self.first
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        assert_eq!(bytes.len(), 32, "misuse of UniqueIDHasher");
+        self.first = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    }
+}
+type BuildUniqueIDHasher = std::hash::BuildHasherDefault<UniqueIDHasher>;
+pub type UniqueIDMap<T> = std::collections::HashMap<UniqueID, T, BuildUniqueIDHasher>;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum UniqueIDParseError {
+    #[error("invalid checksum")]
+    ChecksumMismatch,
+    #[error("contains invalid character")]
+    InvalidCharacter,
+    #[error("incorrect length")]
+    BadLength,
+}
+impl std::str::FromStr for UniqueID {
+    type Err = UniqueIDParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() != 44 {
+            return Err(UniqueIDParseError::BadLength);
+        }
+        let mut bytes = [0; 33];
+        let res = base64::engine::general_purpose::STANDARD_NO_PAD.decode_slice(s, &mut bytes);
+        match res {
+            // Success!
+            Ok(33) => (),
+            Err(base64::DecodeSliceError::DecodeError(base64::DecodeError::InvalidByte(..))) => {
+                return Err(UniqueIDParseError::InvalidCharacter);
+            }
+            // All other cases are length problems
+            _ => return Err(UniqueIDParseError::BadLength),
+        }
+
+        // Split two parts of the data..
+        let (id, checksum) = (<[_; 32]>::try_from(&bytes[..32]).unwrap(), bytes[32]);
+
+        // DARC 8 crc of first 32 bytes should == 33rd byte
+        let actual_checksum = crc::Crc::<u8>::new(&crc::CRC_8_DARC).checksum(&bytes[..32]);
+        if checksum == actual_checksum {
+            Ok(UniqueID(id))
+        } else {
+            Err(UniqueIDParseError::ChecksumMismatch)
         }
     }
-    #[must_use]
-    pub fn brush_kind(&self) -> BrushKind {
-        match self {
-            Self::Stamped { .. } => BrushKind::Stamped,
-            Self::Rolled => BrushKind::Rolled,
+}
+
+#[cfg(test)]
+mod test {
+    use super::{UniqueID, UniqueIDParseError};
+    const CONSECUTIVE_ID: UniqueID = UniqueID([
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31,
+    ]);
+    // manually calculated expected value :3
+    // ID data with DARC CRC8 appended put into a "standard alphabet" padless base64
+
+    const BASE64_CONSECUTIVE_ID: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8L";
+    #[test]
+    fn fmt_debug() {
+        assert_eq!(
+            format!("{CONSECUTIVE_ID:?}"),
+            "UniqueID(000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F)"
+        );
+    }
+    #[test]
+    fn fmt_base64() {
+        assert_eq!(format!("{CONSECUTIVE_ID}"), BASE64_CONSECUTIVE_ID);
+    }
+    #[test]
+    fn from_success() {
+        assert_eq!(BASE64_CONSECUTIVE_ID.parse(), Ok(CONSECUTIVE_ID));
+    }
+    #[test]
+    fn from_bad_len() {
+        assert_eq!(
+            "abc123".parse::<UniqueID>(),
+            Err(UniqueIDParseError::BadLength)
+        );
+    }
+    #[test]
+    fn from_bad_checksum() {
+        // same as BASE64_CONSECUTIVE_ID but with a two chars swapped..
+        assert_eq!(
+            //                     vv
+            "AAECAwQFBgcICQoLDA0ODxRAEhMUFRYXGBkaGxwdHh8L".parse::<UniqueID>(),
+            Err(UniqueIDParseError::ChecksumMismatch)
+        );
+    }
+    #[test]
+    fn from_bad_char() {
+        // same as BASE64_CONSECUTIVE_ID but with an invalid alphabet
+        assert_eq!(
+            //                     v
+            "AAECAwQFBgcICQoLDA0ODx^REhMUFRYXGBkaGxwdHh8L".parse::<UniqueID>(),
+            Err(UniqueIDParseError::InvalidCharacter)
+        );
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Clone,Copy, PartialEq, Eq, Hash, Debug)]
+    pub struct Mirroring : u8 {
+        /// Flip on X-Axis
+        const H_FLIP   = 0b0000_0001;
+        /// Flip on Y-Axis
+        const V_FLIP   = 0b0000_0010;
+        /// Vertically adjust the start position of the current repetition to match the the end value of the last repetition.
+        /// Eg, a line of slope 1 becomes an infinite ramp instead of a sawtooth curve
+        const V_ALIGN  = 0b0000_0100;
+        /// Don't allow exceeding min or max Y.
+        const SATURATE = 0b0000_1000;
+        /// Unused bits for the future :>
+        const RESERVED = 0b1111_0000;
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum MirroringMode {
+    /// Clamp to edge.
+    Clamp,
+    Mirror(Mirroring),
+}
+
+/// [0, 1) value.
+#[derive(
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Clone,
+    Copy,
+    Hash,
+    Debug,
+    Default,
+    bytemuck::Zeroable,
+    bytemuck::Pod,
+)]
+#[repr(transparent)]
+pub struct NormalizedU32(pub u32);
+impl NormalizedU32 {
+    pub const ZERO: Self = Self(0);
+    pub const MAX: Self = Self(u32::MAX);
+    pub fn saturating_sub(self, other: Self) -> Self {
+        Self(self.0.saturating_sub(other.0))
+    }
+    pub fn from_float(value: f32) -> Option<Self> {
+        if !value.is_finite() || value < 0.0 || value >= 1.0 {
+            None
+        } else {
+            Some(Self((value * u32::MAX as f32) as u32))
         }
     }
 }
-impl Default for BrushStyle {
-    fn default() -> Self {
-        Self::default_for(BrushKind::Stamped)
+impl From<NormalizedU32> for f32 {
+    fn from(value: NormalizedU32) -> Self {
+        // I wrote a bitwise crime for this, would be fun to see if it's any more efficient >:3c
+        value.0 as f32 / (u32::MAX as f32 + 1.0)
     }
 }
+
+fn lerp(a: NormalizedU32, b: NormalizedU32, t: NormalizedU32) -> NormalizedU32 {
+    // Probably a more precise way to do this. Todo!
+    let t = f32::from(t);
+    let val = f32::from(a) * (1.0 - t) + f32::from(b) * t;
+    // bad!! badd!!!!
+    NormalizedU32::from_float(val).unwrap()
+}
+
+/// Like [`lerp`], but takes a parameter specifying the endpoint of `t`.
+fn lerp_max(
+    a: NormalizedU32,
+    b: NormalizedU32,
+    t: NormalizedU32,
+    max_t: NormalizedU32,
+) -> NormalizedU32 {
+    // Probably a more precise way to do this. Todo!
+    let t = f32::from(t) / f32::from(max_t);
+    let val = f32::from(a) * (1.0 - t) + f32::from(b) * t;
+    NormalizedU32::from_float(val).unwrap()
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
+pub struct CurvePoint {
+    /// X position, from min to max.
+    frac_x: NormalizedU32,
+    /// The value at that point.
+    value: NormalizedU32,
+}
+
+pub struct Curve<'a> {
+    min_y: f32,
+    scale_y: f32,
+    /// Divide all inputs by this scale.
+    scale_x: f32,
+    /// Value at 0
+    start: NormalizedU32,
+    /// Value at 1
+    end: NormalizedU32,
+    /// Values between 0 and 1.
+    /// Must be sorted and de-duplicated by frac_x
+    points: &'a [CurvePoint],
+    mirroring: MirroringMode,
+}
+impl Curve<'_> {
+    /// Sample from a floating point X value, handling mirroring modes.
+    pub fn sample(&self, mut pos: f32) -> Option<f32> {
+        pos /= self.scale_x;
+        let mirror_idx = pos.floor();
+        // zero to one within the current mirror
+        let fract = NormalizedU32::from_float(pos - mirror_idx)?;
+        // which mirror we're on
+        let mirror_idx = mirror_idx as i32;
+
+        let norm_y = match self.mirroring {
+            // Clamp mode. If outside normal range (mirror_idx != 0) clamp to relavent edge.
+            MirroringMode::Clamp => match mirror_idx {
+                ..=-1 => f32::from(self.start),
+                // Inside range, sample as normal :3
+                0 => self.sample_normalized(fract),
+                1.. => f32::from(self.end),
+            },
+            MirroringMode::Mirror(mirroring) => {
+                let mirror_x = mirroring.intersects(Mirroring::H_FLIP) && mirror_idx & 1 == 1;
+                let mirror_y = mirroring.intersects(Mirroring::V_FLIP) && mirror_idx & 1 == 1;
+
+                // Sample with maybe mirrored x
+                let mut sample = self.sample_normalized_raw(if mirror_x {
+                    NormalizedU32::MAX.saturating_sub(fract)
+                } else {
+                    fract
+                });
+
+                if mirror_y {
+                    sample = NormalizedU32::MAX.saturating_sub(sample);
+                }
+
+                let mut sample = f32::from(sample);
+
+                // Apply vertical shift (mirror_x cancels out the effect!)
+                if mirroring.intersects(Mirroring::V_ALIGN) && !mirror_x {
+                    // How much y increases per mirror (in normalized space!)
+                    let v_shift = f32::from(self.end) - f32::from(self.start);
+
+                    sample = v_shift * mirror_idx as f32;
+                    // todo: take into account mirror Y :V
+                }
+
+                if mirroring.intersects(Mirroring::SATURATE) {
+                    sample = sample.clamp(0.0, 1.0);
+                }
+
+                sample
+            }
+        };
+
+        Some(norm_y * self.scale_y + self.min_y)
+    }
+    pub fn sample_normalized_raw(&self, pos: NormalizedU32) -> NormalizedU32 {
+        match self.points.binary_search_by(|p| p.frac_x.cmp(&pos)) {
+            // Highly unlikely - hit it spot on!
+            Ok(idx) => self.points[idx].value,
+            // More likely, between two.
+            Err(idx) => {
+                match idx {
+                    // Special case - no inner points, between start and end anchor
+                    0 if self.points.is_empty() => lerp(self.start, self.end, pos),
+                    // Between start anchor and first point
+                    0 => {
+                        let first = self.points.first().unwrap();
+                        lerp_max(self.start, first.value, pos, first.frac_x)
+                    }
+                    // Between two inner points
+                    _ if idx < self.points.len() - 1 => {
+                        let before = self.points[idx];
+                        let after = self.points[idx + 1];
+                        // These can be unchecked sub but gwos
+                        let pos = pos.saturating_sub(before.frac_x);
+                        let dist = after.frac_x.saturating_sub(before.frac_x);
+
+                        lerp_max(before.value, after.value, pos, dist)
+                    }
+                    // Between last point and end anchor
+                    _ => {
+                        let last = self.points.last().unwrap();
+
+                        // Can be unchecked sub but gwos
+                        let pos = pos.saturating_sub(last.frac_x);
+                        let dist = NormalizedU32::MAX.saturating_sub(last.frac_x);
+                        lerp_max(last.value, self.end, pos, dist)
+                    }
+                }
+            }
+        }
+    }
+    pub fn sample_normalized(&self, pos: NormalizedU32) -> f32 {
+        f32::from(self.sample_normalized_raw(pos)) * self.scale_y + self.min_y
+    }
+}
+#[derive(Copy, Clone, Debug, Hash)]
+pub enum Swizzle {
+    /// One channel, coverage of white.
+    /// Swizzle = RRRR
+    Alpha,
+    /// Two channels, greyscale + alpha
+    /// Swizzle = RRRG
+    GreyAlpha,
+    /// Four channels, full color.
+    /// Swizzle = RGBA
+    ColorAlpha,
+}
+#[derive(Copy, Clone, Debug, Hash)]
+pub enum Format {
+    // /// Floating point color format, linear space.
+    // // This would be very nice to have. However, I cannot find an existing image codec that falls within
+    // // the rest of our needs that also supports this pixel format!!
+    // F16,
+    /// Normalized bytes. RGB/Grey components are sRGB, alpha component is Linear.
+    // We use sRGB for better perceptual linearity in representable colors. This could be
+    // fixed by using Linear u16, but then data size is doubled!
+    SRGBA8,
+}
+/// Properties inherent to a texture file (ie, settings that one wouldn't want to change if they're re-using the texture)
+#[derive(Copy, Clone, Debug)]
+pub struct Texture {
+    pub swizzle: Swizzle,
+    pub format: Format,
+    pub size: [std::num::NonZeroU32; 2],
+    /// Where the 0,0 point is on the texture, in pixels from the top-left of the texture
+    pub origin: [NormalizedU32; 2],
+    /// The radius containing the bulk of the ink in the texture, in texture pixels around the `origin`.
+    pub diagonal_radius: NormalizedU32,
+    // Todo: Set of categories, like Geometric, Ink, Texture, Splatter, ect to aid in searching through a library.
+    // categories: (),
+}
+
+bitflags::bitflags! {
+    #[derive(Copy, Clone, Debug)]
+    pub struct Filter  : u8 {
+        /// Linear with linear mips. If not set, Nearest neighbor.
+        const DOWNSCALE_TRILINEAR = 0b0000_0001;
+        /// Linear. If not set, Nearest neighbor.
+        const UPSCALE_BILINEAR    = 0b0000_0010;
+    }
+}
+
+/// Properties of how a texture is used in a brush.
+pub struct Tip {
+    pub texture: UniqueID,
+    /// Angle offset, radians.
+    pub base_rotation: NormalizedU32,
+    pub base_scale: f32,
+    pub filter: Filter,
+}
+
 pub struct Brush {
     name: String,
-
-    style: BrushStyle,
-
-    id: crate::FuzzID<Brush>,
-
-    //Globally unique ID, for allowing files to be shared after serialization
-    universal_id: uuid::Uuid,
-}
-impl Brush {
-    #[must_use]
-    pub fn style(&self) -> &BrushStyle {
-        &self.style
-    }
-    pub fn style_mut(&mut self) -> &mut BrushStyle {
-        &mut self.style
-    }
-    #[must_use]
-    pub fn id(&self) -> BrushID {
-        self.id
-    }
-    #[must_use]
-    pub fn universal_id(&self) -> &uuid::Uuid {
-        &self.universal_id
-    }
-    #[must_use]
-    pub fn name_mut(&mut self) -> &mut String {
-        &mut self.name
-    }
-}
-impl Default for Brush {
-    fn default() -> Self {
-        let id = crate::FuzzID::default();
-        Self {
-            name: format!("Brush {}", id.id()),
-            style: BrushStyle::default(),
-            id,
-            universal_id: uuid::Uuid::new_v4(),
-        }
-    }
-}
-
-pub fn todo_brush() -> Brush {
-    static TODO_ID: std::sync::OnceLock<BrushID> = std::sync::OnceLock::new();
-    Brush {
-        name: "Todo".into(),
-        style: BrushStyle::default(),
-        id: *TODO_ID.get_or_init(Default::default),
-        // Example UUID from wikipedia lol
-        universal_id: uuid::uuid!("123e4567-e89b-12d3-a456-426614174000"),
-    }
+    // Todo: multitip
+    tip: Tip,
+    // Todo: Curves per tip
+    // curves: (),
+    // Todo: Set of categories, like Geometric, Ink, Texture, Splatter, ect to aid in searching through a library.
+    // categories: (),
 }

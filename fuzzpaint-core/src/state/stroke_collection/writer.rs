@@ -4,12 +4,12 @@ use super::{
 };
 use crate::queue::writer::CommandWrite;
 
-pub struct StrokeCollectionWriter<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>> {
+pub struct StrokeCollectionWriter<'s, Writer: CommandWrite<commands::Command>> {
     id: StrokeCollectionID,
     collection: &'s mut StrokeCollection,
     writer: Writer,
 }
-impl<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>> std::ops::Deref
+impl<'s, Writer: CommandWrite<commands::Command>> std::ops::Deref
     for StrokeCollectionWriter<'s, Writer>
 {
     type Target = StrokeCollection;
@@ -17,9 +17,7 @@ impl<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>> std::ops::Dere
         &*self.collection
     }
 }
-impl<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>>
-    StrokeCollectionWriter<'s, Writer>
-{
+impl<'s, Writer: CommandWrite<commands::Command>> StrokeCollectionWriter<'s, Writer> {
     pub fn id(&self) -> StrokeCollectionID {
         self.id
     }
@@ -34,27 +32,25 @@ impl<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>>
             id,
             point_collection: points,
         };
-        self.writer
-            .write(commands::StrokeCollectionCommand::Stroke {
-                target: self.id,
-                command: commands::StrokeCommand::Created {
-                    target: id,
-                    brush,
-                    points,
-                },
-            });
+        self.writer.write(commands::Command::Stroke {
+            target: self.id,
+            command: commands::StrokeCommand::Created {
+                target: id,
+                brush,
+                points,
+            },
+        });
         self.collection.push_back(stroke);
 
         id
     }
 }
 
-pub struct StrokeCollectionStateWriter<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>>
-{
+pub struct StrokeCollectionStateWriter<'s, Writer: CommandWrite<commands::Command>> {
     state: &'s mut StrokeCollectionState,
     writer: Writer,
 }
-impl<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>> std::ops::Deref
+impl<'s, Writer: CommandWrite<commands::Command>> std::ops::Deref
     for StrokeCollectionStateWriter<'s, Writer>
 {
     type Target = StrokeCollectionState;
@@ -62,9 +58,7 @@ impl<'s, Writer: CommandWrite<commands::StrokeCollectionCommand>> std::ops::Dere
         &*self.state
     }
 }
-impl<'s, Write: CommandWrite<commands::StrokeCollectionCommand>>
-    StrokeCollectionStateWriter<'s, Write>
-{
+impl<'s, Write: CommandWrite<commands::Command>> StrokeCollectionStateWriter<'s, Write> {
     pub fn new(writer: Write, state: &'s mut StrokeCollectionState) -> Self {
         Self { state, writer }
     }
@@ -83,8 +77,7 @@ impl<'s, Write: CommandWrite<commands::StrokeCollectionCommand>>
     }
     pub fn insert(&mut self) -> StrokeCollectionID {
         let id = self.state.insert();
-        self.writer
-            .write(commands::StrokeCollectionCommand::Created(id));
+        self.writer.write(commands::Command::Created(id));
         id
     }
 }

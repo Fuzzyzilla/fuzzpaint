@@ -1,6 +1,7 @@
 /// IO utilities not specific to the format.
 pub mod common;
 pub mod id;
+pub mod resource;
 pub mod riff;
 
 /// Fields read from a file that were not understood, either due to unrecognized
@@ -227,10 +228,10 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
                     id: crate::FuzzID::default(),
                     brush: crate::state::StrokeBrushSettings {
                         is_eraser: false,
-                        brush: crate::brush::todo_brush().id(),
-                        color_modulate: [0.0, 0.0, 0.0, 1.0],
-                        size_mul: 10.0,
-                        spacing_px: 0.5,
+                        brush: crate::brush::UniqueID([0; 32]),
+                        color_modulate: crate::color::ColorOrPalette::BLACK,
+                        size_mul: crate::util::FiniteF32::new(10.0).unwrap(),
+                        spacing_px: crate::util::FiniteF32::new(0.5).unwrap(),
                     },
                 },
             )
@@ -284,5 +285,6 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
         document_info,
         my_graph,
         stroke_state,
+        crate::state::palette::Palette::default(),
     ))
 }

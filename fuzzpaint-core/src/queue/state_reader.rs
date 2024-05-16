@@ -4,10 +4,8 @@ use crate::{commands, state};
 pub trait CommandQueueStateReader {
     fn graph(&self) -> &state::graph::BlendGraph;
     fn stroke_collections(&self) -> &state::stroke_collection::StrokeCollectionState;
-    /*fn stroke_layers(&self) -> &[state::StrokeLayer];
-    fn stroke_layer(&self, id: state::StrokeLayerID) -> Option<&state::StrokeLayer> {
-        self.stroke_layers().iter().find(|layer| layer.id == id)
-    }*/
+    fn palette(&self) -> &state::palette::Palette;
+
     fn changes(&'_ self) -> impl Iterator<Item = commands::DoUndo<'_, commands::Command>> + '_;
     fn has_changes(&self) -> bool;
 }
@@ -102,6 +100,9 @@ impl CommandQueueStateReader for CommandQueueCloneLock {
     }
     fn stroke_collections(&self) -> &state::stroke_collection::StrokeCollectionState {
         &self.shared_state.stroke_state
+    }
+    fn palette(&self) -> &state::palette::Palette {
+        &self.shared_state.palette
     }
     fn has_changes(&self) -> bool {
         !self.commands.is_empty()

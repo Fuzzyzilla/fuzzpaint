@@ -1,9 +1,14 @@
 use egui::Color32;
+use either::Either;
+use fuzzpaint_core::{
+    color::{Color as FColor, ColorOrPalette, PaletteIndex},
+    util::FiniteF32,
+};
 
-const GROW_FACTOR: f32 = 1.5;
+const GROW_FACTOR: f32 = 1.25;
 
 /// If the contrast between two colors is too low, choose a stroke color to contrast both.
-fn needs_contrasting(
+fn contrasting_stroke(
     background: impl Into<egui::Rgba>,
     foreground: impl Into<egui::Rgba>,
     contrast_target: f32,
@@ -55,18 +60,43 @@ fn needs_contrasting(
     // In light mode it's practically invisible. So, we square the intensity...
     intensity.map(|i| egui::Rgba::from_luminance_alpha(i * i, 1.0))
 }
+fn grayscale_contrasting(
+    foreground: impl Into<egui::Rgba>,
+    background: impl Into<egui::Rgba>,
+) -> egui::Color32 {
+    // Hella scuffed implementation. :V
+    let color: egui::Rgba = foreground.into();
+    let background: egui::Rgba = background.into();
+    let color = background.multiply(1.0 - color.a()) + color;
 
-/// Square button-like element with a solid color that does... nothing except report clicks :P
+    let intensity = color.intensity();
+    let contrasting = (intensity + 0.7) % 1.0;
+    egui::Color32::from_gray((contrasting * 255.999) as u8)
+}
+
+/// Square button-like element with a solid color that does nothing except report interactions and grow on hover.
 #[derive(Copy, Clone)]
-struct ColorSquare {
-    color: [f32; 4],
-    size: f32,
+pub struct ColorSquare {
+    pub color: FColor,
+    /// Display as selected, larger and highlighted. Also triggered on hover and focus.
+    pub selected: bool,
+    pub icon: Option<char>,
+}
+impl Default for ColorSquare {
+    fn default() -> Self {
+        Self {
+            color: FColor::TRANSPARENT,
+            selected: false,
+            icon: None,
+        }
+    }
 }
 impl egui::Widget for ColorSquare {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         let enabled = ui.is_enabled();
+        let size = ui.style().spacing.interact_size.min_elem();
         let (rect, this) = ui.allocate_exact_size(
-            egui::Vec2::splat(self.size),
+            egui::Vec2::splat(size),
             egui::Sense {
                 click: enabled,
                 drag: false,
@@ -86,31 +116,37 @@ impl egui::Widget for ColorSquare {
         });
 
         // false if all in the normal range of colors
-        let out_of_gammut = self.color.iter().any(|&v| !(0.0..=1.0).contains(&v));
+        let out_of_gammut = self
+            .color
+            .as_slice()
+            .iter()
+            .any(|&v| !(FiniteF32::ZERO..=FiniteF32::ONE).contains(&v));
+        let color_arr = self.color.as_array();
         let color = egui::Rgba::from_rgba_premultiplied(
-            self.color[0],
-            self.color[1],
-            self.color[2],
-            self.color[3],
+            color_arr[0],
+            color_arr[1],
+            color_arr[2],
+            color_arr[3],
         );
+        let selected = this.hovered() || self.selected || this.has_focus();
         // Red border if out-of-gamut. Negative border if hovered. Default contrasting border
-        let stroke_color = match (out_of_gammut, this.hovered()) {
-            (true, _) => Some(Color32::DARK_RED),
+        let stroke_color = match (out_of_gammut, selected) {
+            (true, _) => Color32::DARK_RED,
             // Use maximally-contrasty color (not correct impl lol)
-            (false, true) => Some(egui::Rgba::from_gray(1.0 - color.intensity()).into()),
+            (false, true) => egui::Rgba::from_gray(1.0 - color.intensity()).into(),
             (false, false) => {
                 const MIN_CONTRAST: f32 = 0.3;
                 // Check contrast against assumed (FIXME) `canvas` style background, outline with
                 // contrast-y color if not high enough.
-                needs_contrasting(ui.style().visuals.extreme_bg_color, color, MIN_CONTRAST)
-                    .map(Into::into)
+                contrasting_stroke(ui.style().visuals.extreme_bg_color, color, MIN_CONTRAST)
+                    .map_or(ui.style().visuals.extreme_bg_color, Into::into)
             }
         };
         // Increase in size and show ontop when hovered.
-        let (expansion, layer) = if this.hovered() {
+        let (expansion, layer) = if selected {
             // Additive expansion, not multiplicative - subtract one
             (
-                self.size * (GROW_FACTOR - 1.0),
+                size * (GROW_FACTOR - 1.0),
                 egui::LayerId {
                     // Wont work when this button is added to foreground already :V
                     order: egui::Order::Foreground,
@@ -124,14 +160,65 @@ impl egui::Widget for ColorSquare {
         let expansion =
             ui.ctx()
                 .animate_value_with_time(this.id, expansion, ui.style().animation_time);
-        ui.painter().clone().with_layer_id(layer).rect(
+        let painter = ui.painter().clone().with_layer_id(layer);
+        painter.rect(
             rect.expand(expansion),
             0.0,
             color,
-            stroke_color.map_or(egui::Stroke::NONE, |color| egui::Stroke {
-                color,
+            egui::Stroke {
+                color: stroke_color,
                 width: 1.0,
-            }),
+            },
+        );
+        if let Some(icon) = self.icon {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icon,
+                egui::FontId::default(),
+                grayscale_contrasting(color, ui.style().visuals.extreme_bg_color),
+            );
+        }
+
+        this
+    }
+}
+
+/// An icon of identical layout to [`ColorSquare`] that provides a simple icon.
+pub struct IconSquare {
+    icon: char,
+}
+impl egui::Widget for IconSquare {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        let enabled = ui.is_enabled();
+        let size = ui.style().spacing.interact_size.min_elem();
+        let (rect, this) = ui.allocate_exact_size(
+            egui::Vec2::splat(size),
+            egui::Sense {
+                click: enabled,
+                drag: false,
+                focusable: false,
+            },
+        );
+        this.widget_info(|| egui::WidgetInfo {
+            typ: egui::WidgetType::Button,
+            enabled,
+            // Todo: text description of color
+            label: None,
+            current_text_value: None,
+            prev_text_value: None,
+            selected: None,
+            value: None,
+            text_selection: None,
+        });
+
+        let painter = ui.painter();
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            self.icon,
+            egui::FontId::default(),
+            ui.style().visuals.text_color(),
         );
 
         this
@@ -149,11 +236,11 @@ pub enum HistoryScope {
 #[repr(transparent)]
 struct ColorPaletteQueue(
     // front = new, back = old
-    std::collections::VecDeque<[f32; 4]>,
+    std::collections::VecDeque<ColorOrPalette>,
 );
 impl ColorPaletteQueue {
     /// Move or insert the color to the most recent.
-    fn hoist(&mut self, color: [f32; 4]) {
+    fn hoist(&mut self, color: ColorOrPalette) {
         self.remove(color);
         // Add as most recent
         self.0.push_front(color);
@@ -163,7 +250,7 @@ impl ColorPaletteQueue {
             let _ = self.0.drain(max..);
         }
     }
-    fn remove(&mut self, color: [f32; 4]) {
+    fn remove(&mut self, color: ColorOrPalette) {
         // Delete this color from mem
         // We care not for the numeric value of these floats!
         self.0
@@ -172,7 +259,7 @@ impl ColorPaletteQueue {
 }
 // Thin wrapper, inherit iters and such.
 impl std::ops::Deref for ColorPaletteQueue {
-    type Target = std::collections::VecDeque<[f32; 4]>;
+    type Target = std::collections::VecDeque<ColorOrPalette>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -183,40 +270,45 @@ struct ColorPaletteState {
     history: ColorPaletteQueue,
 }
 impl ColorPaletteState {
-    fn hoist(&mut self, color: [f32; 4]) {
-        // We do *not* reorder pinned if it already contains!
-        if self.pinned.contains(&color) {
-            return;
-        }
+    fn hoist(&mut self, color: ColorOrPalette) {
         self.history.hoist(color);
+        // We do *not* reorder pinned!
     }
-    fn pin(&mut self, color: [f32; 4]) {
-        self.history.remove(color);
+    fn pin(&mut self, color: ColorOrPalette) {
+        self.history.hoist(color);
         self.pinned.hoist(color);
     }
-    fn unpin(&mut self, color: [f32; 4]) {
-        self.pinned.remove(color);
+    fn unpin(&mut self, color: ColorOrPalette) {
         self.history.hoist(color);
+        self.pinned.remove(color);
     }
 }
 
 /// Widget that remembers color history, displaying a compact grid of previous selected colors
 /// that can be re-applied.
-pub struct ColorPalette<'color> {
-    color: &'color mut [f32; 4],
+pub struct ColorPalette<'w, 'a: 'w, Writer> {
+    color: &'a mut ColorOrPalette,
+    palette: &'a mut fuzzpaint_core::state::palette::writer::Writer<'w, Writer>,
     max_history: Option<usize>,
     history_scope: HistoryScope,
     in_flux: bool,
+    /// Swap top two colors in the history.
+    do_swap: bool,
     id: Option<egui::Id>,
 }
-impl<'color> ColorPalette<'color> {
+impl<'w, 'a: 'w, Writer> ColorPalette<'w, 'a, Writer> {
     #[must_use]
-    pub fn new(color: &'color mut [f32; 4]) -> Self {
+    pub fn new(
+        color: &'a mut ColorOrPalette,
+        palette: &'a mut fuzzpaint_core::state::palette::writer::Writer<'w, Writer>,
+    ) -> Self {
         Self {
             color,
+            palette,
             max_history: None,
             history_scope: HistoryScope::Local,
             in_flux: false,
+            do_swap: false,
             id: None,
         }
     }
@@ -248,12 +340,32 @@ impl<'color> ColorPalette<'color> {
             ..self
         }
     }
+    /// Swap the first and second most recent colors.
+    #[must_use]
+    pub fn swap(self, swap: bool) -> Self {
+        Self {
+            do_swap: swap,
+            ..self
+        }
+    }
 }
-impl egui::Widget for ColorPalette<'_> {
-    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+pub struct ColorPaletteResponse {
+    pub dereferenced_color: FColor,
+    pub response: egui::Response,
+}
+// Ewwwww.. Traits that make the undo/redo system tick, that usually need not be seen by mortal eyes, but alas here we are...
+impl<
+        Writer: fuzzpaint_core::queue::writer::CommandWrite<
+            fuzzpaint_core::state::palette::commands::Command,
+        >,
+    > ColorPalette<'_, '_, Writer>
+{
+    pub fn show(self, ui: &mut egui::Ui) -> ColorPaletteResponse {
+        let mut changed = false;
         const BTN_BASE_SIZE: f32 = 12.0;
         let width = ui.available_width();
-        egui::Frame::canvas(ui.style())
+
+        let mut response = egui::Frame::canvas(ui.style())
             .shadow(egui::epaint::Shadow::NONE)
             .stroke(egui::Stroke::NONE)
             .rounding(0.0)
@@ -281,6 +393,8 @@ impl egui::Widget for ColorPalette<'_> {
                             let palette =
                                 mem.get_temp_mut_or_default::<ColorPaletteState>(palette_id);
                             if !self.in_flux {
+                                // Pull the active color up in the list.
+                                // Funny syntax!
                                 palette.hoist(*self.color);
                             }
                             if let Some(max) = self.max_history {
@@ -296,15 +410,94 @@ impl egui::Widget for ColorPalette<'_> {
                         );
                         ui.style_mut().spacing.interact_size.y = size;
 
-                        // Both are showing, add an hrule to separate
+                        let mut new_pins = smallvec::SmallVec::<[ColorOrPalette; 1]>::new();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add(IconSquare {
+                                icon: super::PALETTE_ICON
+                            }).on_hover_text("Paletted colors")
+                            .on_hover_text("Colors used from here allow you to modify the color definition after-the-fact and have these changes reflected everywhere it is used.");
+                            // Current color, with indexed color collapsed into a real color.
+                            let mut deref_color = self
+                                .color
+                                .get()
+                                .left_or_else(|idx| self.palette.get(idx).unwrap_or(FColor::BLACK));
+
+                            // if a palette write has been issued.
+                            let mut replace_color = None;
+
+                            for (idx, &color) in self.palette.iter() {
+                                // Show each palette color, if clicked then select it.
+                                let selected = self
+                                    .color
+                                    .get()
+                                    .right()
+                                    .is_some_and(|selected| selected == idx);
+
+                                let color_square = ui.add(ColorSquare {
+                                    color,
+                                    icon: None,
+                                    selected,
+                                });
+
+                                color_square.context_menu(|ui| {
+                                    ui.label(format!("{idx:?}"));
+                                    ui.separator();
+                                    if ui.small_button("Pin").clicked() {
+                                        new_pins.push(idx.into());
+                                        ui.close_menu();
+                                    }
+                                    if ui.small_button("Replace contents with active color").clicked() {
+                                        replace_color = Some((idx, deref_color));
+                                        ui.close_menu();
+                                    }
+                                });
+
+                                if color_square.clicked() {
+                                    *self.color = idx.into();
+                                    changed = true;
+                                    deref_color = self.palette.get(idx).unwrap_or(deref_color);
+                                }
+                            }
+                            // "Add" button at the end, with a plus symbol
+                            if ui
+                                .add(ColorSquare {
+                                    color: deref_color,
+                                    icon: Some(super::PLUS_ICON),
+                                    ..Default::default()
+                                })
+                                .on_hover_text("Create a paletted color from active color")
+                                .clicked()
+                            {
+                                *self.color = self.palette.insert(deref_color).into();
+                            };
+
+                            // Issue write, if requested.
+                            if let Some((idx, color)) = replace_color {
+                                let _ = self.palette.set(idx, color);
+                            }
+                        });
+                        ui.separator();
+
+                        // If both recent and pinned colors are shown similtaneously, add an hrule to separate
                         let needs_separator =
                             !palette.history.is_empty() && !palette.pinned.is_empty();
-
-                        let mut new_unpins = smallvec::SmallVec::<[[f32; 4]; 1]>::new();
+                        let mut new_unpins = smallvec::SmallVec::<[ColorOrPalette; 1]>::new();
                         if !palette.pinned.is_empty() {
                             ui.horizontal_wrapped(|ui| {
-                                for color in palette.pinned.0 {
-                                    let color_btn = ColorSquare { color, size };
+                                ui.add(IconSquare {
+                                    icon: super::PIN_ICON
+                                }).on_hover_text("Pinned colors").on_hover_text("Pin colors from your history to keep them here.");
+                                for &color in &palette.pinned.0 {
+                                    let is_paletted = color.is_palette();
+                                    let color_btn = ColorSquare {
+                                        color: color.get().left_or_else(|idx| {
+                                            self.palette.get(idx).unwrap_or(FColor::TRANSPARENT)
+                                        }),
+                                        icon: is_paletted.then_some(super::PALETTE_ICON),
+                                        // I have experimented with setting `selected` here based on whether it's current, but no
+                                        // combination of logic makes it *feel* right. Always just looks like the selection is jumping around wildly x3
+                                        ..Default::default()
+                                    };
                                     let response = ui.add(color_btn);
                                     response.context_menu(|ui| {
                                         if ui.small_button("Unpin").clicked() {
@@ -313,7 +506,8 @@ impl egui::Widget for ColorPalette<'_> {
                                         }
                                     });
                                     if response.clicked() {
-                                        *self.color = color_btn.color;
+                                        changed = true;
+                                        *self.color = color;
                                     }
                                 }
                             });
@@ -321,11 +515,22 @@ impl egui::Widget for ColorPalette<'_> {
                         if needs_separator {
                             ui.separator();
                         }
-                        let mut new_pins = smallvec::SmallVec::<[[f32; 4]; 1]>::new();
                         if !palette.history.is_empty() {
                             ui.horizontal_wrapped(|ui| {
-                                for color in palette.history.0 {
-                                    let color_btn = ColorSquare { color, size };
+
+                            ui.add(IconSquare {
+                                icon: super::HISTORY_ICON
+                            }).on_hover_text("Recent colors");
+                                for &color in &palette.history.0 {
+                                    let is_paletted = color.is_palette();
+                                    let color_btn = ColorSquare {
+                                        color: color.get().left_or_else(|idx| {
+                                            self.palette.get(idx).unwrap_or(FColor::TRANSPARENT)
+                                        }),
+                                        // Show if it's paletted or pinned.
+                                        icon: is_paletted.then_some(super::PALETTE_ICON).or_else(|| palette.pinned.contains(&color).then_some(super::PIN_ICON)),
+                                        ..Default::default()
+                                    };
                                     let response = ui.add(color_btn);
                                     response.context_menu(|ui| {
                                         if ui.small_button("Pin").clicked() {
@@ -334,7 +539,8 @@ impl egui::Widget for ColorPalette<'_> {
                                         }
                                     });
                                     if response.clicked() {
-                                        *self.color = color_btn.color;
+                                        changed = true;
+                                        *self.color = color;
                                     }
                                 }
                             });
@@ -354,9 +560,399 @@ impl egui::Widget for ColorPalette<'_> {
                                 }
                             });
                         }
+                        // Perform swap
+                        if self.do_swap {
+                            ui.data_mut(|mem| {
+                                let palette =
+                                    mem.get_temp_mut_or_default::<ColorPaletteState>(palette_id);
+                                let Some(&swap_with) = palette.history.get(1) else {
+                                    // History too smol to swap :3
+                                    return;
+                                };
+                                changed = true;
+                                palette.hoist(swap_with);
+                                *self.color = swap_with;
+                        });
+                        }
                     });
             })
             .response
-            .on_hover_cursor(egui::CursorIcon::Crosshair)
+            .on_hover_cursor(egui::CursorIcon::Crosshair);
+
+        if changed {
+            response.mark_changed()
+        }
+
+        ColorPaletteResponse {
+            dereferenced_color: self
+                .color
+                .get()
+                .left_or_else(|idx| self.palette.get(idx).unwrap_or(FColor::BLACK)),
+            response,
+        }
     }
+}
+
+pub struct PickerResponse {
+    /// The color is actively being changed.
+    pub in_flux: bool,
+    pub response: egui::Response,
+}
+
+/// Show a collapsing color picker in the top left of the free area.
+pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> PickerResponse {
+    egui::containers::Area::new("color-picker")
+        .anchor(egui::Align2::LEFT_TOP, [0.0f32; 2])
+        .show(ctx, |ui| {
+            /// number of edge "rays" from the center of the picker arc to the edge.
+            const MAIN_RAYS: usize = 16;
+            /// Number of steps along each ray from the center to the edge.
+            /// Step 0 is special in that it's a triangular section while the others are quads.
+            const MAIN_STEPS: usize = 8;
+            /// Number of segments of the hue arc. Should be a multiple of six to hit all hue peaks!
+            const HUE_STEPS: usize = 24;
+            /// Spacing between main SV picker and H picker
+            const RADIAL_MARGIN: f32 = 10.0;
+            /// Witdth of the H picker
+            const HUE_WIDTH: f32 = 15.0;
+            /// When the circle is small, shift it out of it's corner.
+            const CONTRACTED_OFFSET: f32 = 10.0;
+            const EXPANDED_RADIUS: f32 = 150.0;
+            const PICKER_SIZE: f32 = 10.0;
+            const CONTRACTED_RADIUS: f32 = 20.0;
+            const STEP_DIST: f32 = 1.0 / MAIN_STEPS as f32;
+
+            #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
+            enum ClickTarget {
+                #[default]
+                Hover,
+                SaturationValue,
+                Hue,
+            };
+
+            // Remember if we were expanded last frame, make the interact area much larger.
+            let click_marker = ui.id().with("click");
+            let last_target = ui.memory(|w| w.data.get_temp::<ClickTarget>(click_marker));
+
+            let (rect, mut response) = ui.allocate_exact_size(
+                // Be a small or large area depending on whether it's been opened yet.
+                if last_target.is_some() {
+                    [EXPANDED_RADIUS + RADIAL_MARGIN + HUE_WIDTH; 2].into()
+                } else {
+                    [CONTRACTED_OFFSET + CONTRACTED_RADIUS; 2].into()
+                },
+                egui::Sense::click_and_drag(),
+            );
+
+            let expanded_proportion = ctx.animate_bool(response.id, last_target.is_some());
+            let not_closed = expanded_proportion > 0.0;
+            let radius = egui::lerp(CONTRACTED_RADIUS..=EXPANDED_RADIUS, expanded_proportion);
+            let origin_offset = egui::lerp(CONTRACTED_OFFSET..=0.0, expanded_proportion);
+            let origin = rect.left_top() + [origin_offset; 2].into();
+
+            let mesh_origin = rect.left_top();
+            let mesh_radius = radius + origin_offset;
+
+            // Store expand state for next frame.
+            let click_target = if response.is_pointer_button_down_on() {
+                // Start or continue interaction...
+                match last_target {
+                    Some(ClickTarget::Hover) | None => {
+                        const MAIN_RADIUS: f32 = EXPANDED_RADIUS + RADIAL_MARGIN / 2.0;
+                        const HUE_RADIUS: f32 = MAIN_RADIUS + HUE_WIDTH;
+                        // A new interaction. Find out which type...
+                        // Unwrap ok, we know are sure it's interacted.
+                        let delta = response.interact_pointer_pos().unwrap() - origin;
+                        let dist_sq = delta.length_sq();
+                        if dist_sq < MAIN_RADIUS * MAIN_RADIUS {
+                            Some(ClickTarget::SaturationValue)
+                        } else if dist_sq < HUE_RADIUS * HUE_RADIUS {
+                            Some(ClickTarget::Hue)
+                        } else {
+                            // Miss.
+                            None
+                        }
+                    }
+                    // Interaction ongoing, continue it.
+                    other => other,
+                }
+            } else if response.hovered() {
+                Some(ClickTarget::Hover)
+            } else {
+                None
+            };
+
+            if click_target != last_target {
+                ui.memory_mut(|w| {
+                    if let Some(click_target) = click_target {
+                        w.data
+                            .insert_temp::<ClickTarget>(click_marker, click_target);
+                    } else {
+                        w.data.remove_temp::<ClickTarget>(click_marker);
+                    }
+                });
+            }
+
+            let painter = ui.painter();
+
+            let mesh = not_closed.then(|| {
+                // Reserve exact amount of space. We do this all every frame so any bit of extra perf is nice.
+                // First step has a single shared vertex for all. Every ray then has STEPS more verts on it.
+                const MAIN_VERTICES: usize = 1 + (MAIN_RAYS + 1) * MAIN_STEPS;
+                // Inner circle (Step 0-1) has RAYS tris. All further step regions have 2 per ray pair.
+                const MAIN_TRIANGLES: usize = MAIN_RAYS + MAIN_RAYS * (MAIN_STEPS - 1) * 2;
+                // Much simpler, just a quad between each step.
+                const HUE_VERTICES: usize = 2 * (HUE_STEPS + 1);
+                const HUE_TRIANGLES: usize = 2 * HUE_STEPS;
+
+                // Default mesh uses "no" texture, just vertex colors. (well, a white texture, same difference).
+                let mut mesh = egui::Mesh::default();
+                // Use reserve exact to prevent oversizing - we know the exact amount of stuff we're adding.
+                mesh.vertices.reserve_exact(MAIN_VERTICES + HUE_VERTICES);
+                // Three indices per tri.
+                mesh.indices
+                    .reserve_exact((MAIN_TRIANGLES + HUE_TRIANGLES) * 3);
+
+                //======================================= Main arc =======================================
+                // Build the main body of the picker, a quarter circle which displays
+                // lightness on it's radius and saturation on it's circumference.
+
+                // Origin point shared by all rays! Black under any hue.
+                mesh.colored_vertex(mesh_origin, egui::Color32::BLACK);
+
+                // Create vertices.
+                for ray in 0..=MAIN_RAYS {
+                    // [0, 1], how saturated?
+                    let saturation = ray as f32 / MAIN_RAYS as f32;
+                    // Quarter turn, from x axis to y axis, across the rays.
+                    let ray_dir = egui::Vec2::angled(saturation * std::f32::consts::FRAC_PI_2);
+                    // Skip first step, it's the origin point we pushed first
+                    for step in 1..=MAIN_STEPS {
+                        // [0, 1], how saturated is this?
+                        let value = step as f32 / MAIN_STEPS as f32;
+                        mesh.colored_vertex(
+                            mesh_origin + mesh_radius * ray_dir * (step as f32 * STEP_DIST),
+                            egui::ecolor::HsvaGamma {
+                                h: hsva.h,
+                                // Sqrt accounts for perceptual nonlinearity due to area growing with square of radius,
+                                // leading to most of the area being muddy grays. With my understanding, this means the
+                                // *lightness* should be sqrt-ed, but this looks more correct to me. Weird!
+                                s: (1.0 - saturation).sqrt(),
+                                v: value,
+                                a: 1.0,
+                            }
+                            .into(),
+                        );
+                    }
+                }
+                // Create triangles.
+                for ray in 0..(MAIN_RAYS as u32) {
+                    const VERTICES_PER_RAY: u32 = MAIN_STEPS as u32;
+
+                    let next_ray = ray + 1;
+                    // Inner circle, shared by all rays, filled with a triangle fan.
+                    // Zero is the origin, need to math for the other two.
+                    // Draw between the origin, and first steps of two adjactent rays, to make triangle fan.
+                    mesh.add_triangle(
+                        0,
+                        1 + ray * VERTICES_PER_RAY,
+                        1 + next_ray * VERTICES_PER_RAY,
+                    );
+
+                    // Outer sectors, space between the rays is filled by a quad.
+                    for step in 0..(MAIN_STEPS as u32 - 1) {
+                        let next_step = step + 1;
+
+                        let a = 1 + ray * VERTICES_PER_RAY + step;
+                        let b = 1 + ray * VERTICES_PER_RAY + next_step;
+                        let c = 1 + next_ray * VERTICES_PER_RAY + step;
+                        let d = 1 + next_ray * VERTICES_PER_RAY + next_step;
+
+                        mesh.add_triangle(a, b, c);
+                        mesh.add_triangle(b, c, d);
+                    }
+                }
+
+                // =================================== Hue wheel =============================================
+                let hue_base_index = mesh.vertices.len() as u32;
+                for hue in 0..=HUE_STEPS {
+                    let hue = hue as f32 / HUE_STEPS as f32;
+                    let quarter_angle = hue * std::f32::consts::FRAC_PI_2;
+
+                    let ray_dir = egui::Vec2::angled(quarter_angle);
+
+                    let color = egui::ecolor::Hsva::new(hue, 1.0, 1.0, 1.0).into();
+
+                    mesh.colored_vertex(
+                        mesh_origin + ray_dir * (mesh_radius + RADIAL_MARGIN),
+                        color,
+                    );
+                    mesh.colored_vertex(
+                        mesh_origin + ray_dir * (mesh_radius + RADIAL_MARGIN + HUE_WIDTH),
+                        color,
+                    );
+                }
+                for hue in 0..(HUE_STEPS as u32) {
+                    const VERTICES_PER_HUE: u32 = 2;
+                    let next_hue = hue + 1;
+
+                    let a = hue_base_index + hue * VERTICES_PER_HUE;
+                    let b = hue_base_index + hue * VERTICES_PER_HUE + 1;
+                    let c = hue_base_index + next_hue * VERTICES_PER_HUE;
+                    let d = hue_base_index + next_hue * VERTICES_PER_HUE + 1;
+
+                    mesh.add_triangle(a, b, c);
+                    mesh.add_triangle(b, c, d);
+                }
+
+                mesh
+            });
+            let mut sv_radius = hsva.v * radius;
+            let mut sv_angle = (1.0 - hsva.s.powi(2)) * std::f32::consts::FRAC_PI_2;
+            let mut hue_angle = hsva.h * std::f32::consts::FRAC_PI_2;
+
+            if let Some(click_point) = response.interact_pointer_pos() {
+                match click_target {
+                    Some(ClickTarget::Hover) | None => (),
+                    Some(ClickTarget::SaturationValue) => {
+                        response.mark_changed();
+                        let mut delta = click_point - origin;
+                        delta = delta.max(egui::Vec2::ZERO);
+
+                        sv_radius = delta.length().min(radius);
+                        sv_angle = delta.angle();
+
+                        let selection_angle = sv_angle / std::f32::consts::FRAC_PI_2;
+
+                        let selection_radius = sv_radius / radius;
+
+                        *hsva = egui::ecolor::HsvaGamma {
+                            s: (1.0 - selection_angle).sqrt(),
+                            v: selection_radius,
+                            ..*hsva
+                        }
+                    }
+                    Some(ClickTarget::Hue) => {
+                        response.mark_changed();
+                        let mut delta = click_point - origin;
+                        delta = delta.max(egui::Vec2::ZERO);
+                        hue_angle = delta.angle();
+                        hsva.h = hue_angle / std::f32::consts::FRAC_PI_2;
+                    }
+                }
+            }
+
+            // Show the picker mesh, if one was made.
+            if let Some(mesh) = mesh {
+                painter.add(egui::Shape::mesh(mesh));
+                // Show a stroke around the picker meshes.
+                let selected_stroke = ui.style().interact_selectable(&response, true).bg_stroke;
+                let unselected_stroke = egui::Stroke {
+                    color: egui::Color32::BLACK,
+                    width: 2.0,
+                };
+
+                let main_stroke = match click_target {
+                    Some(ClickTarget::SaturationValue) => selected_stroke,
+                    _ => unselected_stroke,
+                };
+                let hue_stroke = match click_target {
+                    Some(ClickTarget::Hue) => selected_stroke,
+                    _ => unselected_stroke,
+                };
+                // Main picker
+                painter.circle_stroke(mesh_origin, mesh_radius, main_stroke);
+                // Inner for hue circle
+                painter.circle_stroke(mesh_origin, mesh_radius + RADIAL_MARGIN, hue_stroke);
+                // outer
+                painter.circle_stroke(
+                    mesh_origin,
+                    mesh_radius + RADIAL_MARGIN + HUE_WIDTH,
+                    hue_stroke,
+                );
+
+                painter.circle(
+                    mesh_origin
+                        + egui::Vec2::angled(hue_angle)
+                            * (mesh_radius + RADIAL_MARGIN + HUE_WIDTH / 2.0),
+                    PICKER_SIZE,
+                    egui::ecolor::Hsva::new(hsva.h, 1.0, 1.0, 1.0),
+                    hue_stroke,
+                );
+            }
+
+            // Show the selected color in a bubble.
+            // When the selector is collapsed, this is what the user interacts with to open it, it moves out to
+            // it's position on the wheel when expanded.
+            painter.circle(
+                origin + expanded_proportion * egui::Vec2::angled(sv_angle) * sv_radius,
+                egui::lerp(CONTRACTED_RADIUS..=PICKER_SIZE, expanded_proportion),
+                egui::ecolor::HsvaGamma { a: 1.0, ..*hsva },
+                egui::Stroke {
+                    color: grayscale_contrasting(*hsva, egui::Rgba::WHITE),
+                    width: 1.0,
+                },
+            );
+
+            // Hide cursor while interacting.
+            if matches!(
+                click_target,
+                Some(ClickTarget::Hue | ClickTarget::SaturationValue)
+            ) {
+                // We do this only conditionally since we dont want missed clicks to hide the cursor, then they look like hits!
+                response = response.on_hover_and_drag_cursor(egui::CursorIcon::None);
+            }
+            // Double not here makes sense, i swear--
+            // This means fully closed, not animating.
+            // Would be good to show an icon here, an eyedropper specifically.
+            // There is no such glyph, and the palette icon is confusing given the same
+            // iconography is used elsewhere for a different purpose. Uh oh!
+            /*
+            if !not_closed {
+                painter.text(
+                    origin,
+                    egui::Align2::CENTER_CENTER,
+                    super::PALETTE_ICON,
+                    egui::FontId::default(),
+                    grayscale_contrasting(*hsva, egui::Rgba::BLACK),
+                );
+            }*/
+
+            // Include accessibility info
+            if response.changed() {
+                match click_target {
+                    Some(ClickTarget::Hue) => {
+                        response.widget_info(|| egui::WidgetInfo {
+                            typ: egui::WidgetType::Slider,
+                            enabled: true,
+                            label: Some("Hue".into()),
+                            current_text_value: None,
+                            prev_text_value: None,
+                            selected: None,
+                            value: Some(hsva.h.into()),
+                            text_selection: None,
+                        });
+                    }
+                    Some(ClickTarget::SaturationValue) => {
+                        response.widget_info(|| egui::WidgetInfo {
+                            typ: egui::WidgetType::Other,
+                            enabled: true,
+                            label: Some("Saturation/Value".into()),
+                            current_text_value: None,
+                            prev_text_value: None,
+                            selected: None,
+                            value: None,
+                            text_selection: None,
+                        });
+                    }
+                    _ => (),
+                }
+            }
+
+            PickerResponse {
+                in_flux: click_target.is_some(),
+                response,
+            }
+        })
+        .inner
 }

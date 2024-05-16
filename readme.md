@@ -1,5 +1,7 @@
 # <p style="text-align:center;"><a href="#" onclick="return false;"><img src="https://raw.githubusercontent.com/googlefonts/noto-emoji/main/svg/emoji_u1f411.svg" alt="Baa" title="Baa" style="position:relative;bottom: -0.2em;width:1em;"/></a> Fuzzpaint</p>
 
+![a screenshot of the app, with a sheep mascot drawn](demo-images/full.png)
+
 A graphics-accelerated digital art software combining the ease-of-use of raster with the lossless quality of vector.
 
 **This project is in heavy development**, many features are in-progress and semver is ignored. Notably, **drawings cannot yet be saved** - but you can doodle to your heart's content!
@@ -42,7 +44,7 @@ To declare **0.2.0**, I would like to be able to freely doodle a thing and save 
  - [ ] Brushes
    - [ ] Make and manage textured brushes from inside fuzzpaint
    - [ ] Save brushes to file
-     - To document or to global repo? - resolved: both, with UUIDs! That way, files can be freely shared, and brushes can be easily re-used.
+     - To document or to global repo? - resolved: both, with ~~UUIDs~~ cryptographic hashes! That way, files can be freely shared, and brushes can be easily re-used.
    - [X] Tesselation engine capable of mixed brushes
    - [X] Stamped brushes
    - [X] Efficient erasers
@@ -59,7 +61,7 @@ To declare **0.2.0**, I would like to be able to freely doodle a thing and save 
    - [X] Initial layout
    - [X] A ~~simple~~ **✨robust and rebindable✨** hotkey system, with support for
          pen and pad buttons (although, pen+pad events are not yet wired up)
-   - [ ] Application settings menu
+   - [X] Application settings menu
    - [X] Infinite Undo/Redo
    - [X] Pan, Zoom, Scroll, Rotate
    - [ ] Mirror

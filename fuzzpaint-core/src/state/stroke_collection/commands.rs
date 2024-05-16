@@ -1,16 +1,16 @@
 #[derive(Clone, Debug)]
-pub enum StrokeCollectionCommand {
+pub enum Command {
     Created(super::StrokeCollectionID),
     Stroke {
         target: super::StrokeCollectionID,
         command: StrokeCommand,
     },
 }
-impl StrokeCollectionCommand {
+impl Command {
     pub(super) fn stroke(&self) -> Option<&StrokeCommand> {
         match self {
             Self::Stroke { command, .. } => Some(command),
-            StrokeCollectionCommand::Created(_) => None,
+            Command::Created(_) => None,
         }
     }
 }

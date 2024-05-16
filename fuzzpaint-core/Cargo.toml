@@ -8,13 +8,18 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.81"
 az = "1.2.1"
+base64 = {version = "0.22.0", default-features = false }
 bitflags = { version = "2.5.0", features = ["bytemuck"] }
 bitvec = { version = "1.0.1", default-features = false, features = [
     "alloc",
     "std",
 ] }
+blake3 = "1.5.1"
 bytemuck = { version = "1.15.0", features = ["derive"] }
+chrono = { version = "0.4.37", default-features = false }
+crc = "3.2.1"
 dirs = "5.0.1"
+either = "1.11.0"
 fontdb = "0.16.2"
 hashbrown = { version = "0.14.3", features = ["serde"] }
 human_bytes = "0.4.3"

@@ -5,6 +5,9 @@
 #![feature(new_uninit)]
 #![feature(float_next_up_down)]
 #![warn(clippy::pedantic)]
+// I know it's bad but while working on a focus it's not really something I wanna be bugged about
+// with a full screen of yellow lol.
+#![allow(clippy::too_many_lines)]
 
 use std::sync::Arc;
 mod egui_impl;
@@ -173,10 +176,6 @@ fn main() -> AnyResult<()> {
     let window_surface = window::Surface::new()?;
     let (render_context, render_surface) =
         render_device::RenderContext::new_with_window_surface(&window_surface)?;
-
-    if let Err(e) = global::hotkeys::Hotkeys::get().save() {
-        log::warn!("Failed to save hotkey config:\n{e:?}");
-    };
 
     let document_view = Arc::new(document_viewport_proxy::Proxy::new(&render_surface)?);
     let window_renderer = window_surface.with_render_surface(

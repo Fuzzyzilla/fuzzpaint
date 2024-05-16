@@ -30,6 +30,14 @@ mod shaders {
     }
 }
 
+pub struct TessResult<Future: GpuFuture> {
+    pub ready_after: vk::SemaphoreSignalFuture<Future>,
+    pub vertices: vk::Subbuffer<[interface::OutputStrokeVertex]>,
+    pub indirects: vk::Subbuffer<[interface::OutputStrokeInfo]>,
+    /// Where each indirect came from. E.g., the sixth indirect comes from the sixth stroke in this list.
+    pub sources: Vec<fuzzpaint_core::state::stroke_collection::ImmutableStroke>,
+}
+
 pub struct GpuStampTess {
     context: Arc<crate::render_device::RenderContext>,
     pipeline: Arc<vk::ComputePipeline>,
@@ -133,17 +141,14 @@ impl GpuStampTess {
         batch: &crate::renderer::stroke_batcher::StrokeBatch,
         // TODO: implement.
         _take_scratch: bool,
-    ) -> anyhow::Result<(
-        vk::SemaphoreSignalFuture<impl GpuFuture>,
-        vk::Subbuffer<[interface::OutputStrokeVertex]>,
-        vk::Subbuffer<[interface::OutputStrokeInfo]>,
-    )> {
+    ) -> anyhow::Result<TessResult<impl GpuFuture>> {
         #![allow(clippy::too_many_lines)]
         let mut group_index_counter = 0;
         let mut vertex_output_index_counter = 0;
 
         // For each info, how many workgroups are dispatched for it?
         let mut num_groups_per_info = Vec::with_capacity(batch.allocs.len());
+        let mut sources = Vec::new();
 
         let input_infos = vk::Buffer::from_iter(
             self.context.allocators().memory().clone(),
@@ -162,7 +167,7 @@ impl GpuStampTess {
                     .archetype
                     .contains(Archetype::POSITION | Archetype::ARC_LENGTH));
 
-                let density = alloc.src.brush.spacing_px;
+                let density = alloc.src.brush.spacing_px.get();
                 // If not found, ignore by claiming 0 stamps.
                 let num_expected_stamps = alloc
                     .summary
@@ -173,6 +178,10 @@ impl GpuStampTess {
                 let num_expected_verts = num_expected_stamps * 6;
                 let num_groups = num_expected_stamps.div_ceil(self.work_size);
 
+                if num_groups != 0 {
+                    sources.push(alloc.src);
+                }
+
                 let info = shaders::tessellate::InputStrokeInfo {
                     base_element_offset: alloc.offset as u32,
                     num_points,
@@ -181,9 +190,16 @@ impl GpuStampTess {
                     out_vert_limit: num_expected_verts,
                     start_group: group_index_counter,
                     num_groups,
-                    modulate: alloc.src.brush.color_modulate,
+                    modulate: alloc
+                        .src
+                        .brush
+                        .color_modulate
+                        .get()
+                        .left()
+                        .unwrap()
+                        .as_array(),
                     density,
-                    size_mul: alloc.src.brush.size_mul.into(),
+                    size_mul: alloc.src.brush.size_mul.get().into(),
                     is_eraser: if alloc.src.brush.is_eraser { 1.0 } else { 0.0 },
                 };
 
@@ -306,6 +322,11 @@ impl GpuStampTess {
             )?
             .then_signal_semaphore();
 
-        Ok((future, output_verts, output_infos))
+        Ok(TessResult {
+            ready_after: future,
+            vertices: output_verts,
+            indirects: output_infos,
+            sources,
+        })
     }
 }

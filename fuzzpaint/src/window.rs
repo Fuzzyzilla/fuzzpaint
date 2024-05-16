@@ -53,6 +53,7 @@ impl Surface {
             egui_ctx,
             tablet_manager,
             ui: crate::ui::MainUI::new(stream.listen()),
+            enable_document_view: true,
             preview_renderer,
             action_collector:
                 crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
@@ -71,6 +72,8 @@ pub struct Renderer {
     render_context: Arc<render_device::RenderContext>,
     egui_ctx: egui_impl::Ctx,
     ui: crate::ui::MainUI,
+
+    enable_document_view: bool,
 
     action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector,
     action_stream: crate::actions::ActionStream,
@@ -156,7 +159,8 @@ impl Renderer {
                     }
                     match event {
                         WindowEvent::CloseRequested => {
-                            target.exit();
+                            // Mark the UI, allowing it to veto this close.
+                            self.ui.close_requested();
                         }
                         WindowEvent::Resized(..) => {
                             self.recreate_surface().expect("Failed to rebuild surface");
@@ -205,12 +209,45 @@ impl Renderer {
                     // 5 -> unknown, always zero (barrel rotation?)
                 }
                 Event::AboutToWait => {
+                    // The UI has requested the app exit. Do so!
+                    if self.ui.should_close() {
+                        target.exit();
+                        // No need to redraw.
+                        return;
+                    }
+
                     let has_tablet_update = if let Some(tab_events) =
                         self.tablet_manager.as_mut().and_then(|m| m.pump().ok())
                     {
                         let mut has_tablet_update = false;
                         for event in tab_events {
-                            if let octotablet::events::Event::Tool { event, .. } = event {
+                            if let octotablet::events::Event::Tool { event, tool } = event {
+                                // If the event isn't emulated from some other device, send the event to winit_egui
+                                // so that the stylus can be used to interact with the egui layers.
+                                if !matches!(tool.tool_type, Some(octotablet::tool::Type::Emulated))
+                                {
+                                    // Safety: we must not pass the returned event deviceID into any winit functions.
+                                    if let Some(winit_event) = unsafe {
+                                        crate::stylus_events::winit_event_from_octotablet(
+                                            &event,
+                                            self.win.scale_factor(),
+                                        )
+                                    } {
+                                        // Safety: Looking into the code of this, there is no path where the device ID is taken and given to winit.
+                                        // If that occurs, it's UB - MAKE SURE TO CHECK BEFORE UPDATING VERS ;3
+                                        let ignore = self
+                                            .egui_ctx
+                                            .push_winit_event(&self.win, &winit_event)
+                                            .consumed;
+
+                                        // Egui ate the event, skip further processing.
+                                        if ignore {
+                                            continue;
+                                        };
+                                    }
+                                }
+
+                                // Wasn't consumed, forward it to the event stream for the tools to use.
                                 match event {
                                     octotablet::events::ToolEvent::Pose(p) => {
                                         if let Some(p) = p.pressure.get() {
@@ -218,6 +255,7 @@ impl Renderer {
                                         }
                                         self.stylus_events
                                             .push_position((p.position[0], p.position[1]));
+
                                         has_tablet_update = true;
                                     }
                                     octotablet::events::ToolEvent::Up
@@ -237,14 +275,15 @@ impl Renderer {
                     } else {
                         false
                     };
+                    let egui_wants_update = self.egui_ctx.take_wants_update();
                     // run UI logics
-                    self.do_ui();
+                    if egui_wants_update {
+                        self.do_ui();
+                    }
                     self.apply_document_cursor();
 
                     // Request draw if any interactive element wants it (UI, document, or tablet)
-                    if has_tablet_update
-                        || self.egui_ctx.needs_redraw()
-                        || self.preview_renderer.has_update()
+                    if has_tablet_update || egui_wants_update || self.preview_renderer.has_update()
                     {
                         self.window().request_redraw();
                     }
@@ -262,13 +301,18 @@ impl Renderer {
         })
     }
     fn do_ui(&mut self) {
-        let mut viewport = Default::default();
-        self.egui_ctx
-            .update(self.win.as_ref(), |ctx| viewport = self.ui.ui(ctx));
+        let viewport = self
+            .egui_ctx
+            .update(self.win.as_ref(), |ctx| self.ui.ui(ctx));
 
         // Todo: only change if... actually changed :P
-        self.preview_renderer
-            .viewport_changed(viewport.0, viewport.1);
+        if let Some(viewport) = viewport {
+            self.enable_document_view = true;
+            self.preview_renderer
+                .viewport_changed(viewport.0, viewport.1);
+        } else {
+            self.enable_document_view = false;
+        }
     }
     fn paint(&mut self) -> AnyResult<()> {
         let (idx, suboptimal, image_future) =
@@ -298,15 +342,16 @@ impl Renderer {
         //Wait for previous frame to end. (required for safety of preview render proxy)
         self.last_frame_fence.take().map(|fence| fence.wait(None));
 
-        let preview_commands = unsafe {
+        let preview_commands = self.enable_document_view.then(|| unsafe {
             self.preview_renderer.render(
                 self.render_surface.as_ref().unwrap().swapchain_images()[idx as usize].clone(),
                 idx,
             )
-        };
+        });
         let preview_commands = match preview_commands {
-            Ok(commands) => commands,
-            Err(e) => {
+            Some(Ok(commands)) => commands,
+            None => smallvec::SmallVec::new(),
+            Some(Err(e)) => {
                 log::warn!("Failed to build preview commands {e:?}");
                 smallvec::SmallVec::new()
             }

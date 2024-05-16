@@ -1,10 +1,21 @@
+mod brush_ui;
 mod color_palette;
+mod drag;
+mod modal;
 pub mod requests;
+mod settings;
 
-use egui::Ui;
+use modal::Modal;
+
+use egui::{RichText, Ui};
 use fuzzpaint_core::{
     blend::{Blend, BlendMode},
-    brush, io, queue, state,
+    brush,
+    color::{self as fcolor, PaletteIndex},
+    io,
+    queue::{self, state_reader::CommandQueueStateReader},
+    state,
+    util::FiniteF32,
 };
 
 const STROKE_LAYER_ICON: &str = "✏";
@@ -13,6 +24,12 @@ const NOTE_LAYER_ICON: &str = "🖹";
 const FILL_LAYER_ICON: &str = "⬛";
 const GROUP_ICON: &str = "🗀";
 const SCISSOR_ICON: &str = "✂";
+const PLUS_ICON: char = '➕';
+const PALETTE_ICON: char = '🎨';
+const HISTORY_ICON: char = '🕒';
+const HOME_ICON: char = '🏠';
+const PIN_ICON: char = '📌';
+const ALPHA_ICON: &str = "α";
 
 /// Justify `(available_size, size, margin)` -> `(size', margin')`, such that `count` elements
 /// will fill available space completely.
@@ -63,6 +80,7 @@ trait ResponseExt {
         frame: &crate::actions::ActionFrame,
         action: crate::actions::Action,
     ) -> Self;
+    fn clicked_or_escape(self) -> bool;
 }
 impl ResponseExt for egui::Response {
     fn or_action_clicked(
@@ -89,37 +107,45 @@ impl ResponseExt for egui::Response {
             ..if held { self.highlight() } else { self }
         }
     }
+    /// Returns true if [`egui::Response::clicked`] or `Escape` key is pressed, useful for cancel buttons.
+    /// This does not take into account focus.
+    fn clicked_or_escape(self) -> bool {
+        self.clicked() || self.ctx.input(|input| input.key_pressed(egui::Key::Escape))
+    }
 }
 
-trait UILayer {
-    /// Perform UI operations. If `is_background`, a layer is open above this layer - display
-    /// as greyed out and ignore input!
-    /// Return true to dismiss.
-    fn do_ui(
-        &mut self,
-        ctx: &egui::Context,
-        requests_channel: &mut crossbeam::channel::Sender<requests::UiRequest>,
-        is_background: bool,
-    ) -> bool;
+enum CurrentModal {
+    BrushCreation(brush_ui::CreationModal),
+    Settings(settings::Settings),
 }
+
+enum CloseState {
+    None,
+    Modal,
+    Confirmed,
+}
+
 #[derive(Clone)]
 struct PerDocumentData {
     id: state::DocumentID,
     graph_selection: Option<state::graph::AnyID>,
     graph_focused_subtree: Option<state::graph::NodeID>,
-    /// Yanked node during a reparent operation
-    yanked_node: Option<state::graph::AnyID>,
     name: String,
 }
 pub struct MainUI {
-    // Could totally be static dispatch, but for simplicity:
-    /// Displayed on top of everything, disabling all behind it in a stack-like manner
-    modals: Vec<Box<dyn UILayer>>,
-    /// Displayed as windows on the document viewport.
-    inlays: Vec<Box<dyn UILayer>>,
+    // Modal layers, in order. (There is no better way to represent this state, I have considered greatly!)
 
-    documents: Vec<PerDocumentData>,
+    // On top of everything, a "do you want to exit" dialog.
+    close_state: CloseState,
+    // A Ui-defined modal (creating brushes, application settings, etc)
+    modal: Option<CurrentModal>,
+    // Active document viewport
+    // + Implicit layer: welcome screen if no active document.
     cur_document: Option<state::DocumentID>,
+    documents: Vec<PerDocumentData>,
+    picker_color: egui::ecolor::HsvaGamma,
+    picker_in_flux: bool,
+    picker_changed: bool,
 
     requests_send: crossbeam::channel::Sender<requests::UiRequest>,
     requests_recv: crossbeam::channel::Receiver<requests::UiRequest>,
@@ -134,7 +160,6 @@ impl MainUI {
                 id,
                 graph_focused_subtree: None,
                 graph_selection: None,
-                yanked_node: None,
                 name: "Unknown".into(),
             })
             .collect();
@@ -142,14 +167,53 @@ impl MainUI {
 
         let (requests_send, requests_recv) = crossbeam::channel::unbounded();
         Self {
-            modals: Vec::new(),
-            inlays: Vec::new(),
+            close_state: CloseState::None,
             documents,
             cur_document,
+
+            modal: None,
+            picker_color: egui::ecolor::HsvaGamma {
+                h: 0.0,
+                s: 0.0,
+                v: 0.0,
+                a: 1.0,
+            },
+            picker_in_flux: false,
+            picker_changed: false,
+
             requests_send,
             requests_recv,
             action_listener,
         }
+    }
+    /// Marks that a close has been requested by the windower
+    pub fn close_requested(&mut self) {
+        // Close unconditionally if
+        // * A close was requested again even though the modal is up.
+        //   (Either we crashed and the modal isn't seen or the user *really* wants us to close lol)
+        // * No open documents to save anyway.
+        self.close_state =
+            if matches!(self.close_state, CloseState::Modal) || self.documents.is_empty() {
+                CloseState::Confirmed
+            } else {
+                // There are open docs, prompt
+                CloseState::Modal
+            }
+    }
+    /// Returns true if the app should close.
+    #[must_use]
+    pub fn should_close(&self) -> bool {
+        matches!(self.close_state, CloseState::Confirmed)
+    }
+    /// Returns true if a top-level modal exists asking whether to close the app.
+    #[must_use]
+    fn modal_enable(&self) -> bool {
+        matches!(self.close_state, CloseState::Modal)
+    }
+    /// Returns true if any modal is open.
+    #[must_use]
+    fn background_enable(&self) -> bool {
+        self.modal_enable() || self.modal.is_some()
     }
     #[must_use]
     pub fn listen_requests(&self) -> crossbeam::channel::Receiver<requests::UiRequest> {
@@ -157,24 +221,18 @@ impl MainUI {
     }
     /// Main UI and any modals, with the top bar, layers, brushes, color, etc. To be displayed in front of the document and it's gizmos.
     /// Returns the size of the document's viewport space - that is, the size of the rect not covered by any side/top/bottom panels.
-    pub fn ui(&mut self, ctx: &egui::Context) -> (ultraviolet::Vec2, ultraviolet::Vec2) {
+    /// None if a full-screen menu is shown.
+    pub fn ui(&mut self, ctx: &egui::Context) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
+        // Close modal, on top of everything.
+        if self.modal_enable() {
+            self.do_close_modal(ctx);
+        }
+        // Show main viewport stuff. Open document, or splash, and document modals.
         // Display modals before main. Egui will place the windows without regard for free area.
-        let mut is_background = false;
-        for modal in self.modals.iter_mut().rev() {
-            // todo: handle dismiss
-            let _ = modal.do_ui(ctx, &mut self.requests_send, is_background);
-            // Show all remaining elements as background.
-            is_background = true;
-        }
-        // is_background set if at least one modal exists.
-        let ret_value = self.main_ui(ctx, is_background);
-        // Display windows after main. Egui will place the windows inside the free area
-        for inlay in &mut self.inlays {
-            // todo: handle dismiss
-            let _ = inlay.do_ui(ctx, &mut self.requests_send, is_background);
-        }
+        self.do_modal(ctx, !self.modal_enable());
 
-        ret_value
+        // Show, but disable if modal exists.
+        self.main_ui(ctx, !self.background_enable())
     }
     fn get_cur_interface(&mut self) -> Option<&mut PerDocumentData> {
         // Get the document's interface, or reset to none if not found.
@@ -191,71 +249,259 @@ impl MainUI {
             None
         }
     }
+    fn do_close_modal(&mut self, ctx: &egui::Context) {
+        let clicked_elsewhere = egui::Window::new("Exit")
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label("There are unsaved documents. Do you really want to exit?");
+                ui.horizontal(|ui| {
+                    // On first run-thru it would be nice for this cancel button to auto-focus itself.
+                    if ui.button("Cancel").clicked_or_escape() {
+                        self.close_state = CloseState::None;
+                    }
+                    if ui.button("Exit").clicked() {
+                        self.close_state = CloseState::Confirmed;
+                    }
+                });
+            })
+            .map_or(false, |resp| resp.response.clicked_elsewhere());
+
+        // If the user clicks away from the window assume they cancelled.
+        if clicked_elsewhere {
+            self.close_state = CloseState::None;
+        }
+    }
+    /// Execute the current modal's logic and window.
+    fn do_modal(&mut self, ctx: &egui::Context, enabled: bool) {
+        let Some(modal) = self.modal.as_mut() else {
+            return;
+        };
+
+        let title = match modal {
+            CurrentModal::BrushCreation(_) => brush_ui::CreationModal::NAME,
+            CurrentModal::Settings(_) => settings::Settings::NAME,
+        };
+
+        let mut is_open = true;
+
+        let cancelled = egui::Window::new(title)
+            .collapsible(false)
+            .enabled(enabled)
+            .open(&mut is_open)
+            .show(ctx, |ui| match modal {
+                CurrentModal::BrushCreation(b) => b.do_ui(ui).closed(),
+                CurrentModal::Settings(s) => s.do_ui(ui).closed(),
+            })
+            .and_then(|resp| resp.inner)
+            .unwrap_or(false);
+
+        // Closed :3
+        if !is_open || cancelled {
+            self.modal = None;
+        }
+    }
+    fn new_document(&mut self) {
+        // When making a new document, start out with a white bg and stroke layer.
+        // (These additions are not included in the history, but that's Okay!)
+        let mut graph = fuzzpaint_core::state::graph::BlendGraph::default();
+        let _ = graph.add_leaf(
+            state::graph::Location::IndexIntoRoot(0),
+            "Background".to_owned(),
+            state::graph::LeafType::SolidColor {
+                blend: Blend::default(),
+                source: fuzzpaint_core::color::ColorOrPalette::WHITE,
+            },
+        );
+
+        let mut stroke_collection =
+            fuzzpaint_core::state::stroke_collection::StrokeCollectionState::default();
+        let new_collection = crate::FuzzID::default();
+        stroke_collection.0.insert(
+            new_collection,
+            state::stroke_collection::StrokeCollection::default(),
+        );
+
+        // Insert the stroke layer we just allocated a collection for.
+        let stroke_layer = graph
+            .add_leaf(
+                state::graph::Location::IndexIntoRoot(0),
+                "Stroke Layer".to_owned(),
+                state::graph::LeafType::StrokeLayer {
+                    blend: Blend::default(),
+                    collection: new_collection,
+                },
+            )
+            .ok();
+        if stroke_layer.is_none() {
+            // Uh oh, failed to make that layer. Remove the collection to not leave it orphaned.
+            stroke_collection.0.clear();
+        }
+
+        let name = "New Document".to_owned();
+
+        // Give this state to a queue
+        let new_doc = queue::DocumentCommandQueue::from_state(
+            state::Document {
+                path: None,
+                name: name.clone(),
+            },
+            graph,
+            stroke_collection,
+            fuzzpaint_core::state::palette::Palette::default(),
+        );
+
+        let new_id = new_doc.id();
+        // Can't fail, this is a newly allocated ID so it's unqieu
+        let _ = crate::global::provider().insert(new_doc);
+        let interface = PerDocumentData {
+            id: new_id,
+            graph_focused_subtree: None,
+            graph_selection: stroke_layer.map(Into::into),
+            name,
+        };
+        let _ = self.requests_send.send(requests::UiRequest::Document {
+            target: new_id,
+            request: requests::DocumentRequest::Opened,
+        });
+        self.cur_document = Some(new_id);
+        self.documents.push(interface);
+    }
+    fn open_documents(&mut self) {
+        // Synchronous and bad just for now.
+        if let Some(files) = rfd::FileDialog::new().pick_files() {
+            let point_repository = crate::global::points();
+            let provider = crate::global::provider();
+
+            // Keep track of the last successful loaded id
+            let mut recent_success = None;
+            for file in files {
+                match io::read_path(file, point_repository) {
+                    Ok(doc) => {
+                        let id = doc.id();
+                        if provider.insert(doc).is_ok() {
+                            recent_success = Some(id);
+                            self.documents.push(PerDocumentData {
+                                id,
+                                graph_focused_subtree: None,
+                                graph_selection: None,
+                                name: "Unknown".into(),
+                            });
+                        }
+                    }
+                    Err(e) => log::error!("Failed to load: {e:#}"),
+                }
+            }
+            // Select last one, if any succeeded.
+            if let Some(new_doc) = recent_success {
+                self.cur_document = Some(new_doc);
+            }
+        }
+    }
     /// Render just self. Modals and insets handled separately.
     fn main_ui(
         &mut self,
         ctx: &egui::Context,
-        _is_background: bool,
-    ) -> (ultraviolet::Vec2, ultraviolet::Vec2) {
+        enabled: bool,
+    ) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
         let Ok(action_frame) = self.action_listener.frame() else {
-            return (ultraviolet::Vec2::zero(), ultraviolet::Vec2::zero());
+            let viewport = ctx.available_rect();
+            let pos = viewport.left_top();
+            let size = viewport.size();
+            return Some((
+                ultraviolet::Vec2 { x: pos.x, y: pos.y },
+                ultraviolet::Vec2 {
+                    x: size.x,
+                    y: size.y,
+                },
+            ));
         };
         let interface = self.get_cur_interface().cloned();
 
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| self.menu_bar(ui));
-        egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
-            if let Some(interface) = interface {
-                Self::nav_bar(ui, interface.id, &self.requests_send, &action_frame);
-            }
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            ui.set_enabled(enabled);
+            self.menu_bar(ui);
         });
 
-        egui::SidePanel::right("layers").show(ctx, |ui| {
-            ui.label("Layers");
-            ui.separator();
-            if let Some(interface) = self.get_cur_interface() {
-                layers_panel(ui, interface);
-
-                // Update selections.
-                let mut globals = crate::AdHocGlobals::get().write();
-                let old_brush = globals.take().map(|globals| globals.brush);
-                *globals = Some(crate::AdHocGlobals {
-                    document: interface.id,
-                    brush: old_brush.unwrap_or(state::StrokeBrushSettings {
-                        is_eraser: false,
-                        brush: brush::todo_brush().id(),
-                        color_modulate: [0.0, 0.0, 0.0, 1.0],
-                        size_mul: 10.0,
-                        spacing_px: 0.5,
-                    }),
-                    node: interface.graph_selection,
+        if self.cur_document.is_none() {
+            // No document view open, show a splash.
+            // Don't show the bar if it has nothing to say!
+            if !self.documents.is_empty() {
+                egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
+                    ui.set_enabled(enabled);
+                    self.document_bar(ui);
                 });
             }
-        });
+            self.welcome_screen(ctx);
 
-        egui::SidePanel::left("inspector")
-            .resizable(true)
-            .show(ctx, |ui| {
-                // Stats at bottom
-                egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
-                // Toolbox above that
-                egui::TopBottomPanel::bottom("tools-panel")
-                    .show_inside(ui, |ui| tools_panel(ui, &action_frame, &self.requests_send));
-                // Brush panel takes the rest
-                brush_panel(ui, self.cur_document, &action_frame);
+            // When the welcome screen is shown, there is no space for the document view.
+            None
+        } else {
+            // A document is open, show the main view.
+            egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
+                ui.set_enabled(enabled);
+                if let Some(interface) = interface {
+                    Self::nav_bar(ui, interface.id, &self.requests_send, &action_frame);
+                }
+            });
+            egui::SidePanel::right("layers").show(ctx, |ui| {
+                ui.set_enabled(enabled);
+                ui.label("Layers");
+                ui.separator();
+                if let Some(interface) = self.get_cur_interface() {
+                    layers_panel(ui, interface);
+
+                    // Update selections.
+                    let mut globals = crate::AdHocGlobals::get().write();
+                    let old_brush = globals.take().map(|globals| globals.brush);
+                    *globals = Some(crate::AdHocGlobals {
+                        document: interface.id,
+                        brush: old_brush.unwrap_or(state::StrokeBrushSettings {
+                            is_eraser: false,
+                            brush: fuzzpaint_core::brush::UniqueID([0; 32]),
+                            color_modulate: fcolor::ColorOrPalette::BLACK,
+                            size_mul: FiniteF32::new(10.0).unwrap(),
+                            spacing_px: FiniteF32::new(0.5).unwrap(),
+                        }),
+                        node: interface.graph_selection,
+                    });
+                }
             });
 
-        egui::TopBottomPanel::top("document-bar").show(ctx, |ui| self.document_bar(ui));
+            egui::SidePanel::left("inspector")
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.set_enabled(enabled);
+                    // Stats at bottom
+                    egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
+                    // Toolbox above that
+                    egui::TopBottomPanel::bottom("tools-panel")
+                        .show_inside(ui, |ui| tools_panel(ui, &action_frame, &self.requests_send));
+                    // Brush panel takes the rest
+                    self.colors_panel(ui, self.cur_document, &action_frame);
+                });
+            egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
+                ui.set_enabled(enabled);
+                self.document_bar(ui);
+            });
 
-        let viewport = ctx.available_rect();
-        let pos = viewport.left_top();
-        let size = viewport.size();
-        (
-            ultraviolet::Vec2 { x: pos.x, y: pos.y },
-            ultraviolet::Vec2 {
-                x: size.x,
-                y: size.y,
-            },
-        )
+            {
+                let response = color_palette::picker_dock(ctx, &mut self.picker_color);
+                self.picker_changed = response.response.changed();
+                self.picker_in_flux = response.in_flux;
+            }
+
+            let viewport = ctx.available_rect();
+            let pos = viewport.left_top();
+            let size = viewport.size();
+            Some((
+                ultraviolet::Vec2 { x: pos.x, y: pos.y },
+                ultraviolet::Vec2 {
+                    x: size.x,
+                    y: size.y,
+                },
+            ))
+        }
     }
     /// File, Edit, ect
     fn menu_bar(&mut self, ui: &mut Ui) {
@@ -272,23 +518,7 @@ impl MainUI {
                         ui.add(button)
                     };
                     if add_button(ui, "New", Some("Ctrl+N")).clicked() {
-                        let new_doc = queue::DocumentCommandQueue::new();
-                        let new_id = new_doc.id();
-                        // Can't fail
-                        let _ = crate::global::provider().insert(new_doc);
-                        let interface = PerDocumentData {
-                            id: new_id,
-                            graph_focused_subtree: None,
-                            graph_selection: None,
-                            yanked_node: None,
-                            name: "Unknown".into(),
-                        };
-                        let _ = self.requests_send.send(requests::UiRequest::Document {
-                            target: new_id,
-                            request: requests::DocumentRequest::Opened,
-                        });
-                        self.cur_document = Some(new_id);
-                        self.documents.push(interface);
+                        self.new_document();
                     };
                     if add_button(ui, "Save", Some("Ctrl+S")).clicked() {
                         // Dirty testing implementation!
@@ -333,41 +563,124 @@ impl MainUI {
                             });
                         }
                     }
-                    let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
+                    // let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
                     if add_button(ui, "Open", Some("Ctrl+O")).clicked() {
-                        // Synchronous and bad just for testing.
-                        if let Some(files) = rfd::FileDialog::new().pick_files() {
-                            let point_repository = crate::global::points();
-                            let provider = crate::global::provider();
-
-                            // Keep track of the last successful loaded id
-                            let mut recent_success = None;
-                            for file in files {
-                                match io::read_path(file, point_repository) {
-                                    Ok(doc) => {
-                                        let id = doc.id();
-                                        if provider.insert(doc).is_ok() {
-                                            recent_success = Some(id);
-                                            self.documents.push(PerDocumentData {
-                                                id,
-                                                graph_focused_subtree: None,
-                                                graph_selection: None,
-                                                yanked_node: None,
-                                                name: "Unknown".into(),
-                                            });
-                                        }
-                                    }
-                                    Err(e) => log::error!("Failed to load: {e:#}"),
-                                }
-                            }
-                            // Select last one, if any succeeded.
-                            if let Some(new_doc) = recent_success {
-                                self.cur_document = Some(new_doc);
-                            }
-                        }
+                        self.open_documents();
                     }
-                    let _ = add_button(ui, "Open as new", None);
-                    let _ = add_button(ui, "Export", None);
+                    //let _ = add_button(ui, "Open as new", None);
+                    //let _ = add_button(ui, "Export", None);
+                });
+                ui.menu_button("Edit", |ui| {
+                    if ui.button("Settings").clicked() {
+                        self.modal = Some(CurrentModal::Settings(settings::Settings::default()));
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
+    }
+    /// Show a center welcome/"home" panel when no document is selected.
+    fn welcome_screen(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                const BIG_BUTTON_MAX_SIZE: f32 = 125.0;
+                const BIG_BUTTON_MIN_SIZE: f32 = 75.0;
+                const BIG_BUTTON_MARGIN: f32 = 10.0;
+
+                // Use double-size heading.
+                let header_height = ui
+                    .style()
+                    .text_styles
+                    .get(&egui::TextStyle::Heading)
+                    .unwrap()
+                    .size
+                    * 2.5;
+
+                // Show big buttons for new and open.
+                let available_for_buttons = ui.available_size() - egui::vec2(0.0, header_height);
+
+                // Too wide to show side by side, do a vertical layout.
+                let (buttons_vertical, button_size) =
+                    if BIG_BUTTON_MIN_SIZE * 2.0 + BIG_BUTTON_MARGIN > available_for_buttons.x {
+                        (
+                            true,
+                            available_for_buttons
+                                .x
+                                .min(BIG_BUTTON_MAX_SIZE - BIG_BUTTON_MARGIN),
+                        )
+                    } else {
+                        let biggest_possible_size =
+                            (available_for_buttons.x - BIG_BUTTON_MARGIN * 3.0) / 2.0;
+                        let size = biggest_possible_size
+                            .min(BIG_BUTTON_MAX_SIZE)
+                            .min(available_for_buttons.y);
+
+                        (false, size)
+                    };
+
+                // Vertical center by discarding half the region not used by header or buttons.
+                let button_height = if buttons_vertical {
+                    2.0 * button_size + BIG_BUTTON_MARGIN
+                } else {
+                    button_size + BIG_BUTTON_MARGIN
+                };
+                let dead_space = available_for_buttons.y
+                    - button_height
+                    - 2.0 * ui.style().spacing.interact_size.y;
+                ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                    ui.next_widget_position(),
+                    egui::vec2(0.0, dead_space / 2.0),
+                ));
+
+                ui.label(RichText::new("🐑 Fuzzpaint").heading().size(header_height));
+
+                ui.vertical_centered(|ui| {
+                    let big_button =
+                        |ui: &mut egui::Ui, at: egui::Rect, name: &str| -> egui::Response {
+                            // Create a UI in the rect, "justify" (fill) in both axes
+                            let mut ui = ui.child_ui(
+                                at,
+                                egui::Layout::left_to_right(egui::Align::Center)
+                                    .with_main_justify(true)
+                                    .with_cross_justify(true),
+                            );
+                            let button = egui::Button::new(name);
+
+                            ui.add(button)
+                        };
+
+                    let top_center = ui.next_widget_position();
+
+                    let (a, b) = if buttons_vertical {
+                        let top = egui::Rect::from_min_size(
+                            top_center + egui::vec2(-button_size, 0.0),
+                            [button_size; 2].into(),
+                        );
+                        let bottom = egui::Rect::from_min_size(
+                            top_center + egui::vec2(-button_size, button_size + BIG_BUTTON_MARGIN),
+                            [button_size; 2].into(),
+                        );
+
+                        (top, bottom)
+                    } else {
+                        let left = egui::Rect::from_min_size(
+                            top_center - egui::vec2(BIG_BUTTON_MARGIN + button_size, 0.0),
+                            [button_size; 2].into(),
+                        );
+                        let right = egui::Rect::from_min_size(
+                            top_center + egui::vec2(BIG_BUTTON_MARGIN, 0.0),
+                            [button_size; 2].into(),
+                        );
+
+                        (left, right)
+                    };
+
+                    if big_button(ui, a, "➕ New").clicked() {
+                        self.new_document();
+                    }
+                    if big_button(ui, b, "🗀 Open").clicked() {
+                        self.open_documents();
+                    }
                 });
             });
         });
@@ -376,15 +689,27 @@ impl MainUI {
     fn document_bar(&mut self, ui: &mut Ui) {
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal(|ui| {
+                // if there is a selected doc, show a home button to get back to
+                // welcome screen. If there isn't, it shows anyway, so no need!
+                if self.cur_document.is_some()
+                    && ui
+                        .add(egui::Button::new(HOME_ICON.to_string()).frame(false))
+                        .on_hover_text("Return to welcome screen")
+                        .clicked()
+                {
+                    self.cur_document = None;
+                }
+                // Then show, a clicakble header for each document.
                 let mut deleted_ids = smallvec::SmallVec::<[state::DocumentID; 1]>::new();
                 for PerDocumentData { id, name, .. } in &self.documents {
+                    let id = *id;
                     egui::containers::Frame::group(ui.style())
                         .outer_margin(egui::Margin::symmetric(0.0, 0.0))
                         .inner_margin(egui::Margin::symmetric(0.0, 0.0))
-                        .multiply_with_opacity(if self.cur_document == Some(*id) {
+                        .multiply_with_opacity(if self.cur_document == Some(id) {
                             1.0
                         } else {
-                            0.0
+                            0.5
                         })
                         .rounding(egui::Rounding {
                             ne: 2.0,
@@ -392,11 +717,17 @@ impl MainUI {
                             ..0.0.into()
                         })
                         .show(ui, |ui| {
-                            ui.selectable_value(&mut self.cur_document, Some(*id), name);
-                            if ui.small_button("✖").clicked() {
-                                deleted_ids.push(*id);
-                                //Disselect if deleted.
-                                if self.cur_document == Some(*id) {
+                            let middle_click_delete = ui
+                                .selectable_value(&mut self.cur_document, Some(id), name)
+                                .clicked_by(egui::PointerButton::Middle);
+                            if ui
+                                .add(egui::Button::new("✖").small().frame(false))
+                                .clicked()
+                                || middle_click_delete
+                            {
+                                deleted_ids.push(id);
+                                //Disselect if deleted. This is poor behavior, it should have some sort of recent-ness stack!
+                                if self.cur_document == Some(id) {
                                     self.cur_document = None;
                                 }
                             }
@@ -408,6 +739,13 @@ impl MainUI {
                 }
                 self.documents
                     .retain(|interface| !deleted_ids.contains(&interface.id));
+                // Finally, show an add button.
+                if ui
+                    .add(egui::Button::new(PLUS_ICON.to_string()).frame(false))
+                    .clicked()
+                {
+                    self.new_document();
+                }
             });
         });
     }
@@ -529,6 +867,128 @@ impl MainUI {
             }
         });
     }
+
+    fn colors_panel(
+        &mut self,
+        ui: &mut Ui,
+        current_doc: Option<state::DocumentID>,
+        actions: &crate::actions::ActionFrame,
+    ) {
+        use az::SaturatingAs;
+
+        let mut globals = crate::AdHocGlobals::get().write();
+        if let Some(brush) = globals.as_mut().map(|globals| &mut globals.brush) {
+            if let Some(current_doc) = current_doc {
+                // Show palette
+                // Between AdHocGlobals and this, two locks are held. Recipe for a deadlock.
+                crate::global::provider().inspect(current_doc, |doc| {
+                    // Unfortunately this is the second `write_with` this frame. I need a way for this to work better..
+                    // A retained mode UI is probably the solution as well as just a good idea for the future.
+                    doc.write_with(|w| {
+                        let mut palette = w.palette();
+
+                        if std::mem::take(&mut self.picker_changed) {
+                            let picker_color = egui::Rgba::from(self.picker_color);
+                            brush.color_modulate =
+                                fcolor::Color::from_array_lossy(picker_color.to_array())
+                                    .unwrap_or(fcolor::Color::BLACK)
+                                    .into();
+                        }
+
+                        // Small buttons with color history, pins, and palettes.
+                        let palette_response = color_palette::ColorPalette::new(
+                            &mut brush.color_modulate,
+                            &mut palette,
+                        )
+                        .scope(color_palette::HistoryScope::Local)
+                        .in_flux(self.picker_in_flux)
+                        .id_source(current_doc)
+                        .swap(
+                            // Swap top colors if requested.
+                            actions.action_trigger_count(crate::actions::Action::ColorSwap) % 2
+                                == 1,
+                        )
+                        .max_history(64)
+                        .show(ui);
+
+                        // set the picker if the brush was changed by the palette UI.
+                        // There's a really weird lifetime issue though where seemingly both mutable borrows above
+                        // are intertwined and continue indefinitely - thus the color can't be read...?
+                        // So instead, it has it's own return type that uses those borrows to find
+                        // the color for us. Weird werid werid.
+                        // Do this unconditionally - so that the picker is always sync'd, even if
+                        // ssome code runs that changes the brushes modulate without announcing it.
+                        let [r, g, b, a] = palette_response.dereferenced_color.as_array();
+                        let rgba = egui::Rgba::from_rgba_premultiplied(r, g, b, a);
+
+                        self.picker_color = rgba.into();
+                    });
+                });
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Brush");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(PLUS_ICON.to_string()).clicked() {
+                        self.modal = Some(CurrentModal::BrushCreation(
+                            brush_ui::CreationModal::default(),
+                        ));
+                    }
+                })
+            });
+            ui.separator();
+            ui.selectable_value(&mut brush.brush.0[0], 0, "Test brush A");
+            ui.selectable_value(&mut brush.brush.0[0], 1, "Test brush B");
+
+            let mut size_mul = brush.size_mul.get();
+            let mut spacing_px = brush.spacing_px.get();
+            // Apply size up/down actions
+            // - for down, + for up
+            'size_steps: {
+                let size_steps = actions
+                    .action_trigger_count(crate::actions::Action::BrushSizeUp)
+                    .saturating_as::<i32>()
+                    .saturating_sub(
+                        actions
+                            .action_trigger_count(crate::actions::Action::BrushSizeDown)
+                            .saturating_as(),
+                    );
+                if size_steps == 0 {
+                    break 'size_steps;
+                }
+                // Usually editors supply some kind of snapping here to snap to
+                // common values instead. Todo!
+                let factor = 2.0f32.powf(size_steps as f32 / 4.0);
+                size_mul *= factor;
+                spacing_px *= factor;
+            }
+            ui.add(
+                egui::Slider::new(&mut spacing_px, 0.25..=10.0)
+                    .text("Spacing")
+                    .suffix("px")
+                    .max_decimals(2)
+                    .clamp_to_range(false),
+            );
+            // Prevent negative
+            spacing_px = spacing_px.max(0.1);
+            ui.add(
+                egui::Slider::new(&mut size_mul, spacing_px..=50.0)
+                    .text("Size")
+                    .suffix("px")
+                    .max_decimals(2)
+                    .clamp_to_range(false),
+            );
+            // Prevent negative
+            size_mul = size_mul.max(0.1);
+
+            if let Ok(size_mul) = FiniteF32::new(size_mul) {
+                brush.size_mul = size_mul;
+            }
+            if let Ok(spacing_px) = FiniteF32::new(spacing_px) {
+                brush.spacing_px = spacing_px;
+            }
+        }
+    }
 }
 /// For any tool, `(icon string, tooltip, opt_hotkey)`
 fn tool_button_for(
@@ -614,34 +1074,49 @@ fn leaf_props_panel(
         LeafType::Note => false,
         // Color picker
         LeafType::SolidColor { source, .. } => {
-            ui.horizontal(|ui| {
-                ui.label("Fill color:");
-                // Latch onto fill color, to submit update only when selection is finished.
-                latch::latch(ui, (leaf_id, "fill-color"), *source, |ui, [r, g, b, a]| {
-                    let mut rgba = egui::Rgba::from_rgba_premultiplied(*r, *g, *b, *a);
-                    egui::color_picker::color_edit_button_rgba(
-                        ui,
-                        &mut rgba,
-                        // If the user wants Add they should use the blend modes mwuahaha
-                        egui::color_picker::Alpha::OnlyBlend,
-                    );
-                    *r = rgba.r();
-                    *b = rgba.b();
-                    *g = rgba.g();
-                    *a = rgba.a();
+            let mut globals = crate::AdHocGlobals::get().write();
+            let mut current_color = globals.as_mut().map(|g| &mut g.brush.color_modulate);
 
-                    // None of the response fields for color pickers seem to indicate
-                    // a finished interaction TwT
-                    if ui.button("Apply").clicked() {
-                        latch::Latch::Finish
+            ui.horizontal(|ui| {
+                ui.set_enabled(current_color.is_some());
+                // Add a preview button that also allows the user to select this color.
+                if ui
+                    .add_enabled(
+                        current_color.is_some(),
+                        color_palette::ColorSquare {
+                            // Todo: Display paletted.
+                            color: source.get().left_or(fcolor::Color::BLACK),
+                            icon: source.is_palette().then_some(PALETTE_ICON),
+                            ..Default::default()
+                        },
+                    )
+                    .on_hover_text("Use this color")
+                    .clicked()
+                {
+                    match &mut current_color {
+                        Some(current) => **current = *source,
+                        // UI disabled if None, unreachable :D
+                        None => unreachable!(),
+                    }
+                }
+                ui.label("Fill color");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button("Replace")
+                        .on_hover_text("Replace layer color with active color")
+                        .clicked()
+                    {
+                        match current_color {
+                            Some(current) => *source = *current,
+                            // UI disabled if None, unreachable :D
+                            None => unreachable!(),
+                        }
+                        true
                     } else {
-                        latch::Latch::Continue
+                        false
                     }
                 })
-                // Set color on completion
-                .on_finish(|color| *source = color)
-                // Return true if set occured
-                .is_some()
+                .inner
             })
             .inner
         }
@@ -711,146 +1186,159 @@ fn layer_buttons(
     writer: &mut queue::writer::CommandQueueWriter,
 ) {
     ui.horizontal(|ui| {
-        // Copied logic since we can't borrow test_graph_selection throughout this whole
-        // ui section
-        macro_rules! add_location {
-            () => {
-                match interface.graph_selection.as_ref() {
-                    Some(state::graph::AnyID::Node(id)) => {
-                        state::graph::Location::IndexIntoNode(id, 0)
-                    }
-                    Some(any) => state::graph::Location::AboveSelection(any),
-                    // No selection, add into the root of the viewed subree
-                    None => match interface.graph_focused_subtree.as_ref() {
-                        Some(root) => state::graph::Location::IndexIntoNode(root, 0),
-                        None => state::graph::Location::IndexIntoRoot(0),
-                    },
+        // Have a button for adding a layer of any type.
+        // Doing it with an enum in this way makes the lifetimes work (too many borrows if each button
+        // had the layer addition inline) and we obviously don't expect two of these to be triggered in one frame!
+        enum NewLayerType {
+            Stroke,
+            Text,
+            Fill,
+            Note,
+            Group,
+        }
+        let new_layer_button = egui::ComboBox::from_id_source("layer-add")
+            .selected_text(PLUS_ICON.to_string())
+            // Minimize size to fit around the icon.
+            .width(0.0)
+            .show_ui(ui, |ui| {
+                let mut selection = None;
+                if ui
+                    // A bit of an abuse of shortcut text. Screenreaders hate her!
+                    // Unsure of how to better achieve the effect...
+                    .add(egui::Button::new("Stroke Layer").shortcut_text(STROKE_LAYER_ICON))
+                    .clicked()
+                {
+                    selection = Some(NewLayerType::Stroke);
                 }
+                if ui
+                    .add_enabled(
+                        false,
+                        egui::Button::new("Text Layer").shortcut_text(TEXT_LAYER_ICON),
+                    )
+                    .clicked()
+                {
+                    selection = Some(NewLayerType::Text);
+                }
+                if ui
+                    .add(egui::Button::new("Fill Layer").shortcut_text(FILL_LAYER_ICON))
+                    .clicked()
+                {
+                    selection = Some(NewLayerType::Fill);
+                }
+                if ui
+                    .add(egui::Button::new("Note").shortcut_text(NOTE_LAYER_ICON))
+                    .clicked()
+                {
+                    selection = Some(NewLayerType::Note);
+                }
+                ui.separator();
+                if ui
+                    .add(egui::Button::new("Blend Group").shortcut_text(GROUP_ICON))
+                    .clicked()
+                {
+                    selection = Some(NewLayerType::Group);
+                }
+
+                selection
+            });
+
+        new_layer_button.response.on_hover_text("Add layer");
+
+        // Option<Option<...>>, but we only care when Some(Some(...))
+        let new_layer = new_layer_button.inner.flatten();
+
+        // Add the layer if one was requested.
+        if let Some(new_layer) = new_layer {
+            let addition_location = match interface.graph_selection.as_ref() {
+                // If a group is selected, we insert as the topmost child.
+                Some(state::graph::AnyID::Node(id)) => state::graph::Location::IndexIntoNode(id, 0),
+                // Otherwise, we insert as the sibling directly above selected.
+                Some(any) => state::graph::Location::AboveSelection(any),
+                // No selection, add into the root of the viewed subree
+                None => match interface.graph_focused_subtree.as_ref() {
+                    Some(root) => state::graph::Location::IndexIntoNode(root, 0),
+                    None => state::graph::Location::IndexIntoRoot(0),
+                },
             };
-        }
-
-        if ui
-            .button(STROKE_LAYER_ICON)
-            .on_hover_text("Add Stroke Layer")
-            .clicked()
-        {
-            let new_stroke_collection = writer.stroke_collections().insert();
-            interface.graph_selection = writer
-                .graph()
-                .add_leaf(
-                    state::graph::LeafType::StrokeLayer {
-                        blend: Blend::default(),
-                        collection: new_stroke_collection,
-                    },
-                    add_location!(),
-                    "Stroke Layer".to_string(),
-                )
-                .ok()
-                .map(Into::into);
-        }
-        // Borrow graph for the rest of the time.
-        let mut graph = writer.graph();
-        if ui
-            .add_enabled(false, egui::Button::new(TEXT_LAYER_ICON))
-            .on_hover_text("Add Text Layer")
-            .clicked()
-        {
-            interface.graph_selection = graph
-                .add_leaf(
-                    state::graph::LeafType::Text {
-                        blend: Blend::default(),
-                        text: "Hello, world!".to_owned(),
-                        px_per_em: 50.0,
-                    },
-                    add_location!(),
-                    "Text".to_string(),
-                )
-                .ok()
-                .map(Into::into);
-        }
-        if ui
-            .button(FILL_LAYER_ICON)
-            .on_hover_text("Add Fill Layer")
-            .clicked()
-        {
-            interface.graph_selection = graph
-                .add_leaf(
-                    state::graph::LeafType::SolidColor {
-                        blend: Blend::default(),
-                        source: [1.0; 4],
-                    },
-                    add_location!(),
-                    "Fill".to_string(),
-                )
-                .ok()
-                .map(Into::into);
-        }
-        if ui
-            .button(NOTE_LAYER_ICON)
-            .on_hover_text("Add Note")
-            .clicked()
-        {
-            interface.graph_selection = graph
-                .add_leaf(
-                    state::graph::LeafType::Note,
-                    add_location!(),
-                    "Note".to_string(),
-                )
-                .ok()
-                .map(Into::into);
-        }
-
-        ui.add(egui::Separator::default().vertical());
-
-        if ui.button(GROUP_ICON).on_hover_text("Add Group").clicked() {
-            interface.graph_selection = graph
-                .add_node(
-                    state::graph::NodeType::Passthrough,
-                    add_location!(),
-                    "Group Layer".to_string(),
-                )
-                .ok()
-                .map(Into::into);
+            interface.graph_selection = match new_layer {
+                NewLayerType::Stroke => {
+                    let new_stroke_collection = writer.stroke_collections().insert();
+                    writer
+                        .graph()
+                        .add_leaf(
+                            state::graph::LeafType::StrokeLayer {
+                                blend: Blend::default(),
+                                collection: new_stroke_collection,
+                            },
+                            addition_location,
+                            "Stroke Layer".to_string(),
+                        )
+                        .ok()
+                        .map(Into::into)
+                }
+                NewLayerType::Fill => writer
+                    .graph()
+                    .add_leaf(
+                        state::graph::LeafType::SolidColor {
+                            blend: Blend::default(),
+                            source: fcolor::ColorOrPalette::WHITE,
+                        },
+                        addition_location,
+                        "Fill".to_string(),
+                    )
+                    .ok()
+                    .map(Into::into),
+                NewLayerType::Text => writer
+                    .graph()
+                    .add_leaf(
+                        state::graph::LeafType::Text {
+                            blend: Blend::default(),
+                            text: "Hello, world!".to_owned(),
+                            px_per_em: 50.0,
+                        },
+                        addition_location,
+                        "Text".to_string(),
+                    )
+                    .ok()
+                    .map(Into::into),
+                NewLayerType::Note => writer
+                    .graph()
+                    .add_leaf(
+                        state::graph::LeafType::Note,
+                        addition_location,
+                        "Note".to_string(),
+                    )
+                    .ok()
+                    .map(Into::into),
+                NewLayerType::Group => writer
+                    .graph()
+                    .add_node(
+                        state::graph::NodeType::GroupedBlend(Blend::default()),
+                        addition_location,
+                        "Group".to_string(),
+                    )
+                    .ok()
+                    .map(Into::into),
+            };
         };
+
+        let mut graph = writer.graph();
 
         ui.add(egui::Separator::default().vertical());
 
         let merge_button = egui::Button::new("⤵");
-        ui.add_enabled(false, merge_button);
+        ui.add_enabled(false, merge_button)
+            .on_hover_text("Merge down");
 
-        let delete_button = egui::Button::new("✖");
-        if let Some(selection) = interface.graph_selection {
-            if ui.add_enabled(true, delete_button).clicked() {
-                // Explicitly ignore error.
-                let _ = graph.delete(selection);
-                interface.graph_selection = None;
-            }
-        } else {
-            ui.add_enabled(false, delete_button);
-        }
-        if let Some(yanked) = interface.yanked_node {
-            // Display an insert button
-            if ui
-                .button(egui::RichText::new("↪").monospace())
-                .on_hover_text("Insert yanked node here")
-                .clicked()
-            {
-                // Explicitly ignore error. There are many invalid options, in that case do nothing!
-                let _ = graph.reparent(yanked, add_location!());
-                interface.yanked_node = None;
-            }
-        } else {
-            // Display a cut button
-            let button = egui::Button::new(egui::RichText::new(SCISSOR_ICON).monospace());
-            // Disable if no selection.
-            if ui
-                .add_enabled(interface.graph_selection.is_some(), button)
-                .on_hover_text("Reparent")
-                .clicked()
-            {
-                interface.yanked_node = interface.graph_selection;
-            }
-        }
+        if ui
+            .add_enabled(interface.graph_selection.is_some(), egui::Button::new("✖"))
+            .on_hover_text("Delete layer")
+            .clicked()
+        {
+            // Explicitly ignore error.
+            let _ = graph.delete(interface.graph_selection.unwrap());
+            interface.graph_selection = None;
+        };
     });
 }
 /// Side panel showing layer add buttons, layer tree, and layer options
@@ -863,7 +1351,6 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
             let node_props = interface
                 .graph_selection
                 // Ignore if there is a yanked node.
-                .filter(|_| interface.yanked_node.is_none())
                 .and_then(|node| graph.get(node))
                 .cloned();
 
@@ -900,10 +1387,9 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                     }
                 },
             );
-            // Buttons
+
             layer_buttons(ui, interface, writer);
 
-            ui.separator();
             let mut graph = writer.graph();
 
             // Strange visual flicker when this button is clicked,
@@ -929,103 +1415,59 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                     );
                 });
             }
-            egui::ScrollArea::new([false, true])
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    graph_edit_recurse(
-                        ui,
-                        &mut graph,
-                        interface.graph_focused_subtree,
-                        &mut interface.graph_selection,
-                        &mut interface.graph_focused_subtree,
-                        interface.yanked_node,
-                    );
-                });
+            latch::latch(ui, "dnd-state", None, |ui, dnd_state| {
+                egui::ScrollArea::new([false, true])
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        graph_edit_recurse(
+                            ui,
+                            &mut graph,
+                            interface.graph_focused_subtree,
+                            &mut interface.graph_selection,
+                            &mut interface.graph_focused_subtree,
+                            dnd_state,
+                        );
+                    });
+
+                match dnd_state {
+                    None => latch::Latch::None,
+                    Some(DndState {
+                        released: false, ..
+                    }) => latch::Latch::Continue,
+                    Some(_) => latch::Latch::Finish,
+                }
+            })
+            .on_finish(|dnd| {
+                // Drop just occured. Do move!
+                let Some(dnd) = dnd else {
+                    return;
+                };
+
+                let Some(drop_target) = dnd.drop_target else {
+                    return;
+                };
+
+                // It is OK if this err - likely, in fact. If the user eg. places it in the same place it already was,
+                // or tries to make a group a child of itself
+                let _ = graph.reparent(
+                    dnd.drag_target,
+                    match &drop_target {
+                        DroppedAt::Before(before) => state::graph::Location::AboveSelection(before),
+                        DroppedAt::FirstChild(parent) => {
+                            state::graph::Location::IndexIntoNode(parent, 0)
+                        }
+                        // After - index too large is clamped to the end, perfect!
+                        DroppedAt::LastChild(None) => {
+                            state::graph::Location::IndexIntoRoot(usize::MAX)
+                        }
+                        DroppedAt::LastChild(Some(parent)) => {
+                            state::graph::Location::IndexIntoNode(parent, usize::MAX)
+                        }
+                    },
+                );
+            })
         });
     });
-}
-/// Side panel showing layer tree and layer options
-fn brush_panel(
-    ui: &mut Ui,
-    current_doc: Option<state::DocumentID>,
-    actions: &crate::actions::ActionFrame,
-) {
-    use az::SaturatingAs;
-
-    let mut globals = crate::AdHocGlobals::get().write();
-    if let Some(brush) = globals.as_mut().map(|globals| &mut globals.brush) {
-        ui.label("Color");
-        ui.separator();
-        // Why..
-        let mut color = egui::Rgba::from_rgba_premultiplied(
-            brush.color_modulate[0],
-            brush.color_modulate[1],
-            brush.color_modulate[2],
-            brush.color_modulate[3],
-        );
-        if egui::color_picker::color_edit_button_rgba(
-            ui,
-            &mut color,
-            egui::color_picker::Alpha::OnlyBlend,
-        )
-        .changed()
-        {
-            brush.color_modulate = color.to_array();
-        };
-        // VERY hacky way to tell if user is modifying color.
-        // There is no way to actually tell. >:V
-        let in_flux = ui.input(|r| r.pointer.any_down());
-        // Small buttons with color history
-        ui.add(
-            color_palette::ColorPalette::new(&mut brush.color_modulate)
-                .scope(color_palette::HistoryScope::Global)
-                .in_flux(in_flux)
-                .id_source(current_doc)
-                .max_history(64),
-        );
-
-        ui.label("Brush");
-        ui.separator();
-
-        // Apply size up/down actions
-        // - for down, + for up
-        'size_steps: {
-            let size_steps = actions
-                .action_trigger_count(crate::actions::Action::BrushSizeUp)
-                .saturating_as::<i32>()
-                .saturating_sub(
-                    actions
-                        .action_trigger_count(crate::actions::Action::BrushSizeDown)
-                        .saturating_as(),
-                );
-            if size_steps == 0 {
-                break 'size_steps;
-            }
-            // Usually editors supply some kind of snapping here to snap to
-            // common values instead. Todo!
-            let factor = 2.0f32.powf(size_steps as f32 / 4.0);
-            brush.size_mul *= factor;
-            brush.spacing_px *= factor;
-        }
-        ui.add(
-            egui::Slider::new(&mut brush.spacing_px, 0.25..=10.0)
-                .text("Spacing")
-                .suffix("px")
-                .max_decimals(2)
-                .clamp_to_range(false),
-        );
-        // Prevent negative
-        brush.spacing_px = brush.spacing_px.max(0.1);
-        ui.add(
-            egui::Slider::new(&mut brush.size_mul, brush.spacing_px..=50.0)
-                .text("Size")
-                .suffix("px")
-                .max_decimals(2)
-                .clamp_to_range(false),
-        );
-        // Prevent negative
-        brush.size_mul = brush.size_mul.max(0.1);
-    }
 }
 /// Panel showing debug stats
 fn stats_panel(ui: &mut Ui) {
@@ -1158,7 +1600,7 @@ fn ui_layer_blend(
             finished |= ui
                 .toggle_value(
                     &mut blend.alpha_clip,
-                    egui::RichText::new("α").monospace().strong(),
+                    egui::RichText::new(ALPHA_ICON).monospace().strong(),
                 )
                 .on_hover_text("Alpha clip")
                 .clicked();
@@ -1209,7 +1651,7 @@ fn ui_passthrough_or_blend(
                 changed |= ui
                     .toggle_value(
                         &mut blend.alpha_clip,
-                        egui::RichText::new("α").monospace().strong(),
+                        egui::RichText::new(ALPHA_ICON).monospace().strong(),
                     )
                     .on_hover_text("Alpha clip")
                     .changed();
@@ -1259,38 +1701,92 @@ fn ui_passthrough_or_blend(
         }
     })
 }
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum DroppedAt {
+    // Last child of group, or None for last child of root.
+    LastChild(Option<state::graph::NodeID>),
+    /// Sibling above id
+    Before(state::graph::AnyID),
+    /// First child of id
+    FirstChild(state::graph::NodeID),
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+struct DndState {
+    drag_target: state::graph::AnyID,
+    drop_target: Option<DroppedAt>,
+    released: bool,
+}
+impl DndState {
+    fn drag_target(&self) -> state::graph::AnyID {
+        self.drag_target
+    }
+    fn drop_target(&self) -> Option<DroppedAt> {
+        self.drop_target
+    }
+}
+
 fn graph_edit_recurse<
     // Well that's.... not great...
-    W: queue::writer::CommandWrite<state::graph::commands::GraphCommand>,
+    W: queue::writer::CommandWrite<state::graph::commands::Command>,
 >(
     ui: &mut Ui,
     graph: &mut state::graph::writer::GraphWriter<'_, W>,
-    root: Option<state::graph::NodeID>,
+    parent: Option<state::graph::NodeID>,
     selected_node: &mut Option<state::graph::AnyID>,
     focused_node: &mut Option<state::graph::NodeID>,
-    yanked_node: Option<state::graph::AnyID>,
+    dnd_state: &mut Option<DndState>,
 ) {
-    let node_ids: Vec<_> = match root {
+    let node_ids: Vec<_> = match parent {
         Some(root) => graph.iter_node(root).unwrap().map(|(id, _)| id).collect(),
         None => graph.iter_top_level().map(|(id, _)| id).collect(),
     };
 
-    let mut first = true;
+    // Keep track of who the last child was.
+    let mut is_empty = true;
     // Iterate!
     for id in node_ids {
-        if !first {
-            ui.separator();
-        }
+        is_empty = false;
+
+        let dnd_target = DroppedAt::Before(id);
+        // Drag-n-drop target for inserting above this node
+        let head_separator = drag::DropSeparator {
+            active: dnd_state.is_some(),
+            already_selected: dnd_state.as_ref().and_then(DndState::drop_target)
+                == Some(dnd_target),
+        };
+        if head_separator.show(ui).selected {
+            // Unwrap OK - isn't available for selection if None.
+            dnd_state.as_mut().unwrap().drop_target = Some(dnd_target);
+        };
+
         // Name and selection
         let header_response = ui.horizontal(|ui| {
             let data = graph.get(id).unwrap();
-            // Choose an icon based on the type of the node:
-            // Yanked (if any) gets a scissor icon.
-            let icon = if Some(id) == yanked_node {
-                SCISSOR_ICON
-            } else {
-                icon_of_node(data)
-            };
+
+            // Disable everything if dragging a layer around.
+            ui.set_enabled(dnd_state.is_none());
+
+            // Drag-n-drop handle
+            let dragged = ui
+                .add(drag::Handle)
+                .on_hover_text("Drag to reorder")
+                .dragged();
+            if !dragged && dnd_state.is_some_and(|dnd| dnd.drag_target == id) {
+                // No longer dragged and we were the target, end drag.
+                dnd_state.as_mut().unwrap().released = true;
+            } else if dragged && dnd_state.is_none() {
+                // Start drag!
+                *dnd_state = Some(DndState {
+                    drag_target: id,
+                    drop_target: None,
+                    released: false,
+                });
+            }
+
+            // Choose an icon based on the type of the node
+            let icon = icon_of_node(data);
             // Selection radio button + toggle function.
             let is_selected = *selected_node == Some(id);
             if ui
@@ -1303,9 +1799,6 @@ fn graph_edit_recurse<
                     *selected_node = Some(id);
                 }
             }
-
-            // Only show if not in reparent mode.
-            ui.set_enabled(yanked_node.is_none());
 
             let name = graph.name_mut(id).unwrap();
 
@@ -1329,7 +1822,7 @@ fn graph_edit_recurse<
                 // Blend, if any.
                 if let Some(old_blend) = data.blend() {
                     // Reports new blend when interaction is finished, disabled in yank mode.
-                    ui_layer_blend(ui, (&id, "blend"), old_blend, yanked_node.is_some())
+                    ui_layer_blend(ui, (&id, "blend"), old_blend, dnd_state.is_some())
                         .on_finish(|new_blend| graph.change_blend(id, new_blend).unwrap());
                 }
             }
@@ -1347,7 +1840,7 @@ fn graph_edit_recurse<
                 // Display node type - passthrough or grouped blend
                 let old_blend = n.blend();
                 // Reports new blend when interaction finished, disabled in yank mode.
-                ui_passthrough_or_blend(ui, (&id, "blend"), old_blend, yanked_node.is_some())
+                ui_passthrough_or_blend(ui, (&id, "blend"), old_blend, dnd_state.is_some())
                     .on_finish(|new_blend| match (old_blend, new_blend) {
                         (Some(from), Some(to)) if from != to => {
                             // Simple blend change
@@ -1381,18 +1874,46 @@ fn graph_edit_recurse<
                             Some(node_id),
                             selected_node,
                             focused_node,
-                            yanked_node,
+                            dnd_state,
                         );
                     });
             }
             (None, None) => (),
             (Some(_), Some(_)) => panic!("Node is both a leaf and node???"),
         }
-        first = false;
     }
 
-    // (roundabout way to determine that) it's empty!
-    if first {
-        ui.label(egui::RichText::new("Nothing here...").italics().weak());
+    if is_empty {
+        // Show a hint to add stuff.
+        // this also occurs when an empty group is unrolled, show a drop target for first-child of this group.
+        if let Some(group) = parent {
+            let target = DroppedAt::FirstChild(group);
+            let first_child_separator = drag::DropSeparator {
+                active: dnd_state.is_some(),
+                already_selected: dnd_state.as_ref().and_then(DndState::drop_target)
+                    == Some(target),
+            };
+            if first_child_separator.show(ui).selected {
+                // Unwrap OK - isn't available for selection if None.
+                dnd_state.as_mut().unwrap().drop_target = Some(target);
+            };
+        }
+
+        ui.label(
+            egui::RichText::new("Nothing here... Add some layers!")
+                .italics()
+                .weak(),
+        );
+    } else {
+        let target = DroppedAt::LastChild(parent);
+        // Show a drag-n-drop target at the footer too, below the last target.
+        let tail_separator = drag::DropSeparator {
+            active: dnd_state.is_some(),
+            already_selected: dnd_state.as_ref().and_then(DndState::drop_target) == Some(target),
+        };
+        if tail_separator.show(ui).selected {
+            // Unwrap OK - isn't available for selection if None.
+            dnd_state.as_mut().unwrap().drop_target = Some(target);
+        };
     }
 }
