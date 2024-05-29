@@ -113,7 +113,7 @@ pub fn write_into<Document, Writer>(
     writer: Writer,
 ) -> Result<(), WriteError>
 where
-    Document: crate::queue::state_reader::CommandQueueStateReader,
+    Document: crate::queue::reader::CommandQueueStateReader,
     Writer: std::io::Write + std::io::Seek,
 {
     use riff::{

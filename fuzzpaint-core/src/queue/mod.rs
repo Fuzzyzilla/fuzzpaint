@@ -16,16 +16,15 @@ use crate::{
     state,
 };
 
-mod queue_state;
-pub mod state_reader;
-pub mod writer;
+mod inner_state;
+pub mod reader;
 
 struct DocumentCommandQueueInner {
     /// Tree structure of commands, where undos create branches.
     /// "First child" represents earlier series of commands that were undone, "last" is the most recent.
     /// More than two branches are allowed, of course!
     command_tree: slab_tree::Tree<commands::Command>,
-    state: queue_state::State,
+    state: inner_state::State,
     // "Pointer" into the tree where the most recent command took place.
     root: slab_tree::NodeId,
 }
@@ -43,7 +42,7 @@ impl Default for DocumentCommandQueue {
         Self {
             inner: Arc::new(
                 DocumentCommandQueueInner {
-                    state: queue_state::State::new(root),
+                    state: inner_state::State::new(root),
                     command_tree,
                     root,
                 }
@@ -73,7 +72,7 @@ impl DocumentCommandQueue {
         Self {
             inner: Arc::new(
                 DocumentCommandQueueInner {
-                    state: queue_state::State {
+                    state: inner_state::State {
                         document,
                         graph: blend_graph,
                         stroke_state,
@@ -92,28 +91,9 @@ impl DocumentCommandQueue {
     pub fn id(&self) -> state::DocumentID {
         self.document
     }
-    /// Locks the queue for writing commands during the span of the closure, where each modification of the state is tracked
-    /// by the command queue. If multiple commands are written, they will be written in order as a single Atoms scope.
-    pub fn write_with<F, T>(&self, write: F) -> T
-    where
-        F: FnOnce(&mut writer::CommandQueueWriter<'_>) -> T,
-    {
-        let (result, _changed) = {
-            let lock = self.inner.write();
-            let mut writer = writer::CommandQueueWriter {
-                lock,
-                commands: smallvec::SmallVec::new(),
-            };
-            // Panic safe - `writer::CommandQueueWriter`'s Drop impl will do the cleanup ensuring the queue's commands and state are synchronized.
-            // However, changes will not be notified.
-            let result = write(&mut writer);
-            (result, writer.changed())
-        };
-        result
-    }
     /// A helper method to view the state as it is at this moment as a clone.
     #[must_use]
-    pub fn peek_clone_state(&self) -> state_reader::CommandQueueCloneLock {
+    pub fn peek_clone_state(&self) -> reader::CommandQueueCloneLock {
         // Unwrap OK - ref to self means queue is alive valid during this method,
         // and we don't anticipate a broken command graph ofc...
         self.listen_from_now().forward_clone_state().unwrap()
@@ -223,31 +203,27 @@ pub struct DocumentCommandListener {
 impl DocumentCommandListener {
     /// Locks the shared state, without forwarding this listener's point in time.
     /// See [`state_reader::CommandQueueLock`]
-    pub fn peek_lock_state(&self) -> Result<state_reader::CommandQueueReadLock, ListenerError> {
+    pub fn peek_lock_state(&self) -> Result<reader::CommandQueueReadLock, ListenerError> {
         todo!()
     }
     /// Locks the shared state, bringing this listener up-to-date in the process.
     /// See [`state_reader::CommandQueueLock`]
-    pub fn forward_lock_state(
-        &mut self,
-    ) -> Result<state_reader::CommandQueueReadLock, ListenerError> {
+    pub fn forward_lock_state(&mut self) -> Result<reader::CommandQueueReadLock, ListenerError> {
         todo!()
     }
     /// Locks or clones the shared state, without forwarding this listener's point in time.
     /// See [`state_reader::CommandQueueCloneLock`]
-    pub fn peek_clone_state(
-        &'_ self,
-    ) -> Result<state_reader::CommandQueueCloneLock, ListenerError> {
+    pub fn peek_clone_state(&'_ self) -> Result<reader::CommandQueueCloneLock, ListenerError> {
         let inner = self.inner.upgrade().ok_or(ListenerError::DocumentClosed)?;
         let lock = inner.read();
         // Eagerly collect command traversal.
-        let commands: Vec<state_reader::OwnedDoUndo<_>> =
+        let commands: Vec<reader::OwnedDoUndo<_>> =
             traverse(&lock.command_tree, self.cursor, lock.state.present)
                 .map_err(ListenerError::TreeMalformed)?
                 .map(Into::into)
                 .collect();
 
-        Ok(state_reader::CommandQueueCloneLock {
+        Ok(reader::CommandQueueCloneLock {
             inner: self.inner.clone(),
             commands,
             // OOOF!! unconditional big expensive clone, todo here :3
@@ -260,7 +236,7 @@ impl DocumentCommandListener {
     /// See [`state_reader::CommandQueueCloneLock`]
     pub fn forward_clone_state(
         &'_ mut self,
-    ) -> Result<state_reader::CommandQueueCloneLock, ListenerError> {
+    ) -> Result<reader::CommandQueueCloneLock, ListenerError> {
         let state = self.peek_clone_state()?;
         // Advance cursor to the present state of the lock.
         self.cursor = state.shared_state.present;

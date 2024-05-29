@@ -15,8 +15,12 @@ pub enum CommandError {
     MismatchedState,
     #[error("resource referenced by the command is not found")]
     UnknownResource,
+    #[error("command makes no changes")]
+    NoOp,
 }
 pub trait CommandConsumer<C> {
+    /// Apply a single command. If this generates an error,
+    /// the state of `self` should *not* be observably changed.
     fn apply(&mut self, command: DoUndo<'_, C>) -> Result<(), CommandError>;
 }
 #[derive(Clone, Debug)]

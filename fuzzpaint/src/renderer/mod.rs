@@ -150,7 +150,7 @@ impl Renderer {
         text_builder: &mut crate::text::Builder,
         text_renderer: &crate::text::renderer::monochrome::Renderer,
         document_data: &mut PerDocumentData,
-        state: &impl queue::state_reader::CommandQueueStateReader,
+        state: &impl queue::reader::CommandQueueStateReader,
         into: &Arc<vk::ImageView>,
     ) -> anyhow::Result<()> {
         use state::graph::{LeafType, NodeID, NodeType};
@@ -382,7 +382,7 @@ impl Renderer {
         _blend_engine: &blender::BlendEngine,
         _renderer: &stroke_renderer::StrokeLayerRenderer,
         _document_data: &mut PerDocumentData,
-        state: &impl queue::state_reader::CommandQueueStateReader,
+        state: &impl queue::reader::CommandQueueStateReader,
         _into: &Arc<vk::ImageView>,
     ) -> Result<(), IncrementalDrawErr> {
         if state.has_changes() {

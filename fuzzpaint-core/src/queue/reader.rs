@@ -41,7 +41,7 @@ pub struct CommandQueueCloneLock {
     /// be possible to architect this to not need to clone. But for now since queue's
     /// commands are stored in a Vec, their addresses are not 'static :/
     pub(super) commands: Vec<OwnedDoUndo<commands::Command>>,
-    pub(super) shared_state: std::sync::Arc<super::queue_state::State>,
+    pub(super) shared_state: std::sync::Arc<super::inner_state::State>,
     pub(super) inner: std::sync::Weak<parking_lot::RwLock<super::DocumentCommandQueueInner>>,
 }
 pub enum Stale {

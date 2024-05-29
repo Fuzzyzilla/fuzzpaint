@@ -5,7 +5,6 @@
 
 pub mod commands;
 mod stable_id;
-pub mod writer;
 
 use crate::blend::Blend;
 // Re-export the various public ids

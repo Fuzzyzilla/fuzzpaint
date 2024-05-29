@@ -13,7 +13,7 @@ use fuzzpaint_core::{
     brush,
     color::{self as fcolor, PaletteIndex},
     io,
-    queue::{self, state_reader::CommandQueueStateReader},
+    queue::{self, reader::CommandQueueStateReader},
     state,
     util::FiniteF32,
 };

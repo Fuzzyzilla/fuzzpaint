@@ -3,7 +3,6 @@
 //! States which hold many strokes and their settings, as well as their deletion state.
 
 pub mod commands;
-pub mod writer;
 
 pub type StrokeCollectionID = crate::FuzzID<StrokeCollection>;
 pub type ImmutableStrokeID = crate::FuzzID<ImmutableStroke>;

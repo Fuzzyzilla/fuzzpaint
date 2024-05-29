@@ -18,51 +18,6 @@ pub mod commands {
         },
     }
 }
-pub mod writer {
-    use super::{commands::Command, Color, PaletteIndex};
-    use crate::queue::writer::CommandWrite;
-    pub struct Writer<'a, Write> {
-        writer: Write,
-        state: &'a mut super::Palette,
-    }
-    impl<Write> std::ops::Deref for Writer<'_, Write> {
-        type Target = super::Palette;
-        fn deref(&self) -> &Self::Target {
-            self.state
-        }
-    }
-
-    impl<'a, Write: CommandWrite<Command>> Writer<'a, Write> {
-        pub fn new(writer: Write, state: &'a mut super::Palette) -> Self {
-            Self { writer, state }
-        }
-        pub fn insert(&mut self, color: Color) -> PaletteIndex {
-            let new_idx = self.state.push(color);
-            self.writer.write(Command::Added {
-                target: new_idx,
-                initial_color: color,
-            });
-            new_idx
-        }
-        pub fn set(&mut self, index: PaletteIndex, to: Color) -> Result<(), ()> {
-            let (exists, color) = self.state.get_mut(index).ok_or(())?;
-            if !*exists {
-                return Err(());
-            }
-
-            let from = *color;
-            *color = to;
-
-            self.writer.write(Command::Changed {
-                target: index,
-                from,
-                to,
-            });
-
-            Ok(())
-        }
-    }
-}
 
 #[derive(Default, Clone)]
 pub struct Palette {
