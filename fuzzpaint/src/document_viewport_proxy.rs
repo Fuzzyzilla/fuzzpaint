@@ -411,7 +411,9 @@ impl Proxy {
                 format: crate::DOCUMENT_FORMAT,
                 extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
                 array_layers: NUM_DOCUMENT_BUFFERS,
+                // Too many!!
                 usage: vk::ImageUsage::COLOR_ATTACHMENT
+                    | vk::ImageUsage::INPUT_ATTACHMENT
                     | vk::ImageUsage::SAMPLED
                     | vk::ImageUsage::TRANSFER_DST
                     | vk::ImageUsage::STORAGE,

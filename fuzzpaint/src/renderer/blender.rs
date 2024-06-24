@@ -13,10 +13,9 @@ type BlendCompiler =
 enum BlendLogic {
     /// The blend can be represented as a standard blend function. Hardware accelerated, pipelinable, and coherent. Nice :3
     Simple(vk::AttachmentBlend),
-    // /// Use a loopback fragment to compute `A (+) B` for arbitrary blend logic. Still pipeliend, but noncoherent 3:
-    // /// (except perhaps if the device has fragment interlock, todo!)
-    // Arbitrary(/* repr? linkable spirv?!? */),
-
+    /// Provide a Load function for a shader to compute `A (+) B` for arbitrary blend logic. Still pipeliend, but noncoherent 3:
+    /// (except perhaps if the device has fragment interlock, todo!)
+    Arbitrary(fn(Arc<vk::Device>) -> Result<Arc<vk::ShaderModule>, vk::Validated<vk::VulkanError>>),
     // other ideas for implementing, with various stages of slowness (still better than loopback fragment):
     // * we have blend constants and dual src blend at our disposal! These are free, but latter requires hardware support.
     // * Additionally, we could use the fragment to do arbitrary transforms to `Src` but still use regular blend eqs
@@ -79,6 +78,7 @@ impl BlendLogic {
                 dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
                 ..alpha_channel
             }),
+            (BlendMode::Multiply, true) => BlendLogic::Arbitrary(shaders::noncoherent_test::load),
             _ => unimplemented!(),
         }
     }
@@ -91,57 +91,81 @@ enum CompiledBlend {
     /// Inputs: attachment 0 set 0 binding 0 - RGBA input attachment.
     /// Outputs: location 0: RGBA
     SimpleCoherent(Arc<vk::GraphicsPipeline>),
-    // /// A pipeline which performs a non-coherent "loopback" operation
-    // Loopback(Arc<vk::GraphicsPipeline>),
+    /// A pipeline which performs a non-coherent "loopback" operation
+    Loopback(Arc<vk::GraphicsPipeline>),
 }
 
 mod shaders {
+    /// Vertex shader that fills the viewport and provides UV at location 0.
+    /// Call with three vertices.
+    pub mod fullscreen_vert {
+        vulkano_shaders::shader! {
+            ty: "vertex",
+            src: r"
+                    #version 460
+
+                    layout(location = 0) out vec2 uv;
+
+                    void main() {
+                        // fullscreen tri
+                        vec2 pos = vec2(
+                            float((gl_VertexIndex & 1) * 4 - 1),
+                            float((gl_VertexIndex & 2) * 2 - 1)
+                        );
+
+                        uv = pos / 2.0 + 0.5;
+                        gl_Position = vec4(
+                            pos,
+                            0.0,
+                            1.0
+                        );
+                    }
+                "
+        }
+    }
     /// A shader that does nothing special, filling the viewport with image at set 0, binding 0.
     /// Use fixed function blend math to achieve blend effects. This is the most efficient blend method!
-    pub mod simple {
-        pub mod vert {
-            vulkano_shaders::shader! {
-                ty: "vertex",
-                src: r"
-                        #version 460
+    pub mod coherent_frag {
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            src: r"
+                    #version 460
+                    layout(set = 0, binding = 0) uniform sampler2D src;
+                    // reserved, undefined behavior to read from.
+                    // layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput dont_use;
 
-                        layout(location = 0) out vec2 uv;
+                    layout(push_constant) uniform Constants {
+                        float alpha;
+                    };
 
-                        void main() {
-                            // fullscreen tri
-                            vec2 pos = vec2(
-                                float((gl_VertexIndex & 1) * 4 - 1),
-                                float((gl_VertexIndex & 2) * 2 - 1)
-                            );
+                    layout(location = 0) in vec2 uv;
+                    layout(location = 0) out vec4 color;
 
-                            uv = pos / 2.0 + 0.5;
-                            gl_Position = vec4(
-                                pos,
-                                0.0,
-                                1.0
-                            );
-                        }
-                    "
-            }
+                    void main() {
+                        color = texture(src, uv) * alpha;
+                    }
+                "
         }
-        pub mod frag {
-            vulkano_shaders::shader! {
-                ty: "fragment",
-                src: r"
-                        #version 460
-                        layout(set = 0, binding = 0) uniform sampler2D in_color;
-                        layout(push_constant) uniform Constants {
-                            float alpha;
-                        };
+    }
+    pub mod noncoherent_test {
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            src: r"
+                    #version 460
+                    layout(set = 0, binding = 0) uniform sampler2D src;
+                    layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput dst;
 
-                        layout(location = 0) in vec2 uv;
-                        layout(location = 0) out vec4 color;
+                    layout(push_constant) uniform Constants {
+                        float alpha;
+                    };
 
-                        void main() {
-                            color = texture(in_color, uv) * alpha;
-                        }
-                    "
-            }
+                    layout(location = 0) in vec2 uv;
+                    layout(location = 0) out vec4 color;
+
+                    void main() {
+                        color = subpassLoad(dst).gbra;
+                    }
+                "
         }
     }
 }
@@ -277,14 +301,14 @@ pub struct BlendEngine {
     workgroup_size: (u32, u32),
     // Based on chosen workgroup_size, device's max workgroup count, and device image size.
     max_image_size: (u32, u32),
-    /// Layout for [`CompiledBlend::SimpleCoherent`]
-    simple_coherent_layout: Arc<vk::PipelineLayout>,
+    /// Layout for all blend operations.
+    feedback_layout: Arc<vk::PipelineLayout>,
     /// Spawns fragments across the entire viewport. No outputs.
     fullscreen_vert: vk::EntryPoint,
     /// Passes fragments from input attachment 0, set 0, binding 0, unchanged.
-    simple_coherent_frag: vk::EntryPoint,
+    coherent_frag: vk::EntryPoint,
     /// Pipes need a renderpass to build against. We don't have the pass at the time of pipe compilation, tho!
-    simple_coherent_dynamic_info: vk::PipelineRenderingCreateInfo,
+    feedback_pass: Arc<vk::RenderPass>,
     /// (mode, clip) -> prepared blend pipe.
     mode_pipelines: hashbrown::HashMap<(BlendMode, bool), CompiledBlend>,
 }
@@ -312,7 +336,7 @@ impl BlendEngine {
                                         self.fullscreen_vert.clone()
                                     ),
                                     vk::PipelineShaderStageCreateInfo::new(
-                                        self.simple_coherent_frag.clone()
+                                        self.coherent_frag.clone()
                                     )
                                 ],
                                 // Data generated by vertex iteself.
@@ -331,9 +355,46 @@ impl BlendEngine {
                                 // Viewport dynamic, scissor irrelevant.
                                 viewport_state: Some(vk::ViewportState::default()),
                                 dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
-                                subpass: Some(self.simple_coherent_dynamic_info.clone().into()),
+                                subpass: Some(self.feedback_pass.clone().first_subpass().into()),
                                 ..vulkano::pipeline::graphics::GraphicsPipelineCreateInfo::layout(
-                                    self.simple_coherent_layout.clone(),
+                                    self.feedback_layout.clone(),
+                                )
+                            },
+                        )?;
+
+                        Ok(v.insert(CompiledBlend::SimpleCoherent(pipe)))
+                    }
+                    BlendLogic::Arbitrary(load) => {
+                        let shader = load(self.device.clone())?
+                            .entry_point("main")
+                            .ok_or_else(|| anyhow::anyhow!("entry point `main` not found"))?;
+
+                        let pipe = vk::GraphicsPipeline::new(
+                            self.device.clone(),
+                            None,
+                            vulkano::pipeline::graphics::GraphicsPipelineCreateInfo {
+                                stages: smallvec::smallvec![
+                                    vk::PipelineShaderStageCreateInfo::new(
+                                        self.fullscreen_vert.clone()
+                                    ),
+                                    vk::PipelineShaderStageCreateInfo::new(shader)
+                                ],
+                                // Data generated by vertex iteself.
+                                vertex_input_state: Some(vk::VertexInputState::new()),
+                                input_assembly_state: Some(vk::InputAssemblyState::default()),
+                                rasterization_state: Some(vk::RasterizationState::default()),
+                                color_blend_state: Some(vk::ColorBlendState {
+                                    // No blend equation, the shader is to do alllllll the work.
+                                    attachments: vec![vk::ColorBlendAttachmentState::default()],
+                                    ..Default::default()
+                                }),
+                                multisample_state: Some(vk::MultisampleState::default()),
+                                // Viewport dynamic, scissor irrelevant.
+                                viewport_state: Some(vk::ViewportState::default()),
+                                dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
+                                subpass: Some(self.feedback_pass.clone().first_subpass().into()),
+                                ..vulkano::pipeline::graphics::GraphicsPipelineCreateInfo::layout(
+                                    self.feedback_layout.clone(),
                                 )
                             },
                         )?;
@@ -382,8 +443,8 @@ impl BlendEngine {
         // Build fixed layout for "simple coherent" blend processes.
         // Consists of a fixed sampler and one sampled image.
         let nearest_sampler = vk::Sampler::new(device.clone(), vk::SamplerCreateInfo::default())?;
-        let mut input_bindings = std::collections::BTreeMap::new();
-        input_bindings.insert(
+        let mut sampler_bindings = std::collections::BTreeMap::new();
+        sampler_bindings.insert(
             0,
             vk::DescriptorSetLayoutBinding {
                 descriptor_count: 1,
@@ -394,11 +455,30 @@ impl BlendEngine {
                 )
             },
         );
+        let mut input_attachment_bindings = std::collections::BTreeMap::new();
+        input_attachment_bindings.insert(
+            0,
+            vk::DescriptorSetLayoutBinding {
+                descriptor_count: 1,
+                immutable_samplers: vec![],
+                stages: vk::ShaderStages::FRAGMENT,
+                ..vk::DescriptorSetLayoutBinding::descriptor_type(
+                    vk::DescriptorType::InputAttachment,
+                )
+            },
+        );
 
-        let input_layout = vk::DescriptorSetLayout::new(
+        let sampler_layout = vk::DescriptorSetLayout::new(
             device.clone(),
             vk::DescriptorSetLayoutCreateInfo {
-                bindings: input_bindings,
+                bindings: sampler_bindings,
+                ..Default::default()
+            },
+        )?;
+        let input_attachment_layout = vk::DescriptorSetLayout::new(
+            device.clone(),
+            vk::DescriptorSetLayoutCreateInfo {
+                bindings: input_attachment_bindings,
                 ..Default::default()
             },
         )?;
@@ -409,31 +489,29 @@ impl BlendEngine {
             stages: vk::ShaderStages::FRAGMENT,
         };
 
-        let simple_coherent_layout = vk::PipelineLayout::new(
+        // These two layouts, for both kinds of pipe, are descriptor set compatible.
+        let feedback_layout = vk::PipelineLayout::new(
             device.clone(),
             vk::PipelineLayoutCreateInfo {
-                set_layouts: vec![input_layout],
+                set_layouts: vec![sampler_layout, input_attachment_layout],
                 push_constant_ranges: vec![alpha_push_constant],
                 ..vk::PipelineLayoutCreateInfo::default()
             },
         )?;
 
         // Precompile these because we're gonna use em a lot!
-        let fullscreen_vert = shaders::simple::vert::load(device.clone())?
+        let fullscreen_vert = shaders::fullscreen_vert::load(device.clone())?
             .entry_point("main")
             .unwrap();
-        let simple_coherent_frag = shaders::simple::frag::load(device.clone())?
+        // All simple coherent pipes share a fragment shader because the logic happens in
+        // fixed-function blend hardware.
+        let coherent_frag = shaders::coherent_frag::load(device.clone())?
             .entry_point("main")
             .unwrap();
 
-        let simple_coherent_dynamic_info = vk::PipelineRenderingCreateInfo {
-            color_attachment_formats: vec![Some(crate::DOCUMENT_FORMAT); 1],
-            ..Default::default()
-        };
-        // Renderpassed ver, better in the long run, but just for getting my bearings use dynamic
-        /*
-        {
-            let input_attachment = vk::AttachmentDescription {
+        let feedback_pass = {
+            let feedback_attachment = vk::AttachmentDescription {
+                // THIS SHOULD BE `ImageLayout::AttachmentFeedbackLoopOptimal`, vulkano doesn't support that yet.
                 initial_layout: vk::ImageLayout::General,
                 final_layout: vk::ImageLayout::General,
                 format: crate::DOCUMENT_FORMAT,
@@ -443,10 +521,6 @@ impl BlendEngine {
                 store_op: vk::AttachmentStoreOp::Store,
                 ..Default::default()
             };
-            let output_attachment = vk::AttachmentDescription {
-                store_op: vk::AttachmentStoreOp::Store,
-                ..input_attachment
-            };
             let input_reference = vk::AttachmentReference {
                 aspects: vk::ImageAspects::COLOR,
                 attachment: 0,
@@ -454,8 +528,8 @@ impl BlendEngine {
                 ..Default::default()
             };
             let output_reference = vk::AttachmentReference {
-                aspects: vk::ImageAspects::COLOR,
-                attachment: 1,
+                aspects: vk::ImageAspects::empty(),
+                attachment: 0,
                 layout: vk::ImageLayout::General,
                 ..Default::default()
             };
@@ -467,23 +541,21 @@ impl BlendEngine {
             vk::RenderPass::new(
                 device.clone(),
                 vk::RenderPassCreateInfo {
-                    attachments: vec![input_attachment, output_attachment],
+                    attachments: vec![feedback_attachment],
                     subpasses: vec![subpass],
                     ..Default::default()
                 },
             )?
-            .first_subpass()
         };
-        */
 
         let mut this = Self {
             device: device.clone(),
             max_image_size,
             workgroup_size,
-            simple_coherent_layout,
+            feedback_layout,
             fullscreen_vert,
-            simple_coherent_frag,
-            simple_coherent_dynamic_info,
+            coherent_frag,
+            feedback_pass,
             mode_pipelines: hashbrown::HashMap::new(),
         };
 
@@ -493,6 +565,7 @@ impl BlendEngine {
             (BlendMode::Add, false),
             (BlendMode::Add, true),
             (BlendMode::Multiply, false),
+            (BlendMode::Multiply, true),
         ] {
             this.lazy_blend_pipe(mode, clip)?;
         }
@@ -618,37 +691,39 @@ impl BlendEngine {
             vk::CommandBufferUsage::OneTimeSubmit,
         )?;
 
+        if clear_destination {
+            commands.clear_color_image(vk::ClearColorImageInfo {
+                clear_value: [0.0; 4].into(),
+                regions: smallvec::smallvec![destination_image.subresource_range().clone(),],
+                ..vk::ClearColorImageInfo::image(destination_image.image().clone())
+            })?;
+        }
+
         // Still honor the request to clear the image if no layers are provided.
         if layers.is_empty() {
-            if clear_destination {
-                commands.clear_color_image(vk::ClearColorImageInfo {
-                    clear_value: [0.0; 4].into(),
-                    regions: smallvec::smallvec![destination_image.subresource_range().clone(),],
-                    ..vk::ClearColorImageInfo::image(destination_image.image().clone())
-                })?;
-            }
             return Ok(commands.build()?);
         }
 
         commands
-            .begin_rendering(vk::RenderingInfo {
-                color_attachments: vec![Some(vk::RenderingAttachmentInfo {
-                    load_op: if clear_destination {
-                        vk::AttachmentLoadOp::Clear
-                    } else {
-                        vk::AttachmentLoadOp::Load
-                    },
-                    clear_value: clear_destination.then_some([0.0; 4].into()),
-                    store_op: vulkano::render_pass::AttachmentStoreOp::Store,
-                    ..vk::RenderingAttachmentInfo::image_view(destination_image.clone())
-                })],
-                render_area_offset: [0; 2],
-                render_area_extent: [
-                    destination_image.image().extent()[0],
-                    destination_image.image().extent()[1],
-                ],
-                ..Default::default()
-            })?
+            .begin_render_pass(
+                vk::RenderPassBeginInfo {
+                    render_pass: self.feedback_pass.clone(),
+                    clear_values: vec![None], //vec![clear_destination.then_some([0.0; 4].into())],
+                    // Todo: Cache. Framebuffers are not trivial to construct.
+                    ..vk::RenderPassBeginInfo::framebuffer(vk::Framebuffer::new(
+                        self.feedback_pass.clone(),
+                        vk::FramebufferCreateInfo {
+                            attachments: vec![destination_image.clone()],
+                            extent: [
+                                destination_image.image().extent()[0],
+                                destination_image.image().extent()[1],
+                            ],
+                            ..Default::default()
+                        },
+                    )?)
+                },
+                vk::SubpassBeginInfo::default(),
+            )?
             .set_viewport(
                 0,
                 smallvec::smallvec![vk::Viewport {
@@ -660,6 +735,23 @@ impl BlendEngine {
                     ],
                 }],
             )?;
+
+        // Bind the input attachment at set 1
+        let feedback_set = vk::PersistentDescriptorSet::new(
+            context.allocators().descriptor_set(),
+            self.feedback_layout.set_layouts()[1].clone(),
+            [vk::WriteDescriptorSet::image_view(
+                0,
+                destination_image.clone(),
+            )],
+            [],
+        )?;
+        commands.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.feedback_layout.clone(),
+            1,
+            feedback_set,
+        )?;
 
         let mut last_mode = None;
         let mut last_opacity = None;
@@ -675,7 +767,7 @@ impl BlendEngine {
                     anyhow::bail!("Blend mode {:?} unsupported", mode)
                 };
                 match &pipe {
-                    CompiledBlend::SimpleCoherent(pipe) => {
+                    CompiledBlend::SimpleCoherent(pipe) | CompiledBlend::Loopback(pipe) => {
                         commands.bind_pipeline_graphics(pipe.clone())?;
                     }
                 }
@@ -684,14 +776,14 @@ impl BlendEngine {
 
             // Inform of the new alpha, if changed
             if last_opacity != Some(opacity) {
-                commands.push_constants(self.simple_coherent_layout.clone(), 0, opacity)?;
+                commands.push_constants(self.feedback_layout.clone(), 0, opacity)?;
                 last_opacity = Some(opacity);
             }
 
             // Set the image. The sampler is bundled magically by being baked into the layout itself.
-            let input_set = vk::PersistentDescriptorSet::new(
+            let sampler_set = vk::PersistentDescriptorSet::new(
                 context.allocators().descriptor_set(),
-                self.simple_coherent_layout.set_layouts()[0].clone(),
+                self.feedback_layout.set_layouts()[0].clone(),
                 [vk::WriteDescriptorSet::image_view(
                     0,
                     image_src.view().clone(),
@@ -700,47 +792,18 @@ impl BlendEngine {
             )?;
 
             // Bind and draw!
+            // Vulkano does not seem to insert pipe barriers here, which makes sense for most uses but is UB for our
+            // feedback loops. Uh oh!
             commands
                 .bind_descriptor_sets(
                     vk::PipelineBindPoint::Graphics,
-                    self.simple_coherent_layout.clone(),
+                    self.feedback_layout.clone(),
                     0,
-                    input_set,
+                    sampler_set,
                 )?
                 .draw(3, 1, 0, 0)?;
-
-            /*
-            // Push new clip/alpha constants if different from last iter
-            // As per https://registry.khronos.org/vulkan/site/guide/latest/push_constants.html#pc-lifetime,
-            // I believe push constants should remain across compatible pipeline binds
-            let constants = shaders::BlendConstants::new(*opacity, *alpha_clip);
-            if Some(constants) != last_blend_settings {
-                commands.push_constants(self.shader_layout.clone(), 0, constants)?;
-                last_blend_settings = Some(constants);
-            }
-
-            let input_set = vk::PersistentDescriptorSet::new(
-                context.allocators().descriptor_set(),
-                self.shader_layout.set_layouts()[shaders::INPUT_IMAGE_SET as usize].clone(),
-                [vk::WriteDescriptorSet::image_view(
-                    0,
-                    image_src.view().clone(),
-                )],
-                [],
-            )?;
-            commands
-                .bind_descriptor_sets(
-                    vk::PipelineBindPoint::Compute,
-                    self.shader_layout.clone(),
-                    shaders::INPUT_IMAGE_SET,
-                    vec![input_set],
-                )?
-                .dispatch(
-                    get_dispatch_size(image_src.view().image().extent())
-                        .ok_or_else(|| anyhow::anyhow!("Image too large to blend!"))?,
-                )?;*/
         }
-        commands.end_rendering()?;
+        commands.end_render_pass(vk::SubpassEndInfo::default())?;
         Ok(commands.build()?)
     }
 }

@@ -3442,7 +3442,7 @@ dependencies = [
 [[package]]
 name = "vulkano"
 version = "0.34.0"
-source = "git+https://github.com/fuzzyzilla/vulkano.git?branch=backport-null-check#83406ec018f472b6557e3f98941d5b5ed20a16ac"
+source = "git+https://github.com/fuzzyzilla/vulkano.git?branch=backport-null-check#02e7d20c5d7884b3e610e8447b06ad56a427b5c7"
 dependencies = [
  "ahash",
  "ash",
@@ -3471,7 +3471,7 @@ dependencies = [
 [[package]]
 name = "vulkano-macros"
 version = "0.34.0"
-source = "git+https://github.com/fuzzyzilla/vulkano.git?branch=backport-null-check#83406ec018f472b6557e3f98941d5b5ed20a16ac"
+source = "git+https://github.com/fuzzyzilla/vulkano.git?branch=backport-null-check#02e7d20c5d7884b3e610e8447b06ad56a427b5c7"
 dependencies = [
  "proc-macro-crate 1.3.1",
  "proc-macro2",
@@ -3482,7 +3482,7 @@ dependencies = [
 [[package]]
 name = "vulkano-shaders"
 version = "0.34.0"
-source = "git+https://github.com/fuzzyzilla/vulkano.git?branch=backport-null-check#83406ec018f472b6557e3f98941d5b5ed20a16ac"
+source = "git+https://github.com/fuzzyzilla/vulkano.git?branch=backport-null-check#02e7d20c5d7884b3e610e8447b06ad56a427b5c7"
 dependencies = [
  "ahash",
  "heck 0.4.1",

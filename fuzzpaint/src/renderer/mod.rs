@@ -980,6 +980,7 @@ mod stroke_renderer {
             let image = vk::Image::new(
                 self.context.allocators().memory().clone(),
                 vk::ImageCreateInfo {
+                    // Too many !!
                     usage: vk::ImageUsage::COLOR_ATTACHMENT
                         | vk::ImageUsage::SAMPLED
                         // For color clearing
