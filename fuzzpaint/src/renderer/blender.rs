@@ -3,74 +3,145 @@ use std::{fmt::Debug, sync::Arc};
 
 use fuzzpaint_core::blend::{Blend, BlendMode};
 
-mod shaders {
-    pub const INPUT_IMAGE_SET: u32 = 0;
-    pub const OUTPUT_IMAGE_SET: u32 = 1;
+type BlendCompiler =
+    fn(Arc<vk::Device>) -> Result<Arc<vk::ShaderModule>, vk::Validated<vk::VulkanError>>;
 
-    /// Every blend shader specializes on the 2d size of workgroups to be selected at runtime.
-    /// Z size is always one (for now, maybe in multisampling z can represent sample index)
-    #[derive(Copy, Clone)]
-    #[repr(C)]
-    pub struct WorkgroupSizeConstants {
-        pub x: u32,
-        pub y: u32,
+/// Different creation parameters of blend math, in order of preference.
+/// E.g., a simple blend should be the preferable implementation over a compute, if possible.
+///
+/// Use to create a [`CompiledBlend`]
+enum BlendLogic {
+    /// The blend can be represented as a standard blend function. Hardware accelerated, pipelinable, and coherent. Nice :3
+    Simple(vk::AttachmentBlend),
+    // /// Use a loopback fragment to compute `A (+) B` for arbitrary blend logic. Still pipeliend, but noncoherent 3:
+    // /// (except perhaps if the device has fragment interlock, todo!)
+    // Arbitrary(/* repr? linkable spirv?!? */),
+
+    // other ideas for implementing, with various stages of slowness (still better than loopback fragment):
+    // * we have blend constants and dual src blend at our disposal! These are free, but latter requires hardware support.
+    // * Additionally, we could use the fragment to do arbitrary transforms to `Src` but still use regular blend eqs
+    // not sure what modes would use these other techniques, yet.
+}
+impl BlendLogic {
+    /// Get the logic needed to perform a blend.
+    fn of(blend: BlendMode, clip: bool) -> BlendLogic {
+        use vk::{AttachmentBlend, BlendFactor};
+
+        // When writing new operations here, remember that:
+        // * if the result alpha is zero, RGB must also be zero.
+        // * if the dst alpha is zero and not clip, then use src directly. -- maybe?
+        // * if the src alpha is zero, dst should be unchanged.
+        // * if clip, then the dst alpha should be unchanged.
+        // This serves as a decent litmus test for if something is horribly borked.
+
+        // The logic for just the alpha channel, color channels must be overridden.
+        let alpha_channel = if clip {
+            AttachmentBlend {
+                // Keep alpha from dest.
+                src_alpha_blend_factor: BlendFactor::Zero,
+                dst_alpha_blend_factor: BlendFactor::One,
+                ..Default::default()
+            }
+        } else {
+            AttachmentBlend {
+                src_alpha_blend_factor: BlendFactor::One,
+                dst_alpha_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                ..Default::default()
+            }
+        };
+
+        match (blend, clip) {
+            (BlendMode::Normal, false) => BlendLogic::Simple(AttachmentBlend {
+                src_color_blend_factor: BlendFactor::One,
+                dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                ..alpha_channel
+            }),
+            (BlendMode::Normal, true) => BlendLogic::Simple(AttachmentBlend {
+                src_color_blend_factor: BlendFactor::DstAlpha,
+                // Should this be (1 - (Sa * Da))? this can't be represented, if so.
+                dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                ..alpha_channel
+            }),
+            (BlendMode::Add, false) => BlendLogic::Simple(AttachmentBlend {
+                src_color_blend_factor: BlendFactor::One,
+                dst_color_blend_factor: BlendFactor::One,
+                ..alpha_channel
+            }),
+            (BlendMode::Add, true) => BlendLogic::Simple(AttachmentBlend {
+                src_color_blend_factor: BlendFactor::DstAlpha,
+                dst_color_blend_factor: BlendFactor::One,
+                ..alpha_channel
+            }),
+            (BlendMode::Multiply, false) => BlendLogic::Simple(AttachmentBlend {
+                // Not quite right, always results in black on a transparent background.
+                // Funny! No mul op, so instead "Normal" op with the left side having a multiply factor.
+                src_color_blend_factor: BlendFactor::DstColor,
+                dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                ..alpha_channel
+            }),
+            _ => unimplemented!(),
+        }
     }
-    /// The push constants to customize blending. Corresponds to fields in `super::Blend`.
-    /// Every blend shader must accept this struct format!
-    // Noteably, NOT AnyBitPattern nor Pod, bool32 has invalid states
-    #[derive(bytemuck::Zeroable, vulkano::buffer::BufferContents, Clone, Copy, PartialEq)]
-    #[repr(C)]
-    pub struct BlendConstants {
-        pub opacity: f32,
-        /// Bool32: only 1 and 0 are valid!!
-        clip: u32,
-    }
-    impl BlendConstants {
-        pub fn new(opacity: f32, clip: bool) -> Self {
-            Self {
-                opacity,
-                clip: u32::from(clip),
+}
+
+/// Different implementations of blending logic, from most optimal to least.
+#[derive(Clone, PartialEq, Eq)]
+enum CompiledBlend {
+    /// A pipeline which takes an image and outputs it directly to the entire viewport.
+    /// Inputs: attachment 0 set 0 binding 0 - RGBA input attachment.
+    /// Outputs: location 0: RGBA
+    SimpleCoherent(Arc<vk::GraphicsPipeline>),
+    // /// A pipeline which performs a non-coherent "loopback" operation
+    // Loopback(Arc<vk::GraphicsPipeline>),
+}
+
+mod shaders {
+    /// A shader that does nothing special, filling the viewport with image at set 0, binding 0.
+    /// Use fixed function blend math to achieve blend effects. This is the most efficient blend method!
+    pub mod simple {
+        pub mod vert {
+            vulkano_shaders::shader! {
+                ty: "vertex",
+                src: r"
+                        #version 460
+
+                        layout(location = 0) out vec2 uv;
+
+                        void main() {
+                            // fullscreen tri
+                            vec2 pos = vec2(
+                                float((gl_VertexIndex & 1) * 4 - 1),
+                                float((gl_VertexIndex & 2) * 2 - 1)
+                            );
+
+                            uv = pos / 2.0 + 0.5;
+                            gl_Position = vec4(
+                                pos,
+                                0.0,
+                                1.0
+                            );
+                        }
+                    "
             }
         }
-    }
-    /// Push constants to specify the rectangle to blend. Todo!
-    #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy)]
-    #[repr(C)]
-    pub struct BlendRect {
-        pub origin: [u32; 2],
-        pub size: [u32; 2],
-    }
+        pub mod frag {
+            vulkano_shaders::shader! {
+                ty: "fragment",
+                src: r"
+                        #version 460
+                        layout(set = 0, binding = 0) uniform sampler2D in_color;
+                        layout(push_constant) uniform Constants {
+                            float alpha;
+                        };
 
-    pub mod normal {
-        vulkano_shaders::shader! {
-            ty: "compute",
-            path: "src/shaders/blend/blend_one.comp",
-            include: ["src/shaders/blend"],
-            define: [("BLEND_NORMAL", "."), ("MODE_FUNC", "blend_normal")],
-        }
-    }
-    pub mod add {
-        vulkano_shaders::shader! {
-            ty: "compute",
-            path: "src/shaders/blend/blend_one.comp",
-            include: ["src/shaders/blend"],
-            define: [("BLEND_ADD", "."), ("MODE_FUNC", "blend_add")],
-        }
-    }
-    pub mod multiply {
-        vulkano_shaders::shader! {
-            ty: "compute",
-            path: "src/shaders/blend/blend_one.comp",
-            include: ["src/shaders/blend"],
-            define: [("BLEND_MULTIPLY", "."), ("MODE_FUNC", "blend_multiply")],
-        }
-    }
-    pub mod overlay {
-        vulkano_shaders::shader! {
-            ty: "compute",
-            path: "src/shaders/blend/blend_one.comp",
-            include: ["src/shaders/blend"],
-            define: [("BLEND_OVERLAY", "."), ("MODE_FUNC", "blend_overlay")],
+                        layout(location = 0) in vec2 uv;
+                        layout(location = 0) out vec4 color;
+
+                        void main() {
+                            color = texture(in_color, uv) * alpha;
+                        }
+                    "
+            }
         }
     }
 }
@@ -202,42 +273,83 @@ impl BlendInvocationBuilder {
 }
 use crate::vk;
 pub struct BlendEngine {
+    device: Arc<vk::Device>,
     workgroup_size: (u32, u32),
     // Based on chosen workgroup_size, device's max workgroup count, and device image size.
     max_image_size: (u32, u32),
-    shader_layout: Arc<vk::PipelineLayout>,
-    mode_pipelines: std::collections::HashMap<BlendMode, Arc<vk::ComputePipeline>>,
+    /// Layout for [`CompiledBlend::SimpleCoherent`]
+    simple_coherent_layout: Arc<vk::PipelineLayout>,
+    /// Spawns fragments across the entire viewport. No outputs.
+    fullscreen_vert: vk::EntryPoint,
+    /// Passes fragments from input attachment 0, set 0, binding 0, unchanged.
+    simple_coherent_frag: vk::EntryPoint,
+    /// Pipes need a renderpass to build against. We don't have the pass at the time of pipe compilation, tho!
+    simple_coherent_dynamic_info: vk::PipelineRenderingCreateInfo,
+    /// (mode, clip) -> prepared blend pipe.
+    mode_pipelines: hashbrown::HashMap<(BlendMode, bool), CompiledBlend>,
 }
 impl BlendEngine {
-    fn build_pipeline(
-        device: Arc<vk::Device>,
-        layout: Arc<vk::PipelineLayout>,
-        size: shaders::WorkgroupSizeConstants,
-        entry_point: &Arc<vulkano::shader::ShaderModule>,
-    ) -> anyhow::Result<Arc<vk::ComputePipeline>> {
-        let mut specialization =
-            ahash::HashMap::<u32, vk::SpecializationConstant>::with_capacity_and_hasher(
-                2,
-                ahash::RandomState::default(),
-            );
-        specialization.insert(0, size.x.into());
-        specialization.insert(1, size.y.into());
-        let pipeline = vk::ComputePipeline::new(
-            device,
-            None,
-            vk::ComputePipelineCreateInfo::stage_layout(
-                vk::PipelineShaderStageCreateInfo::new(
-                    entry_point
-                        .specialize(specialization)?
-                        .entry_point("main")
-                        .ok_or_else(|| anyhow::anyhow!("Entry point not found"))?,
-                ),
-                layout,
-            ),
-        )?;
-        Ok(pipeline)
+    /// Get or compile the blend logic for the given mode.
+    pub fn lazy_blend_pipe(
+        &mut self,
+        mode: BlendMode,
+        clip: bool,
+    ) -> anyhow::Result<&CompiledBlend> {
+        match self.mode_pipelines.entry((mode, clip)) {
+            hashbrown::hash_map::Entry::Occupied(o) => Ok(o.into_mut()),
+            hashbrown::hash_map::Entry::Vacant(v) => {
+                // Fetch the equation
+                let logic = BlendLogic::of(mode, clip);
+                // Compile it!
+                match logic {
+                    BlendLogic::Simple(equation) => {
+                        let pipe = vk::GraphicsPipeline::new(
+                            self.device.clone(),
+                            None,
+                            vulkano::pipeline::graphics::GraphicsPipelineCreateInfo {
+                                stages: smallvec::smallvec![
+                                    vk::PipelineShaderStageCreateInfo::new(
+                                        self.fullscreen_vert.clone()
+                                    ),
+                                    vk::PipelineShaderStageCreateInfo::new(
+                                        self.simple_coherent_frag.clone()
+                                    )
+                                ],
+                                // Data generated by vertex iteself.
+                                vertex_input_state: Some(vk::VertexInputState::new()),
+                                input_assembly_state: Some(vk::InputAssemblyState::default()),
+                                rasterization_state: Some(vk::RasterizationState::default()),
+                                // Pass the requested equation directly!
+                                color_blend_state: Some(vk::ColorBlendState {
+                                    attachments: vec![vk::ColorBlendAttachmentState {
+                                        blend: Some(equation),
+                                        ..Default::default()
+                                    }],
+                                    ..Default::default()
+                                }),
+                                multisample_state: Some(vk::MultisampleState::default()),
+                                // Viewport dynamic, scissor irrelevant.
+                                viewport_state: Some(vk::ViewportState::default()),
+                                dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
+                                subpass: Some(self.simple_coherent_dynamic_info.clone().into()),
+                                ..vulkano::pipeline::graphics::GraphicsPipelineCreateInfo::layout(
+                                    self.simple_coherent_layout.clone(),
+                                )
+                            },
+                        )?;
+
+                        Ok(v.insert(CompiledBlend::SimpleCoherent(pipe)))
+                    }
+                }
+            }
+        }
     }
-    pub fn new(device: &Arc<vk::Device>) -> anyhow::Result<Self> {
+    /// Get the pipeline for a blend mode, or `None` if it has not been compiled yet.
+    pub fn blend_pipe(&self, mode: BlendMode, clip: bool) -> Option<&CompiledBlend> {
+        self.mode_pipelines.get(&(mode, clip))
+    }
+    pub fn new(context: &crate::render_device::RenderContext) -> anyhow::Result<Self> {
+        let device = context.device();
         // compute the workgroup size, specified as specialization constants
         let properties = device.physical_device().properties();
         let workgroup_size = {
@@ -267,84 +379,125 @@ impl BlendEngine {
             max_image_size.1
         );
 
-        // Build fixed layout for all blend processes
-        let mut input_image_bindings = std::collections::BTreeMap::new();
-        input_image_bindings.insert(
+        // Build fixed layout for "simple coherent" blend processes.
+        // Consists of a fixed sampler and one sampled image.
+        let nearest_sampler = vk::Sampler::new(device.clone(), vk::SamplerCreateInfo::default())?;
+        let mut input_bindings = std::collections::BTreeMap::new();
+        input_bindings.insert(
             0,
             vk::DescriptorSetLayoutBinding {
                 descriptor_count: 1,
-                immutable_samplers: Vec::default(),
-                stages: vk::ShaderStages::COMPUTE,
-                ..vk::DescriptorSetLayoutBinding::descriptor_type(vk::DescriptorType::StorageImage)
+                immutable_samplers: vec![nearest_sampler],
+                stages: vk::ShaderStages::FRAGMENT,
+                ..vk::DescriptorSetLayoutBinding::descriptor_type(
+                    vk::DescriptorType::CombinedImageSampler,
+                )
             },
         );
-        let output_image_bindings = input_image_bindings.clone();
 
-        let input_image_layout = vk::DescriptorSetLayout::new(
+        let input_layout = vk::DescriptorSetLayout::new(
             device.clone(),
             vk::DescriptorSetLayoutCreateInfo {
-                bindings: input_image_bindings,
-                ..Default::default()
-            },
-        )?;
-        let output_image_layout = vk::DescriptorSetLayout::new(
-            device.clone(),
-            vk::DescriptorSetLayoutCreateInfo {
-                bindings: output_image_bindings,
+                bindings: input_bindings,
                 ..Default::default()
             },
         )?;
 
-        let shader_layout = vk::PipelineLayout::new(
+        let alpha_push_constant = vk::PushConstantRange {
+            offset: 0,
+            size: std::mem::size_of::<f32>() as u32,
+            stages: vk::ShaderStages::FRAGMENT,
+        };
+
+        let simple_coherent_layout = vk::PipelineLayout::new(
             device.clone(),
             vk::PipelineLayoutCreateInfo {
-                set_layouts: vec![input_image_layout, output_image_layout],
-                push_constant_ranges: vec![vk::PushConstantRange {
-                    offset: 0,
-                    size: 24, // f32 + bool32 + Rect:(u32 * 4)
-                    stages: vk::ShaderStages::COMPUTE,
-                }],
+                set_layouts: vec![input_layout],
+                push_constant_ranges: vec![alpha_push_constant],
                 ..vk::PipelineLayoutCreateInfo::default()
             },
         )?;
-        let size = shaders::WorkgroupSizeConstants {
-            x: workgroup_size.0,
-            y: workgroup_size.1,
+
+        // Precompile these because we're gonna use em a lot!
+        let fullscreen_vert = shaders::simple::vert::load(device.clone())?
+            .entry_point("main")
+            .unwrap();
+        let simple_coherent_frag = shaders::simple::frag::load(device.clone())?
+            .entry_point("main")
+            .unwrap();
+
+        let simple_coherent_dynamic_info = vk::PipelineRenderingCreateInfo {
+            color_attachment_formats: vec![Some(crate::DOCUMENT_FORMAT); 1],
+            ..Default::default()
         };
-
-        let mut modes = std::collections::HashMap::new();
-        /// Very smol inflexible macro to compile and insert one blend mode program from the `shaders` module into the `modes` map.
-        macro_rules! build_mode {
-            ($mode:expr, $namespace:ident) => {
-                let mode: BlendMode = $mode;
-                let prev = modes.insert(
-                    mode,
-                    Self::build_pipeline(
-                        device.clone(),
-                        shader_layout.clone(),
-                        size,
-                        &shaders::$namespace::load(device.clone())?,
-                    )?,
-                );
-                assert!(
-                    prev.is_none(),
-                    "Overwrote blend program {mode:?}. Did you typo the name?"
-                );
+        // Renderpassed ver, better in the long run, but just for getting my bearings use dynamic
+        /*
+        {
+            let input_attachment = vk::AttachmentDescription {
+                initial_layout: vk::ImageLayout::General,
+                final_layout: vk::ImageLayout::General,
+                format: crate::DOCUMENT_FORMAT,
+                load_op: vk::AttachmentLoadOp::Load,
+                // THIS SHOULD BE `StoreOp::None`, vulkano doesn't support that yet.
+                // This is an input-only attachment and is not modified.
+                store_op: vk::AttachmentStoreOp::Store,
+                ..Default::default()
             };
-        }
+            let output_attachment = vk::AttachmentDescription {
+                store_op: vk::AttachmentStoreOp::Store,
+                ..input_attachment
+            };
+            let input_reference = vk::AttachmentReference {
+                aspects: vk::ImageAspects::COLOR,
+                attachment: 0,
+                layout: vk::ImageLayout::General,
+                ..Default::default()
+            };
+            let output_reference = vk::AttachmentReference {
+                aspects: vk::ImageAspects::COLOR,
+                attachment: 1,
+                layout: vk::ImageLayout::General,
+                ..Default::default()
+            };
+            let subpass = vk::SubpassDescription {
+                color_attachments: vec![Some(output_reference)],
+                input_attachments: vec![Some(input_reference)],
+                ..Default::default()
+            };
+            vk::RenderPass::new(
+                device.clone(),
+                vk::RenderPassCreateInfo {
+                    attachments: vec![input_attachment, output_attachment],
+                    subpasses: vec![subpass],
+                    ..Default::default()
+                },
+            )?
+            .first_subpass()
+        };
+        */
 
-        // It is unreasonably cool how well the rust-analyzer autocomplete works here :O
-        build_mode!(BlendMode::Normal, normal);
-        build_mode!(BlendMode::Add, add);
-        build_mode!(BlendMode::Multiply, multiply);
-        build_mode!(BlendMode::Overlay, overlay);
-
-        Ok(Self {
-            shader_layout,
+        let mut this = Self {
+            device: device.clone(),
             max_image_size,
             workgroup_size,
-            mode_pipelines: modes,
-        })
+            simple_coherent_layout,
+            fullscreen_vert,
+            simple_coherent_frag,
+            simple_coherent_dynamic_info,
+            mode_pipelines: hashbrown::HashMap::new(),
+        };
+
+        for (mode, clip) in [
+            (BlendMode::Normal, false),
+            (BlendMode::Normal, true),
+            (BlendMode::Add, false),
+            (BlendMode::Add, true),
+            (BlendMode::Multiply, false),
+        ] {
+            this.lazy_blend_pipe(mode, clip)?;
+        }
+
+        Ok(this)
     }
     /// Begin a blend operation with the engine.
     /// The destination image must be available at the time of calling `submit`.
@@ -461,72 +614,102 @@ impl BlendEngine {
     ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
         let mut commands = vk::AutoCommandBufferBuilder::primary(
             context.allocators().command_buffer(),
-            context.queues().compute().idx(),
+            context.queues().graphics().idx(),
             vk::CommandBufferUsage::OneTimeSubmit,
         )?;
 
-        if clear_destination {
-            commands.clear_color_image(vk::ClearColorImageInfo {
-                clear_value: [0.0; 4].into(),
-                regions: smallvec::smallvec![destination_image.subresource_range().clone(),],
-                ..vk::ClearColorImageInfo::image(destination_image.image().clone())
-            })?;
-        }
-
         // Still honor the request to clear the image if no layers are provided.
         if layers.is_empty() {
+            if clear_destination {
+                commands.clear_color_image(vk::ClearColorImageInfo {
+                    clear_value: [0.0; 4].into(),
+                    regions: smallvec::smallvec![destination_image.subresource_range().clone(),],
+                    ..vk::ClearColorImageInfo::image(destination_image.image().clone())
+                })?;
+            }
             return Ok(commands.build()?);
         }
 
-        // Compute the number of workgroups to dispatch for a given image
-        // Or, None if the number of workgroups exceeds the maximum the device supports.
-        let output_size = destination_image.image().extent();
-        let get_dispatch_size = |dimensions: [u32; 3]| -> Option<[u32; 3]> {
-            let x = dimensions[0].min(output_size[0]);
-            let y = dimensions[1].min(output_size[1]);
-            if x > self.max_image_size.0 || y > self.max_image_size.1 {
-                None
-            } else {
-                Some([
-                    x.div_ceil(self.workgroup_size.0),
-                    y.div_ceil(self.workgroup_size.1),
-                    1,
-                ])
-            }
-        };
-
-        let output_set = vk::PersistentDescriptorSet::new(
-            context.allocators().descriptor_set(),
-            self.shader_layout.set_layouts()[shaders::OUTPUT_IMAGE_SET as usize].clone(),
-            [vk::WriteDescriptorSet::image_view(0, destination_image)],
-            [],
-        )?;
-        commands.bind_descriptor_sets(
-            vk::PipelineBindPoint::Compute,
-            self.shader_layout.clone(),
-            shaders::OUTPUT_IMAGE_SET,
-            vec![output_set],
-        )?;
+        commands
+            .begin_rendering(vk::RenderingInfo {
+                color_attachments: vec![Some(vk::RenderingAttachmentInfo {
+                    load_op: if clear_destination {
+                        vk::AttachmentLoadOp::Clear
+                    } else {
+                        vk::AttachmentLoadOp::Load
+                    },
+                    clear_value: clear_destination.then_some([0.0; 4].into()),
+                    store_op: vulkano::render_pass::AttachmentStoreOp::Store,
+                    ..vk::RenderingAttachmentInfo::image_view(destination_image.clone())
+                })],
+                render_area_offset: [0; 2],
+                render_area_extent: [
+                    destination_image.image().extent()[0],
+                    destination_image.image().extent()[1],
+                ],
+                ..Default::default()
+            })?
+            .set_viewport(
+                0,
+                smallvec::smallvec![vk::Viewport {
+                    depth_range: 0.0..=1.0,
+                    offset: [0.0; 2],
+                    extent: [
+                        destination_image.image().extent()[0] as f32,
+                        destination_image.image().extent()[1] as f32,
+                    ],
+                }],
+            )?;
 
         let mut last_mode = None;
-        let mut last_blend_settings = None;
-        for (
-            image_src,
-            Blend {
+        let mut last_opacity = None;
+        for (image_src, blend) in layers {
+            let Blend {
                 mode,
                 alpha_clip,
                 opacity,
-            },
-        ) in layers
-        {
+            } = *blend;
             // bind a new pipeline if changed from last iter
-            if last_mode != Some(*mode) {
-                let Some(program) = self.mode_pipelines.get(mode).cloned() else {
+            if last_mode != Some((mode, alpha_clip)) {
+                let Some(pipe) = self.blend_pipe(mode, alpha_clip).cloned() else {
                     anyhow::bail!("Blend mode {:?} unsupported", mode)
                 };
-                commands.bind_pipeline_compute(program)?;
-                last_mode = Some(*mode);
+                match &pipe {
+                    CompiledBlend::SimpleCoherent(pipe) => {
+                        commands.bind_pipeline_graphics(pipe.clone())?;
+                    }
+                }
+                last_mode = Some((mode, alpha_clip));
             }
+
+            // Inform of the new alpha, if changed
+            if last_opacity != Some(opacity) {
+                commands.push_constants(self.simple_coherent_layout.clone(), 0, opacity)?;
+                last_opacity = Some(opacity);
+            }
+
+            // Set the image. The sampler is bundled magically by being baked into the layout itself.
+            let input_set = vk::PersistentDescriptorSet::new(
+                context.allocators().descriptor_set(),
+                self.simple_coherent_layout.set_layouts()[0].clone(),
+                [vk::WriteDescriptorSet::image_view(
+                    0,
+                    image_src.view().clone(),
+                )],
+                [],
+            )?;
+
+            // Bind and draw!
+            commands
+                .bind_descriptor_sets(
+                    vk::PipelineBindPoint::Graphics,
+                    self.simple_coherent_layout.clone(),
+                    0,
+                    input_set,
+                )?
+                .draw(3, 1, 0, 0)?;
+
+            /*
             // Push new clip/alpha constants if different from last iter
             // As per https://registry.khronos.org/vulkan/site/guide/latest/push_constants.html#pc-lifetime,
             // I believe push constants should remain across compatible pipeline binds
@@ -555,8 +738,9 @@ impl BlendEngine {
                 .dispatch(
                     get_dispatch_size(image_src.view().image().extent())
                         .ok_or_else(|| anyhow::anyhow!("Image too large to blend!"))?,
-                )?;
+                )?;*/
         }
+        commands.end_rendering()?;
         Ok(commands.build()?)
     }
 }

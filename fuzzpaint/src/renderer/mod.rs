@@ -55,7 +55,7 @@ impl Renderer {
     fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
         Ok(Self {
             context: context.clone(),
-            blend_engine: blender::BlendEngine::new(context.device())?,
+            blend_engine: blender::BlendEngine::new(&context)?,
             text_builder: crate::text::Builder::allocate_new(
                 context.allocators().memory().clone(),
             )?,
@@ -981,7 +981,7 @@ mod stroke_renderer {
                 self.context.allocators().memory().clone(),
                 vk::ImageCreateInfo {
                     usage: vk::ImageUsage::COLOR_ATTACHMENT
-                        | vk::ImageUsage::STORAGE
+                        | vk::ImageUsage::SAMPLED
                         // For color clearing
                         | vk::ImageUsage::TRANSFER_DST,
                     extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],

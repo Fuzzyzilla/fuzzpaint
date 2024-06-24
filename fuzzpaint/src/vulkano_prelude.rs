@@ -89,10 +89,11 @@ pub mod vk {
             DynamicState, PipelineBindPoint, PipelineShaderStageCreateInfo,
         },
         render_pass::{
-            AttachmentLoadOp, AttachmentStoreOp, Framebuffer, FramebufferCreateInfo, RenderPass,
-            Subpass,
+            AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
+            Framebuffer, FramebufferCreateInfo, RenderPass, RenderPassCreateInfo, Subpass,
+            SubpassDescription,
         },
-        shader::{ShaderStages, SpecializationConstant},
+        shader::{EntryPoint, ShaderModule, ShaderStages, SpecializationConstant},
         swapchain::{
             acquire_next_image, PresentInfo, PresentMode, Surface, SurfaceInfo, Swapchain,
             SwapchainCreateInfo, SwapchainPresentInfo,
