@@ -374,7 +374,9 @@ impl Renderer {
         }
 
         // Execute blend after the images are ready
-        blend_engine.submit(context.as_ref(), top_level_blend)
+        unsafe { blend_engine.submit(context.as_ref(), top_level_blend)?; }
+
+        Ok(())
     }
     /// Assumes the existence of a previous `draw_from_scratch`, applying only the diff.
     fn draw_incremental(
