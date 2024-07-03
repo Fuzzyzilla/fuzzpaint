@@ -91,7 +91,7 @@ pub mod vk {
         render_pass::{
             AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
             Framebuffer, FramebufferCreateInfo, RenderPass, RenderPassCreateInfo, Subpass,
-            SubpassDescription,
+            SubpassDependency, SubpassDescription,
         },
         shader::{EntryPoint, ShaderModule, ShaderStages, SpecializationConstant},
         swapchain::{

@@ -312,6 +312,8 @@ pub struct BlendEngine {
     feedback_pass: Arc<vk::RenderPass>,
     /// (mode, clip) -> prepared blend pipe.
     mode_pipelines: hashbrown::HashMap<(BlendMode, bool), CompiledBlend>,
+    /// Data needed to specify self-dependency barrier.
+    self_dependency_flags: vk::SubpassDependency,
 }
 impl BlendEngine {
     /// Get or compile the blend logic for the given mode.
@@ -510,6 +512,21 @@ impl BlendEngine {
             .entry_point("main")
             .unwrap();
 
+        // allow self-dependencies (CmdPipelineBarrier) within subpass 0 so that we may use feedback loops.
+        // ONLY barriers with these *exact* access/stages are allowed, and MUST be by-region :O
+        let self_dependency_flags = vk::SubpassDependency {
+            src_subpass: Some(0),
+            src_stages: vk::sync::PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+            src_access: vk::sync::AccessFlags::COLOR_ATTACHMENT_WRITE,
+
+            dst_subpass: Some(0),
+            dst_stages: vk::sync::PipelineStages::FRAGMENT_SHADER,
+            dst_access: vk::sync::AccessFlags::INPUT_ATTACHMENT_READ,
+
+            dependency_flags: vk::sync::DependencyFlags::BY_REGION,
+            ..Default::default()
+        };
+
         let feedback_pass = {
             let feedback_attachment = vk::AttachmentDescription {
                 // THIS SHOULD BE `ImageLayout::AttachmentFeedbackLoopOptimal`, vulkano doesn't support that yet.
@@ -539,11 +556,35 @@ impl BlendEngine {
                 input_attachments: vec![Some(input_reference)],
                 ..Default::default()
             };
+
+            let external_dependencies = vk::SubpassDependency {
+                // We don't know what will be performed outside. I should come back and make this well-defined,
+                // but use an extremely strong dependency instead :P
+                src_subpass: None, // External
+                src_stages: vk::sync::PipelineStages::BOTTOM_OF_PIPE,
+                src_access: vk::sync::AccessFlags::MEMORY_WRITE
+                    | vk::sync::AccessFlags::MEMORY_READ,
+
+                dst_subpass: Some(0),
+                // Before we read or write the images in any way within subpass.
+                dst_stages: vk::sync::PipelineStages::FRAGMENT_SHADER
+                    | vk::sync::PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                dst_access: vk::sync::AccessFlags::INPUT_ATTACHMENT_READ
+                    | vk::sync::AccessFlags::COLOR_ATTACHMENT_READ
+                    | vk::sync::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::sync::AccessFlags::SHADER_READ,
+
+                // Does this even make sense for an external dep? Oh well, it's allowed UwU
+                dependency_flags: vk::sync::DependencyFlags::BY_REGION,
+                ..Default::default()
+            };
+
             vk::RenderPass::new(
                 device.clone(),
                 vk::RenderPassCreateInfo {
                     attachments: vec![feedback_attachment],
                     subpasses: vec![subpass],
+                    dependencies: vec![external_dependencies, self_dependency_flags.clone()],
                     ..Default::default()
                 },
             )?
@@ -558,6 +599,7 @@ impl BlendEngine {
             coherent_frag,
             feedback_pass,
             mode_pipelines: hashbrown::HashMap::new(),
+            self_dependency_flags,
         };
 
         for (mode, clip) in [
@@ -715,38 +757,37 @@ impl BlendEngine {
                 },
             )?;
 
-            // We need to make sure that the previous command buffer isn't accessing the images we're about to use.
-            let global_barrier = {
-                // We could make a barrier-per-image... Seems pricey for the driver to handle.
-                let barrier = vulkano::sync::MemoryBarrier {
-                    // We can't know what happened before, so source is maximally strong
-                    src_access: vulkano::sync::AccessFlags::MEMORY_WRITE,
-                    src_stages: vulkano::sync::PipelineStages::BOTTOM_OF_PIPE,
-
-                    // We *do* know what we're gonna do, though!
-                    // We can't access input/color attachments or samplers until
-                    dst_access: vulkano::sync::AccessFlags::COLOR_ATTACHMENT_READ
-                        | vulkano::sync::AccessFlags::COLOR_ATTACHMENT_WRITE
-                        | vulkano::sync::AccessFlags::SHADER_SAMPLED_READ,
-
-                    // Clears and fragments must wait.
-                    dst_stages: vulkano::sync::PipelineStages::FRAGMENT_SHADER
-                        | vulkano::sync::PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-
-                    ..Default::default()
-                };
-                vulkano::sync::DependencyInfo {
-                    dependency_flags: vulkano::sync::DependencyFlags::BY_REGION,
-                    memory_barriers: smallvec::smallvec![barrier],
-                    ..Default::default()
-                }
-            };
-
             // Still honor the request to clear the image if no layers are provided.
             // In the not empty case, it's handled by a clear_attachment instead.
             if layers.is_empty() {
                 if clear_destination {
                     // Wait for exclusive access...
+
+                    // We need to make sure that the previous command buffer isn't accessing the images we're about to use.
+                    let global_barrier = {
+                        // We could make a barrier-per-image... Seems pricey for the driver to handle.
+                        let barrier = vulkano::sync::MemoryBarrier {
+                            // We can't know what happened before, so source is maximally strong
+                            src_access: vulkano::sync::AccessFlags::MEMORY_WRITE
+                                | vulkano::sync::AccessFlags::MEMORY_READ,
+                            src_stages: vulkano::sync::PipelineStages::BOTTOM_OF_PIPE,
+
+                            // We *do* know what we're gonna do, though!
+                            // We can't clear until all red/writes from before complete.
+                            dst_access: vulkano::sync::AccessFlags::TRANSFER_WRITE,
+                            // Only need CLEAR but that's extension...
+                            dst_stages: vulkano::sync::PipelineStages::ALL_TRANSFER,
+
+                            ..Default::default()
+                        };
+
+                        vulkano::sync::DependencyInfo {
+                            dependency_flags: vulkano::sync::DependencyFlags::BY_REGION,
+                            memory_barriers: smallvec::smallvec![barrier],
+                            ..Default::default()
+                        }
+                    };
+
                     commands.pipeline_barrier(&global_barrier)?;
                     commands.clear_color_image(&vk::ClearColorImageInfo {
                         clear_value: [0.0; 4].into(),
@@ -758,6 +799,7 @@ impl BlendEngine {
             }
 
             commands
+                // Implicit external barrier here due to external dependency in the subpass!
                 .begin_render_pass(
                     &vk::RenderPassBeginInfo {
                         render_pass: self.feedback_pass.clone(),
@@ -806,19 +848,14 @@ impl BlendEngine {
                 &[feedback_set.into()],
             )?;
 
-            // Barrier to insert to ensure renderpass commands after the barrier may access
-            // through the feedback attachment any writes from previous draws.
+            // Self-dependency barrier. MUST be a subset of the pipeline dependency flags.
             let feedback_barrier = {
                 let destination_image_barrier = vulkano::sync::ImageMemoryBarrier {
-                    // Coincidentally, this is perfect for the initial clear
-                    // as well as feedback operations. Nice!
-                    src_access: vulkano::sync::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                    // Wait for clears and blends to finish...
-                    src_stages: vulkano::sync::PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+                    src_access: self.self_dependency_flags.src_access,
+                    src_stages: self.self_dependency_flags.src_stages,
 
-                    dst_access: vulkano::sync::AccessFlags::INPUT_ATTACHMENT_READ,
-                    // ... before we're allowed to `subpassLoad`!
-                    dst_stages: vulkano::sync::PipelineStages::FRAGMENT_SHADER,
+                    dst_access: self.self_dependency_flags.dst_access,
+                    dst_stages: self.self_dependency_flags.dst_stages,
 
                     new_layout: vk::ImageLayout::General,
                     old_layout: vk::ImageLayout::General,
@@ -832,14 +869,11 @@ impl BlendEngine {
                     ..vulkano::sync::ImageMemoryBarrier::image(destination_image.image().clone())
                 };
                 vulkano::sync::DependencyInfo {
-                    dependency_flags: vulkano::sync::DependencyFlags::BY_REGION,
+                    dependency_flags: self.self_dependency_flags.dependency_flags,
                     image_memory_barriers: smallvec::smallvec![destination_image_barrier],
                     ..Default::default()
                 }
             };
-
-            // Our accesses are about to start. wait for earlier accesses to any images to complete...
-            commands.pipeline_barrier(&global_barrier)?;
 
             if clear_destination {
                 // Clear before any blends occur. This is properly barrier'd
