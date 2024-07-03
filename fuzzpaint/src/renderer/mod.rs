@@ -161,6 +161,7 @@ impl Renderer {
             builder: &mut blender::BlendInvocationBuilder,
             document_data: &PerDocumentData,
             graph: &state::graph::BlendGraph,
+            palette: &state::palette::Palette,
 
             id: state::graph::AnyID,
             data: &state::graph::NodeData,
@@ -169,8 +170,7 @@ impl Renderer {
                 // Pre-rendered leaves
                 (
                     Some(
-                        LeafType::SolidColor { blend, .. }
-                        | LeafType::StrokeLayer { blend, .. }
+                        LeafType::StrokeLayer { blend, .. }
                         | LeafType::Text { blend, .. },
                     ),
                     None,
@@ -183,6 +183,12 @@ impl Renderer {
                         .clone();
                     builder.then_blend(blender::BlendImageSource::Immediate(view), *blend)?;
                 }
+                // Lazily rendered leaves
+                (Some(LeafType::SolidColor { blend, source }), None) => {
+                    // Dereference possibly paletted color
+                    let color = source.get().left_or_else(|pal_idx| palette.get(pal_idx).unwrap_or(fuzzpaint_core::color::Color::TRANSPARENT));
+                    builder.then_blend(blender::BlendImageSource::SolidColor(color), *blend)?;
+                }
                 (Some(LeafType::Note), None) => (),
                 // Passthrough - add children directly without grouped blend
                 (None, Some(NodeType::Passthrough)) => {
@@ -191,6 +197,7 @@ impl Renderer {
                         builder,
                         document_data,
                         graph,
+                        palette,
                         id.try_into().unwrap(),
                     )?;
                 }
@@ -200,6 +207,7 @@ impl Renderer {
                         blend_engine,
                         document_data,
                         graph,
+                        palette,
                         id.try_into().unwrap(),
                         document_data
                             .graph_render_data
@@ -223,13 +231,14 @@ impl Renderer {
             builder: &mut blender::BlendInvocationBuilder,
             document_data: &PerDocumentData,
             graph: &state::graph::BlendGraph,
+            palette: &state::palette::Palette,
             node: NodeID,
         ) -> anyhow::Result<()> {
             let iter = graph
                 .iter_node(node)
                 .ok_or_else(|| anyhow::anyhow!("Passthrough node not found"))?;
             for (id, data) in iter {
-                insert_blend(blend_engine, builder, document_data, graph, id, data)?;
+                insert_blend(blend_engine, builder, document_data, graph, palette, id, data)?;
             }
             Ok(())
         }
@@ -239,6 +248,7 @@ impl Renderer {
             blend_engine: &blender::BlendEngine,
             document_data: &PerDocumentData,
             graph: &state::graph::BlendGraph,
+            palette: &state::palette::Palette,
             node: NodeID,
 
             into_image: Arc<vk::ImageView>,
@@ -250,7 +260,7 @@ impl Renderer {
             let mut builder = blend_engine.start(into_image, clear_image);
 
             for (id, data) in iter {
-                insert_blend(blend_engine, &mut builder, document_data, graph, id, data)?;
+                insert_blend(blend_engine, &mut builder, document_data, graph, palette, id, data)?;
             }
 
             // We traverse top-down, we need to blend bottom-up
@@ -269,22 +279,6 @@ impl Renderer {
         // Walk the tree in arbitrary order, rendering all as needed and collecting their futures.
         for (id, data) in state.graph().iter() {
             match data.leaf() {
-                Some(LeafType::SolidColor { source, .. }) => {
-                    let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Expected image to be created by allocate_prune_graph for {id:?}"
-                        )
-                    })?;
-                    let color = source.get().left_or_else(|p| {
-                        state
-                            .palette()
-                            .get(p)
-                            // Err, uh oh!
-                            .unwrap_or(fuzzpaint_core::color::Color::TRANSPARENT)
-                    });
-                    // Fill image, store semaphore.
-                    fences.push(Self::render_color(context.as_ref(), image, color)?);
-                }
                 // Render stroke image
                 Some(LeafType::StrokeLayer { collection, .. }) => {
                     let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
@@ -345,12 +339,14 @@ impl Renderer {
                         text,
                     )?);
                 }
-                Some(LeafType::Note) | None => (),
+                // No rendering or lazily rendered.
+                Some(LeafType::SolidColor { .. } | LeafType::Note) | None => (),
             }
         }
 
         let mut top_level_blend = blend_engine.start(into.clone(), true);
         let graph = state.graph();
+        let palette = state.palette();
         // Walk the tree in tree-order, building up a blend operation.
         for (id, data) in graph.iter_top_level() {
             insert_blend(
@@ -358,6 +354,7 @@ impl Renderer {
                 &mut top_level_blend,
                 document_data,
                 graph,
+                palette,
                 id,
                 data,
             )?;
@@ -512,12 +509,10 @@ impl Renderer {
                 // We expect it to be a node xor leaf!
                 // This is an api issue ;w;
                 (Some(..), Some(..)) | (None, None) => unreachable!(),
-                // Color and Stroke have images.
-                // Color needing a whole image is a big ol inefficiency but that's todo :P
+                // Stroke and text have images.
                 (
                     Some(
-                        state::graph::LeafType::SolidColor { .. }
-                        | state::graph::LeafType::StrokeLayer { .. }
+                         state::graph::LeafType::StrokeLayer { .. }
                         | state::graph::LeafType::Text { .. },
                     ),
                     None,

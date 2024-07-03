@@ -112,6 +112,15 @@ impl Color {
             Ok(raw)
         }
     }
+    /// Return a new color with alpha multiplied by a factor, normalizing transparent colors to transparent black.
+    #[must_use = "returns a new color and does not modify self"]
+    pub fn alpha_multipy(self, alpha: FiniteF32) -> Self {
+        let mut color = self.as_array();
+        for channel in &mut color {
+            *channel *= alpha.get();
+        }
+        Self::from_array_lossy(color).unwrap_or(Color::TRANSPARENT)
+    }
     /// Create a new color from premul linear channels. Normalizes all fully transparent colors to 0.0.
     pub fn from_array_lossy([r, g, b, a]: [f32; 4]) -> Result<Self, FiniteF32Error> {
         Self::new_lossy(r, g, b, a)

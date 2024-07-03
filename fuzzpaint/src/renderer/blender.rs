@@ -97,6 +97,35 @@ enum CompiledBlend {
 }
 
 mod shaders {
+    #[derive(
+        PartialEq,
+        Copy,
+        Clone,
+        bytemuck::NoUninit,
+        bytemuck::Zeroable,
+        vulkano::buffer::BufferContents,
+    )]
+    #[repr(C)]
+    pub struct Constants {
+        pub solid_color: [f32; 4],
+        // Safety: VkBool32, must be 0 or 1
+        is_solid: u32,
+    }
+    impl Constants {
+        pub fn new_solid(solid_color: fuzzpaint_core::color::Color) -> Self {
+            Self {
+                solid_color: solid_color.as_array(),
+                is_solid: true.into(),
+            }
+        }
+        pub fn new_image(alpha: f32) -> Self {
+            Self {
+                solid_color: [0.0, 0.0, 0.0, alpha],
+                is_solid: false.into(),
+            }
+        }
+    }
+
     /// Vertex shader that fills the viewport and provides UV at location 0.
     /// Call with three vertices.
     pub mod fullscreen_vert {
@@ -124,7 +153,7 @@ mod shaders {
                 "
         }
     }
-    /// A shader that does nothing special, filling the viewport with image at set 0, binding 0.
+    /// A shader that does nothing special, filling the viewport with either image at set 0, binding 0, or solid color if specified.
     /// Use fixed function blend math to achieve blend effects. This is the most efficient blend method!
     pub mod coherent_frag {
         vulkano_shaders::shader! {
@@ -136,14 +165,18 @@ mod shaders {
                     // layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput dont_use;
 
                     layout(push_constant) uniform Constants {
-                        float alpha;
+                        // Solid color constant, otherwise just the alpha is used as global multiplier.
+                        vec4 solid_color;
+                        // True if the shader should 'sample' from `solid_color` instead of the image.
+                        // UB to read image if this is set.
+                        bool is_solid;
                     };
 
                     layout(location = 0) in vec2 uv;
                     layout(location = 0) out vec4 color;
 
                     void main() {
-                        color = texture(src, uv) * alpha;
+                        color = is_solid ? solid_color : (texture(src, uv) * solid_color.a);
                     }
                 "
         }
@@ -157,14 +190,18 @@ mod shaders {
                     layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput dst;
 
                     layout(push_constant) uniform Constants {
-                        float alpha;
+                        // Solid color constant, otherwise just the alpha is used as global multiplier.
+                        vec4 solid_color;
+                        // True if the shader should 'sample' from `solid_color` instead of the image.
+                        // UB to read image if this is set.
+                        bool is_solid;
                     };
 
                     layout(location = 0) in vec2 uv;
                     layout(location = 0) out vec4 color;
 
                     void main() {
-                        color = subpassLoad(dst).gbra;
+                        color = is_solid ? solid_color.gbra : (texture(src, uv).gbra * solid_color.a);
                     }
                 "
         }
@@ -201,6 +238,7 @@ pub enum BlendImageSource {
     /// The image comes from a previous blend operation.
     /// Synchronization and submission will be handled automatically.
     BlendInvocation(BlendInvocationHandle),
+    SolidColor(fuzzpaint_core::color::Color),
 }
 impl From<BlendInvocationHandle> for BlendImageSource {
     fn from(value: BlendInvocationHandle) -> Self {
@@ -208,13 +246,14 @@ impl From<BlendInvocationHandle> for BlendImageSource {
     }
 }
 impl BlendImageSource {
-    fn view(&self) -> &Arc<vk::ImageView> {
+    fn view(&self) -> Option<&Arc<vk::ImageView>> {
         match self {
             BlendImageSource::Immediate(image)
             | BlendImageSource::BlendInvocation(BlendInvocationHandle {
                 destination_image: image,
                 ..
-            }) => image,
+            }) => Some(image),
+            Self::SolidColor(_) => None,
         }
     }
 }
@@ -237,7 +276,10 @@ fn does_alias(dest: &vk::ImageView, src: &BlendImageSource) -> bool {
                     || b.end > a.start && b.end <= a.end)
     }
 
-    let src = src.view();
+    let Some(src) = src.view() else {
+        // No memory usage, no aliasing!
+        return false;
+    };
     if dest.image() == src.image() {
         // Compare subresources
         let dest = dest.subresource_range();
@@ -488,7 +530,8 @@ impl BlendEngine {
 
         let alpha_push_constant = vk::PushConstantRange {
             offset: 0,
-            size: std::mem::size_of::<f32>() as u32,
+            // RGBA32F + Bool32
+            size: 20,
             stages: vk::ShaderStages::FRAGMENT,
         };
 
@@ -680,6 +723,7 @@ impl BlendEngine {
                         .filter_map(|(image, _)| match image {
                             BlendImageSource::BlendInvocation(inv) => Some(inv),
                             BlendImageSource::Immediate(_) => None,
+                            BlendImageSource::SolidColor(_) => None,
                         }),
                 );
             }
@@ -901,7 +945,8 @@ impl BlendEngine {
             // for a read to occur after a write without a barrier.
             let mut will_read = false;
             let mut last_mode = None;
-            let mut last_opacity = None;
+
+            let mut last_constants = None;
             for (image_src, blend) in layers {
                 let Blend {
                     mode,
@@ -926,29 +971,43 @@ impl BlendEngine {
                     last_mode = Some((mode, alpha_clip));
                 }
 
-                // Inform of the new alpha, if changed
-                if last_opacity != Some(opacity) {
-                    commands.push_constants(&self.feedback_layout, 0, &opacity)?;
-                    last_opacity = Some(opacity);
-                }
-
                 // Set the image. The sampler is bundled magically by being baked into the layout itself.
-                let sampler_set = vk::PersistentDescriptorSet::new(
-                    context.allocators().descriptor_set(),
-                    self.feedback_layout.set_layouts()[0].clone(),
-                    [vk::WriteDescriptorSet::image_view(
-                        0,
-                        image_src.view().clone(),
-                    )],
-                    [],
-                )?;
+                match image_src {
+                    BlendImageSource::BlendInvocation(BlendInvocationHandle {
+                        destination_image: view,
+                        ..
+                    })
+                    | BlendImageSource::Immediate(view) => {
+                        let sampler_set = vk::PersistentDescriptorSet::new(
+                            context.allocators().descriptor_set(),
+                            self.feedback_layout.set_layouts()[0].clone(),
+                            [vk::WriteDescriptorSet::image_view(0, view.clone())],
+                            [],
+                        )?;
+                        commands.bind_descriptor_sets(
+                            vk::PipelineBindPoint::Graphics,
+                            &self.feedback_layout,
+                            0,
+                            &[sampler_set.into()],
+                        )?;
 
-                commands.bind_descriptor_sets(
-                    vk::PipelineBindPoint::Graphics,
-                    &self.feedback_layout,
-                    0,
-                    &[sampler_set.into()],
-                )?;
+                        let constants = shaders::Constants::new_image(opacity);
+                        if last_constants != Some(constants) {
+                            commands.push_constants(&self.feedback_layout, 0, &constants)?;
+                            last_constants = Some(constants);
+                        }
+                    }
+                    &BlendImageSource::SolidColor(color) => {
+                        let constants = shaders::Constants::new_solid(color.alpha_multipy(
+                            fuzzpaint_core::util::FiniteF32::new(opacity).unwrap_or_default(),
+                        ));
+
+                        if last_constants != Some(constants) {
+                            commands.push_constants(&self.feedback_layout, 0, &constants)?;
+                            last_constants = Some(constants);
+                        }
+                    }
+                }
 
                 if had_write && will_read {
                     // Insert a barrier to ensure last loop's write completes before this loop's read.
