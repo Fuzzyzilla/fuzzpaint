@@ -187,6 +187,14 @@ impl Renderer {
                             }
                         }
                         WindowEvent::RedrawRequested => {
+                            // run UI logics
+                            if self.egui_ctx.take_wants_update() {
+                                self.do_ui();
+                            }
+                            // Overwrite the Egui provided cursor over the doc area.
+                            self.apply_document_cursor();
+
+                            // Render and present the updated UI
                             if let Err(e) = self.paint() {
                                 log::error!("{e:?}");
                             };
@@ -275,22 +283,20 @@ impl Renderer {
                     } else {
                         false
                     };
-                    let egui_wants_update = self.egui_ctx.take_wants_update();
-                    // run UI logics
-                    if egui_wants_update {
-                        self.do_ui();
-                    }
-                    self.apply_document_cursor();
 
                     // Request draw if any interactive element wants it (UI, document, or tablet)
-                    if has_tablet_update || egui_wants_update || self.preview_renderer.has_update()
+                    if has_tablet_update
+                        || self.egui_ctx.peek_wants_update()
+                        || self.preview_renderer.has_update()
                     {
+                        // winit automagically coalesces these if we call it too often, that's okay ;3
                         self.window().request_redraw();
                     }
 
-                    // End frame
+                    // End stylus frame
                     self.stylus_events.finish();
-                    // Wait. We'll be notified when to redraw UI, but the document preview could assert
+
+                    // Wait. We'll be notified when to redraw UI, but the document preview or octotablet could assert
                     // an update at any time! Thus, we must poll. U_U
                     target.set_control_flow(winit::event_loop::ControlFlow::wait_duration(
                         std::time::Duration::from_millis(50),
@@ -411,7 +417,7 @@ impl Renderer {
                     )?
                     .boxed()
             }
-            None => image_future.boxed(),
+            None => anyhow::bail!("no commands submitted"),
         };
 
         self.window().pre_present_notify();
