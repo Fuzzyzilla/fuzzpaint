@@ -4,7 +4,7 @@ use std::{fmt::Debug, sync::Arc};
 use fuzzpaint_core::blend::{Blend, BlendMode};
 use vulkano::VulkanObject;
 
-/// `fn` to load a shader module on a given device. Equivalent to the signature of the vulkano-generated <shader>::load.
+/// `fn` to load a shader module on a given device. Equivalent to the signature of the vulkano-generated `<shader>::load`.
 type BlendLoader =
     fn(Arc<vk::Device>) -> Result<Arc<vk::ShaderModule>, vk::Validated<vk::VulkanError>>;
 
@@ -612,8 +612,10 @@ impl BlendInvocation {
                             dst_access: vulkano::sync::AccessFlags::TRANSFER_WRITE,
                             // Only need CLEAR but that's extension...
                             dst_stages: vulkano::sync::PipelineStages::ALL_TRANSFER,
-                            old_layout: vk::ImageLayout::Undefined,
-                            new_layout: vk::ImageLayout::TransferDstOptimal,
+
+                            old_layout: vk::ImageLayout::General,
+                            new_layout: vk::ImageLayout::General,
+
                             subresource_range: op.destination_image.subresource_range().clone(),
 
                             ..vulkano::sync::ImageMemoryBarrier::image(
@@ -660,12 +662,8 @@ impl BlendInvocation {
                         | vulkano::sync::PipelineStages::FRAGMENT_SHADER,
 
                     subresource_range: op.destination_image.subresource_range().clone(),
-                    old_layout: if op.clear_destination {
-                        // If we're clearing we don't care what it was!
-                        vk::ImageLayout::Undefined
-                    } else {
-                        vk::ImageLayout::General
-                    },
+
+                    old_layout: vk::ImageLayout::General,
                     new_layout: vk::ImageLayout::General,
 
                     ..vulkano::sync::ImageMemoryBarrier::image(op.destination_image.image().clone())
@@ -679,8 +677,8 @@ impl BlendInvocation {
                     dst_access: vulkano::sync::AccessFlags::SHADER_READ,
                     dst_stages: vulkano::sync::PipelineStages::FRAGMENT_SHADER,
 
-                    old_layout: vk::ImageLayout::General,
-                    new_layout: vk::ImageLayout::General,
+                    old_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+                    new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
                     // Dummy image for _ne -w-;;
                     ..vulkano::sync::ImageMemoryBarrier::image(op.destination_image.image().clone())
                 };
@@ -696,6 +694,12 @@ impl BlendInvocation {
                                 let mut src_barrier = src_barrier.clone();
                                 src_barrier.image = view.image().clone();
                                 src_barrier.subresource_range = view.subresource_range().clone();
+
+                                if matches!(src, BlendImageSource::BlendInvocation(_)) {
+                                    src_barrier.new_layout = vk::ImageLayout::General;
+                                    src_barrier.old_layout = vk::ImageLayout::General;
+                                }
+
                                 src_barrier
                             })
                         }))
@@ -734,8 +738,13 @@ impl BlendInvocation {
             commands.bind_descriptor_sets(
                 vk::PipelineBindPoint::Graphics,
                 &engine.feedback_layout,
-                1,
-                &[feedback_descriptor.clone().into()],
+                0,
+                &[
+                    // Initialize to dummy image, as it's required to have well-formed descriptor even
+                    // if it's dynamically unused.
+                    engine.dummy_image_descriptor.clone().into(),
+                    feedback_descriptor.clone().into(),
+                ],
             )?;
 
             // Self-dependency barrier. MUST be a subset of the pipeline dependency flags.
@@ -862,12 +871,18 @@ impl BlendInvocation {
     /// Execute the blend tree.
     ///
     /// # Safety
+    /// ## Access
     /// * This invocation must not be run on the device in parallel with itself.
-    /// * This `BlendInvocation` host object must outlive the duration of execution on the device.
+    /// * This invocation host object must outlive the duration of execution on the device.
     /// * All input images must be externally synchronized and retain shared access
     ///   by the graphics queue during the operation.
     /// * All output images must be externally synchronized and retain exclusive access
     ///   by the graphics queue during the operation.
+    /// ## Layout
+    /// * All destination images must be in `GENERAL` layout.
+    // (we don't specify that `clear`ed destination images may be any layout, since
+    // there's no way to communicate back to vulkano that the transition occured)
+    /// * All source images must be in `SHADER_READ_ONLY_OPTIMAL` layout.
     // Todo: input sync? As-is, the user must wait on host side, not ideal.
     pub unsafe fn execute(&self) -> anyhow::Result<()> {
         for buffers in &self.commands {
@@ -923,6 +938,11 @@ pub struct BlendEngine {
     mode_pipelines: parking_lot::RwLock<hashbrown::HashMap<(BlendMode, bool), CompiledBlend>>,
     /// Data needed to specify self-dependency barrier.
     self_dependency_flags: vk::SubpassDependency,
+    /// An image with undefined content, in `SHADER_READ_ONLY_OPTIMAL` layout, "usable" for sampling and nothing else.
+    /// (Although it is undefined behavior to actually access.)
+    /// Vulkan requires that any desciptor set that is statically-used be in a fully valid state, even if it is
+    /// dynamically unused. Use this for such cases.
+    dummy_image_descriptor: Arc<vk::PersistentDescriptorSet>,
 }
 impl BlendEngine {
     /// Compile the blend logic for a given mode. Does *not* access the mode cache or check if it was already compiled.
@@ -1001,6 +1021,108 @@ impl BlendEngine {
                 Ok(CompiledBlend::Loopback(pipe))
             }
         }
+    }
+    /// Create a dummy image descriptor set. See [`BlendEngine::dummy_image_descriptor`] for motivation.
+    fn make_dummy_image_descriptor(
+        context: &crate::render_device::RenderContext,
+        layout: Arc<vk::DescriptorSetLayout>,
+    ) -> anyhow::Result<Arc<vk::PersistentDescriptorSet>> {
+        // No need to populate the image, since it's a logic error to read anyway.
+        let image = vk::Image::new(
+            context.allocators().memory().clone(),
+            vulkano::image::ImageCreateInfo {
+                image_type: vulkano::image::ImageType::Dim2d,
+                format: vulkano::format::Format::R8_UNORM,
+                extent: [1; 3],
+                array_layers: 1,
+                mip_levels: 1,
+                samples: vk::SampleCount::Sample1,
+                tiling: vulkano::image::ImageTiling::Optimal,
+                usage: vk::ImageUsage::SAMPLED,
+                sharing: vk::Sharing::Exclusive,
+                initial_layout: vk::ImageLayout::Undefined,
+                ..Default::default()
+            },
+            vulkano::memory::allocator::AllocationCreateInfo {
+                memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
+        )?;
+        let view = vk::ImageView::new(
+            image.clone(),
+            vk::ImageViewCreateInfo {
+                format: image.format(),
+                ..vk::ImageViewCreateInfo::from_image(&image)
+            },
+        )?;
+        // Insert a dummy barrier to transition the image. Expensive!
+        unsafe {
+            let mut cb = vulkano::command_buffer::sys::UnsafeCommandBufferBuilder::new(
+                context.allocators().command_buffer(),
+                context.queues().graphics().idx(),
+                vulkano::command_buffer::CommandBufferLevel::Primary,
+                vulkano::command_buffer::sys::CommandBufferBeginInfo {
+                    usage: vk::CommandBufferUsage::OneTimeSubmit,
+                    inheritance_info: None,
+                    ..Default::default()
+                },
+            )?;
+            let dummy_transition = vk::sync::ImageMemoryBarrier {
+                old_layout: vk::ImageLayout::Undefined,
+                new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+
+                // None.
+                src_stages: vk::sync::PipelineStages::TOP_OF_PIPE,
+                src_access: vk::sync::AccessFlags::empty(),
+
+                dst_stages: vk::sync::PipelineStages::FRAGMENT_SHADER,
+                dst_access: vk::sync::AccessFlags::SHADER_READ,
+
+                subresource_range: image.subresource_range(),
+
+                ..vk::sync::ImageMemoryBarrier::image(image)
+            };
+            cb.pipeline_barrier(&vk::sync::DependencyInfo {
+                image_memory_barriers: smallvec::smallvec![dummy_transition],
+                ..Default::default()
+            })?;
+
+            let cb = cb.build()?;
+            let cb = [cb.handle()];
+
+            let submission = ash::vk::SubmitInfo::builder().command_buffers(&cb);
+
+            let graphics = context.queues().graphics().queue();
+            let graphics_handle = graphics.handle();
+            let pfn_submit = context.device().fns().v1_0.queue_submit;
+
+            // Synchronize externally
+            graphics.with(|mut lock| -> anyhow::Result<()> {
+                (pfn_submit)(
+                    graphics_handle,
+                    1,
+                    &submission.build(),
+                    ash::vk::Fence::null(),
+                )
+                .result()?;
+                // cb, image must outlive execution. Weh.
+                lock.wait_idle()?;
+                Ok(())
+            })?;
+        }
+        vk::PersistentDescriptorSet::new(
+            context.allocators().descriptor_set(),
+            layout,
+            [vk::WriteDescriptorSet::image_view_with_layout(
+                0,
+                vulkano::descriptor_set::DescriptorImageViewInfo {
+                    image_view: view,
+                    image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+                },
+            )],
+            [],
+        )
+        .map_err(Into::into)
     }
     pub fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Arc<Self>> {
         let device = context.device();
@@ -1154,6 +1276,9 @@ impl BlendEngine {
             )?
         };
 
+        let dummy_image_descriptor =
+            Self::make_dummy_image_descriptor(&context, feedback_layout.set_layouts()[1].clone())?;
+
         Ok(Self {
             context,
             feedback_layout,
@@ -1162,6 +1287,7 @@ impl BlendEngine {
             feedback_pass,
             mode_pipelines: hashbrown::HashMap::new().into(),
             self_dependency_flags,
+            dummy_image_descriptor,
         }
         .into())
     }
