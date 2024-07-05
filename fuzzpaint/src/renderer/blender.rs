@@ -603,8 +603,7 @@ impl BlendInvocation {
                         // We could make a barrier-per-image... Seems pricey for the driver to handle.
                         let barrier = vulkano::sync::ImageMemoryBarrier {
                             // We can't know what happened before, so source is maximally strong
-                            src_access: vulkano::sync::AccessFlags::MEMORY_WRITE
-                                | vulkano::sync::AccessFlags::MEMORY_READ,
+                            src_access: vulkano::sync::AccessFlags::MEMORY_WRITE,
                             src_stages: vulkano::sync::PipelineStages::BOTTOM_OF_PIPE,
 
                             // We *do* know what we're gonna do, though!
@@ -649,8 +648,7 @@ impl BlendInvocation {
             let giant_barrier_of_doom = {
                 let dest_barrier = vulkano::sync::ImageMemoryBarrier {
                     // We can't know what happened before, so source is maximally strong
-                    src_access: vulkano::sync::AccessFlags::MEMORY_WRITE
-                        | vulkano::sync::AccessFlags::MEMORY_READ,
+                    src_access: vulkano::sync::AccessFlags::MEMORY_WRITE,
                     src_stages: vulkano::sync::PipelineStages::BOTTOM_OF_PIPE,
 
                     // We *do* know what we're gonna do, though!
@@ -868,7 +866,7 @@ impl BlendInvocation {
             Ok(commands.build()?)
         }
     }
-    /// Execute the blend tree.
+    /// Execute the entire blend tree.
     ///
     /// # Safety
     /// ## Access
@@ -922,6 +920,22 @@ impl BlendInvocation {
 
         Ok(())
     }
+    /// Like `execute`, except only running necessary calculations for one image source being changed.
+    /// No guarantees are made about this accessing fewer resources than a full execution.
+    ///
+    /// # Safety:
+    /// See [`BlendInvocation::execute`]
+    pub unsafe fn execute_delta(&self, _changed: &vk::Image) -> anyhow::Result<()> {
+        // Todo! This is a valid implementation, however.
+        // Safety forwarded to caller.
+        unsafe { self.execute() }
+    }
+}
+
+#[derive(Copy, Clone, Debug, thiserror::Error)]
+pub enum ExecuteDeltaError {
+    #[error("the changed image was not a source")]
+    NotASource,
 }
 
 pub struct BlendEngine {
@@ -1220,8 +1234,7 @@ impl BlendEngine {
                 final_layout: vk::ImageLayout::General,
                 format: crate::DOCUMENT_FORMAT,
                 load_op: vk::AttachmentLoadOp::Load,
-                // THIS SHOULD BE `StoreOp::None`, vulkano doesn't support that yet.
-                // This is an input-only attachment and is not modified.
+
                 store_op: vk::AttachmentStoreOp::Store,
                 ..Default::default()
             };
@@ -1248,8 +1261,7 @@ impl BlendEngine {
                 // but use an extremely strong dependency instead :P
                 src_subpass: None, // External
                 src_stages: vk::sync::PipelineStages::BOTTOM_OF_PIPE,
-                src_access: vk::sync::AccessFlags::MEMORY_WRITE
-                    | vk::sync::AccessFlags::MEMORY_READ,
+                src_access: vk::sync::AccessFlags::MEMORY_WRITE,
 
                 dst_subpass: Some(0),
                 // Before we read or write the images in any way within subpass.
@@ -1277,7 +1289,7 @@ impl BlendEngine {
         };
 
         let dummy_image_descriptor =
-            Self::make_dummy_image_descriptor(&context, feedback_layout.set_layouts()[1].clone())?;
+            Self::make_dummy_image_descriptor(&context, feedback_layout.set_layouts()[0].clone())?;
 
         Ok(Self {
             context,

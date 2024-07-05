@@ -13,6 +13,8 @@ struct PerDocumentData {
     listener: queue::DocumentCommandListener,
     /// Cached images of each of the nodes of the graph.
     graph_render_data: hashbrown::HashMap<state::graph::AnyID, RenderData>,
+    /// precompiled blend operations, invalided when the graph changes.
+    compiled_blend: Option<blender::BlendInvocation>,
 }
 #[derive(thiserror::Error, Debug)]
 enum IncrementalDrawErr {
@@ -85,6 +87,7 @@ impl Renderer {
                     v.insert(PerDocumentData {
                         listener,
                         graph_render_data: hashbrown::HashMap::new(),
+                        compiled_blend: None,
                     }),
                 )
             }
@@ -312,7 +315,7 @@ impl Renderer {
                         .collect();
                     if strokes.is_empty() {
                         //FIXME: Renderer doesn't know how to handle zero strokes.
-                        fences.push(Self::render_color(
+                        fences.push(Self::clear(
                             context.as_ref(),
                             image,
                             fuzzpaint_core::color::Color::TRANSPARENT,
@@ -383,16 +386,21 @@ impl Renderer {
         state: &impl queue::state_reader::CommandQueueStateReader,
         _into: &Arc<vk::ImageView>,
     ) -> Result<(), IncrementalDrawErr> {
+        if !state.has_changes() {
+            // Nothing to do
+            return Ok(());
+        }
+
+
         if state.has_changes() {
             // State is dirty!
             // Lol, just defer to draw_from_scratch until that works.
             Err(IncrementalDrawErr::StateMismatch)
         } else {
-            // Nothing to do
             Ok(())
         }
     }
-    fn render_color(
+    fn clear(
         context: &crate::render_device::RenderContext,
         image: &RenderData,
         color: fuzzpaint_core::color::Color,
@@ -977,9 +985,13 @@ mod stroke_renderer {
                 self.context.allocators().memory().clone(),
                 vk::ImageCreateInfo {
                     // Too many !!
-                    usage: vk::ImageUsage::COLOR_ATTACHMENT
+                    usage:
+                    // Feedback loop for blending into..
+                    vk::ImageUsage::COLOR_ATTACHMENT
+                        | vk::ImageUsage::INPUT_ATTACHMENT
+                        // Source for blending from..
                         | vk::ImageUsage::SAMPLED
-                        // For color clearing
+                        // For color clearing..
                         | vk::ImageUsage::TRANSFER_DST,
                     extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
                     array_layers: 1,

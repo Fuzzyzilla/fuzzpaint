@@ -19,6 +19,9 @@
                     "kind": "bin"
                 }
             },
+            "env": {
+                "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation"
+            },
             "args": [],
             "cwd": "${workspaceFolder}"
         },
@@ -37,6 +40,9 @@
                     "name": "fuzzpaint",
                     "kind": "bin"
                 }
+            },
+            "env": {
+                "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation"
             },
             "args": [],
             "cwd": "${workspaceFolder}"
