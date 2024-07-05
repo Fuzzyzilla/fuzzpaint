@@ -48,14 +48,14 @@ struct Renderer {
     strokes: stroke_renderer::StrokeLayerRenderer,
     text_builder: crate::text::Builder,
     text: crate::text::renderer::monochrome::Renderer,
-    blend_engine: blender::BlendEngine,
+    blend_engine: Arc<blender::BlendEngine>,
     data: hashbrown::HashMap<state::DocumentID, PerDocumentData>,
 }
 impl Renderer {
     fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
         Ok(Self {
             context: context.clone(),
-            blend_engine: blender::BlendEngine::new(&context)?,
+            blend_engine: blender::BlendEngine::new(context.clone())?,
             text_builder: crate::text::Builder::allocate_new(
                 context.allocators().memory().clone(),
             )?,
@@ -145,7 +145,7 @@ impl Renderer {
     /// Reuses allocated images, but ignores their contents!
     fn draw_from_scratch(
         context: &Arc<crate::render_device::RenderContext>,
-        blend_engine: &blender::BlendEngine,
+        blend_engine: &Arc<blender::BlendEngine>,
         renderer: &stroke_renderer::StrokeLayerRenderer,
         text_builder: &mut crate::text::Builder,
         text_renderer: &crate::text::renderer::monochrome::Renderer,
@@ -157,7 +157,7 @@ impl Renderer {
 
         /// Insert a single node (possibly recursing) into the builder.
         fn insert_blend(
-            blend_engine: &blender::BlendEngine,
+            blend_engine: &Arc<blender::BlendEngine>,
             builder: &mut blender::BlendInvocationBuilder,
             document_data: &PerDocumentData,
             graph: &state::graph::BlendGraph,
@@ -227,7 +227,7 @@ impl Renderer {
 
         /// Recursively add children into existing blend builder.
         fn blend_for_passthrough(
-            blend_engine: &blender::BlendEngine,
+            blend_engine: &Arc<blender::BlendEngine>,
             builder: &mut blender::BlendInvocationBuilder,
             document_data: &PerDocumentData,
             graph: &state::graph::BlendGraph,
@@ -245,7 +245,7 @@ impl Renderer {
 
         /// Recursively build a blend invocation for the node, or None for root.
         fn blend_for_node(
-            blend_engine: &blender::BlendEngine,
+            blend_engine: &Arc<blender::BlendEngine>,
             document_data: &PerDocumentData,
             graph: &state::graph::BlendGraph,
             palette: &state::palette::Palette,
@@ -253,11 +253,11 @@ impl Renderer {
 
             into_image: Arc<vk::ImageView>,
             clear_image: bool,
-        ) -> anyhow::Result<blender::BlendInvocationHandle> {
+        ) -> anyhow::Result<blender::NestedBlendInvocation> {
             let iter = graph
                 .iter_node(node)
                 .ok_or_else(|| anyhow::anyhow!("Node not found"))?;
-            let mut builder = blend_engine.start(into_image, clear_image);
+            let mut builder = blend_engine.clone().start(into_image, clear_image);
 
             for (id, data) in iter {
                 insert_blend(blend_engine, &mut builder, document_data, graph, palette, id, data)?;
@@ -265,7 +265,7 @@ impl Renderer {
 
             // We traverse top-down, we need to blend bottom-up
             builder.reverse();
-            Ok(builder.build())
+            Ok(builder.nest())
         }
         // Create/discard images
         Self::allocate_prune_graph(
@@ -344,7 +344,7 @@ impl Renderer {
             }
         }
 
-        let mut top_level_blend = blend_engine.start(into.clone(), true);
+        let mut top_level_blend = blend_engine.clone().start(into.clone(), true);
         let graph = state.graph();
         let palette = state.palette();
         // Walk the tree in tree-order, building up a blend operation.
@@ -361,7 +361,6 @@ impl Renderer {
         }
         // We traverse top-down, we need to blend bottom-up
         top_level_blend.reverse();
-        let top_level_blend = top_level_blend.build();
 
         // Wait for every fence. Terrible, but vulkano semaphores don't seem to be working currently.
         // Note to self: see commit fuzzpaint @ d435ca7c29cf045be413c9849be928693a2de458 for a time when this worked.
@@ -371,14 +370,14 @@ impl Renderer {
         }
 
         // Execute blend after the images are ready
-        unsafe { blend_engine.submit(context.as_ref(), top_level_blend)?; }
+        unsafe { top_level_blend.build()?.execute()?; }
 
         Ok(())
     }
     /// Assumes the existence of a previous `draw_from_scratch`, applying only the diff.
     fn draw_incremental(
         _context: &Arc<crate::render_device::RenderContext>,
-        _blend_engine: &blender::BlendEngine,
+        _blend_engine: &Arc<blender::BlendEngine>,
         _renderer: &stroke_renderer::StrokeLayerRenderer,
         _document_data: &mut PerDocumentData,
         state: &impl queue::state_reader::CommandQueueStateReader,
