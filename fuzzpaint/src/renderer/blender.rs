@@ -370,13 +370,24 @@ impl BlendInvocationBuilder {
     }
 }
 
+/// Data to inform vulkano of changes in layout from blending operations.
+struct LayoutTransitionNeeds {
+    /// Images moved to `general` layout after invocation, must inform vulkano of the change.
+    to_general_after: hashbrown::HashSet<Arc<vk::Image>>,
+    /// Images that must be moved to general layout before execution
+    to_general_before: hashbrown::HashSet<Arc<vk::Image>>,
+    /// Images that must be moved to sampled optimal layout before execution.
+    to_sampled_before: hashbrown::HashSet<Arc<vk::Image>>,
+}
+
 /// A compiled, ready-to-execute blend operation.
 pub struct BlendInvocation {
     /// Keep device and allocators alive.
     engine: Arc<BlendEngine>,
     /// Array of stages which must be run sequentially, each stage running an array of operations in parallel.
     commands: Vec<Vec<vulkano::command_buffer::sys::UnsafeCommandBuffer>>,
-    /// Kept around merely for lifetimes.
+    transitions: LayoutTransitionNeeds,
+    /// Kept around merely for allocation lifetimes.
     _framebuffers: hashbrown::HashMap<
         ash::vk::ImageView,
         (Arc<vk::Framebuffer>, Arc<vk::PersistentDescriptorSet>),
@@ -398,6 +409,7 @@ impl BlendInvocation {
                 Arc<vk::PersistentDescriptorSet>,
             >,
             dest: &Arc<vk::ImageView>,
+            clear_dest: bool,
             sources: &[(BlendImageSource, Blend)],
         ) -> anyhow::Result<()> {
             // Insert framebuffer + feedback attachment for destination image.
@@ -420,6 +432,7 @@ impl BlendInvocation {
                     )?,
                 ),
             );
+
             // Insert sources for all children.
             for (source, blend) in sources {
                 // Track the mode
@@ -445,6 +458,7 @@ impl BlendInvocation {
                         framebuffers,
                         descriptors,
                         &inv.destination_image,
+                        inv.clear_destination,
                         &inv.operations,
                     )?;
                 }
@@ -465,6 +479,7 @@ impl BlendInvocation {
             &mut framebuffers,
             &mut descriptors,
             &from.destination_image,
+            from.clear_destination,
             &from.operations,
         )?;
 
@@ -516,6 +531,12 @@ impl BlendInvocation {
             pipes
         };
 
+        let mut transitions = LayoutTransitionNeeds {
+            to_general_after: hashbrown::HashSet::new(),
+            to_general_before: hashbrown::HashSet::new(),
+            to_sampled_before: hashbrown::HashSet::new(),
+        };
+
         // Tasks that can all be executed in parallel on the device.
         // child tasks should be put back.
         let mut next_tasks = vec![from];
@@ -536,6 +557,7 @@ impl BlendInvocation {
                         &pipes,
                         &framebuffers,
                         &descriptors,
+                        &mut transitions,
                     )?;
 
                     // Push compilation tasks for nested operations onto next loop.
@@ -558,6 +580,7 @@ impl BlendInvocation {
         Ok(Self {
             engine,
             commands: all_commands,
+            transitions,
             _descriptors: descriptors,
             _framebuffers: framebuffers,
         })
@@ -575,6 +598,8 @@ impl BlendInvocation {
             (Arc<vk::Framebuffer>, Arc<vk::PersistentDescriptorSet>),
         >,
         descriptors: &hashbrown::HashMap<ash::vk::ImageView, Arc<vk::PersistentDescriptorSet>>,
+        // Keep track of what we changed in unsafe-land so that vulkano knows what's up...
+        transitions: &mut LayoutTransitionNeeds,
     ) -> anyhow::Result<vulkano::command_buffer::sys::UnsafeCommandBuffer> {
         // Unfortunately, we *need* to use unsafe command buffer here. There is currently
         // an error with Auto command buffer, where pipeline barriers are not inserted correctly
@@ -612,7 +637,8 @@ impl BlendInvocation {
                             // Only need CLEAR but that's extension...
                             dst_stages: vulkano::sync::PipelineStages::ALL_TRANSFER,
 
-                            old_layout: vk::ImageLayout::General,
+                            // Don't mind the initial layout.
+                            old_layout: vk::ImageLayout::Undefined,
                             new_layout: vk::ImageLayout::General,
 
                             subresource_range: op.destination_image.subresource_range().clone(),
@@ -630,6 +656,10 @@ impl BlendInvocation {
                         }
                     };
 
+                    transitions
+                        .to_general_after
+                        .insert(op.destination_image.image().clone());
+
                     commands.pipeline_barrier(&destination_barrier)?;
                     commands.clear_color_image(&vk::ClearColorImageInfo {
                         clear_value: [0.0; 4].into(),
@@ -646,6 +676,10 @@ impl BlendInvocation {
             // Insert a frankly gigantic barrier, ensuring prior image access is complete.
 
             let giant_barrier_of_doom = {
+                transitions
+                    .to_general_after
+                    .insert(op.destination_image.image().clone());
+
                 let dest_barrier = vulkano::sync::ImageMemoryBarrier {
                     // We can't know what happened before, so source is maximally strong
                     src_access: vulkano::sync::AccessFlags::MEMORY_WRITE,
@@ -661,7 +695,14 @@ impl BlendInvocation {
 
                     subresource_range: op.destination_image.subresource_range().clone(),
 
-                    old_layout: vk::ImageLayout::General,
+                    old_layout: if op.clear_destination {
+                        vk::ImageLayout::Undefined
+                    } else {
+                        transitions
+                            .to_general_before
+                            .insert(op.destination_image.image().clone());
+                        vk::ImageLayout::General
+                    },
                     new_layout: vk::ImageLayout::General,
 
                     ..vulkano::sync::ImageMemoryBarrier::image(op.destination_image.image().clone())
@@ -693,9 +734,11 @@ impl BlendInvocation {
                                 src_barrier.image = view.image().clone();
                                 src_barrier.subresource_range = view.subresource_range().clone();
 
-                                if matches!(src, BlendImageSource::BlendInvocation(_)) {
+                                if matches!(src, BlendImageSource::BlendInvocation(inv)) {
                                     src_barrier.new_layout = vk::ImageLayout::General;
                                     src_barrier.old_layout = vk::ImageLayout::General;
+                                } else {
+                                    transitions.to_sampled_before.insert(view.image().clone());
                                 }
 
                                 src_barrier
@@ -883,6 +926,115 @@ impl BlendInvocation {
     /// * All source images must be in `SHADER_READ_ONLY_OPTIMAL` layout.
     // Todo: input sync? As-is, the user must wait on host side, not ideal.
     pub unsafe fn execute(&self) -> anyhow::Result<()> {
+        // We have images to transition, look at what layout they were and then move them!
+        let _outlive = if self.transitions.to_general_before.is_empty()
+            || self.transitions.to_sampled_before.is_empty()
+        {
+            // Vulkano does not update layouts until a cleanup occurs, wait_idle being one such cleanup....
+            // This is very sad, but unfixable until vulkano-taskgraph comes along.
+            self.engine
+                .context
+                .queues()
+                .graphics()
+                .queue()
+                .with(|mut q| q.wait_idle())?;
+
+            unsafe {
+                let mut barrier = vk::sync::DependencyInfo {
+                    ..Default::default()
+                };
+
+                // Barrier each image if vulkano left it in the wrong layout for our needs
+                for image in &self.transitions.to_general_before {
+                    // Instantaneous layout is okay here due to the wait_idle and the safety precondition.
+                    let current_layout = image.instantaneous_layout();
+                    if current_layout != vk::ImageLayout::General {
+                        barrier
+                            .image_memory_barriers
+                            .push(vk::sync::ImageMemoryBarrier {
+                                // None.
+                                src_stages: vk::sync::PipelineStages::TOP_OF_PIPE,
+                                src_access: vk::sync::AccessFlags::empty(),
+
+                                // All
+                                dst_stages: vk::sync::PipelineStages::TOP_OF_PIPE,
+                                dst_access: vk::sync::AccessFlags::MEMORY_WRITE,
+
+                                old_layout: current_layout,
+                                new_layout: vk::ImageLayout::General,
+
+                                subresource_range: image.subresource_range(),
+
+                                ..vulkano::sync::ImageMemoryBarrier::image(image.clone())
+                            });
+                    }
+                }
+                // Barrier each image if vulkano let it in the wrong layout for our needs
+                for image in &self.transitions.to_sampled_before {
+                    // Instantaneous layout is okay here due to the wait_idle and the safety precondition.
+                    let current_layout = image.instantaneous_layout();
+                    if current_layout != vk::ImageLayout::ShaderReadOnlyOptimal {
+                        barrier
+                            .image_memory_barriers
+                            .push(vk::sync::ImageMemoryBarrier {
+                                // None.
+                                src_stages: vk::sync::PipelineStages::TOP_OF_PIPE,
+                                src_access: vk::sync::AccessFlags::empty(),
+
+                                // All reads, (since that's all we do with these images)
+                                dst_stages: vk::sync::PipelineStages::TOP_OF_PIPE,
+                                dst_access: vk::sync::AccessFlags::MEMORY_READ,
+
+                                old_layout: current_layout,
+                                new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+
+                                subresource_range: image.subresource_range(),
+
+                                ..vulkano::sync::ImageMemoryBarrier::image(image.clone())
+                            });
+                    }
+                }
+
+                // Only unsafe command buffer lets us execute arbitrary barriers.
+                let mut commands = vulkano::command_buffer::sys::UnsafeCommandBufferBuilder::new(
+                    self.engine.context.allocators().command_buffer(),
+                    self.engine.context.queues().graphics().idx(),
+                    vulkano::command_buffer::CommandBufferLevel::Primary,
+                    vulkano::command_buffer::sys::CommandBufferBeginInfo {
+                        usage: vk::CommandBufferUsage::OneTimeSubmit,
+                        inheritance_info: None,
+                        ..Default::default()
+                    },
+                )?;
+                commands.pipeline_barrier(&barrier)?;
+                let commands = commands.build()?;
+                let cbs = [commands.handle()];
+
+                let submission = ash::vk::SubmitInfo::builder().command_buffers(&cbs);
+
+                let graphics = self.engine.context.queues().graphics().queue();
+                let graphics_handle = graphics.handle();
+                let pfn_submit = self.engine.context.device().fns().v1_0.queue_submit;
+
+                // Synchronize externally
+                graphics.with(|_lock| -> anyhow::Result<()> {
+                    (pfn_submit)(
+                        graphics_handle,
+                        1,
+                        &submission.build(),
+                        ash::vk::Fence::null(),
+                    )
+                    .result()?;
+                    Ok(())
+                })?;
+
+                // Ensure our allocation lives long enough!
+                Some(commands)
+            }
+        } else {
+            None
+        };
+
         for buffers in &self.commands {
             // `buffers` may all be executed in parallel without sync.
             // After all of these, the next iteration can proceed following a barrier.
@@ -917,6 +1069,31 @@ impl BlendInvocation {
             .graphics()
             .queue()
             .with(|mut q| q.wait_idle())?;
+
+        // Inform Vulkano of the transitions we executed on it's behalf.
+        for transition in self
+            .transitions
+            .to_general_after
+            .iter()
+            .chain(self.transitions.to_general_before.iter())
+        {
+            // Safety: Our command buffers did this transition by necessity!
+            // Fallibility: no host nor device accesses are happening right now (safety condition + q.wait_idle)
+            unsafe {
+                transition
+                    .externally_transitioned(vulkano::image::ImageLayout::General)
+                    .unwrap();
+            }
+        }
+        for transition in &self.transitions.to_sampled_before {
+            // Safety: Our command buffers did this transition by necessity!
+            // Fallibility: no host nor device accesses are happening right now (safety condition + q.wait_idle)
+            unsafe {
+                transition
+                    .externally_transitioned(vulkano::image::ImageLayout::ShaderReadOnlyOptimal)
+                    .unwrap();
+            }
+        }
 
         Ok(())
     }
