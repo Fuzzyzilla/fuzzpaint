@@ -202,7 +202,7 @@ mod shaders {
                     layout(location = 0) out vec4 color;
 
                     void main() {
-                        color = is_solid ? solid_color.gbra : (texture(src, uv).gbra * solid_color.a);
+                        color = subpassLoad(dst).gbra;
                     }
                 "
         }
@@ -370,29 +370,12 @@ impl BlendInvocationBuilder {
     }
 }
 
-/// Data to inform vulkano of changes in layout from blending operations.
-struct LayoutTransitionNeeds {
-    /// Images moved to `general` layout after invocation, must inform vulkano of the change.
-    to_general_after: hashbrown::HashSet<Arc<vk::Image>>,
-    /// Images that must be moved to general layout before execution
-    to_general_before: hashbrown::HashSet<Arc<vk::Image>>,
-    /// Images that must be moved to sampled optimal layout before execution.
-    to_sampled_before: hashbrown::HashSet<Arc<vk::Image>>,
-}
-
 /// A compiled, ready-to-execute blend operation.
 pub struct BlendInvocation {
     /// Keep device and allocators alive.
     engine: Arc<BlendEngine>,
     /// Array of stages which must be run sequentially, each stage running an array of operations in parallel.
-    commands: Vec<Vec<vulkano::command_buffer::sys::UnsafeCommandBuffer>>,
-    transitions: LayoutTransitionNeeds,
-    /// Kept around merely for allocation lifetimes.
-    _framebuffers: hashbrown::HashMap<
-        ash::vk::ImageView,
-        (Arc<vk::Framebuffer>, Arc<vk::PersistentDescriptorSet>),
-    >,
-    _descriptors: hashbrown::HashMap<ash::vk::ImageView, Arc<vk::PersistentDescriptorSet>>,
+    commands: Vec<Vec<Arc<vk::PrimaryAutoCommandBuffer>>>,
 }
 impl BlendInvocation {
     fn compile(engine: Arc<BlendEngine>, from: NestedBlendInvocation) -> anyhow::Result<Self> {
@@ -409,7 +392,6 @@ impl BlendInvocation {
                 Arc<vk::PersistentDescriptorSet>,
             >,
             dest: &Arc<vk::ImageView>,
-            clear_dest: bool,
             sources: &[(BlendImageSource, Blend)],
         ) -> anyhow::Result<()> {
             // Insert framebuffer + feedback attachment for destination image.
@@ -427,7 +409,13 @@ impl BlendInvocation {
                     vk::PersistentDescriptorSet::new(
                         engine.context.allocators().descriptor_set(),
                         engine.feedback_layout.set_layouts()[1].clone(),
-                        [vk::WriteDescriptorSet::image_view(0, dest.clone())],
+                        [vk::WriteDescriptorSet::image_view_with_layout(
+                            0,
+                            vulkano::descriptor_set::DescriptorImageViewInfo {
+                                image_layout: vk::ImageLayout::General,
+                                image_view: dest.clone(),
+                            },
+                        )],
                         [],
                     )?,
                 ),
@@ -445,7 +433,20 @@ impl BlendInvocation {
                         vk::PersistentDescriptorSet::new(
                             engine.context.allocators().descriptor_set(),
                             engine.feedback_layout.set_layouts()[0].clone(),
-                            [vk::WriteDescriptorSet::image_view(0, view.clone())],
+                            [vk::WriteDescriptorSet::image_view_with_layout(
+                                0,
+                                vulkano::descriptor_set::DescriptorImageViewInfo {
+                                    image_layout: if matches!(
+                                        source,
+                                        BlendImageSource::BlendInvocation(_)
+                                    ) {
+                                        vk::ImageLayout::General
+                                    } else {
+                                        vk::ImageLayout::ShaderReadOnlyOptimal
+                                    },
+                                    image_view: view.clone(),
+                                },
+                            )],
                             [],
                         )?,
                     );
@@ -458,7 +459,6 @@ impl BlendInvocation {
                         framebuffers,
                         descriptors,
                         &inv.destination_image,
-                        inv.clear_destination,
                         &inv.operations,
                     )?;
                 }
@@ -479,7 +479,6 @@ impl BlendInvocation {
             &mut framebuffers,
             &mut descriptors,
             &from.destination_image,
-            from.clear_destination,
             &from.operations,
         )?;
 
@@ -531,17 +530,11 @@ impl BlendInvocation {
             pipes
         };
 
-        let mut transitions = LayoutTransitionNeeds {
-            to_general_after: hashbrown::HashSet::new(),
-            to_general_before: hashbrown::HashSet::new(),
-            to_sampled_before: hashbrown::HashSet::new(),
-        };
-
         // Tasks that can all be executed in parallel on the device.
         // child tasks should be put back.
         let mut next_tasks = vec![from];
 
-        let mut all_commands = vec![vec![]];
+        let mut all_commands = vec![];
 
         while !next_tasks.is_empty() {
             let cur_tasks = std::mem::take(&mut next_tasks);
@@ -557,7 +550,6 @@ impl BlendInvocation {
                         &pipes,
                         &framebuffers,
                         &descriptors,
-                        &mut transitions,
                     )?;
 
                     // Push compilation tasks for nested operations onto next loop.
@@ -571,7 +563,8 @@ impl BlendInvocation {
                 })
                 .collect();
 
-            all_commands.push(commands?);
+            let commands = commands?;
+            all_commands.push(commands);
         }
 
         // We start with deepest nested ops first, work up.
@@ -580,9 +573,6 @@ impl BlendInvocation {
         Ok(Self {
             engine,
             commands: all_commands,
-            transitions,
-            _descriptors: descriptors,
-            _framebuffers: framebuffers,
         })
     }
     /// Compile a nested blend, without recursing into further nested blends.
@@ -598,468 +588,193 @@ impl BlendInvocation {
             (Arc<vk::Framebuffer>, Arc<vk::PersistentDescriptorSet>),
         >,
         descriptors: &hashbrown::HashMap<ash::vk::ImageView, Arc<vk::PersistentDescriptorSet>>,
-        // Keep track of what we changed in unsafe-land so that vulkano knows what's up...
-        transitions: &mut LayoutTransitionNeeds,
-    ) -> anyhow::Result<vulkano::command_buffer::sys::UnsafeCommandBuffer> {
+    ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
         // Unfortunately, we *need* to use unsafe command buffer here. There is currently
         // an error with Auto command buffer, where pipeline barriers are not inserted correctly
         // between `CompiledBlend::Loopback` pipes leading to race conditions, and there is no way to do it manually
         // other than to lower to `unsafe`!
-        unsafe {
-            let mut commands = vulkano::command_buffer::sys::UnsafeCommandBufferBuilder::new(
-                engine.context.allocators().command_buffer(),
-                engine.context.queues().graphics().idx(),
-                vulkano::command_buffer::CommandBufferLevel::Primary,
-                vulkano::command_buffer::sys::CommandBufferBeginInfo {
-                    usage: vk::CommandBufferUsage::MultipleSubmit,
-                    inheritance_info: None,
-                    ..Default::default()
-                },
-            )?;
+        let mut commands = vk::AutoCommandBufferBuilder::primary(
+            engine.context.allocators().command_buffer(),
+            engine.context.queues().graphics().idx(),
+            vk::CommandBufferUsage::MultipleSubmit,
+        )?;
 
-            // Still honor the request to clear the image if no layers are provided.
-            // In the not empty case, it's handled by a clear_attachment instead.
-            if op.operations.is_empty() {
-                if op.clear_destination {
-                    // Wait for exclusive access...
-
-                    // We need to make sure that the previous command buffer isn't accessing the image we're about to clear.
-                    let destination_barrier = {
-                        // We could make a barrier-per-image... Seems pricey for the driver to handle.
-                        let barrier = vulkano::sync::ImageMemoryBarrier {
-                            // We can't know what happened before, so source is maximally strong
-                            src_access: vulkano::sync::AccessFlags::MEMORY_WRITE,
-                            src_stages: vulkano::sync::PipelineStages::BOTTOM_OF_PIPE,
-
-                            // We *do* know what we're gonna do, though!
-                            // We can't clear until all red/writes from before complete.
-                            dst_access: vulkano::sync::AccessFlags::TRANSFER_WRITE,
-                            // Only need CLEAR but that's extension...
-                            dst_stages: vulkano::sync::PipelineStages::ALL_TRANSFER,
-
-                            // Don't mind the initial layout.
-                            old_layout: vk::ImageLayout::Undefined,
-                            new_layout: vk::ImageLayout::General,
-
-                            subresource_range: op.destination_image.subresource_range().clone(),
-
-                            ..vulkano::sync::ImageMemoryBarrier::image(
-                                op.destination_image.image().clone(),
-                            )
-                        };
-
-                        vulkano::sync::DependencyInfo {
-                            // Can't be by-region, as clears don't work that way.
-                            dependency_flags: vulkano::sync::DependencyFlags::empty(),
-                            image_memory_barriers: smallvec::smallvec![barrier],
-                            ..Default::default()
-                        }
-                    };
-
-                    transitions
-                        .to_general_after
-                        .insert(op.destination_image.image().clone());
-
-                    commands.pipeline_barrier(&destination_barrier)?;
-                    commands.clear_color_image(&vk::ClearColorImageInfo {
-                        clear_value: [0.0; 4].into(),
-                        regions: smallvec::smallvec![op
-                            .destination_image
-                            .subresource_range()
-                            .clone(),],
-                        ..vk::ClearColorImageInfo::image(op.destination_image.image().clone())
-                    })?;
-                }
-                return Ok(commands.build()?);
-            }
-
-            // Insert a frankly gigantic barrier, ensuring prior image access is complete.
-
-            let giant_barrier_of_doom = {
-                transitions
-                    .to_general_after
-                    .insert(op.destination_image.image().clone());
-
-                let dest_barrier = vulkano::sync::ImageMemoryBarrier {
-                    // We can't know what happened before, so source is maximally strong
-                    src_access: vulkano::sync::AccessFlags::MEMORY_WRITE,
-                    src_stages: vulkano::sync::PipelineStages::BOTTOM_OF_PIPE,
-
-                    // We *do* know what we're gonna do, though!
-                    // We can't feedback or blend until all red/writes from before complete.
-                    dst_access: vulkano::sync::AccessFlags::COLOR_ATTACHMENT_READ
-                        | vulkano::sync::AccessFlags::COLOR_ATTACHMENT_WRITE
-                        | vulkano::sync::AccessFlags::INPUT_ATTACHMENT_READ,
-                    dst_stages: vulkano::sync::PipelineStages::COLOR_ATTACHMENT_OUTPUT
-                        | vulkano::sync::PipelineStages::FRAGMENT_SHADER,
-
-                    subresource_range: op.destination_image.subresource_range().clone(),
-
-                    old_layout: if op.clear_destination {
-                        vk::ImageLayout::Undefined
-                    } else {
-                        transitions
-                            .to_general_before
-                            .insert(op.destination_image.image().clone());
-                        vk::ImageLayout::General
-                    },
-                    new_layout: vk::ImageLayout::General,
-
-                    ..vulkano::sync::ImageMemoryBarrier::image(op.destination_image.image().clone())
-                };
-                let src_barrier = vulkano::sync::ImageMemoryBarrier {
-                    // We can't know what happened before, so source is maximally strong for writes only.
-                    src_access: vulkano::sync::AccessFlags::MEMORY_WRITE,
-                    src_stages: vulkano::sync::PipelineStages::BOTTOM_OF_PIPE,
-
-                    // Only sampling
-                    dst_access: vulkano::sync::AccessFlags::SHADER_READ,
-                    dst_stages: vulkano::sync::PipelineStages::FRAGMENT_SHADER,
-
-                    old_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-                    new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-                    // Dummy image for _ne -w-;;
-                    ..vulkano::sync::ImageMemoryBarrier::image(op.destination_image.image().clone())
-                };
-
-                vulkano::sync::DependencyInfo {
-                    // Can't be by-region, as samplers don't work that way.
-                    // Could split it up into two barriers, by region and global? Hmmm..
-                    dependency_flags: vulkano::sync::DependencyFlags::empty(),
-                    // Barrier on the output image and allll inputs.
-                    image_memory_barriers: std::iter::once(dest_barrier)
-                        .chain(op.operations.iter().filter_map(|(src, _)| {
-                            src.view().map(|view| {
-                                let mut src_barrier = src_barrier.clone();
-                                src_barrier.image = view.image().clone();
-                                src_barrier.subresource_range = view.subresource_range().clone();
-
-                                if matches!(src, BlendImageSource::BlendInvocation(inv)) {
-                                    src_barrier.new_layout = vk::ImageLayout::General;
-                                    src_barrier.old_layout = vk::ImageLayout::General;
-                                } else {
-                                    transitions.to_sampled_before.insert(view.image().clone());
-                                }
-
-                                src_barrier
-                            })
-                        }))
-                        .collect(),
-                    ..Default::default()
-                }
-            };
-
-            commands.pipeline_barrier(&giant_barrier_of_doom)?;
-
-            let (framebuffer, feedback_descriptor) =
-                framebuffers.get(&op.destination_image.handle()).unwrap();
-
-            commands
-                // Implicit external barrier here due to external dependency in the subpass!
-                .begin_render_pass(
-                    &vk::RenderPassBeginInfo {
-                        render_pass: engine.feedback_pass.clone(),
-                        clear_values: vec![None],
-                        ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
-                    },
-                    &vk::SubpassBeginInfo::default(),
-                )?
-                .set_viewport(
-                    0,
-                    &[vk::Viewport {
-                        depth_range: 0.0..=1.0,
-                        offset: [0.0; 2],
-                        extent: [
-                            op.destination_image.image().extent()[0] as f32,
-                            op.destination_image.image().extent()[1] as f32,
-                        ],
-                    }],
-                )?;
-
-            commands.bind_descriptor_sets(
-                vk::PipelineBindPoint::Graphics,
-                &engine.feedback_layout,
-                0,
-                &[
-                    // Initialize to dummy image, as it's required to have well-formed descriptor even
-                    // if it's dynamically unused.
-                    engine.dummy_image_descriptor.clone().into(),
-                    feedback_descriptor.clone().into(),
-                ],
-            )?;
-
-            // Self-dependency barrier. MUST be a subset of the pipeline dependency flags.
-            let feedback_barrier = {
-                let destination_image_barrier = vulkano::sync::ImageMemoryBarrier {
-                    src_access: engine.self_dependency_flags.src_access,
-                    src_stages: engine.self_dependency_flags.src_stages,
-
-                    dst_access: engine.self_dependency_flags.dst_access,
-                    dst_stages: engine.self_dependency_flags.dst_stages,
-
-                    new_layout: vk::ImageLayout::General,
-                    old_layout: vk::ImageLayout::General,
-
-                    queue_family_ownership_transfer: None,
-                    subresource_range: vk::ImageSubresourceRange {
-                        array_layers: 0..1,
-                        aspects: vk::ImageAspects::COLOR,
-                        mip_levels: 0..1,
-                    },
-                    ..vulkano::sync::ImageMemoryBarrier::image(op.destination_image.image().clone())
-                };
-                vulkano::sync::DependencyInfo {
-                    dependency_flags: engine.self_dependency_flags.dependency_flags,
-                    image_memory_barriers: smallvec::smallvec![destination_image_barrier],
-                    ..Default::default()
-                }
-            };
-
+        // Still honor the request to clear the image if no layers are provided.
+        // In the not empty case, it's handled by a clear_attachment instead.
+        if op.operations.is_empty() {
             if op.clear_destination {
-                // Clear before any blends occur. This is properly barrier'd
-                // by setting write to `true` initially.
-                commands.clear_attachments(
-                    &[vulkano::command_buffer::ClearAttachment::Color {
-                        color_attachment: 0,
-                        clear_value: [0.0; 4].into(),
-                    }],
-                    &[vulkano::command_buffer::ClearRect {
-                        offset: [0; 2],
-                        extent: [
-                            op.destination_image.image().extent()[0],
-                            op.destination_image.image().extent()[1],
-                        ],
-                        array_layers: 0..1,
-                    }],
+                commands.clear_color_image(vk::ClearColorImageInfo {
+                    clear_value: [0.0; 4].into(),
+                    regions: smallvec::smallvec![op.destination_image.subresource_range().clone(),],
+                    ..vk::ClearColorImageInfo::image(op.destination_image.image().clone())
+                })?;
+            }
+            return Ok(commands.build()?);
+        }
+
+        let (framebuffer, feedback_descriptor) =
+            framebuffers.get(&op.destination_image.handle()).unwrap();
+
+        let render_pass_begin = vk::RenderPassBeginInfo {
+            render_pass: engine.feedback_pass.clone(),
+            clear_values: vec![None],
+            ..vk::RenderPassBeginInfo::framebuffer(framebuffer.clone())
+        };
+
+        commands
+            // Implicit external barrier here due to external dependency in the subpass!
+            .begin_render_pass(render_pass_begin.clone(), vk::SubpassBeginInfo::default())?
+            .set_viewport(
+                0,
+                smallvec::smallvec![vk::Viewport {
+                    depth_range: 0.0..=1.0,
+                    offset: [0.0; 2],
+                    extent: [
+                        op.destination_image.image().extent()[0] as f32,
+                        op.destination_image.image().extent()[1] as f32,
+                    ],
+                }],
+            )?;
+
+        commands.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            engine.feedback_layout.clone(),
+            0,
+            (
+                // Initialize to dummy image, as it's required to have well-formed descriptor even
+                // if it's dynamically unused.
+                engine.dummy_image_descriptor.clone(),
+                feedback_descriptor.clone(),
+            ),
+        )?;
+
+        if op.clear_destination {
+            // Clear before any blends occur. This is properly barrier'd
+            // by setting write to `true` initially.
+            commands.clear_attachments(
+                smallvec::smallvec![vulkano::command_buffer::ClearAttachment::Color {
+                    color_attachment: 0,
+                    clear_value: [0.0; 4].into(),
+                }],
+                smallvec::smallvec![vulkano::command_buffer::ClearRect {
+                    offset: [0; 2],
+                    extent: [
+                        op.destination_image.image().extent()[0],
+                        op.destination_image.image().extent()[1],
+                    ],
+                    array_layers: 0..1,
+                }],
+            )?;
+        }
+
+        // Whether we just wrote to the destination image on the last loop.
+        // Clear counts as a write!
+        let mut had_write = op.clear_destination;
+        // Whether the current pipe will read the destination image. It is UB
+        // for a read to occur after a write without a barrier.
+        let mut will_read = false;
+        let mut last_mode = None;
+
+        let mut last_constants = None;
+        for (image_src, blend) in &op.operations {
+            let Blend {
+                mode,
+                alpha_clip,
+                opacity,
+            } = *blend;
+            // bind a new pipeline if changed from last iter
+            if last_mode != Some((mode, alpha_clip)) {
+                let pipe = pipes.get(&(mode, alpha_clip)).unwrap();
+                match pipe {
+                    CompiledBlend::SimpleCoherent(pipe) => {
+                        will_read = false;
+                        commands.bind_pipeline_graphics(pipe.clone())?;
+                    }
+                    CompiledBlend::Loopback(pipe) => {
+                        will_read = true;
+                        commands.bind_pipeline_graphics(pipe.clone())?;
+                    }
+                }
+                last_mode = Some((mode, alpha_clip));
+            }
+
+            // Set the image. The sampler is bundled magically by being baked into the layout itself.
+            match image_src {
+                BlendImageSource::BlendInvocation(NestedBlendInvocation {
+                    destination_image: view,
+                    ..
+                })
+                | BlendImageSource::Immediate(view) => {
+                    commands.bind_descriptor_sets(
+                        vk::PipelineBindPoint::Graphics,
+                        engine.feedback_layout.clone(),
+                        0,
+                        descriptors.get(&view.handle()).unwrap().clone(),
+                    )?;
+
+                    let constants = shaders::Constants::new_image(opacity);
+                    if last_constants != Some(constants) {
+                        commands.push_constants(engine.feedback_layout.clone(), 0, constants)?;
+                        last_constants = Some(constants);
+                    }
+                }
+                &BlendImageSource::SolidColor(color) => {
+                    let constants = shaders::Constants::new_solid(color.alpha_multipy(
+                        fuzzpaint_core::util::FiniteF32::new(opacity).unwrap_or_default(),
+                    ));
+
+                    if last_constants != Some(constants) {
+                        commands.push_constants(engine.feedback_layout.clone(), 0, constants)?;
+                        last_constants = Some(constants);
+                    }
+                }
+            }
+
+            if had_write && will_read {
+                // Insert a barrier to ensure last loop's write completes before this loop's read.
+                // Okay okay so...
+                // I went on an entire week long expedition to use vkCmdPipelineBarrier here with a subpass self-dependency,
+                // it was glorious! Lovely! Amazing and fast! Alas, it is impossible to inform vulkano of the changes made
+                // during an external command buffer (vulkano::command_buffer::sys::UnsafeCommandBuffer), and so despite
+                // the blend code working a treat, it caused UB outside due to incorrect image layouts from vulkano working off
+                // of outdated info... The only option was to let unsafe command buffers permeate the whole app so that I am
+                // in control of layouts and barriers, a non-trivial task this deep into it.
+
+                // I am not pleased by end-begin dance, it's surely substantially slower but it allows vulkano to insert the
+                // necessary barrier itself, which then updates internal structures to avoid that UB in other places. Heck.
+
+                // Marc is working on a graph implementation for vulkano, allowing raw vulkan code to interact and communicate
+                // with vulkano, fixing this issue in some future release. Thank you marc!
+                commands.end_render_pass(vk::SubpassEndInfo::default())?;
+                commands.begin_render_pass(
+                    render_pass_begin.clone(),
+                    vk::SubpassBeginInfo::default(),
                 )?;
             }
 
-            // Whether we just wrote to the destination image on the last loop.
-            // Clear counts as a write!
-            let mut had_write = op.clear_destination;
-            // Whether the current pipe will read the destination image. It is UB
-            // for a read to occur after a write without a barrier.
-            let mut will_read = false;
-            let mut last_mode = None;
-
-            let mut last_constants = None;
-            for (image_src, blend) in &op.operations {
-                let Blend {
-                    mode,
-                    alpha_clip,
-                    opacity,
-                } = *blend;
-                // bind a new pipeline if changed from last iter
-                if last_mode != Some((mode, alpha_clip)) {
-                    let pipe = pipes.get(&(mode, alpha_clip)).unwrap();
-                    match pipe {
-                        CompiledBlend::SimpleCoherent(pipe) => {
-                            will_read = false;
-                            commands.bind_pipeline_graphics(pipe)?;
-                        }
-                        CompiledBlend::Loopback(pipe) => {
-                            will_read = true;
-                            commands.bind_pipeline_graphics(pipe)?;
-                        }
-                    }
-                    last_mode = Some((mode, alpha_clip));
-                }
-
-                // Set the image. The sampler is bundled magically by being baked into the layout itself.
-                match image_src {
-                    BlendImageSource::BlendInvocation(NestedBlendInvocation {
-                        destination_image: view,
-                        ..
-                    })
-                    | BlendImageSource::Immediate(view) => {
-                        commands.bind_descriptor_sets(
-                            vk::PipelineBindPoint::Graphics,
-                            &engine.feedback_layout,
-                            0,
-                            &[descriptors.get(&view.handle()).unwrap().clone().into()],
-                        )?;
-
-                        let constants = shaders::Constants::new_image(opacity);
-                        if last_constants != Some(constants) {
-                            commands.push_constants(&engine.feedback_layout, 0, &constants)?;
-                            last_constants = Some(constants);
-                        }
-                    }
-                    &BlendImageSource::SolidColor(color) => {
-                        let constants = shaders::Constants::new_solid(color.alpha_multipy(
-                            fuzzpaint_core::util::FiniteF32::new(opacity).unwrap_or_default(),
-                        ));
-
-                        if last_constants != Some(constants) {
-                            commands.push_constants(&engine.feedback_layout, 0, &constants)?;
-                            last_constants = Some(constants);
-                        }
-                    }
-                }
-
-                if had_write && will_read {
-                    // Insert a barrier to ensure last loop's write completes before this loop's read.
-                    commands.pipeline_barrier(&feedback_barrier)?;
-                }
-
-                commands.draw(3, 1, 0, 0)?;
-                had_write = true;
-            }
-            commands.end_render_pass(&vk::SubpassEndInfo::default())?;
-            Ok(commands.build()?)
+            commands.draw(3, 1, 0, 0)?;
+            had_write = true;
         }
+        commands.end_render_pass(vk::SubpassEndInfo::default())?;
+        Ok(commands.build()?)
     }
     /// Execute the entire blend tree.
     ///
-    /// # Safety
-    /// ## Access
-    /// * This invocation must not be run on the device in parallel with itself.
-    /// * This invocation host object must outlive the duration of execution on the device.
-    /// * All input images must be externally synchronized and retain shared access
-    ///   by the graphics queue during the operation.
-    /// * All output images must be externally synchronized and retain exclusive access
-    ///   by the graphics queue during the operation.
-    /// ## Layout
-    /// * All destination images must be in `GENERAL` layout.
-    // (we don't specify that `clear`ed destination images may be any layout, since
-    // there's no way to communicate back to vulkano that the transition occured)
-    /// * All source images must be in `SHADER_READ_ONLY_OPTIMAL` layout.
     // Todo: input sync? As-is, the user must wait on host side, not ideal.
-    pub unsafe fn execute(&self) -> anyhow::Result<()> {
-        // We have images to transition, look at what layout they were and then move them!
-        let _outlive = if self.transitions.to_general_before.is_empty()
-            || self.transitions.to_sampled_before.is_empty()
-        {
-            // Vulkano does not update layouts until a cleanup occurs, wait_idle being one such cleanup....
-            // This is very sad, but unfixable until vulkano-taskgraph comes along.
-            self.engine
-                .context
-                .queues()
-                .graphics()
-                .queue()
-                .with(|mut q| q.wait_idle())?;
-
-            unsafe {
-                let mut barrier = vk::sync::DependencyInfo {
-                    ..Default::default()
-                };
-
-                // Barrier each image if vulkano left it in the wrong layout for our needs
-                for image in &self.transitions.to_general_before {
-                    // Instantaneous layout is okay here due to the wait_idle and the safety precondition.
-                    let current_layout = image.instantaneous_layout();
-                    if current_layout != vk::ImageLayout::General {
-                        barrier
-                            .image_memory_barriers
-                            .push(vk::sync::ImageMemoryBarrier {
-                                // None.
-                                src_stages: vk::sync::PipelineStages::TOP_OF_PIPE,
-                                src_access: vk::sync::AccessFlags::empty(),
-
-                                // All
-                                dst_stages: vk::sync::PipelineStages::TOP_OF_PIPE,
-                                dst_access: vk::sync::AccessFlags::MEMORY_WRITE,
-
-                                old_layout: current_layout,
-                                new_layout: vk::ImageLayout::General,
-
-                                subresource_range: image.subresource_range(),
-
-                                ..vulkano::sync::ImageMemoryBarrier::image(image.clone())
-                            });
-                    }
-                }
-                // Barrier each image if vulkano let it in the wrong layout for our needs
-                for image in &self.transitions.to_sampled_before {
-                    // Instantaneous layout is okay here due to the wait_idle and the safety precondition.
-                    let current_layout = image.instantaneous_layout();
-                    if current_layout != vk::ImageLayout::ShaderReadOnlyOptimal {
-                        barrier
-                            .image_memory_barriers
-                            .push(vk::sync::ImageMemoryBarrier {
-                                // None.
-                                src_stages: vk::sync::PipelineStages::TOP_OF_PIPE,
-                                src_access: vk::sync::AccessFlags::empty(),
-
-                                // All reads, (since that's all we do with these images)
-                                dst_stages: vk::sync::PipelineStages::TOP_OF_PIPE,
-                                dst_access: vk::sync::AccessFlags::MEMORY_READ,
-
-                                old_layout: current_layout,
-                                new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-
-                                subresource_range: image.subresource_range(),
-
-                                ..vulkano::sync::ImageMemoryBarrier::image(image.clone())
-                            });
-                    }
-                }
-
-                // Only unsafe command buffer lets us execute arbitrary barriers.
-                let mut commands = vulkano::command_buffer::sys::UnsafeCommandBufferBuilder::new(
-                    self.engine.context.allocators().command_buffer(),
-                    self.engine.context.queues().graphics().idx(),
-                    vulkano::command_buffer::CommandBufferLevel::Primary,
-                    vulkano::command_buffer::sys::CommandBufferBeginInfo {
-                        usage: vk::CommandBufferUsage::OneTimeSubmit,
-                        inheritance_info: None,
-                        ..Default::default()
-                    },
-                )?;
-                commands.pipeline_barrier(&barrier)?;
-                let commands = commands.build()?;
-                let cbs = [commands.handle()];
-
-                let submission = ash::vk::SubmitInfo::builder().command_buffers(&cbs);
-
-                let graphics = self.engine.context.queues().graphics().queue();
-                let graphics_handle = graphics.handle();
-                let pfn_submit = self.engine.context.device().fns().v1_0.queue_submit;
-
-                // Synchronize externally
-                graphics.with(|_lock| -> anyhow::Result<()> {
-                    (pfn_submit)(
-                        graphics_handle,
-                        1,
-                        &submission.build(),
-                        ash::vk::Fence::null(),
-                    )
-                    .result()?;
-                    Ok(())
-                })?;
-
-                // Ensure our allocation lives long enough!
-                Some(commands)
-            }
-        } else {
-            None
-        };
-
+    pub fn execute(&self) -> anyhow::Result<()> {
         for buffers in &self.commands {
             // `buffers` may all be executed in parallel without sync.
-            // After all of these, the next iteration can proceed following a barrier.
-            let graphics = self.engine.context.queues().graphics().queue();
-            let graphics_handle = graphics.handle();
-            let pfn_submit = self.engine.context.device().fns().v1_0.queue_submit;
-
-            let raw_buffers = buffers
-                .iter()
-                .map(vulkano::VulkanObject::handle)
-                .collect::<Vec<_>>();
-            // No need to wait semaphores since each buffer contains an overkill barrier. Fixme!
-            let submission = ash::vk::SubmitInfo::builder().command_buffers(&raw_buffers);
-
-            // Synchronize queue externally using vulkano's mechanisms!
-            graphics
-                .with(|_lock| unsafe {
-                    (pfn_submit)(
-                        graphics_handle,
-                        1,
-                        &submission.build(),
-                        ash::vk::Fence::null(),
-                    )
-                })
-                .result()?;
+            // This is not possible to express in vulkano, blegh.
+            let mut future = self.engine.context.now().boxed();
+            for buffer in buffers {
+                future = future
+                    .then_execute(
+                        self.engine.context.queues().graphics().queue().clone(),
+                        buffer.clone(),
+                    )?
+                    .boxed();
+            }
+            future.then_signal_fence_and_flush()?.wait(None)?;
         }
 
         // Fixme: fence/semaphore instead of eager wait idle.
@@ -1070,31 +785,6 @@ impl BlendInvocation {
             .queue()
             .with(|mut q| q.wait_idle())?;
 
-        // Inform Vulkano of the transitions we executed on it's behalf.
-        for transition in self
-            .transitions
-            .to_general_after
-            .iter()
-            .chain(self.transitions.to_general_before.iter())
-        {
-            // Safety: Our command buffers did this transition by necessity!
-            // Fallibility: no host nor device accesses are happening right now (safety condition + q.wait_idle)
-            unsafe {
-                transition
-                    .externally_transitioned(vulkano::image::ImageLayout::General)
-                    .unwrap();
-            }
-        }
-        for transition in &self.transitions.to_sampled_before {
-            // Safety: Our command buffers did this transition by necessity!
-            // Fallibility: no host nor device accesses are happening right now (safety condition + q.wait_idle)
-            unsafe {
-                transition
-                    .externally_transitioned(vulkano::image::ImageLayout::ShaderReadOnlyOptimal)
-                    .unwrap();
-            }
-        }
-
         Ok(())
     }
     /// Like `execute`, except only running necessary calculations for one image source being changed.
@@ -1102,10 +792,9 @@ impl BlendInvocation {
     ///
     /// # Safety:
     /// See [`BlendInvocation::execute`]
-    pub unsafe fn execute_delta(&self, _changed: &vk::Image) -> anyhow::Result<()> {
+    pub fn execute_delta(&self, _changed: &vk::Image) -> anyhow::Result<()> {
         // Todo! This is a valid implementation, however.
-        // Safety forwarded to caller.
-        unsafe { self.execute() }
+        self.execute()
     }
 }
 
@@ -1127,8 +816,6 @@ pub struct BlendEngine {
     feedback_pass: Arc<vk::RenderPass>,
     /// (mode, clip) -> prepared blend pipe.
     mode_pipelines: parking_lot::RwLock<hashbrown::HashMap<(BlendMode, bool), CompiledBlend>>,
-    /// Data needed to specify self-dependency barrier.
-    self_dependency_flags: vk::SubpassDependency,
     /// An image with undefined content, in `SHADER_READ_ONLY_OPTIMAL` layout, "usable" for sampling and nothing else.
     /// (Although it is undefined behavior to actually access.)
     /// Vulkan requires that any desciptor set that is statically-used be in a fully valid state, even if it is
@@ -1246,61 +933,7 @@ impl BlendEngine {
                 ..vk::ImageViewCreateInfo::from_image(&image)
             },
         )?;
-        // Insert a dummy barrier to transition the image. Expensive!
-        unsafe {
-            let mut cb = vulkano::command_buffer::sys::UnsafeCommandBufferBuilder::new(
-                context.allocators().command_buffer(),
-                context.queues().graphics().idx(),
-                vulkano::command_buffer::CommandBufferLevel::Primary,
-                vulkano::command_buffer::sys::CommandBufferBeginInfo {
-                    usage: vk::CommandBufferUsage::OneTimeSubmit,
-                    inheritance_info: None,
-                    ..Default::default()
-                },
-            )?;
-            let dummy_transition = vk::sync::ImageMemoryBarrier {
-                old_layout: vk::ImageLayout::Undefined,
-                new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-
-                // None.
-                src_stages: vk::sync::PipelineStages::TOP_OF_PIPE,
-                src_access: vk::sync::AccessFlags::empty(),
-
-                dst_stages: vk::sync::PipelineStages::FRAGMENT_SHADER,
-                dst_access: vk::sync::AccessFlags::SHADER_READ,
-
-                subresource_range: image.subresource_range(),
-
-                ..vk::sync::ImageMemoryBarrier::image(image)
-            };
-            cb.pipeline_barrier(&vk::sync::DependencyInfo {
-                image_memory_barriers: smallvec::smallvec![dummy_transition],
-                ..Default::default()
-            })?;
-
-            let cb = cb.build()?;
-            let cb = [cb.handle()];
-
-            let submission = ash::vk::SubmitInfo::builder().command_buffers(&cb);
-
-            let graphics = context.queues().graphics().queue();
-            let graphics_handle = graphics.handle();
-            let pfn_submit = context.device().fns().v1_0.queue_submit;
-
-            // Synchronize externally
-            graphics.with(|mut lock| -> anyhow::Result<()> {
-                (pfn_submit)(
-                    graphics_handle,
-                    1,
-                    &submission.build(),
-                    ash::vk::Fence::null(),
-                )
-                .result()?;
-                // cb, image must outlive execution. Weh.
-                lock.wait_idle()?;
-                Ok(())
-            })?;
-        }
+        // Vulkano executes a barrier just-in-time to get it from undefined to needed ShaderReadOnly layout.
         vk::PersistentDescriptorSet::new(
             context.allocators().descriptor_set(),
             layout,
@@ -1389,21 +1022,6 @@ impl BlendEngine {
             .entry_point("main")
             .unwrap();
 
-        // allow self-dependencies (CmdPipelineBarrier) within subpass 0 so that we may use feedback loops.
-        // ONLY barriers with these *exact* access/stages are allowed, and MUST be by-region :O
-        let self_dependency_flags = vk::SubpassDependency {
-            src_subpass: Some(0),
-            src_stages: vk::sync::PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-            src_access: vk::sync::AccessFlags::COLOR_ATTACHMENT_WRITE,
-
-            dst_subpass: Some(0),
-            dst_stages: vk::sync::PipelineStages::FRAGMENT_SHADER,
-            dst_access: vk::sync::AccessFlags::INPUT_ATTACHMENT_READ,
-
-            dependency_flags: vk::sync::DependencyFlags::BY_REGION,
-            ..Default::default()
-        };
-
         let feedback_pass = {
             let feedback_attachment = vk::AttachmentDescription {
                 // THIS SHOULD BE `ImageLayout::AttachmentFeedbackLoopOptimal`, vulkano doesn't support that yet.
@@ -1433,33 +1051,11 @@ impl BlendEngine {
                 ..Default::default()
             };
 
-            let external_dependencies = vk::SubpassDependency {
-                // We don't know what will be performed outside. I should come back and make this well-defined,
-                // but use an extremely strong dependency instead :P
-                src_subpass: None, // External
-                src_stages: vk::sync::PipelineStages::BOTTOM_OF_PIPE,
-                src_access: vk::sync::AccessFlags::MEMORY_WRITE,
-
-                dst_subpass: Some(0),
-                // Before we read or write the images in any way within subpass.
-                dst_stages: vk::sync::PipelineStages::FRAGMENT_SHADER
-                    | vk::sync::PipelineStages::COLOR_ATTACHMENT_OUTPUT,
-                dst_access: vk::sync::AccessFlags::INPUT_ATTACHMENT_READ
-                    | vk::sync::AccessFlags::COLOR_ATTACHMENT_READ
-                    | vk::sync::AccessFlags::COLOR_ATTACHMENT_WRITE
-                    | vk::sync::AccessFlags::SHADER_READ,
-
-                // Does this even make sense for an external dep? Oh well, it's allowed UwU
-                dependency_flags: vk::sync::DependencyFlags::BY_REGION,
-                ..Default::default()
-            };
-
             vk::RenderPass::new(
                 device.clone(),
                 vk::RenderPassCreateInfo {
                     attachments: vec![feedback_attachment],
                     subpasses: vec![subpass],
-                    dependencies: vec![external_dependencies, self_dependency_flags.clone()],
                     ..Default::default()
                 },
             )?
@@ -1475,7 +1071,6 @@ impl BlendEngine {
             coherent_frag,
             feedback_pass,
             mode_pipelines: hashbrown::HashMap::new().into(),
-            self_dependency_flags,
             dummy_image_descriptor,
         }
         .into())
