@@ -409,13 +409,7 @@ impl BlendInvocation {
                     vk::PersistentDescriptorSet::new(
                         engine.context.allocators().descriptor_set(),
                         engine.feedback_layout.set_layouts()[1].clone(),
-                        [vk::WriteDescriptorSet::image_view_with_layout(
-                            0,
-                            vulkano::descriptor_set::DescriptorImageViewInfo {
-                                image_layout: vk::ImageLayout::General,
-                                image_view: dest.clone(),
-                            },
-                        )],
+                        [vk::WriteDescriptorSet::image_view(0, dest.clone())],
                         [],
                     )?,
                 ),
@@ -433,20 +427,7 @@ impl BlendInvocation {
                         vk::PersistentDescriptorSet::new(
                             engine.context.allocators().descriptor_set(),
                             engine.feedback_layout.set_layouts()[0].clone(),
-                            [vk::WriteDescriptorSet::image_view_with_layout(
-                                0,
-                                vulkano::descriptor_set::DescriptorImageViewInfo {
-                                    image_layout: if matches!(
-                                        source,
-                                        BlendImageSource::BlendInvocation(_)
-                                    ) {
-                                        vk::ImageLayout::General
-                                    } else {
-                                        vk::ImageLayout::ShaderReadOnlyOptimal
-                                    },
-                                    image_view: view.clone(),
-                                },
-                            )],
+                            [vk::WriteDescriptorSet::image_view(0, view.clone())],
                             [],
                         )?,
                     );
@@ -937,13 +918,7 @@ impl BlendEngine {
         vk::PersistentDescriptorSet::new(
             context.allocators().descriptor_set(),
             layout,
-            [vk::WriteDescriptorSet::image_view_with_layout(
-                0,
-                vulkano::descriptor_set::DescriptorImageViewInfo {
-                    image_view: view,
-                    image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-                },
-            )],
+            [vk::WriteDescriptorSet::image_view(0, view)],
             [],
         )
         .map_err(Into::into)
