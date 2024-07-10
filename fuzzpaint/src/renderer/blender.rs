@@ -755,16 +755,9 @@ impl BlendInvocation {
                     )?
                     .boxed();
             }
+            // Fixme: fence/semaphore instead of eager wait idle.
             future.then_signal_fence_and_flush()?.wait(None)?;
         }
-
-        // Fixme: fence/semaphore instead of eager wait idle.
-        self.engine
-            .context
-            .queues()
-            .graphics()
-            .queue()
-            .with(|mut q| q.wait_idle())?;
 
         Ok(())
     }

@@ -4,8 +4,12 @@ pub mod picker;
 pub mod requests;
 mod stroke_batcher;
 
-use fuzzpaint_core::{queue, state};
+use fuzzpaint_core::{
+    queue::{self, state_reader::CommandQueueStateReader},
+    state,
+};
 use std::sync::Arc;
+use vulkano::command_buffer::{CopyImageInfo, ImageCopy};
 
 use crate::vulkano_prelude::*;
 
@@ -15,54 +19,19 @@ struct PerDocumentData {
     graph_render_data: hashbrown::HashMap<state::graph::AnyID, RenderData>,
     /// precompiled blend operations, invalided when the graph changes.
     compiled_blend: Option<blender::BlendInvocation>,
+    render_target: RenderData,
 }
-#[derive(thiserror::Error, Debug)]
-enum IncrementalDrawErr {
-    #[error(transparent)]
-    Anyhow(#[from] anyhow::Error),
-    /// State was not usable for incremental draw.
-    /// Draw from scratch instead!
-    #[error("state mismatch")]
-    StateMismatch,
-}
-#[allow(dead_code)]
-enum CachedImage<'data> {
-    /// The data is ready for use immediately.
-    Ready(&'data RenderData),
-    /// The data is currently in-flight on the graphics device, and will become ready once the provided
-    /// `fence` becomes signalled.
-    ReadyAfter {
-        image: &'data RenderData,
-        fence: &'data vk::sync::future::FenceSignalFuture<Box<dyn vk::sync::GpuFuture>>,
-    },
-}
-impl<'data> CachedImage<'data> {
-    #[allow(dead_code)]
-    fn data(&self) -> &'data RenderData {
-        match self {
-            CachedImage::Ready(data) => data,
-            CachedImage::ReadyAfter { image, .. } => image,
-        }
-    }
-}
+
+/// Dispatches render work to engines to create document images.
+/// Maintains a cache of document render data.
 struct Renderer {
-    context: Arc<crate::render_device::RenderContext>,
-    strokes: stroke_renderer::StrokeLayerRenderer,
-    text_builder: crate::text::Builder,
-    text: crate::text::renderer::monochrome::Renderer,
-    blend_engine: Arc<blender::BlendEngine>,
+    engines: Engines,
     data: hashbrown::HashMap<state::DocumentID, PerDocumentData>,
 }
 impl Renderer {
     fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
         Ok(Self {
-            context: context.clone(),
-            blend_engine: blender::BlendEngine::new(context.clone())?,
-            text_builder: crate::text::Builder::allocate_new(
-                context.allocators().memory().clone(),
-            )?,
-            text: crate::text::renderer::monochrome::Renderer::new(context.clone())?,
-            strokes: stroke_renderer::StrokeLayerRenderer::new(context)?,
+            engines: Engines::new(context)?,
             data: hashbrown::HashMap::new(),
         })
     }
@@ -70,28 +39,31 @@ impl Renderer {
         &mut self,
         id: state::DocumentID,
         into: &Arc<vk::ImageView>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn vk::sync::GpuFuture + Send>>> {
         let data = self.data.entry(id);
-        // Get the document data, and a flag for if we need to initialize that data.
-        let (is_new, data) = match data {
-            hashbrown::hash_map::Entry::Occupied(o) => (false, o.into_mut()),
+        // Get the document data to update.
+        let data = match data {
+            hashbrown::hash_map::Entry::Occupied(o) => o.into_mut(),
             hashbrown::hash_map::Entry::Vacant(v) => {
+                // Special case - new render! Build it + draw it from scratch.
+
                 let Some(listener) = crate::global::provider()
                     .inspect(id, queue::DocumentCommandQueue::listen_from_now)
                 else {
                     // Deleted before we could do anything.
                     anyhow::bail!("Document deleted before render worker reached it");
                 };
-                (
-                    true,
-                    v.insert(PerDocumentData {
-                        listener,
-                        graph_render_data: hashbrown::HashMap::new(),
-                        compiled_blend: None,
-                    }),
-                )
+
+                let data = v.insert(self.engines.new_render_from_scrach(listener)?);
+
+                // Then copy to the preview.
+                return self
+                    .engines
+                    .copy_document_to_preview_proxy(data, into)
+                    .map_err(Into::into);
             }
         };
+
         // Forward the listener state.
         let changes = match data.listener.forward_clone_state() {
             Ok(changes) => changes,
@@ -102,67 +74,220 @@ impl Renderer {
                 return Err(e.into());
             }
         };
-        // Render from scratch if we just created the data,
-        // otherwise update from previous state.
-        if is_new {
-            Self::draw_from_scratch(
-                &self.context,
-                &self.blend_engine,
-                &self.strokes,
-                &mut self.text_builder,
-                &self.text,
-                data,
-                &changes,
-                into,
-            )
-        } else {
-            // Try to draw incrementally. If that reports it's impossible, try
-            // to draw from scratch.
-            match Self::draw_incremental(
-                &self.context,
-                &self.blend_engine,
-                &self.strokes,
-                data,
-                &changes,
-                into,
-            ) {
-                Err(IncrementalDrawErr::StateMismatch) => {
-                    log::info!("Incremental draw failed! Retrying from scratch...");
-                    Self::draw_from_scratch(
-                        &self.context,
-                        &self.blend_engine,
-                        &self.strokes,
-                        &mut self.text_builder,
-                        &self.text,
-                        data,
-                        &changes,
-                        into,
-                    )
+
+        // Draw just the changes!
+        enum StrokeChanges {
+            // Strokes were added
+            Add(Vec<state::stroke_collection::ImmutableStrokeID>),
+            // Big change, redraw from scratch.
+            Invalidated,
+        }
+
+        let mut stroke_changes =
+            hashbrown::HashMap::<state::stroke_collection::StrokeCollectionID, StrokeChanges>::new(
+            );
+        let mut graph_invalidated = false;
+
+        let mut analyze_change = |change| -> std::ops::ControlFlow<()> {
+            use fuzzpaint_core::commands::{Command, DoUndo, MetaCommand, StrokeCollectionCommand};
+            use state::stroke_collection::commands::StrokeCommand;
+            match change {
+                // An added stroke can be executed as a delta.
+                DoUndo::Do(Command::StrokeCollection(StrokeCollectionCommand::Stroke {
+                    target: stroke_collection,
+                    command:
+                        StrokeCommand::Created {
+                            target: stroke_id, ..
+                        },
+                })) => {
+                    let changes = stroke_changes
+                        .entry(*stroke_collection)
+                        .or_insert(StrokeChanges::Add(vec![]));
+                    match changes {
+                        StrokeChanges::Add(add) => add.push(*stroke_id),
+                        // Already invalidated, can't do a delta.
+                        StrokeChanges::Invalidated => (),
+                    }
                 }
-                Err(IncrementalDrawErr::Anyhow(anyhow)) => Err(anyhow),
-                Ok(()) => Ok(()),
+                // All other stroke commands invalidate the data and need full layer redraw.
+                DoUndo::Do(Command::StrokeCollection(c))
+                | DoUndo::Undo(Command::StrokeCollection(c)) => match *c {
+                    StrokeCollectionCommand::Created(id)
+                    | StrokeCollectionCommand::Stroke { target: id, .. } => {
+                        let _ = stroke_changes.insert(id, StrokeChanges::Invalidated);
+                    }
+                },
+                // Any modifications to the blend graph require a rebuild.
+                // (text can be delta'd but that's not really implemented at all yet.)
+                DoUndo::Do(Command::Graph(_)) | DoUndo::Undo(Command::Graph(_)) => {
+                    graph_invalidated = true
+                }
+                // Palettes influence the blend graph and possibly every stroke layer. Uh oh.
+                // Invalidate everything, and make this better future me!!!
+                DoUndo::Do(Command::Palette(_)) | DoUndo::Undo(Command::Palette(_)) => {
+                    for &key in changes.stroke_collections().0.keys() {
+                        let _ = stroke_changes.insert(key, StrokeChanges::Invalidated);
+                    }
+                    graph_invalidated = true;
+                    // Invalidated literally everything lmao, no need to keep looking at deltas.
+                    return std::ops::ControlFlow::Break(());
+                }
+                // Commands must be externally flattened.
+                DoUndo::Do(Command::Meta(MetaCommand::Scope(..)))
+                | DoUndo::Undo(Command::Meta(MetaCommand::Scope(..))) => unreachable!(),
+                // No influence on rendering.
+                DoUndo::Do(Command::Meta(_) | Command::Dummy)
+                | DoUndo::Undo(Command::Meta(_) | Command::Dummy) => (),
+            }
+            std::ops::ControlFlow::Continue(())
+        };
+
+        for change in changes.changes() {
+            use fuzzpaint_core::commands::{Command, DoUndo, MetaCommand};
+            // Flatten and analyze changes!
+            match change {
+                DoUndo::Do(Command::Meta(MetaCommand::Scope(_, s))) => {
+                    // This should be recursive. I don't want to. BLegh.
+                    for change in s {
+                        if analyze_change(DoUndo::Do(change)).is_break() {
+                            break;
+                        }
+                    }
+                }
+                DoUndo::Undo(Command::Meta(MetaCommand::Scope(_, s))) => {
+                    // This should be recursive. I don't want to. BLegh.
+                    for change in s.iter().rev() {
+                        if analyze_change(DoUndo::Undo(change)).is_break() {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    if analyze_change(change).is_break() {
+                        break;
+                    }
+                }
             }
         }
-    }
-    /// Draws the entire state from the beginning, ignoring the diff.
-    /// Reuses allocated images, but ignores their contents!
-    fn draw_from_scratch(
-        context: &Arc<crate::render_device::RenderContext>,
-        blend_engine: &Arc<blender::BlendEngine>,
-        renderer: &stroke_renderer::StrokeLayerRenderer,
-        text_builder: &mut crate::text::Builder,
-        text_renderer: &crate::text::renderer::monochrome::Renderer,
-        document_data: &mut PerDocumentData,
-        state: &impl queue::state_reader::CommandQueueStateReader,
-        into: &Arc<vk::ImageView>,
-    ) -> anyhow::Result<()> {
-        use state::graph::{LeafType, NodeID, NodeType};
 
+        let mut fences = vec![];
+
+        if graph_invalidated || data.compiled_blend.is_none() {
+            log::trace!("Scouring allocations");
+            self.engines
+                .allocate_prune_graph(&mut data.graph_render_data, changes.graph())?;
+        }
+
+        for (collection, stroke_changes) in stroke_changes {
+            let graph_id = changes
+                .graph()
+                .iter()
+                .find_map(|(id, data)| {
+                    // If this node is a stroke layer with our same collection ID, then we found it!
+                    data.leaf()
+                        .is_some_and(|leaf| match leaf {
+                            state::graph::LeafType::StrokeLayer {
+                                collection: this_leaf,
+                                ..
+                            } => collection == *this_leaf,
+                            _ => false,
+                        })
+                        .then_some(id)
+                })
+                .ok_or_else(|| anyhow::anyhow!("delta references non-existent node"))?;
+
+            let render_data = data
+                .graph_render_data
+                .get(&graph_id)
+                .ok_or_else(|| anyhow::anyhow!("missing render data for delta"))?;
+            let collection = changes
+                .stroke_collections()
+                .get(collection)
+                .ok_or_else(|| anyhow::anyhow!("delta references non-existent collection"))?;
+
+            let which = match &stroke_changes {
+                StrokeChanges::Add(which) => {
+                    // Draw selected.
+                    Some(which.as_slice())
+                }
+                StrokeChanges::Invalidated => {
+                    // Draw all.
+                    None
+                }
+            };
+
+            if let Some(fence) =
+                self.engines
+                    .stroke_layer(collection, changes.palette(), render_data, which)?
+            {
+                fences.push(fence);
+            }
+        }
+
+        for fence in fences {
+            // Blegh. No way to do better express this with current vulkano sync.
+            fence.wait(None)?;
+        }
+
+        // This has to be *after* stroke render, for some reason, or the layers don't show up at all.
+        // Probably something wrong with the internal layout transitions. ;;;w;;;
+        // *screaming*
+        if graph_invalidated || data.compiled_blend.is_none() {
+            log::trace!("Recompiling blend graph");
+            // Drop old one before building anew, to conserve mem. This could be delta'd instead to re-use old work, todo.
+            let _ = data.compiled_blend.take();
+            let invocation = self.engines.compile_blend_graph(
+                changes.graph(),
+                &data.graph_render_data,
+                changes.palette(),
+                &data.render_target,
+            )?;
+            data.compiled_blend = Some(invocation);
+        }
+
+        // This is known some, guarded above.
+        data.compiled_blend.as_mut().unwrap().execute()?;
+
+        self.engines.copy_document_to_preview_proxy(data, into)
+    }
+}
+/// Struct that contains all the compiled GPU logic.
+struct Engines {
+    context: Arc<crate::render_device::RenderContext>,
+    strokes: stroke_renderer::StrokeLayerRenderer,
+    text_builder: crate::text::Builder,
+    text: crate::text::renderer::monochrome::Renderer,
+    blend: Arc<blender::BlendEngine>,
+}
+impl Engines {
+    fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
+        Ok(Self {
+            context: context.clone(),
+            blend: blender::BlendEngine::new(context.clone())?,
+            text_builder: crate::text::Builder::allocate_new(
+                context.allocators().memory().clone(),
+            )?,
+            text: crate::text::renderer::monochrome::Renderer::new(context.clone())?,
+            strokes: stroke_renderer::StrokeLayerRenderer::new(context)?,
+        })
+    }
+    /// Compile a GPU blend invocation for blending a document into an image.
+    /// The `graph_render_data` should be fully populated with allocated images for any nodes or leaves that make use of images.
+    ///
+    /// Reuse this invocation as much as possible!
+    fn compile_blend_graph(
+        &self,
+        graph: &state::graph::BlendGraph,
+        graph_render_data: &hashbrown::HashMap<state::graph::AnyID, RenderData>,
+        palette: &state::palette::Palette,
+        into: &RenderData,
+    ) -> anyhow::Result<blender::BlendInvocation> {
+        use state::graph::{LeafType, NodeID, NodeType};
         /// Insert a single node (possibly recursing) into the builder.
         fn insert_blend(
             blend_engine: &Arc<blender::BlendEngine>,
             builder: &mut blender::BlendInvocationBuilder,
-            document_data: &PerDocumentData,
+            graph_render_data: &hashbrown::HashMap<state::graph::AnyID, RenderData>,
             graph: &state::graph::BlendGraph,
             palette: &state::palette::Palette,
 
@@ -172,16 +297,12 @@ impl Renderer {
             match (data.leaf(), data.node()) {
                 // Pre-rendered leaves
                 (
-                    Some(
-                        LeafType::StrokeLayer { blend, .. }
-                        | LeafType::Text { blend, .. },
-                    ),
+                    Some(LeafType::StrokeLayer { blend, .. } | LeafType::Text { blend, .. }),
                     None,
                 ) => {
-                    let view = document_data
-                        .graph_render_data
+                    let view = graph_render_data
                         .get(&id)
-                        .unwrap()
+                        .ok_or_else(|| anyhow::anyhow!("blend data not found for leaf {id:?}"))?
                         .view
                         .clone();
                     builder.then_blend(blender::BlendImageSource::Immediate(view), *blend)?;
@@ -189,7 +310,11 @@ impl Renderer {
                 // Lazily rendered leaves
                 (Some(LeafType::SolidColor { blend, source }), None) => {
                     // Dereference possibly paletted color
-                    let color = source.get().left_or_else(|pal_idx| palette.get(pal_idx).unwrap_or(fuzzpaint_core::color::Color::TRANSPARENT));
+                    let color = source.get().left_or_else(|pal_idx| {
+                        palette
+                            .get(pal_idx)
+                            .unwrap_or(fuzzpaint_core::color::Color::TRANSPARENT)
+                    });
                     builder.then_blend(blender::BlendImageSource::SolidColor(color), *blend)?;
                 }
                 (Some(LeafType::Note), None) => (),
@@ -198,7 +323,7 @@ impl Renderer {
                     blend_for_passthrough(
                         blend_engine,
                         builder,
-                        document_data,
+                        graph_render_data,
                         graph,
                         palette,
                         id.try_into().unwrap(),
@@ -208,13 +333,13 @@ impl Renderer {
                 (None, Some(NodeType::GroupedBlend(blend))) => {
                     let handle = blend_for_node(
                         blend_engine,
-                        document_data,
+                        graph_render_data,
                         graph,
                         palette,
                         id.try_into().unwrap(),
-                        document_data
-                            .graph_render_data
+                        graph_render_data
                             .get(&id)
+                            .ok_or_else(|| anyhow::anyhow!("blend data not found for group {id:?}"))
                             .unwrap()
                             .view
                             .clone(),
@@ -232,7 +357,7 @@ impl Renderer {
         fn blend_for_passthrough(
             blend_engine: &Arc<blender::BlendEngine>,
             builder: &mut blender::BlendInvocationBuilder,
-            document_data: &PerDocumentData,
+            graph_render_data: &hashbrown::HashMap<state::graph::AnyID, RenderData>,
             graph: &state::graph::BlendGraph,
             palette: &state::palette::Palette,
             node: NodeID,
@@ -241,7 +366,15 @@ impl Renderer {
                 .iter_node(node)
                 .ok_or_else(|| anyhow::anyhow!("Passthrough node not found"))?;
             for (id, data) in iter {
-                insert_blend(blend_engine, builder, document_data, graph, palette, id, data)?;
+                insert_blend(
+                    blend_engine,
+                    builder,
+                    graph_render_data,
+                    graph,
+                    palette,
+                    id,
+                    data,
+                )?;
             }
             Ok(())
         }
@@ -249,7 +382,7 @@ impl Renderer {
         /// Recursively build a blend invocation for the node, or None for root.
         fn blend_for_node(
             blend_engine: &Arc<blender::BlendEngine>,
-            document_data: &PerDocumentData,
+            graph_render_data: &hashbrown::HashMap<state::graph::AnyID, RenderData>,
             graph: &state::graph::BlendGraph,
             palette: &state::palette::Palette,
             node: NodeID,
@@ -263,99 +396,29 @@ impl Renderer {
             let mut builder = blend_engine.clone().start(into_image, clear_image);
 
             for (id, data) in iter {
-                insert_blend(blend_engine, &mut builder, document_data, graph, palette, id, data)?;
+                insert_blend(
+                    blend_engine,
+                    &mut builder,
+                    graph_render_data,
+                    graph,
+                    palette,
+                    id,
+                    data,
+                )?;
             }
 
             // We traverse top-down, we need to blend bottom-up
             builder.reverse();
             Ok(builder.nest())
         }
-        // Create/discard images
-        Self::allocate_prune_graph(
-            renderer,
-            &mut document_data.graph_render_data,
-            state.graph(),
-        )?;
 
-        let mut fences = Vec::<vk::FenceSignalFuture<Box<dyn GpuFuture>>>::new();
-
-        // Walk the tree in arbitrary order, rendering all as needed and collecting their futures.
-        for (id, data) in state.graph().iter() {
-            match data.leaf() {
-                // Render stroke image
-                Some(LeafType::StrokeLayer { collection, .. }) => {
-                    let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Expected image to be created by allocate_prune_graph for {id:?}"
-                        )
-                    })?;
-                    let strokes = state.stroke_collections().get(*collection).ok_or_else(|| {
-                        anyhow::anyhow!("Missing stroke collection {collection:?}")
-                    })?;
-                    let strokes: Vec<_> = strokes
-                        .iter_active()
-                        .map(|stroke| {
-                            // Convert paletted color into concrete color.
-                            // THIS LOGIC SHOULD NOT BE HERE X3
-                            let color_modulate =
-                                stroke.brush.color_modulate.get().left_or_else(|idx| {
-                                    state
-                                        .palette()
-                                        .get(idx)
-                                        .unwrap_or(fuzzpaint_core::color::Color::BLACK)
-                                });
-                            fuzzpaint_core::state::stroke_collection::ImmutableStroke {
-                                brush: state::StrokeBrushSettings {
-                                    color_modulate: color_modulate.into(),
-                                    ..stroke.brush
-                                },
-                                ..*stroke
-                            }
-                        })
-                        .collect();
-                    if strokes.is_empty() {
-                        //FIXME: Renderer doesn't know how to handle zero strokes.
-                        fences.push(Self::clear(
-                            context.as_ref(),
-                            image,
-                            fuzzpaint_core::color::Color::TRANSPARENT,
-                        )?);
-                    } else {
-                        renderer.draw(strokes.as_ref(), image, true)?;
-                    }
-                }
-                // Render stroke image
-                Some(LeafType::Text {
-                    text, px_per_em, ..
-                }) => {
-                    let image = document_data.graph_render_data.get(&id).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Expected image to be created by allocate_prune_graph for {id:?}"
-                        )
-                    })?;
-                    fences.push(Self::render_text(
-                        context.as_ref(),
-                        text_builder,
-                        text_renderer,
-                        image,
-                        *px_per_em,
-                        text,
-                    )?);
-                }
-                // No rendering or lazily rendered.
-                Some(LeafType::SolidColor { .. } | LeafType::Note) | None => (),
-            }
-        }
-
-        let mut top_level_blend = blend_engine.clone().start(into.clone(), true);
-        let graph = state.graph();
-        let palette = state.palette();
+        let mut top_level_blend = self.blend.clone().start(into.view.clone(), true);
         // Walk the tree in tree-order, building up a blend operation.
         for (id, data) in graph.iter_top_level() {
             insert_blend(
-                blend_engine,
+                &self.blend,
                 &mut top_level_blend,
-                document_data,
+                graph_render_data,
                 graph,
                 palette,
                 id,
@@ -365,6 +428,219 @@ impl Renderer {
         // We traverse top-down, we need to blend bottom-up
         top_level_blend.reverse();
 
+        top_level_blend.build()
+    }
+    /// Render a document from scratch into a newly allocated document data.
+    fn new_render_from_scrach(
+        &self,
+        listener: queue::DocumentCommandListener,
+    ) -> anyhow::Result<PerDocumentData> {
+        let mut data = PerDocumentData {
+            listener,
+            compiled_blend: None,
+            graph_render_data: hashbrown::HashMap::new(),
+            render_target: self.strokes.uninit_render_data()?,
+        };
+
+        // Observe concrete document state.
+        let reader = data.listener.forward_clone_state()?;
+
+        // Allocate blend and leaf images.
+        self.allocate_prune_graph(&mut data.graph_render_data, reader.graph())?;
+
+        // Draw leaves.
+        self.leaves_from_scratch(&data, &reader)?;
+
+        // Compile blending logic on the GPU.
+        let invocation = self.compile_blend_graph(
+            reader.graph(),
+            &data.graph_render_data,
+            reader.palette(),
+            &data.render_target,
+        )?;
+
+        // Execute blending!
+        data.compiled_blend.insert(invocation).execute()?;
+
+        // Woohoo!
+        Ok(data)
+    }
+    /// Render a stroke layer. If `which` is `Some`, this defines an update operation, where each stroke in `which` is drawn into the existing buffer.
+    /// Otherwise, the buffer is cleared and all active (not undone) strokes from the collection are drawn.
+    ///
+    /// Ok(None) represents a success that does not need host-side waiting, `Ok(Some(fence))` requires synchronization before the operation is complete.
+    fn stroke_layer(
+        &self,
+        collection: &state::stroke_collection::StrokeCollection,
+        palette: &state::palette::Palette,
+        data: &RenderData,
+        which: Option<&[state::stroke_collection::ImmutableStrokeID]>,
+    ) -> anyhow::Result<Option<vk::FenceSignalFuture<Box<dyn vk::sync::GpuFuture>>>> {
+        enum EitherIter<
+            'a,
+            A: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
+            B: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
+        > {
+            Active(A),
+            Which(B),
+        }
+        impl<
+                'a,
+                A: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
+                B: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
+            > Iterator for EitherIter<'a, A, B>
+        {
+            type Item = &'a state::stroke_collection::ImmutableStroke;
+            fn next(&mut self) -> Option<Self::Item> {
+                match self {
+                    EitherIter::Active(a) => a.next(),
+                    EitherIter::Which(b) => b.next(),
+                }
+            }
+        }
+
+        let clear = which.is_none();
+
+        let strokes: Vec<_> = match which {
+            Some(which) => EitherIter::Which(which.iter().filter_map(|&id| collection.get(id))),
+            None => EitherIter::Active(collection.iter_active()),
+        }
+        .map(|stroke| {
+            // Convert paletted color into concrete color.
+            // THIS LOGIC SHOULD NOT BE HERE X3
+            let color_modulate = stroke.brush.color_modulate.get().left_or_else(|idx| {
+                palette
+                    .get(idx)
+                    .unwrap_or(fuzzpaint_core::color::Color::BLACK)
+            });
+            fuzzpaint_core::state::stroke_collection::ImmutableStroke {
+                brush: state::StrokeBrushSettings {
+                    color_modulate: color_modulate.into(),
+                    ..stroke.brush
+                },
+                ..*stroke
+            }
+        })
+        .collect();
+
+        if strokes.is_empty() {
+            if clear {
+                //FIXME: Renderer doesn't know how to handle zero strokes.
+                Self::clear(
+                    &self.context,
+                    data,
+                    fuzzpaint_core::color::Color::TRANSPARENT,
+                )
+                .map(Some)
+            } else {
+                Ok(None)
+            }
+        } else {
+            self.strokes
+                .draw(strokes.as_ref(), data, clear)
+                .map(|()| None)
+        }
+    }
+    fn text_layer(
+        &self,
+        text: &str,
+        pix_per_em: f32,
+        data: &RenderData,
+    ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn vk::sync::GpuFuture>>> {
+        todo!();
+        // Fixme: text builder needs inner mutability.
+        // Self::render_text(&self.context, &mut self.text_builder, renderer, image, px_per_em, text)
+    }
+    fn copy_document_to_preview_proxy(
+        &self,
+        document_data: &PerDocumentData,
+        into: &Arc<vk::ImageView>,
+    ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn vk::sync::GpuFuture + Send>>> {
+        let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
+            self.context.allocators().command_buffer(),
+            self.context.queues().graphics().idx(),
+            vk::CommandBufferUsage::OneTimeSubmit,
+        )?;
+        let region = ImageCopy {
+            dst_offset: [0; 3],
+            src_offset: [0; 3],
+            extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
+            src_subresource: vk::ImageSubresourceLayers {
+                array_layers: 0..1,
+                mip_level: 0,
+                aspects: vk::ImageAspects::COLOR,
+            },
+            dst_subresource: vk::ImageSubresourceLayers {
+                array_layers: into.subresource_range().array_layers.clone(),
+                aspects: vk::ImageAspects::COLOR,
+                mip_level: 0,
+            },
+            ..Default::default()
+        };
+        command_buffer.copy_image(CopyImageInfo {
+            regions: smallvec::smallvec![region],
+            ..CopyImageInfo::images(
+                document_data.render_target.image.clone(),
+                into.image().clone(),
+            )
+        })?;
+
+        let command_buffer = command_buffer.build()?;
+
+        Ok(vk::sync::now(self.context.device().clone())
+            .then_execute(
+                self.context.queues().graphics().queue().clone(),
+                command_buffer,
+            )?
+            .boxed_send()
+            .then_signal_fence_and_flush()?)
+    }
+    /// Renders every leaf, does not execute blend.
+    fn leaves_from_scratch(
+        &self,
+        document_data: &PerDocumentData,
+        reader: impl queue::state_reader::CommandQueueStateReader,
+    ) -> anyhow::Result<()> {
+        use state::graph::LeafType;
+        let mut fences = vec![];
+
+        // Walk the tree in arbitrary order, rendering all as needed and collecting their futures.
+        for (id, data) in reader.graph().iter() {
+            match data.leaf() {
+                // Render stroke image
+                Some(LeafType::StrokeLayer { collection, .. }) => {
+                    let data = document_data.graph_render_data.get(&id).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Expected image to be created by allocate_prune_graph for {id:?}"
+                        )
+                    })?;
+                    let strokes =
+                        reader
+                            .stroke_collections()
+                            .get(*collection)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Missing stroke collection {collection:?}")
+                            })?;
+                    if let Some(fence) = self.stroke_layer(strokes, reader.palette(), data, None)? {
+                        fences.push(fence);
+                    };
+                }
+                // Render stroke image
+                Some(LeafType::Text {
+                    text, px_per_em, ..
+                }) => {
+                    let data = document_data.graph_render_data.get(&id).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Expected image to be created by allocate_prune_graph for {id:?}"
+                        )
+                    })?;
+                    fences.push(self.text_layer(text, *px_per_em, data)?);
+                }
+                // No rendering or lazily rendered.
+                Some(LeafType::SolidColor { .. } | LeafType::Note) | None => (),
+            }
+        }
+
         // Wait for every fence. Terrible, but vulkano semaphores don't seem to be working currently.
         // Note to self: see commit fuzzpaint @ d435ca7c29cf045be413c9849be928693a2de458 for a time when this worked.
         // Iunno what changed :<
@@ -372,33 +648,7 @@ impl Renderer {
             fence.wait(None)?;
         }
 
-        // Execute blend after the images are ready
-        unsafe { top_level_blend.build()?.execute()?; }
-
         Ok(())
-    }
-    /// Assumes the existence of a previous `draw_from_scratch`, applying only the diff.
-    fn draw_incremental(
-        _context: &Arc<crate::render_device::RenderContext>,
-        _blend_engine: &Arc<blender::BlendEngine>,
-        _renderer: &stroke_renderer::StrokeLayerRenderer,
-        _document_data: &mut PerDocumentData,
-        state: &impl queue::state_reader::CommandQueueStateReader,
-        _into: &Arc<vk::ImageView>,
-    ) -> Result<(), IncrementalDrawErr> {
-        if !state.has_changes() {
-            // Nothing to do
-            return Ok(());
-        }
-
-
-        if state.has_changes() {
-            // State is dirty!
-            // Lol, just defer to draw_from_scratch until that works.
-            Err(IncrementalDrawErr::StateMismatch)
-        } else {
-            Ok(())
-        }
     }
     fn clear(
         context: &crate::render_device::RenderContext,
@@ -505,7 +755,7 @@ impl Renderer {
     /// Creates images for all nodes which require rendering, drops node images that are deleted, etc.
     /// Only fails when graphics device is out-of-memory
     fn allocate_prune_graph(
-        renderer: &stroke_renderer::StrokeLayerRenderer,
+        &self,
         graph_render_data: &mut hashbrown::HashMap<state::graph::AnyID, RenderData>,
         graph: &state::graph::BlendGraph,
     ) -> anyhow::Result<()> {
@@ -519,7 +769,7 @@ impl Renderer {
                 // Stroke and text have images.
                 (
                     Some(
-                         state::graph::LeafType::StrokeLayer { .. }
+                        state::graph::LeafType::StrokeLayer { .. }
                         | state::graph::LeafType::Text { .. },
                     ),
                     None,
@@ -534,7 +784,7 @@ impl Renderer {
                 retain_data.insert(id);
                 // Allocate new image, if none allocated already.
                 if let hashbrown::hash_map::Entry::Vacant(v) = graph_render_data.entry(id) {
-                    v.insert(renderer.uninit_render_data()?);
+                    v.insert(self.strokes.uninit_render_data()?);
                 }
             }
         }
@@ -616,9 +866,10 @@ async fn render_changes(
         // Rerender, if requested
         if changes.contains(&selections.document) {
             let write = document_preview.write().await;
-            renderer.render_one(selections.document, &write)?;
-            // We sync with renderer, oofs :V
-            write.submit_now();
+
+            let fence = renderer.render_one(selections.document, &write)?;
+
+            write.submit_with_fence(fence);
         }
         changes.clear();
     }
@@ -676,12 +927,12 @@ mod stroke_renderer {
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {
             // Begin uploading a brush image in the background while we continue setup
             let (image_a, image_b, sampler, _defer) = {
-                let brush_a =
-                    image::load_from_memory(include_bytes!("../../brushes/splotch.png"))?
-                        .into_luma8();
-                let mut brush_b =
-                image::load_from_memory(include_bytes!("../../../fuzzpaint-core/default/circle.png"))?
+                let brush_a = image::load_from_memory(include_bytes!("../../brushes/splotch.png"))?
                     .into_luma8();
+                let mut brush_b = image::load_from_memory(include_bytes!(
+                    "../../../fuzzpaint-core/default/circle.png"
+                ))?
+                .into_luma8();
 
                 brush_b.iter_mut().for_each(|l| *l = 255 - *l);
                 assert_eq!(brush_a.width(), brush_b.width());
@@ -695,7 +946,9 @@ mod stroke_renderer {
                         array_layers: 2,
                         mip_levels: mips,
                         format: vk::Format::R8_UNORM,
-                        usage: vk::ImageUsage::SAMPLED | vk::ImageUsage::TRANSFER_DST | vk::ImageUsage::TRANSFER_SRC,
+                        usage: vk::ImageUsage::SAMPLED
+                            | vk::ImageUsage::TRANSFER_DST
+                            | vk::ImageUsage::TRANSFER_SRC,
 
                         ..Default::default()
                     },
@@ -752,7 +1005,7 @@ mod stroke_renderer {
                 {
                     let mut src_width = brush_a.width();
                     let mut src_height = brush_a.height();
-                    for src_mip in 0..mips-1 {
+                    for src_mip in 0..mips - 1 {
                         let dst_mip = src_mip + 1;
                         let dst_width = src_width / 2;
                         let dst_height = src_height / 2;
@@ -768,22 +1021,14 @@ mod stroke_renderer {
                                 aspects: vk::ImageAspects::COLOR,
                                 mip_level: dst_mip,
                             },
-                            src_offsets: [
-                                [0, 0, 0],
-                                [src_width, src_height, 1],
-                            ],
-                            dst_offsets: [
-                                [0, 0, 0],
-                                [dst_width, dst_height, 1],
-                            ],
+                            src_offsets: [[0, 0, 0], [src_width, src_height, 1]],
+                            dst_offsets: [[0, 0, 0], [dst_width, dst_height, 1]],
                             ..Default::default()
                         };
 
                         cb.blit_image(vk::BlitImageInfo {
                             filter: vk::Filter::Linear,
-                            regions: smallvec::smallvec![
-                                blit,
-                            ],
+                            regions: smallvec::smallvec![blit,],
                             ..vk::BlitImageInfo::images(device_image.clone(), device_image.clone())
                         })?;
 
@@ -953,7 +1198,9 @@ mod stroke_renderer {
                 context.allocators().descriptor_set(),
                 pipeline.layout().set_layouts()[0].clone(),
                 [vk::WriteDescriptorSet::image_view_sampler(
-                    0, image_a, sampler.clone(),
+                    0,
+                    image_a,
+                    sampler.clone(),
                 )],
                 [],
             )?;
@@ -972,9 +1219,18 @@ mod stroke_renderer {
                 context,
                 pipeline,
                 gpu_tess: tess,
-                texture_descriptors: [(fuzzpaint_core::brush::UniqueID([0; 32]), descriptor_set_a), (fuzzpaint_core::brush::UniqueID([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), descriptor_set_b)]
-                    .into_iter()
-                    .collect(),
+                texture_descriptors: [
+                    (fuzzpaint_core::brush::UniqueID([0; 32]), descriptor_set_a),
+                    (
+                        fuzzpaint_core::brush::UniqueID([
+                            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                            0, 0, 0, 0, 0, 0, 0, 0,
+                        ]),
+                        descriptor_set_b,
+                    ),
+                ]
+                .into_iter()
+                .collect(),
             })
         }
         /// Allocate a new `RenderData` object. Initial contents are undefined!
@@ -992,7 +1248,9 @@ mod stroke_renderer {
                         // Source for blending from..
                         | vk::ImageUsage::SAMPLED
                         // For color clearing..
-                        | vk::ImageUsage::TRANSFER_DST,
+                        | vk::ImageUsage::TRANSFER_DST
+                        // For blitting to preview proxy...
+                        | vk::ImageUsage::TRANSFER_SRC,
                     extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
                     array_layers: 1,
                     mip_levels: 1,
@@ -1095,8 +1353,7 @@ mod stroke_renderer {
 
                 // Group together commands by brush ID and draw them!
                 while let Some((brush_id, indirects)) = next_indirects_by_brush_id() {
-                    let Some(descriptor) = 
-                    self.texture_descriptors
+                    let Some(descriptor) = self.texture_descriptors
                         .get(&brush_id)
                         .cloned() else {
                             continue

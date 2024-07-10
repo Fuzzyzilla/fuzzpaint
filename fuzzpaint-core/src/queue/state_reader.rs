@@ -9,6 +9,26 @@ pub trait CommandQueueStateReader {
     fn changes(&'_ self) -> impl Iterator<Item = commands::DoUndo<'_, commands::Command>> + '_;
     fn has_changes(&self) -> bool;
 }
+impl<T> CommandQueueStateReader for &T
+where
+    T: CommandQueueStateReader,
+{
+    fn changes(&'_ self) -> impl Iterator<Item = commands::DoUndo<'_, commands::Command>> + '_ {
+        (*self).changes()
+    }
+    fn graph(&self) -> &state::graph::BlendGraph {
+        (*self).graph()
+    }
+    fn has_changes(&self) -> bool {
+        (*self).has_changes()
+    }
+    fn palette(&self) -> &state::palette::Palette {
+        (*self).palette()
+    }
+    fn stroke_collections(&self) -> &state::stroke_collection::StrokeCollectionState {
+        (*self).stroke_collections()
+    }
+}
 
 /// Represents a lock on the global queue state.
 /// Guarunteed to be the most up-to-date view, as the queue can not be modified

@@ -110,7 +110,7 @@ impl Command {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum DoUndo<'c, T> {
     Do(&'c T),
     Undo(&'c T),
