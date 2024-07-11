@@ -30,7 +30,7 @@ impl BlendLogic {
 
         // When writing new operations here, remember that:
         // * if the result alpha is zero, RGB must also be zero.
-        // * if the dst alpha is zero and not clip, then use src directly. -- maybe?
+        // * if the dst alpha is zero and not clip, then use src directly.
         // * if the src alpha is zero, dst should be unchanged.
         // * if clip, then the dst alpha should be unchanged.
         // This serves as a decent litmus test for if something is horribly borked.
@@ -51,37 +51,59 @@ impl BlendLogic {
             }
         };
 
+        // Verification is based on parity testing with Krita
         match (blend, clip) {
+            // Verified
             (BlendMode::Normal, false) => BlendLogic::Simple(AttachmentBlend {
                 src_color_blend_factor: BlendFactor::One,
                 dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
                 ..alpha_channel
             }),
+            // Verified
             (BlendMode::Normal, true) => BlendLogic::Simple(AttachmentBlend {
                 src_color_blend_factor: BlendFactor::DstAlpha,
-                // Should this be (1 - (Sa * Da))? this can't be represented, if so.
                 dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
                 ..alpha_channel
             }),
+            // Verified
             (BlendMode::Add, false) => BlendLogic::Simple(AttachmentBlend {
                 src_color_blend_factor: BlendFactor::One,
                 dst_color_blend_factor: BlendFactor::One,
                 ..alpha_channel
             }),
+            // Ba(a)d
+            // `[Src * DstAlpha] + [Dst]` is subtly wrong. (red + translucent white) = translucent red, should be white.
             (BlendMode::Add, true) => BlendLogic::Simple(AttachmentBlend {
                 src_color_blend_factor: BlendFactor::DstAlpha,
                 dst_color_blend_factor: BlendFactor::One,
                 ..alpha_channel
             }),
+            // Ba(a)d
+            // `[Src * Dst] + [Dst * (1 - SrcAlpha)]` is subtly wrong, (red * transparent) = black, should be red.
             (BlendMode::Multiply, false) => BlendLogic::Simple(AttachmentBlend {
-                // Not quite right, always results in black on a transparent background.
                 // Funny! No mul op, so instead "Normal" op with the left side having a multiply factor.
                 src_color_blend_factor: BlendFactor::DstColor,
                 dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
                 ..alpha_channel
             }),
-            (BlendMode::Multiply, true) => BlendLogic::Arbitrary(shaders::noncoherent_test::load),
-            _ => unimplemented!(),
+            // Verified
+            (BlendMode::Multiply, true) => BlendLogic::Simple(AttachmentBlend {
+                // Funny! No mul op, so instead "Normal" op with the left side having a multiply factor.
+                src_color_blend_factor: BlendFactor::DstColor,
+                dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                ..alpha_channel
+            }),
+            // Unique exception to the "if clip, then the dst alpha should be unchanged" rule, as this
+            // is the only mode that can *decrease* image opacity.
+            // Verified, both clip and not.
+            (BlendMode::Erase, _) => BlendLogic::Simple(AttachmentBlend {
+                src_color_blend_factor: BlendFactor::Zero,
+                src_alpha_blend_factor: BlendFactor::Zero,
+                dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                dst_alpha_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                ..Default::default()
+            }),
+            (BlendMode::Overlay, _) => unimplemented!(),
         }
     }
 }

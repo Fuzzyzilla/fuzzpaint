@@ -16,6 +16,7 @@ pub enum BlendMode {
     Add,
     Multiply,
     Overlay,
+    Erase,
 }
 impl Default for BlendMode {
     fn default() -> Self {
