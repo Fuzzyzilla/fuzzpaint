@@ -172,8 +172,10 @@ impl Renderer {
 
         let mut fences = vec![];
 
-        if graph_invalidated || data.compiled_blend.is_none() {
+        if graph_invalidated {
             log::trace!("Scouring allocations");
+            // Needs recompile.
+            let _ = data.compiled_blend.take();
             self.engines
                 .allocate_prune_graph(&mut data.graph_render_data, changes.graph())?;
         }
@@ -232,21 +234,24 @@ impl Renderer {
         // This has to be *after* stroke render, for some reason, or the layers don't show up at all.
         // Probably something wrong with the internal layout transitions. ;;;w;;;
         // *screaming*
-        if graph_invalidated || data.compiled_blend.is_none() {
-            log::trace!("Recompiling blend graph");
-            // Drop old one before building anew, to conserve mem. This could be delta'd instead to re-use old work, todo.
-            let _ = data.compiled_blend.take();
-            let invocation = self.engines.compile_blend_graph(
-                changes.graph(),
-                &data.graph_render_data,
-                changes.palette(),
-                &data.render_target,
-            )?;
-            data.compiled_blend = Some(invocation);
-        }
+        let compiled_blend = match &mut data.compiled_blend {
+            Some(c) => c,
+            None => {
+                log::trace!("Recompiling blend graph");
+                // Drop old one before building anew, to conserve mem. This could be delta'd instead to re-use old work, todo.
+                let _ = data.compiled_blend.take();
+                let invocation = self.engines.compile_blend_graph(
+                    changes.graph(),
+                    &data.graph_render_data,
+                    changes.palette(),
+                    &data.render_target,
+                )?;
 
-        // This is known some, guarded above.
-        data.compiled_blend.as_mut().unwrap().execute()?;
+                data.compiled_blend.insert(invocation)
+            }
+        };
+
+        compiled_blend.execute()?;
 
         self.engines.copy_document_to_preview_proxy(data, into)
     }
@@ -1314,7 +1319,6 @@ mod stroke_renderer {
                         // Take the rest.
                         Some((id, indirects.clone()))
                     }
-                    
                 };
 
                 let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
