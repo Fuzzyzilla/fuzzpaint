@@ -15,7 +15,9 @@ pub enum BlendMode {
     Normal,
     Add,
     Multiply,
-    Overlay,
+    Screen,
+    Darken,
+    Lighten,
     Erase,
 }
 impl Default for BlendMode {

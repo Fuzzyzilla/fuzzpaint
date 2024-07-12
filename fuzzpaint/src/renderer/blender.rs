@@ -14,10 +14,28 @@ type BlendLoader =
 /// Use to create a [`CompiledBlend`]
 enum BlendLogic {
     /// The blend can be represented as a standard blend function. Hardware accelerated, pipelinable, and coherent. Nice :3
-    Simple(vk::AttachmentBlend),
+    SimplePair {
+        unclipped: vk::AttachmentBlend,
+        clipped: vk::AttachmentBlend,
+    },
     /// Provide a Load function for a shader to compute `A (+) B` for arbitrary blend logic. Still pipeliend, but noncoherent 3:
     /// (except perhaps if the device has fragment interlock, todo!)
+    ///
+    /// The clipping behavior is provided transparently by the engine for Arbitrary pipes, thus only the unclipped function is needed.
     Arbitrary(BlendLoader),
+    /// Only the clipped version is coherent.
+    ArbitraryUnclipped {
+        unclipped: BlendLoader,
+        clipped: vk::AttachmentBlend,
+    },
+    /// Only the Unclipped version is coherent.
+    ///
+    /// The clipping behavior is provided transparently by the engine for Arbitrary pipes, thus the provided clip function
+    /// should produce *unclipped* results.
+    ArbitraryClipped {
+        unclipped: vk::AttachmentBlend,
+        clipped: BlendLoader,
+    },
     // other ideas for implementing, with various stages of slowness (still better than loopback fragment):
     // * we have blend constants and dual src blend at our disposal! These are free, but latter requires hardware support.
     // * Additionally, we could use the fragment to do arbitrary transforms to `Src` but still use regular blend eqs
@@ -25,8 +43,11 @@ enum BlendLogic {
 }
 impl BlendLogic {
     /// Get the logic needed to perform a blend.
-    fn of(blend: BlendMode, clip: bool) -> BlendLogic {
-        use vk::{AttachmentBlend, BlendFactor};
+    fn of(blend: BlendMode) -> Self {
+        use vk::{AttachmentBlend, BlendFactor, BlendOp};
+
+        // Big ol' note to self: BlendOp::  {Min, Max} *silently ignore factors*. Only ever uses `One`.
+        // Don't waste any time trying to write coherent Clipped Lighten or Un/clipped Darken! :P
 
         // When writing new operations here, remember that:
         // * if the result alpha is zero, RGB must also be zero.
@@ -35,75 +56,113 @@ impl BlendLogic {
         // * if clip, then the dst alpha should be unchanged.
         // This serves as a decent litmus test for if something is horribly borked.
 
-        // The logic for just the alpha channel, color channels must be overridden.
-        let alpha_channel = if clip {
-            AttachmentBlend {
-                // Keep alpha from dest.
-                src_alpha_blend_factor: BlendFactor::Zero,
-                dst_alpha_blend_factor: BlendFactor::One,
-                ..Default::default()
-            }
-        } else {
-            AttachmentBlend {
-                src_alpha_blend_factor: BlendFactor::One,
-                dst_alpha_blend_factor: BlendFactor::OneMinusSrcAlpha,
-                ..Default::default()
-            }
+        // The logic for usual behaviours of the alpha channel, color channels must be overridden.
+        let clip = AttachmentBlend {
+            // Keep alpha from dest.
+            src_alpha_blend_factor: BlendFactor::Zero,
+            dst_alpha_blend_factor: BlendFactor::One,
+            ..Default::default()
+        };
+
+        let noclip = AttachmentBlend {
+            src_alpha_blend_factor: BlendFactor::One,
+            dst_alpha_blend_factor: BlendFactor::OneMinusSrcAlpha,
+            ..Default::default()
         };
 
         // Verification is based on parity testing with Krita
-        match (blend, clip) {
-            // Verified
-            (BlendMode::Normal, false) => BlendLogic::Simple(AttachmentBlend {
-                src_color_blend_factor: BlendFactor::One,
-                dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
-                ..alpha_channel
-            }),
-            // Verified
-            (BlendMode::Normal, true) => BlendLogic::Simple(AttachmentBlend {
-                src_color_blend_factor: BlendFactor::DstAlpha,
-                dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
-                ..alpha_channel
-            }),
-            // Verified
-            (BlendMode::Add, false) => BlendLogic::Simple(AttachmentBlend {
-                src_color_blend_factor: BlendFactor::One,
-                dst_color_blend_factor: BlendFactor::One,
-                ..alpha_channel
-            }),
-            // Ba(a)d
-            // `[Src * DstAlpha] + [Dst]` is subtly wrong. (red + translucent white) = translucent red, should be white.
-            (BlendMode::Add, true) => BlendLogic::Simple(AttachmentBlend {
-                src_color_blend_factor: BlendFactor::DstAlpha,
-                dst_color_blend_factor: BlendFactor::One,
-                ..alpha_channel
-            }),
-            // Ba(a)d
-            // `[Src * Dst] + [Dst * (1 - SrcAlpha)]` is subtly wrong, (red * transparent) = black, should be red.
-            (BlendMode::Multiply, false) => BlendLogic::Simple(AttachmentBlend {
-                // Funny! No mul op, so instead "Normal" op with the left side having a multiply factor.
-                src_color_blend_factor: BlendFactor::DstColor,
-                dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
-                ..alpha_channel
-            }),
-            // Verified
-            (BlendMode::Multiply, true) => BlendLogic::Simple(AttachmentBlend {
-                // Funny! No mul op, so instead "Normal" op with the left side having a multiply factor.
-                src_color_blend_factor: BlendFactor::DstColor,
-                dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
-                ..alpha_channel
-            }),
+        match blend {
+            BlendMode::Normal => BlendLogic::SimplePair {
+                // Verified
+                unclipped: AttachmentBlend {
+                    src_color_blend_factor: BlendFactor::One,
+                    dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                    ..noclip
+                },
+                // Verified
+                clipped: AttachmentBlend {
+                    src_color_blend_factor: BlendFactor::DstAlpha,
+                    dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                    ..clip
+                },
+            },
+            BlendMode::Add => BlendLogic::SimplePair {
+                // Verified
+                unclipped: AttachmentBlend {
+                    src_color_blend_factor: BlendFactor::One,
+                    dst_color_blend_factor: BlendFactor::One,
+                    ..noclip
+                },
+                // `[Src * DstAlpha] + [Dst]` is subtly wrong. (red + translucent white) = translucent red, should be white.
+                // This is strange, but only in relation to an art software that clips at white. This is expected behavior
+                // given that we allow brighter-than-white colors. (The red fringe is >100% red being faded out with alpha)
+                //
+                // Somehow, Krita does not have this fringe, even with unclamped floating point color. Not sure how!
+                clipped: AttachmentBlend {
+                    src_color_blend_factor: BlendFactor::DstAlpha,
+                    dst_color_blend_factor: BlendFactor::One,
+                    ..clip
+                },
+            },
+            BlendMode::Multiply => BlendLogic::ArbitraryUnclipped {
+                // `[Src * Dst] + [Dst * (1 - SrcAlpha)]` is subtly wrong, (red * transparent) = black, should be red.
+                // So, use arbitrary to patch it with more complex logic.
+                // Verified
+                unclipped: shaders::multiply_noclip::load,
+                // Verified
+                clipped: AttachmentBlend {
+                    // Funny! No mul op, so instead "Normal" op with the left side having a multiply factor.
+                    src_color_blend_factor: BlendFactor::DstColor,
+                    dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                    ..clip
+                },
+            },
+            BlendMode::Screen => BlendLogic::SimplePair {
+                // Verified
+                unclipped: AttachmentBlend {
+                    src_color_blend_factor: BlendFactor::One,
+                    dst_color_blend_factor: BlendFactor::OneMinusSrcColor,
+                    ..noclip
+                },
+                // Verified
+                clipped: AttachmentBlend {
+                    src_color_blend_factor: BlendFactor::DstAlpha,
+                    dst_color_blend_factor: BlendFactor::OneMinusSrcColor,
+                    ..clip
+                },
+            },
+            // Very wrong
+            BlendMode::Darken => BlendLogic::Arbitrary(shaders::darken::load),
+            BlendMode::Lighten => BlendLogic::ArbitraryClipped {
+                // Verified
+                unclipped: AttachmentBlend {
+                    src_color_blend_factor: BlendFactor::One,
+                    dst_color_blend_factor: BlendFactor::One,
+                    color_blend_op: BlendOp::Max,
+                    ..noclip
+                },
+                // Very wrong
+                clipped: shaders::lighten_clip::load,
+            },
             // Unique exception to the "if clip, then the dst alpha should be unchanged" rule, as this
             // is the only mode that can *decrease* image opacity.
             // Verified, both clip and not.
-            (BlendMode::Erase, _) => BlendLogic::Simple(AttachmentBlend {
-                src_color_blend_factor: BlendFactor::Zero,
-                src_alpha_blend_factor: BlendFactor::Zero,
-                dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
-                dst_alpha_blend_factor: BlendFactor::OneMinusSrcAlpha,
-                ..Default::default()
-            }),
-            (BlendMode::Overlay, _) => unimplemented!(),
+            BlendMode::Erase => {
+                let erase = AttachmentBlend {
+                    src_color_blend_factor: BlendFactor::Zero,
+                    src_alpha_blend_factor: BlendFactor::Zero,
+                    dst_color_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                    dst_alpha_blend_factor: BlendFactor::OneMinusSrcAlpha,
+                    ..Default::default()
+                };
+                // Wholly unique case where clipped and unclipped are the same. It'll get compiled twice,
+                // but it's not really worthwhile to special case this...
+                BlendLogic::SimplePair {
+                    unclipped: erase,
+                    clipped: erase,
+                }
+            }
+            _ => unimplemented!(),
         }
     }
 }
@@ -117,6 +176,14 @@ enum CompiledBlend {
     SimpleCoherent(Arc<vk::GraphicsPipeline>),
     /// A pipeline which performs a non-coherent "loopback" operation
     Loopback(Arc<vk::GraphicsPipeline>),
+}
+impl CompiledBlend {
+    fn reads_input_attachment(&self) -> bool {
+        match self {
+            Self::SimpleCoherent(_) => false,
+            Self::Loopback(_) => true,
+        }
+    }
 }
 
 mod shaders {
@@ -204,7 +271,7 @@ mod shaders {
                 "
         }
     }
-    pub mod noncoherent_test {
+    pub mod multiply_noclip {
         vulkano_shaders::shader! {
             ty: "fragment",
             src: r"
@@ -224,7 +291,77 @@ mod shaders {
                     layout(location = 0) out vec4 color;
 
                     void main() {
-                        color = subpassLoad(dst).gbra;
+                        vec4 c_dst = subpassLoad(dst);
+                        vec4 c_src = is_solid ? solid_color : (texture(src, uv) * solid_color.a);
+
+                        // It's as simple as this, but we need to apply logic so that a transparent dst
+                        // gives src directly (instead of black as this would do).
+                        vec4 mul = c_dst * c_src + c_dst * (1.0 - c_src.a);
+
+                        // To handle transparent dst, do a 'normal' blend of mul, clpped by dst, on top of src.
+                        color = mul + c_src * (1.0 - c_dst.a);
+                    }
+                "
+        }
+    }
+    pub mod darken {
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            src: r"
+                    #version 460
+                    layout(set = 0, binding = 0) uniform sampler2D src;
+                    layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput dst;
+
+                    layout(push_constant) uniform Constants {
+                        // Solid color constant, otherwise just the alpha is used as global multiplier.
+                        vec4 solid_color;
+                        // True if the shader should 'sample' from `solid_color` instead of the image.
+                        // UB to read image if this is set.
+                        bool is_solid;
+                    };
+
+                    layout(location = 0) in vec2 uv;
+                    layout(location = 0) out vec4 color;
+
+                    void main() {
+                        vec4 c_dst = subpassLoad(dst);
+                        vec4 c_src = is_solid ? solid_color : (texture(src, uv) * solid_color.a);
+
+                        // Unmultiply - treat it as if the dst is fully opaque, do our blend,
+                        // then allow the VkBlendEq to re-apply dst alpha. This effectively clips it.
+                        c_dst = c_dst.a == 0.0 ? vec4(0.0, 0.0, 0.0, 1.0) : c_dst / c_dst.a;
+
+                        vec4 darken = min(c_src, c_dst);
+
+                        color = darken;
+                    }
+                "
+        }
+    }
+    pub mod lighten_clip {
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            src: r"
+                    #version 460
+                    layout(set = 0, binding = 0) uniform sampler2D src;
+                    layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput dst;
+
+                    layout(push_constant) uniform Constants {
+                        // Solid color constant, otherwise just the alpha is used as global multiplier.
+                        vec4 solid_color;
+                        // True if the shader should 'sample' from `solid_color` instead of the image.
+                        // UB to read image if this is set.
+                        bool is_solid;
+                    };
+
+                    layout(location = 0) in vec2 uv;
+                    layout(location = 0) out vec4 color;
+
+                    void main() {
+                        vec4 c_dst = subpassLoad(dst);
+                        vec4 c_src = is_solid ? solid_color : (texture(src, uv) * solid_color.a);
+
+                        color = vec4(min(c_dst.rgb, c_src.rgb), 1.0);
                     }
                 "
         }
@@ -493,14 +630,22 @@ impl BlendInvocation {
             let mut needs_compile = Vec::new();
             let read = engine.mode_pipelines.read();
 
-            for needed_mode in modes {
-                if let Some(pipe) = read.get(&needed_mode) {
-                    // Found it!
-                    pipes.insert(needed_mode, pipe.clone());
-                } else {
-                    // Not found, remember to compile it.
-                    needs_compile.push(needed_mode);
+            for (needed_mode, needed_clip) in modes {
+                if let Some((unclipped_pipe, clipped_pipe)) = read.get(&needed_mode) {
+                    let pipe = if needed_clip {
+                        clipped_pipe
+                    } else {
+                        unclipped_pipe
+                    };
+
+                    if let Some(pipe) = pipe {
+                        // Found it!
+                        pipes.insert((needed_mode, needed_clip), pipe.clone());
+                        continue;
+                    }
                 }
+                // fallthrough = Not found, remember to compile it.
+                needs_compile.push((needed_mode, needed_clip));
             }
 
             // May need to switch to write, avoid deadlock.
@@ -515,17 +660,34 @@ impl BlendInvocation {
                     // The switch from reader to writer was not atomic, so the state may have changed.
                     // Use `entry` API to cope with this.
 
-                    match write.entry((mode, clip)) {
-                        hashbrown::hash_map::Entry::Occupied(o) => {
-                            // Somebody did it for us in the meantime, how polite~!
-                            pipes.insert((mode, clip), o.get().clone());
+                    match write.entry(mode) {
+                        hashbrown::hash_map::Entry::Occupied(mut o) => {
+                            let (unclipped_pipe, clipped_pipe) = o.get_mut();
+                            let pipe = if clip { clipped_pipe } else { unclipped_pipe };
+
+                            if let Some(pipe) = pipe {
+                                // Somebody did it for us in the meantime, how polite~!
+                                pipes.insert((mode, clip), pipe.clone());
+                            } else {
+                                // Still missing, compile
+                                let compiled = engine.compile_pipe_for(mode, clip)?;
+                                pipes.insert((mode, clip), compiled.clone());
+                                // Put in the open cache slot too!
+                                *pipe = Some(compiled);
+                            }
                         }
                         hashbrown::hash_map::Entry::Vacant(v) => {
                             // Still missing, compile
                             let compiled = engine.compile_pipe_for(mode, clip)?;
                             pipes.insert((mode, clip), compiled.clone());
-                            // Put in the cache too!
-                            v.insert(compiled);
+
+                            // Make a new entry in the cache too, in the right position:
+                            let pair = if clip {
+                                (None, Some(compiled))
+                            } else {
+                                (Some(compiled), None)
+                            };
+                            v.insert(pair);
                         }
                     }
                 }
@@ -810,8 +972,10 @@ pub struct BlendEngine {
     coherent_frag: vk::EntryPoint,
     /// Pipes need a renderpass to build against. We don't have the pass at the time of pipe compilation, tho!
     feedback_pass: Arc<vk::RenderPass>,
-    /// (mode, clip) -> prepared blend pipe.
-    mode_pipelines: parking_lot::RwLock<hashbrown::HashMap<(BlendMode, bool), CompiledBlend>>,
+    /// mode -> (unclipped pipe, clipped pipe).
+    mode_pipelines: parking_lot::RwLock<
+        hashbrown::HashMap<BlendMode, (Option<CompiledBlend>, Option<CompiledBlend>)>,
+    >,
     /// An image with undefined content, in `SHADER_READ_ONLY_OPTIMAL` layout, "usable" for sampling and nothing else.
     /// (Although it is undefined behavior to actually access.)
     /// Vulkan requires that any desciptor set that is statically-used be in a fully valid state, even if it is
@@ -821,11 +985,38 @@ pub struct BlendEngine {
 impl BlendEngine {
     /// Compile the blend logic for a given mode. Does *not* access the mode cache or check if it was already compiled.
     fn compile_pipe_for(&self, mode: BlendMode, clip: bool) -> anyhow::Result<CompiledBlend> {
-        // Fetch the equation
-        let logic = BlendLogic::of(mode, clip);
+        // Fetch the equation pair
+        let logic_pair = BlendLogic::of(mode);
+
+        // Extract the side of the pair we're interested in...
+        let logic: either::Either<BlendLoader, vk::AttachmentBlend> = match logic_pair {
+            BlendLogic::Arbitrary(a) => either::Either::Left(a),
+            BlendLogic::ArbitraryClipped { unclipped, clipped } => {
+                if clip {
+                    either::Either::Left(clipped)
+                } else {
+                    either::Either::Right(unclipped)
+                }
+            }
+            BlendLogic::ArbitraryUnclipped { unclipped, clipped } => {
+                if clip {
+                    either::Either::Right(clipped)
+                } else {
+                    either::Either::Left(unclipped)
+                }
+            }
+            BlendLogic::SimplePair { unclipped, clipped } => {
+                if clip {
+                    either::Either::Right(clipped)
+                } else {
+                    either::Either::Right(unclipped)
+                }
+            }
+        };
+
         // Compile it!
         match logic {
-            BlendLogic::Simple(equation) => {
+            either::Either::Right(equation) => {
                 let pipe = vk::GraphicsPipeline::new(
                     self.context.device().clone(),
                     None,
@@ -859,7 +1050,7 @@ impl BlendEngine {
 
                 Ok(CompiledBlend::SimpleCoherent(pipe))
             }
-            BlendLogic::Arbitrary(load) => {
+            either::Either::Left(load) => {
                 let shader = load(self.context.device().clone())?
                     .entry_point("main")
                     .ok_or_else(|| anyhow::anyhow!("entry point `main` not found"))?;
@@ -877,8 +1068,23 @@ impl BlendEngine {
                         input_assembly_state: Some(vk::InputAssemblyState::default()),
                         rasterization_state: Some(vk::RasterizationState::default()),
                         color_blend_state: Some(vk::ColorBlendState {
-                            // No blend equation, the shader is to do alllllll the work.
-                            attachments: vec![vk::ColorBlendAttachmentState::default()],
+                            // Still use blend operation to apply clipping behavior.
+                            // Arbitrary shader should compute the final, unclipped color.
+                            // This factors out code duplication and also might shift some
+                            // work from shader to fixed function hardware.
+                            attachments: vec![vk::ColorBlendAttachmentState {
+                                blend: clip.then_some(vk::AttachmentBlend {
+                                    // Keep background alpha (premul color).
+                                    src_color_blend_factor: vk::BlendFactor::DstAlpha,
+                                    // Discard background (src will be fully blended result)
+                                    dst_color_blend_factor: vk::BlendFactor::Zero,
+                                    src_alpha_blend_factor: vk::BlendFactor::Zero,
+                                    // Keep background alpha.
+                                    dst_alpha_blend_factor: vk::BlendFactor::One,
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }],
                             ..Default::default()
                         }),
                         multisample_state: Some(vk::MultisampleState::default()),
