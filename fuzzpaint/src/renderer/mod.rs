@@ -6,20 +6,25 @@ mod stroke_batcher;
 
 use fuzzpaint_core::{
     queue::{self, state_reader::CommandQueueStateReader},
-    state,
+    state::{self, graph},
 };
 use std::sync::Arc;
 use vulkano::command_buffer::{CopyImageInfo, ImageCopy};
 
 use crate::vulkano_prelude::*;
 
+struct GraphImages {
+    leaves: hashbrown::HashMap<graph::LeafID, LeafRenderData>,
+    nodes: hashbrown::HashMap<graph::NodeID, NodeRenderData>,
+}
+
 struct PerDocumentData {
     listener: queue::DocumentCommandListener,
     /// Cached images of each of the nodes of the graph.
-    graph_render_data: hashbrown::HashMap<state::graph::AnyID, RenderData>,
+    graph_render_data: GraphImages,
     /// precompiled blend operations, invalided when the graph changes.
     compiled_blend: Option<blender::BlendInvocation>,
-    render_target: RenderData,
+    render_target: NodeRenderData,
 }
 
 /// Dispatches render work to engines to create document images.
@@ -188,7 +193,7 @@ impl Renderer {
                     // If this node is a stroke layer with our same collection ID, then we found it!
                     data.leaf()
                         .is_some_and(|leaf| match leaf {
-                            state::graph::LeafType::StrokeLayer {
+                            graph::LeafType::StrokeLayer {
                                 collection: this_leaf,
                                 ..
                             } => collection == *this_leaf,
@@ -198,8 +203,13 @@ impl Renderer {
                 })
                 .ok_or_else(|| anyhow::anyhow!("delta references non-existent node"))?;
 
+            let Ok(graph_id) = graph::LeafID::try_from(graph_id) else {
+                continue;
+            };
+
             let render_data = data
                 .graph_render_data
+                .leaves
                 .get(&graph_id)
                 .ok_or_else(|| anyhow::anyhow!("missing render data for delta"))?;
             let collection = changes
@@ -282,22 +292,22 @@ impl Engines {
     /// Reuse this invocation as much as possible!
     fn compile_blend_graph(
         &self,
-        graph: &state::graph::BlendGraph,
-        graph_render_data: &hashbrown::HashMap<state::graph::AnyID, RenderData>,
+        graph: &graph::BlendGraph,
+        graph_render_data: &GraphImages,
         palette: &state::palette::Palette,
-        into: &RenderData,
+        into: &NodeRenderData,
     ) -> anyhow::Result<blender::BlendInvocation> {
-        use state::graph::{LeafType, NodeID, NodeType};
+        use graph::{LeafType, NodeID, NodeType};
         /// Insert a single node (possibly recursing) into the builder.
         fn insert_blend(
             blend_engine: &Arc<blender::BlendEngine>,
             builder: &mut blender::BlendInvocationBuilder,
-            graph_render_data: &hashbrown::HashMap<state::graph::AnyID, RenderData>,
-            graph: &state::graph::BlendGraph,
+            graph_render_data: &GraphImages,
+            graph: &graph::BlendGraph,
             palette: &state::palette::Palette,
 
-            id: state::graph::AnyID,
-            data: &state::graph::NodeData,
+            id: graph::AnyID,
+            data: &graph::NodeData,
         ) -> anyhow::Result<()> {
             match (data.leaf(), data.node()) {
                 // Pre-rendered leaves
@@ -306,7 +316,8 @@ impl Engines {
                     None,
                 ) => {
                     let view = graph_render_data
-                        .get(&id)
+                        .leaves
+                        .get(&graph::LeafID::try_from(id).unwrap())
                         .ok_or_else(|| anyhow::anyhow!("blend data not found for leaf {id:?}"))?
                         .view
                         .clone();
@@ -343,7 +354,8 @@ impl Engines {
                         palette,
                         id.try_into().unwrap(),
                         graph_render_data
-                            .get(&id)
+                            .nodes
+                            .get(&graph::NodeID::try_from(id).unwrap())
                             .ok_or_else(|| anyhow::anyhow!("blend data not found for group {id:?}"))
                             .unwrap()
                             .view
@@ -362,8 +374,8 @@ impl Engines {
         fn blend_for_passthrough(
             blend_engine: &Arc<blender::BlendEngine>,
             builder: &mut blender::BlendInvocationBuilder,
-            graph_render_data: &hashbrown::HashMap<state::graph::AnyID, RenderData>,
-            graph: &state::graph::BlendGraph,
+            graph_render_data: &GraphImages,
+            graph: &graph::BlendGraph,
             palette: &state::palette::Palette,
             node: NodeID,
         ) -> anyhow::Result<()> {
@@ -387,8 +399,8 @@ impl Engines {
         /// Recursively build a blend invocation for the node, or None for root.
         fn blend_for_node(
             blend_engine: &Arc<blender::BlendEngine>,
-            graph_render_data: &hashbrown::HashMap<state::graph::AnyID, RenderData>,
-            graph: &state::graph::BlendGraph,
+            graph_render_data: &GraphImages,
+            graph: &graph::BlendGraph,
             palette: &state::palette::Palette,
             node: NodeID,
 
@@ -443,8 +455,11 @@ impl Engines {
         let mut data = PerDocumentData {
             listener,
             compiled_blend: None,
-            graph_render_data: hashbrown::HashMap::new(),
-            render_target: self.strokes.uninit_render_data()?,
+            graph_render_data: GraphImages {
+                leaves: hashbrown::HashMap::new(),
+                nodes: hashbrown::HashMap::new(),
+            },
+            render_target: self.strokes.cleared_node_data()?,
         };
 
         // Observe concrete document state.
@@ -478,7 +493,7 @@ impl Engines {
         &self,
         collection: &state::stroke_collection::StrokeCollection,
         palette: &state::palette::Palette,
-        data: &RenderData,
+        data: &LeafRenderData,
         which: Option<&[state::stroke_collection::ImmutableStrokeID]>,
     ) -> anyhow::Result<Option<vk::FenceSignalFuture<Box<dyn vk::sync::GpuFuture>>>> {
         enum EitherIter<
@@ -550,7 +565,7 @@ impl Engines {
         &self,
         text: &str,
         pix_per_em: f32,
-        data: &RenderData,
+        data: &LeafRenderData,
     ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn vk::sync::GpuFuture>>> {
         todo!();
         // Fixme: text builder needs inner mutability.
@@ -606,19 +621,28 @@ impl Engines {
         document_data: &PerDocumentData,
         reader: impl queue::state_reader::CommandQueueStateReader,
     ) -> anyhow::Result<()> {
-        use state::graph::LeafType;
+        use graph::LeafType;
         let mut fences = vec![];
 
         // Walk the tree in arbitrary order, rendering all as needed and collecting their futures.
         for (id, data) in reader.graph().iter() {
+            let Ok(id) = graph::LeafID::try_from(id) else {
+                continue;
+            };
+
             match data.leaf() {
                 // Render stroke image
                 Some(LeafType::StrokeLayer { collection, .. }) => {
-                    let data = document_data.graph_render_data.get(&id).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Expected image to be created by allocate_prune_graph for {id:?}"
-                        )
-                    })?;
+                    let data =
+                        document_data
+                            .graph_render_data
+                            .leaves
+                            .get(&id)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                "Expected image to be created by allocate_prune_graph for {id:?}"
+                            )
+                            })?;
                     let strokes =
                         reader
                             .stroke_collections()
@@ -634,11 +658,16 @@ impl Engines {
                 Some(LeafType::Text {
                     text, px_per_em, ..
                 }) => {
-                    let data = document_data.graph_render_data.get(&id).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Expected image to be created by allocate_prune_graph for {id:?}"
-                        )
-                    })?;
+                    let data =
+                        document_data
+                            .graph_render_data
+                            .leaves
+                            .get(&id)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                "Expected image to be created by allocate_prune_graph for {id:?}"
+                            )
+                            })?;
                     fences.push(self.text_layer(text, *px_per_em, data)?);
                 }
                 // No rendering or lazily rendered.
@@ -657,7 +686,7 @@ impl Engines {
     }
     fn clear(
         context: &crate::render_device::RenderContext,
-        image: &RenderData,
+        image: &LeafRenderData,
         color: fuzzpaint_core::color::Color,
     ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn GpuFuture>>> {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
@@ -685,7 +714,7 @@ impl Engines {
         context: &crate::render_device::RenderContext,
         builder: &mut crate::text::Builder,
         renderer: &crate::text::renderer::monochrome::Renderer,
-        image: &RenderData,
+        image: &LeafRenderData,
         px_per_em: f32,
         text: &str,
     ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn GpuFuture>>> {
@@ -761,41 +790,51 @@ impl Engines {
     /// Only fails when graphics device is out-of-memory
     fn allocate_prune_graph(
         &self,
-        graph_render_data: &mut hashbrown::HashMap<state::graph::AnyID, RenderData>,
-        graph: &state::graph::BlendGraph,
+        graph_render_data: &mut GraphImages,
+        graph: &graph::BlendGraph,
     ) -> anyhow::Result<()> {
-        let mut retain_data = hashbrown::HashSet::new();
+        let mut retain_nodes = hashbrown::HashSet::<graph::NodeID>::new();
+        let mut retain_leaves = hashbrown::HashSet::<graph::LeafID>::new();
         for (id, node) in graph.iter() {
-            #[allow(clippy::match_same_arms)]
-            let has_graphics = match (node.leaf(), node.node()) {
-                // We expect it to be a node xor leaf!
-                // This is an api issue ;w;
-                (Some(..), Some(..)) | (None, None) => unreachable!(),
+            let render_type = match (node.leaf(), node.node()) {
                 // Stroke and text have images.
                 (
-                    Some(
-                        state::graph::LeafType::StrokeLayer { .. }
-                        | state::graph::LeafType::Text { .. },
-                    ),
+                    Some(graph::LeafType::StrokeLayer { .. } | graph::LeafType::Text { .. }),
                     None,
-                ) => true,
-                // Blend groups need an image.
-                (None, Some(state::graph::NodeType::GroupedBlend(..))) => true,
-                // Every other type has no graphic.
-                _ => false,
-            };
-            if has_graphics {
-                // Mark this data as needed
-                retain_data.insert(id);
-                // Allocate new image, if none allocated already.
-                if let hashbrown::hash_map::Entry::Vacant(v) = graph_render_data.entry(id) {
-                    v.insert(self.strokes.uninit_render_data()?);
+                ) => {
+                    let id = id.try_into().unwrap();
+                    // Mark it as used, so that it wont get dealloc'd
+                    retain_leaves.insert(id);
+                    // If it doesn't have an allocation, make one!
+                    if let hashbrown::hash_map::Entry::Vacant(v) =
+                        graph_render_data.leaves.entry(id)
+                    {
+                        v.insert(self.strokes.uninit_leaf_data()?);
+                    }
                 }
-            }
+                // Blend groups need an image.
+                (None, Some(graph::NodeType::GroupedBlend(..))) => {
+                    let id = id.try_into().unwrap();
+                    // Mark it as used, so that it wont get dealloc'd
+                    retain_nodes.insert(id);
+                    // If it doesn't have an allocation, make one!
+                    if let hashbrown::hash_map::Entry::Vacant(v) = graph_render_data.nodes.entry(id)
+                    {
+                        v.insert(self.strokes.cleared_node_data()?);
+                    }
+                }
+                // Every other type has no graphic.
+                _ => (),
+            };
         }
 
         // Drop all images that are no longer needed
-        graph_render_data.retain(|id, _| retain_data.contains(id));
+        graph_render_data
+            .leaves
+            .retain(|id, _| retain_leaves.contains(id));
+        graph_render_data
+            .nodes
+            .retain(|id, _| retain_nodes.contains(id));
 
         Ok(())
     }
@@ -894,13 +933,13 @@ pub async fn render_worker(
     .map(|_| ())
 }
 
-/// The data managed by the renderer.
-/// For now, in persuit of actually getting a working product one day,
-/// this is a very coarse caching sceme. In the future, perhaps a bit more granular
-/// control can occur, should performance become an issue:
-///  * Caching images of incrementally older states, reducing work to get to any given state (performant undo)
-///  * Caching tesselation output
-pub struct RenderData {
+/// Data managed by the renderer for a layer leaf, e.g. Stroke layers, text layers, ect.
+pub struct LeafRenderData {
+    image: Arc<vk::Image>,
+    pub view: Arc<vk::ImageView>,
+}
+/// Data managed by the renderer for a layer node, i.e. blend groups. Can be used as the target for blending.
+pub struct NodeRenderData {
     image: Arc<vk::Image>,
     pub view: Arc<vk::ImageView>,
 }
@@ -1238,23 +1277,51 @@ mod stroke_renderer {
                 .collect(),
             })
         }
-        /// Allocate a new `RenderData` object. Initial contents are undefined!
-        pub fn uninit_render_data(&self) -> anyhow::Result<super::RenderData> {
+        /// Allocate a new `LeafRenderData`, initial contents are undefined.
+        pub fn uninit_leaf_data(&self) -> anyhow::Result<super::LeafRenderData> {
             use vulkano::VulkanObject;
 
             let image = vk::Image::new(
                 self.context.allocators().memory().clone(),
                 vk::ImageCreateInfo {
-                    // Too many !!
                     usage:
-                    // Feedback loop for blending into..
+                    // Rendering into
                     vk::ImageUsage::COLOR_ATTACHMENT
-                        | vk::ImageUsage::INPUT_ATTACHMENT
+                        // Source for blending from..
+                        | vk::ImageUsage::SAMPLED
+                        // For color clearing..
+                        | vk::ImageUsage::TRANSFER_DST,
+                    extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
+                    array_layers: 1,
+                    mip_levels: 1,
+                    sharing: self.context.queues().sharing_compute_graphics(),
+                    format: crate::DOCUMENT_FORMAT,
+                    ..Default::default()
+                },
+                vk::AllocationCreateInfo {
+                    memory_type_filter: vk::MemoryTypeFilter::PREFER_DEVICE,
+                    ..Default::default()
+                },
+            )?;
+            let view = vk::ImageView::new_default(image.clone())?;
+
+            Ok(super::LeafRenderData { image, view })
+        }
+        /// Allocate a new `NodeRenderData`, initial contents are eagerly cleared.
+        pub fn cleared_node_data(&self) -> anyhow::Result<super::NodeRenderData> {
+            let image = vk::Image::new(
+                self.context.allocators().memory().clone(),
+                vk::ImageCreateInfo {
+                    usage:
+                    // Rendering into
+                    vk::ImageUsage::COLOR_ATTACHMENT
+                    // Feedback loop for blending into
+                     | vk::ImageUsage::INPUT_ATTACHMENT
                         // Source for blending from..
                         | vk::ImageUsage::SAMPLED
                         // For color clearing..
                         | vk::ImageUsage::TRANSFER_DST
-                        // For blitting to preview proxy...
+                        // For blitting to preview proxy image.
                         | vk::ImageUsage::TRANSFER_SRC,
                     extent: [crate::DOCUMENT_DIMENSION, crate::DOCUMENT_DIMENSION, 1],
                     array_layers: 1,
@@ -1270,14 +1337,34 @@ mod stroke_renderer {
             )?;
             let view = vk::ImageView::new_default(image.clone())?;
 
-            log::info!("Made render data at id{:?}", view.handle());
+            // Commit hackery. There is a validation error that vulkano triggers when the uninitialized image
+            // gets assumed to be `General` layout during blending. I'm not sure why this occurs, but this gives
+            // vulkano an opportunity to perform that transition and avoid UB.
+            let mut cb = vk::AutoCommandBufferBuilder::primary(
+                self.context.allocators().command_buffer(),
+                self.context.queues().graphics().idx(),
+                vk::CommandBufferUsage::OneTimeSubmit,
+            )?;
+            cb.clear_color_image(vk::ClearColorImageInfo {
+                clear_value: [0.0; 4].into(),
+                regions: smallvec::smallvec![view.subresource_range().clone(),],
+                ..vk::ClearColorImageInfo::image(view.image().clone())
+            })?;
 
-            Ok(super::RenderData { image, view })
+            let cb = cb.build()?;
+
+            self.context
+                .now()
+                .then_execute(self.context.queues().graphics().queue().clone(), cb)?
+                .then_signal_fence_and_flush()?
+                .wait(None)?;
+
+            Ok(super::NodeRenderData { image, view })
         }
         pub fn draw(
             &self,
             strokes: &[fuzzpaint_core::state::stroke_collection::ImmutableStroke],
-            renderbuf: &super::RenderData,
+            renderbuf: &super::LeafRenderData,
             clear: bool,
         ) -> AnyResult<()> {
             let mut matrix = cgmath::Matrix4::from_scale(2.0 / crate::DOCUMENT_DIMENSION as f32);
