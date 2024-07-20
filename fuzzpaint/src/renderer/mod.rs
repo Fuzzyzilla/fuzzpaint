@@ -125,7 +125,7 @@ impl Renderer {
                 // Any modifications to the blend graph require a rebuild.
                 // (text can be delta'd but that's not really implemented at all yet.)
                 DoUndo::Do(Command::Graph(_)) | DoUndo::Undo(Command::Graph(_)) => {
-                    graph_invalidated = true
+                    graph_invalidated = true;
                 }
                 // Palettes influence the blend graph and possibly every stroke layer. Uh oh.
                 // Invalidate everything, and make this better future me!!!
@@ -543,23 +543,9 @@ impl Engines {
         })
         .collect();
 
-        if strokes.is_empty() {
-            if clear {
-                //FIXME: Renderer doesn't know how to handle zero strokes.
-                Self::clear(
-                    &self.context,
-                    data,
-                    fuzzpaint_core::color::Color::TRANSPARENT,
-                )
-                .map(Some)
-            } else {
-                Ok(None)
-            }
-        } else {
-            self.strokes
-                .draw(strokes.as_ref(), data, clear)
-                .map(|()| None)
-        }
+        self.strokes
+            .draw(strokes.as_ref(), data, clear)
+            .map(|()| None)
     }
     fn text_layer(
         &self,
@@ -1365,7 +1351,7 @@ mod stroke_renderer {
             &self,
             strokes: &[fuzzpaint_core::state::stroke_collection::ImmutableStroke],
             renderbuf: &super::LeafRenderData,
-            clear: bool,
+            mut clear: bool,
         ) -> AnyResult<()> {
             let mut matrix = cgmath::Matrix4::from_scale(2.0 / crate::DOCUMENT_DIMENSION as f32);
             matrix.y *= -1.0;
@@ -1379,12 +1365,46 @@ mod stroke_renderer {
                 vulkano::sync::Sharing::Exclusive,
             )?;
             batch.batch(strokes.iter().copied(), |batch| -> AnyResult<_> {
-                let gpu_tess::TessResult {
+
+                let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
+                    self.context.allocators().command_buffer(),
+                    self.context.queues().graphics().idx(),
+                    vk::CommandBufferUsage::OneTimeSubmit,
+                )?;
+
+                let Some(gpu_tess::TessOutput {
                     ready_after,
                     vertices,
                     mut indirects,
                     sources,
-                } = self.gpu_tess.tess_batch(batch, true)?;
+                }) = self.gpu_tess.tess_batch(batch, true)? else {
+                    // Nothing to render. Still honor the clear.
+                    if clear {
+                        clear = false;
+
+                        let region = renderbuf.view.subresource_range().clone();
+
+                        command_buffer.clear_color_image(vk::ClearColorImageInfo {
+                            clear_value: [0.0; 4].into(),
+                            regions: smallvec::smallvec![region],
+                            ..vk::ClearColorImageInfo::image(renderbuf.image.clone())
+                        })?;
+
+                        let command_buffer = command_buffer.build()?;
+
+                        let fence = self.context.now()
+                            .then_execute(
+                                self.context.queues().graphics().queue().clone(),
+                                command_buffer,
+                            )?
+                            .then_signal_fence_and_flush()?;
+
+                        // Even though we don't depend on the buffer, still await this fence so that
+                        // next iter can access the image.
+                        return Ok(super::stroke_batcher::SyncOutput::Fence(fence));
+                    }
+                    return Ok(super::stroke_batcher::SyncOutput::Immediate);
+                };
 
                 let mut sources = &sources[..];
                 let mut next_indirects_by_brush_id = || -> Option<(fuzzpaint_core::brush::UniqueID, vk::Subbuffer<[vulkano::command_buffer::DrawIndirectCommand]>)> {
@@ -1407,12 +1427,6 @@ mod stroke_renderer {
                         Some((id, indirects.clone()))
                     }
                 };
-
-                let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
-                    self.context.allocators().command_buffer(),
-                    self.context.queues().graphics().idx(),
-                    vk::CommandBufferUsage::OneTimeSubmit,
-                )?;
 
                 command_buffer
                     .begin_rendering(vk::RenderingInfo {
@@ -1441,6 +1455,9 @@ mod stroke_renderer {
                         Into::<[[f32; 4]; 4]>::into(matrix),
                     )?
                     .bind_vertex_buffers(0, vertices)?;
+
+                // Ensure only the first loop clears.
+                clear = false;
 
                 // Group together commands by brush ID and draw them!
                 while let Some((brush_id, indirects)) = next_indirects_by_brush_id() {
@@ -1478,6 +1495,37 @@ mod stroke_renderer {
                 // (In reality, the stage is done after `ready_after` but vulkano sync currently lacks a way to represent this)
                 Ok(super::stroke_batcher::SyncOutput::Fence(fence))
             })?;
+
+            // Fellthrough without clearing. There wasn't anything to draw! Still honor the clear.
+            if clear {
+                clear = false;
+
+                let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
+                    self.context.allocators().command_buffer(),
+                    self.context.queues().graphics().idx(),
+                    vk::CommandBufferUsage::OneTimeSubmit,
+                )?;
+
+                let region = renderbuf.view.subresource_range().clone();
+
+                command_buffer.clear_color_image(vk::ClearColorImageInfo {
+                    clear_value: [0.0; 4].into(),
+                    regions: smallvec::smallvec![region],
+                    ..vk::ClearColorImageInfo::image(renderbuf.image.clone())
+                })?;
+
+                let command_buffer = command_buffer.build()?;
+
+                let fence = self
+                    .context
+                    .now()
+                    .then_execute(
+                        self.context.queues().graphics().queue().clone(),
+                        command_buffer,
+                    )?
+                    .then_signal_fence_and_flush()?
+                    .wait(None)?;
+            }
 
             Ok(())
         }

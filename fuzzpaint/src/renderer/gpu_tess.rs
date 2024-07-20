@@ -30,7 +30,7 @@ mod shaders {
     }
 }
 
-pub struct TessResult<Future: GpuFuture> {
+pub struct TessOutput<Future: GpuFuture> {
     pub ready_after: vk::FenceSignalFuture<Future>,
     pub vertices: vk::Subbuffer<[interface::OutputStrokeVertex]>,
     pub indirects: vk::Subbuffer<[interface::OutputStrokeInfo]>,
@@ -141,7 +141,7 @@ impl GpuStampTess {
         batch: &crate::renderer::stroke_batcher::StrokeBatch,
         // TODO: implement.
         _take_scratch: bool,
-    ) -> anyhow::Result<TessResult<impl GpuFuture>> {
+    ) -> anyhow::Result<Option<TessOutput<impl GpuFuture>>> {
         #![allow(clippy::too_many_lines)]
         let mut group_index_counter = 0;
         let mut vertex_output_index_counter = 0;
@@ -215,7 +215,8 @@ impl GpuStampTess {
         )?;
 
         if group_index_counter == 0 {
-            anyhow::bail!("Stroke too short to tessellate.")
+            // There is nothing for us to do.
+            return Ok(None);
         }
         // One element per workgroup, telling it which info to work on.
         let input_map = vk::Buffer::new_slice::<u32>(
@@ -322,11 +323,11 @@ impl GpuStampTess {
             )?
             .then_signal_fence();
 
-        Ok(TessResult {
+        Ok(Some(TessOutput {
             ready_after: future,
             vertices: output_verts,
             indirects: output_infos,
             sources,
-        })
+        }))
     }
 }
