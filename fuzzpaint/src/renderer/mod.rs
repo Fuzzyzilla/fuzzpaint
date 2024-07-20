@@ -1464,12 +1464,15 @@ mod stroke_renderer {
                 let command_buffer = command_buffer.build()?;
 
                 // After tessellation finishes, render.
-                let fence = ready_after
+                // Semaphores simply don't work. I'm frustrated.
+                ready_after.wait(None)?;
+                let fence = self.context.now()
                     .then_execute(
                         self.context.queues().graphics().queue().clone(),
                         command_buffer,
                     )?
                     .then_signal_fence_and_flush()?;
+
 
                 // Let the batcher know when we're done using the stage.
                 // (In reality, the stage is done after `ready_after` but vulkano sync currently lacks a way to represent this)

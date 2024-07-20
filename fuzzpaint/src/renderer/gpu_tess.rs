@@ -31,7 +31,7 @@ mod shaders {
 }
 
 pub struct TessResult<Future: GpuFuture> {
-    pub ready_after: vk::SemaphoreSignalFuture<Future>,
+    pub ready_after: vk::FenceSignalFuture<Future>,
     pub vertices: vk::Subbuffer<[interface::OutputStrokeVertex]>,
     pub indirects: vk::Subbuffer<[interface::OutputStrokeInfo]>,
     /// Where each indirect came from. E.g., the sixth indirect comes from the sixth stroke in this list.
@@ -320,7 +320,7 @@ impl GpuStampTess {
                 self.context.queues().compute().queue().clone(),
                 command_buffer,
             )?
-            .then_signal_semaphore();
+            .then_signal_fence();
 
         Ok(TessResult {
             ready_after: future,
