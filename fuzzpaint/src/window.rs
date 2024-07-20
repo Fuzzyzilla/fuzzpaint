@@ -39,7 +39,10 @@ impl Surface {
     ) -> anyhow::Result<Renderer> {
         let egui_ctx = egui_impl::Ctx::new(self.win.as_ref(), &render_surface)?;
 
-        let tablet_manager = octotablet::Builder::new().build_shared(&self.win).ok();
+        let tablet_manager = octotablet::Builder::new()
+            .emulate_tool_from_mouse(false)
+            .build_shared(&self.win)
+            .ok();
 
         let (send, stream) = crate::actions::create_action_stream();
 
@@ -337,6 +340,10 @@ impl Renderer {
                 }
                 Ok(r) => r,
             };
+
+        // Print a warning if swapchain image future is dropped. Per a dire warning in the comments of vulkano,
+        // dropping futures can result in that swapchain image being lost forever...!
+        let bail_warning = defer::defer(|| log::warn!("Dropped swapchain future."));
         // After we present, recreate if suboptimal.
         defer::defer(|| {
             if suboptimal {
@@ -437,6 +444,8 @@ impl Renderer {
             )
             .boxed()
             .then_signal_fence_and_flush()?;
+
+        std::mem::forget(bail_warning);
 
         self.last_frame_fence = Some(next_frame_future);
 
