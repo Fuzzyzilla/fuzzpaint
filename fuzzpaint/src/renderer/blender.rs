@@ -4,6 +4,37 @@ use std::{fmt::Debug, sync::Arc};
 use fuzzpaint_core::blend::{Blend, BlendMode};
 use vulkano::VulkanObject;
 
+/// Providing a "quoted" GLSL snippit, accepting premultiplied RGBA `vec4 c_src` and `vec4 c_dst`, `return` the new color.
+/// Logic need not handle the additional requirement that transparent dst returns src unchanged, that
+/// is handled by the rest of the shader logic.
+macro_rules! blend_noclip {
+    ($blend_expr:literal) => {{
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            define: [
+                ("EXPR", $blend_expr),
+            ],
+            path: "src/shaders/blend_no_clip.frag",
+        }
+        crate::renderer::blender::BlendLogic::Arbitrary(load)
+    }};
+}
+/// Providing a "quoted" GLSL snippit, accepting an opaque RGBA `vec4 c_src` and premultiplied `vec4 c_dst`,
+/// `return` the new color. Logic need not handle the additional clipping logic, that is handled by the rest
+/// of the shader logic.
+macro_rules! blend_clip {
+    ($blend_expr:literal) => {{
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            define: [
+                ("EXPR", $blend_expr),
+            ],
+            path: "src/shaders/blend_clip.frag",
+        }
+        crate::renderer::blender::BlendLogic::Arbitrary(load)
+    }};
+}
+
 /// `fn` to load a shader module on a given device. Equivalent to the signature of the vulkano-generated `<shader>::load`.
 type BlendLoader =
     fn(Arc<vk::Device>) -> Result<Arc<vk::ShaderModule>, vk::Validated<vk::VulkanError>>;
@@ -90,7 +121,9 @@ impl BlendLogic {
             // `[Src * Dst] + [Dst * (1 - SrcAlpha)]` is subtly wrong, (red * transparent) = black, should be red.
             // So, use arbitrary to patch it with more complex logic.
             // Verified
-            (BlendMode::Multiply, false) => BlendLogic::Arbitrary(shaders::multiply_noclip::load),
+            (BlendMode::Multiply, false) => {
+                blend_noclip! {"return c_dst * c_src + c_dst * (1.0 - c_src.a);"}
+            }
             // Verified
             (BlendMode::Multiply, true) => AttachmentBlend {
                 // Funny! No mul op, so instead "Normal" op with the left side having a multiply factor.
@@ -114,7 +147,8 @@ impl BlendLogic {
             }
             .into(),
             // Very wrong
-            (BlendMode::Darken, _) => BlendLogic::Arbitrary(shaders::darken::load),
+            (BlendMode::Darken, false) => blend_noclip!("return min(c_src, c_dst);"),
+            (BlendMode::Darken, true) => blend_clip!("return min(c_src, c_dst);"),
             // Verified
             (BlendMode::Lighten, false) => AttachmentBlend {
                 src_color_blend_factor: BlendFactor::One,
@@ -124,7 +158,7 @@ impl BlendLogic {
             }
             .into(),
             // Very wrong
-            (BlendMode::Lighten, true) => BlendLogic::Arbitrary(shaders::lighten_clip::load),
+            (BlendMode::Lighten, true) => blend_clip!("return max(c_src, c_dst);"),
             // Unique exception to the "if clip, then the dst alpha should be unchanged" rule, as this
             // is the only mode that can *decrease* image opacity.
             // Verified, both clip and not.
@@ -241,101 +275,6 @@ mod shaders {
 
                     void main() {
                         color = is_solid ? solid_color : (texture(src, uv) * solid_color.a);
-                    }
-                "
-        }
-    }
-    pub mod multiply_noclip {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            src: r"
-                    #version 460
-                    layout(set = 0, binding = 0) uniform sampler2D src;
-                    layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput dst;
-
-                    layout(push_constant) uniform Constants {
-                        // Solid color constant, otherwise just the alpha is used as global multiplier.
-                        vec4 solid_color;
-                        // True if the shader should 'sample' from `solid_color` instead of the image.
-                        // UB to read image if this is set.
-                        bool is_solid;
-                    };
-
-                    layout(location = 0) in vec2 uv;
-                    layout(location = 0) out vec4 color;
-
-                    void main() {
-                        vec4 c_dst = subpassLoad(dst);
-                        vec4 c_src = is_solid ? solid_color : (texture(src, uv) * solid_color.a);
-
-                        // It's as simple as this, but we need to apply logic so that a transparent dst
-                        // gives src directly (instead of black as this would do).
-                        vec4 mul = c_dst * c_src + c_dst * (1.0 - c_src.a);
-
-                        // To handle transparent dst, do a 'normal' blend of mul, clpped by dst, on top of src.
-                        color = mul + c_src * (1.0 - c_dst.a);
-                    }
-                "
-        }
-    }
-    pub mod darken {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            src: r"
-                    #version 460
-                    layout(set = 0, binding = 0) uniform sampler2D src;
-                    layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput dst;
-
-                    layout(push_constant) uniform Constants {
-                        // Solid color constant, otherwise just the alpha is used as global multiplier.
-                        vec4 solid_color;
-                        // True if the shader should 'sample' from `solid_color` instead of the image.
-                        // UB to read image if this is set.
-                        bool is_solid;
-                    };
-
-                    layout(location = 0) in vec2 uv;
-                    layout(location = 0) out vec4 color;
-
-                    void main() {
-                        vec4 c_dst = subpassLoad(dst);
-                        vec4 c_src = is_solid ? solid_color : (texture(src, uv) * solid_color.a);
-
-                        // Unmultiply - treat it as if the dst is fully opaque, do our blend,
-                        // then allow the VkBlendEq to re-apply dst alpha. This effectively clips it.
-                        c_dst = c_dst.a == 0.0 ? vec4(0.0, 0.0, 0.0, 1.0) : c_dst / c_dst.a;
-
-                        vec4 darken = min(c_src, c_dst);
-
-                        color = darken;
-                    }
-                "
-        }
-    }
-    pub mod lighten_clip {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            src: r"
-                    #version 460
-                    layout(set = 0, binding = 0) uniform sampler2D src;
-                    layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput dst;
-
-                    layout(push_constant) uniform Constants {
-                        // Solid color constant, otherwise just the alpha is used as global multiplier.
-                        vec4 solid_color;
-                        // True if the shader should 'sample' from `solid_color` instead of the image.
-                        // UB to read image if this is set.
-                        bool is_solid;
-                    };
-
-                    layout(location = 0) in vec2 uv;
-                    layout(location = 0) out vec4 color;
-
-                    void main() {
-                        vec4 c_dst = subpassLoad(dst);
-                        vec4 c_src = is_solid ? solid_color : (texture(src, uv) * solid_color.a);
-
-                        color = vec4(min(c_dst.rgb, c_src.rgb), 1.0);
                     }
                 "
         }
