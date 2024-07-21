@@ -118,6 +118,11 @@ impl Ctx {
         // Closure always runs, this is not presented on a type level though.
         user_output.unwrap()
     }
+    /// Peek the update flag without destroying it.
+    pub fn peek_wants_update(&self) -> bool {
+        let now = &std::time::Instant::now();
+        self.redraw_this_frame || self.repaint_times.iter().any(|t| t <= now)
+    }
     /// Wants to re-draw the screen. Check this after you've checked [`Self::wants_update`] and updated accordingly, but repaints may
     /// be requested even if an update is not. Check this frequently, but note that querying this destroys the flag.
     pub fn take_wants_update(&mut self) -> bool {

@@ -24,6 +24,12 @@ impl FiniteF32 {
     }
 }
 
+impl Default for FiniteF32 {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
 impl TryFrom<f32> for FiniteF32 {
     type Error = FiniteF32Error;
     fn try_from(value: f32) -> Result<Self, Self::Error> {

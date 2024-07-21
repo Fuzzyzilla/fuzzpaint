@@ -35,25 +35,23 @@ enum QueueSrc {
     Queue(Queue),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct QueueIndices {
+    /// Also present, if that was required.
     graphics: u32,
-    present: Option<u32>,
+    graphics_can_present: bool,
     compute: u32,
 }
 pub struct Queues {
     graphics_queue: Queue,
-    present_queue: Option<QueueSrc>,
+    /// Always the same as graphics if so (required by vulkano during present).
+    has_present: bool,
     compute_queue: QueueSrc,
 }
 impl Queues {
     #[must_use]
     pub fn present(&self) -> Option<&Queue> {
-        match &self.present_queue {
-            None => None,
-            Some(QueueSrc::UseGraphics) => Some(self.graphics()),
-            Some(QueueSrc::Queue(q)) => Some(q),
-        }
+        self.has_present.then(|| self.graphics())
     }
     #[must_use]
     pub fn graphics(&self) -> &Queue {
@@ -405,7 +403,8 @@ impl RenderContext {
         };
 
         //Todo: what if compute and present end up in the same family, aside from graphics? Unlikely :)
-        let (has_compute_queue, compute_queue_info) = {
+        // ^^ Pfft, tell that to the future asp who spent two hours debugging a similar situation
+        let (has_unique_compute_queue, compute_queue_info) = {
             if queue_indices.compute == queue_indices.graphics {
                 let capacity = physical_device.queue_family_properties()
                     [graphics_queue_info.queue_family_index as usize]
@@ -432,40 +431,10 @@ impl RenderContext {
             }
         };
 
-        let present_queue_info = queue_indices.present.map(|present| {
-            if present == queue_indices.graphics {
-                let capacity = physical_device.queue_family_properties()
-                    [graphics_queue_info.queue_family_index as usize]
-                    .queue_count;
-                //Is there room for another queue?
-                if capacity as usize > graphics_queue_info.queues.len() {
-                    graphics_queue_info.queues.push(0.5);
-
-                    //In the graphics queue family. No queue info.
-                    (true, None)
-                } else {
-                    //Share a queue with graphics.
-                    (false, None)
-                }
-            } else {
-                (
-                    true,
-                    Some(vk::QueueCreateInfo {
-                        queue_family_index: present,
-                        queues: vec![0.5],
-                        ..Default::default()
-                    }),
-                )
-            }
-        });
-
         let mut create_infos = vec![graphics_queue_info];
 
         if let Some(compute_create_info) = compute_queue_info {
             create_infos.push(compute_create_info);
-        }
-        if let Some((_, Some(ref present_create_info))) = present_queue_info {
-            create_infos.push(present_create_info.clone());
         }
 
         let enabled_extensions = if physical_device.api_version() < vk::Version::V1_3 {
@@ -491,12 +460,12 @@ impl RenderContext {
             },
         )?;
 
+        // Queues will be in order of create info, so this depends on the layout created by the `if` statements above.
         let graphics_queue = Queue {
             queue: queues.next().unwrap(),
             family_idx: queue_indices.graphics,
         };
-        //Todo: Are these indices correct?
-        let compute_queue = if has_compute_queue {
+        let compute_queue = if has_unique_compute_queue {
             QueueSrc::Queue(Queue {
                 queue: queues.next().unwrap(),
                 family_idx: queue_indices.compute,
@@ -504,23 +473,14 @@ impl RenderContext {
         } else {
             QueueSrc::UseGraphics
         };
-        let present_queue = present_queue_info.map(|(has_present, _)| {
-            if has_present {
-                QueueSrc::Queue(Queue {
-                    queue: queues.next().unwrap(),
-                    family_idx: queue_indices.present.unwrap(),
-                })
-            } else {
-                QueueSrc::UseGraphics
-            }
-        });
+
         assert!(queues.next().is_none());
 
         Ok((
             device,
             Queues {
                 graphics_queue,
-                present_queue,
+                has_present: queue_indices.graphics_can_present,
                 compute_queue,
             },
         ))
@@ -566,10 +526,15 @@ impl RenderContext {
                     return None;
                 }
 
-                //We need a graphics queue, always! Otherwise, disqualify.
+                // We need a graphics queue, always! Otherwise, disqualify.
+                // If we require present to the surface, ensure that this queue can also do it.
                 let graphics_queue = families.iter().enumerate().find(|q| {
-                    q.1.queue_flags
-                        .contains(QueueFlags::GRAPHICS | QueueFlags::TRANSFER)
+                    let is_graphics = q.1.queue_flags.contains(QueueFlags::GRAPHICS);
+                    let can_present = compatible_surface.is_none()
+                        || device
+                            .surface_support(q.0 as u32, compatible_surface.unwrap())
+                            .unwrap_or(false);
+                    is_graphics && can_present
                 })?;
 
                 //We need a compute queue. This can be the same as graphics, but preferably not.
@@ -582,10 +547,7 @@ impl RenderContext {
                     .enumerate()
                     //Ignore the family we chose for graphics
                     .filter(|&(idx, _)| idx != graphics_queue.0)
-                    .find(|q| {
-                        q.1.queue_flags
-                            .contains(QueueFlags::COMPUTE | QueueFlags::TRANSFER)
-                    });
+                    .find(|q| q.1.queue_flags.contains(QueueFlags::COMPUTE));
 
                 //Failed to find compute queue, shared or otherwise. Disqualify!
                 if !graphics_supports_compute && compute_queue.is_none() {
@@ -596,8 +558,9 @@ impl RenderContext {
                     device.clone(),
                     QueueIndices {
                         compute: compute_queue.unwrap_or(graphics_queue).0 as u32,
+                        // Would have bailed if not!
+                        graphics_can_present: compatible_surface.is_some(),
                         graphics: graphics_queue.0 as u32,
-                        present: present_queue.map(|(idx, _)| idx as u32),
                     },
                 ))
             })

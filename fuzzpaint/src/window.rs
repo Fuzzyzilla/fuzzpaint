@@ -39,7 +39,10 @@ impl Surface {
     ) -> anyhow::Result<Renderer> {
         let egui_ctx = egui_impl::Ctx::new(self.win.as_ref(), &render_surface)?;
 
-        let tablet_manager = octotablet::Builder::new().build_shared(&self.win).ok();
+        let tablet_manager = octotablet::Builder::new()
+            .emulate_tool_from_mouse(false)
+            .build_shared(&self.win)
+            .ok();
 
         let (send, stream) = crate::actions::create_action_stream();
 
@@ -187,6 +190,14 @@ impl Renderer {
                             }
                         }
                         WindowEvent::RedrawRequested => {
+                            // run UI logics
+                            if self.egui_ctx.take_wants_update() {
+                                self.do_ui();
+                            }
+                            // Overwrite the Egui provided cursor over the doc area.
+                            self.apply_document_cursor();
+
+                            // Render and present the updated UI
                             if let Err(e) = self.paint() {
                                 log::error!("{e:?}");
                             };
@@ -275,22 +286,20 @@ impl Renderer {
                     } else {
                         false
                     };
-                    let egui_wants_update = self.egui_ctx.take_wants_update();
-                    // run UI logics
-                    if egui_wants_update {
-                        self.do_ui();
-                    }
-                    self.apply_document_cursor();
 
                     // Request draw if any interactive element wants it (UI, document, or tablet)
-                    if has_tablet_update || egui_wants_update || self.preview_renderer.has_update()
+                    if has_tablet_update
+                        || self.egui_ctx.peek_wants_update()
+                        || self.preview_renderer.has_update()
                     {
+                        // winit automagically coalesces these if we call it too often, that's okay ;3
                         self.window().request_redraw();
                     }
 
-                    // End frame
+                    // End stylus frame
                     self.stylus_events.finish();
-                    // Wait. We'll be notified when to redraw UI, but the document preview could assert
+
+                    // Wait. We'll be notified when to redraw UI, but the document preview or octotablet could assert
                     // an update at any time! Thus, we must poll. U_U
                     target.set_control_flow(winit::event_loop::ControlFlow::wait_duration(
                         std::time::Duration::from_millis(50),
@@ -331,6 +340,10 @@ impl Renderer {
                 }
                 Ok(r) => r,
             };
+
+        // Print a warning if swapchain image future is dropped. Per a dire warning in the comments of vulkano,
+        // dropping futures can result in that swapchain image being lost forever...!
+        let bail_warning = defer::defer(|| log::warn!("Dropped swapchain future."));
         // After we present, recreate if suboptimal.
         defer::defer(|| {
             if suboptimal {
@@ -411,7 +424,7 @@ impl Renderer {
                     )?
                     .boxed()
             }
-            None => image_future.boxed(),
+            None => anyhow::bail!("no commands submitted"),
         };
 
         self.window().pre_present_notify();
@@ -431,6 +444,8 @@ impl Renderer {
             )
             .boxed()
             .then_signal_fence_and_flush()?;
+
+        std::mem::forget(bail_warning);
 
         self.last_frame_fence = Some(next_frame_future);
 

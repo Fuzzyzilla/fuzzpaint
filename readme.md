@@ -50,8 +50,7 @@ To declare **0.2.0**, I would like to be able to freely doodle a thing and save 
    - [X] Efficient erasers
  - [ ] Layers
    - [X] Simple UI to manage layer creation, order, modes, etc.
-   - [X] Blending compute shaders
-     - take advantage of associativity and commutativity of blend modes to reduce number of distinct dispatches?
+   - [X] Blending shaders
      - fall forward on `EXT_blend_operation_advanced` or `EXT_fragment_shader_interlock`?
    - [X] Passthrough, grouped-blend layers
    - [X] Color fill layers
