@@ -176,7 +176,7 @@ impl RenderSurface {
             image_format: format,
             image_color_space: color_space,
             image_extent: size,
-            image_usage: vk::ImageUsage::COLOR_ATTACHMENT,
+            image_usage: vk::ImageUsage::COLOR_ATTACHMENT | vk::ImageUsage::TRANSFER_DST,
             composite_alpha: alpha_mode,
             present_mode,
             clipped: true, // We wont read the framebuffer.
