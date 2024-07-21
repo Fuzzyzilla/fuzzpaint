@@ -528,7 +528,7 @@ impl Render {
                     .subresource_range()
                     .clone()],
                 ..vk::ClearColorImageInfo::image(framebuffer.attachments()[0].image().clone())
-            });
+            })?;
         }
         command_buffer_builder
             .begin_render_pass(
