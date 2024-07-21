@@ -344,12 +344,6 @@ impl Renderer {
         // Print a warning if swapchain image future is dropped. Per a dire warning in the comments of vulkano,
         // dropping futures can result in that swapchain image being lost forever...!
         let bail_warning = defer::defer(|| log::warn!("Dropped swapchain future."));
-        // After we present, recreate if suboptimal.
-        defer::defer(|| {
-            if suboptimal {
-                self.recreate_surface().unwrap();
-            }
-        });
         let commands = self.egui_ctx.build_commands(idx);
 
         //Wait for previous frame to end. (required for safety of preview render proxy)
@@ -448,6 +442,11 @@ impl Renderer {
         std::mem::forget(bail_warning);
 
         self.last_frame_fence = Some(next_frame_future);
+
+        // After we present, recreate if suboptimal.
+        if suboptimal {
+            self.recreate_surface().unwrap();
+        }
 
         Ok(())
     }
