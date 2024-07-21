@@ -454,7 +454,7 @@ impl Proxy {
                 .then_signal_fence_and_flush()?
         };
         // Wait on the future at the end of init
-        defer::defer(move || initialize_future.wait(None).unwrap());
+        let _defer = defer::defer(move || initialize_future.wait(None).unwrap());
 
         let document_image_views = [
             vk::ImageView::new(

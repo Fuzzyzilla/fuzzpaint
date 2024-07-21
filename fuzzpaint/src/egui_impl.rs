@@ -167,6 +167,7 @@ impl Ctx {
     pub fn build_commands(
         &mut self,
         swapchain_idx: u32,
+        clear: bool,
     ) -> Option<(
         Option<Arc<vk::PrimaryAutoCommandBuffer>>,
         Arc<vk::PrimaryAutoCommandBuffer>,
@@ -178,7 +179,7 @@ impl Ctx {
         let res: AnyResult<_> = try_block::try_block! {
             let transfer_commands = self.renderer.do_image_deltas(output.textures_delta).transpose()?;
             let tess_geom = self.state.egui_ctx().tessellate(output.shapes, output.pixels_per_point);
-            let draw_commands = self.renderer.upload_and_render(output.pixels_per_point, swapchain_idx, &tess_geom)?;
+            let draw_commands = self.renderer.upload_and_render(output.pixels_per_point, swapchain_idx, &tess_geom, clear)?;
             drop(tess_geom);
 
             Ok((transfer_commands, draw_commands))
@@ -437,6 +438,7 @@ impl Render {
         scale_factor: f32,
         present_img_index: u32,
         tesselated_geom: &[egui::epaint::ClippedPrimitive],
+        clear: bool,
     ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
         let mut vert_buff_size = 0;
         let mut index_buff_size = 0;
@@ -519,6 +521,15 @@ impl Render {
             self.context.queues().graphics().idx(),
             vk::CommandBufferUsage::OneTimeSubmit,
         )?;
+        if clear {
+            command_buffer_builder.clear_color_image(vk::ClearColorImageInfo {
+                clear_value: [0.0, 0.0, 0.0, 1.0].into(),
+                regions: smallvec::smallvec![framebuffer.attachments()[0]
+                    .subresource_range()
+                    .clone()],
+                ..vk::ClearColorImageInfo::image(framebuffer.attachments()[0].image().clone())
+            })?;
+        }
         command_buffer_builder
             .begin_render_pass(
                 vk::RenderPassBeginInfo {

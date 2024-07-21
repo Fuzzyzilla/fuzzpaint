@@ -344,13 +344,6 @@ impl Renderer {
         // Print a warning if swapchain image future is dropped. Per a dire warning in the comments of vulkano,
         // dropping futures can result in that swapchain image being lost forever...!
         let bail_warning = defer::defer(|| log::warn!("Dropped swapchain future."));
-        // After we present, recreate if suboptimal.
-        defer::defer(|| {
-            if suboptimal {
-                self.recreate_surface().unwrap();
-            }
-        });
-        let commands = self.egui_ctx.build_commands(idx);
 
         //Wait for previous frame to end. (required for safety of preview render proxy)
         self.last_frame_fence.take().map(|fence| fence.wait(None));
@@ -369,6 +362,12 @@ impl Renderer {
                 smallvec::SmallVec::new()
             }
         };
+
+        let commands = self
+            .egui_ctx
+            // Preview commands are responsible for turning the UNDEFINED image into a well-defined state.
+            // If there are none, instruct egui renderer to clear it first.
+            .build_commands(idx, preview_commands.is_empty());
 
         let render_complete = match commands {
             Some((Some(transfer), draw)) => {
@@ -448,6 +447,11 @@ impl Renderer {
         std::mem::forget(bail_warning);
 
         self.last_frame_fence = Some(next_frame_future);
+
+        // After we present, recreate if suboptimal.
+        if suboptimal {
+            self.recreate_surface().unwrap();
+        }
 
         Ok(())
     }
