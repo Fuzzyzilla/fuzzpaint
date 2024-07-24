@@ -1358,11 +1358,6 @@ fn inner_transform(
     ui: &mut Ui,
     inner: state::transform::Similarity,
 ) -> Option<state::transform::Similarity> {
-    // Are interactions ongoing?
-    let mut active = false;
-    // Has anything changed?
-    let mut changed = false;
-
     let reset = ui
         .horizontal(|ui| {
             ui.label("Inner Transform");
@@ -1373,6 +1368,11 @@ fn inner_transform(
     ui.separator();
     ui.indent(ui.id().with("indent"), |ui| {
         latch::latch(ui, ui.id().with("inner-transform"), inner, |ui, inner| {
+            // Are interactions ongoing?
+            let mut active = false;
+            // Has anything changed?
+            let mut changed = false;
+
             if reset {
                 *inner = state::transform::Similarity::default();
                 changed = true;
@@ -1455,9 +1455,17 @@ fn outer_transform(
     ui.separator();
     ui.indent(ui.id().with("indent"), |ui| {
         latch::latch(ui, ui.id().with("outer-scale"), outer, |ui, outer| {
+            // Are interactions ongoing?
+            let mut active = false;
+            // Has anything changed?
+            let mut changed = false;
+
             if reset {
                 *outer = state::transform::Matrix::default();
+                changed = true;
             }
+
+            let original_scale = outer.elements[0][0];
 
             let mut scale = outer.elements[0][0];
             let response = ui.add(
@@ -1470,17 +1478,46 @@ fn outer_transform(
             outer.elements[0][0] = scale;
             outer.elements[1][1] = scale;
 
-            if reset {
-                return latch::Latch::Finish;
-            }
-            // There is, as far as I can tell, no way to do this right.
-            if response.has_focus() {
-                return latch::Latch::Continue;
-            }
-            if response.drag_released() || response.lost_focus() {
-                return latch::Latch::Finish;
-            }
-            match (response.changed(), response.dragged()) {
+            // Try to derive a status from the response - this is just a heuristic, blegh.
+            active |= response.has_focus() | response.dragged();
+            changed |= response.changed() | response.lost_focus() || response.drag_released();
+
+            ui.horizontal(|ui| {
+                // Convert skew values to angles, then back. For ease of use!
+                // E.g., a "vertical" (how to unambiguously name skews?!?) skew of 45 deg means the
+                // local X axis is skewed vertically into a 45 deg angle with the global Y axis
+                ui.label("Skew:");
+                let mut skew_angle = (outer.elements[1][0] / original_scale).atan();
+                if !skew_angle.is_finite() {
+                    skew_angle = 0.0;
+                };
+
+                let response = ui.drag_angle(&mut skew_angle);
+
+                active |= response.has_focus() | response.dragged();
+                changed |= response.changed() | response.lost_focus() || response.drag_released();
+                outer.elements[1][0] = skew_angle.tan() * scale;
+                if !outer.elements[1][0].is_finite() {
+                    outer.elements[1][0] = 0.0;
+                };
+
+                // Do it again for the other axis.
+                let mut skew_angle = (outer.elements[0][1] / original_scale).atan();
+                if !skew_angle.is_finite() {
+                    skew_angle = 0.0;
+                };
+
+                let response = ui.drag_angle(&mut skew_angle);
+
+                active |= response.has_focus() | response.dragged();
+                changed |= response.changed() | response.lost_focus() || response.drag_released();
+                outer.elements[0][1] = skew_angle.tan() * scale;
+                if !outer.elements[0][1].is_finite() {
+                    outer.elements[0][1] = 0.0;
+                };
+            });
+
+            match (changed, active) {
                 (_, true) => latch::Latch::Continue,
                 (true, false) => latch::Latch::Finish,
                 (false, false) => latch::Latch::None,
