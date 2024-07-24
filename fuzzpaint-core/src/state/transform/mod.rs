@@ -45,6 +45,32 @@ pub struct Matrix {
     pub elements: [[f32; 2]; 3],
 }
 
+impl Matrix {
+    #[must_use = "Returns a new matrix and does not modify self"]
+    pub fn then(&self, other: &Self) -> Self {
+        // Compute other * self.
+        // Ordered this way for plain english purposes :P
+        let r = &self.elements;
+        let l = &other.elements;
+        Self {
+            elements: [
+                [
+                    r[0][0] * l[0][0] + r[0][1] * l[1][0],
+                    r[0][0] * l[0][1] + r[0][1] * l[1][1],
+                ],
+                [
+                    r[1][0] * l[0][0] + r[1][1] * l[1][0],
+                    r[1][0] * l[0][1] + r[1][1] * l[1][1],
+                ],
+                [
+                    r[2][0] * l[0][0] + r[2][1] * l[1][0] + l[2][0],
+                    r[2][0] * l[0][1] + r[2][1] * l[1][1] + l[2][1],
+                ],
+            ],
+        }
+    }
+}
+
 impl Default for Matrix {
     fn default() -> Self {
         Self {
