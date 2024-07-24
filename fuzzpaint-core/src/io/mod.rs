@@ -251,6 +251,8 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
     );
     let my_node = crate::state::graph::LeafType::StrokeLayer {
         blend: crate::blend::Blend::default(),
+        inner_transform: crate::state::transform::Similarity::default(),
+        outer_transform: crate::state::transform::Matrix::default(),
         collection: my_collection,
     };
     let mut my_graph = crate::state::graph::BlendGraph::default();

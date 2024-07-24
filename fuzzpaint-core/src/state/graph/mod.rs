@@ -7,6 +7,7 @@ pub mod commands;
 mod stable_id;
 pub mod writer;
 
+use super::transform;
 use crate::blend::Blend;
 // Re-export the various public ids
 // FuzzNodeID is NOT public!
@@ -17,6 +18,10 @@ pub enum LeafType {
     StrokeLayer {
         blend: Blend,
         collection: crate::state::stroke_collection::StrokeCollectionID,
+        /// Transform points before tessellation.
+        inner_transform: transform::Similarity,
+        /// Tramsform points after tessellation.
+        outer_transform: transform::Matrix,
     },
     SolidColor {
         blend: Blend,
@@ -31,6 +36,7 @@ pub enum LeafType {
         // "em" is a physical unit. Currently, we have no means to deal with this fact.
         // Allow the user to specify manually.
         px_per_em: f32,
+        outer_transform: transform::Matrix,
     },
     // The name of the note is the note!
     Note,
@@ -51,6 +57,25 @@ impl LeafType {
             | Self::SolidColor { blend, .. }
             | Self::Text { blend, .. } => Some(blend),
             Self::Note => None,
+        }
+    }
+    pub fn inner_transform_mut(&mut self) -> Option<&mut transform::Similarity> {
+        match self {
+            Self::StrokeLayer {
+                inner_transform, ..
+            } => Some(inner_transform),
+            Self::Note | Self::SolidColor { .. } | Self::Text { .. } => None,
+        }
+    }
+    pub fn outer_transform_mut(&mut self) -> Option<&mut transform::Matrix> {
+        match self {
+            Self::StrokeLayer {
+                outer_transform, ..
+            }
+            | Self::Text {
+                outer_transform, ..
+            } => Some(outer_transform),
+            Self::Note | Self::SolidColor { .. } => None,
         }
     }
 }
@@ -569,6 +594,71 @@ impl crate::commands::CommandConsumer<commands::Command> for BlendGraph {
                 }
                 *blend = *to;
                 Ok(())
+            }
+            DoUndo::Do(Command::LeafInnerTransformChanged {
+                target,
+                old_transform,
+                new_transform,
+            })
+            | DoUndo::Undo(Command::LeafInnerTransformChanged {
+                target,
+                old_transform: new_transform,
+                new_transform: old_transform,
+            }) => {
+                let Some(node) = self.get_leaf_mut(*target) else {
+                    return Err(CommandError::UnknownResource);
+                };
+
+                match node {
+                    LeafType::StrokeLayer {
+                        inner_transform, ..
+                    } => {
+                        // If NaN This becomes problematic.
+                        if inner_transform != old_transform {
+                            Err(CommandError::MismatchedState)
+                        } else {
+                            *inner_transform = *new_transform;
+                            Ok(())
+                        }
+                    }
+                    LeafType::Note | LeafType::SolidColor { .. } | LeafType::Text { .. } => {
+                        Err(CommandError::MismatchedState)
+                    }
+                }
+            }
+            DoUndo::Do(Command::LeafOuterTransformChanged {
+                target,
+                old_transform,
+                new_transform,
+            })
+            | DoUndo::Undo(Command::LeafOuterTransformChanged {
+                target,
+                old_transform: new_transform,
+                new_transform: old_transform,
+            }) => {
+                let Some(node) = self.get_leaf_mut(*target) else {
+                    return Err(CommandError::UnknownResource);
+                };
+
+                match node {
+                    LeafType::StrokeLayer {
+                        outer_transform, ..
+                    }
+                    | LeafType::Text {
+                        outer_transform, ..
+                    } => {
+                        // If NaN This becomes problematic.
+                        if outer_transform != old_transform {
+                            Err(CommandError::MismatchedState)
+                        } else {
+                            *outer_transform = *new_transform;
+                            Ok(())
+                        }
+                    }
+                    LeafType::Note | LeafType::SolidColor { .. } => {
+                        Err(CommandError::MismatchedState)
+                    }
+                }
             }
             DoUndo::Do(Command::LeafTyChanged { target, old_ty, ty })
             | DoUndo::Undo(Command::LeafTyChanged {

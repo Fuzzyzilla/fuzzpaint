@@ -82,11 +82,17 @@ impl GpuStampTess {
             },
         )?;
 
+        let inner_transform_constant = vk::PushConstantRange {
+            stages: vk::ShaderStages::COMPUTE,
+            offset: 0,
+            size: std::mem::size_of::<[[f32; 2]; 3]>() as u32 + std::mem::size_of::<f32>() as u32,
+        };
+
         Ok((
             vk::PipelineLayout::new(
                 device,
                 vk::PipelineLayoutCreateInfo {
-                    push_constant_ranges: Vec::new(),
+                    push_constant_ranges: vec![inner_transform_constant],
                     set_layouts: vec![inputs.clone(), outputs.clone()],
                     ..Default::default()
                 },
@@ -139,12 +145,17 @@ impl GpuStampTess {
     pub fn tess_batch(
         &self,
         batch: &crate::renderer::stroke_batcher::StrokeBatch,
+        // Transform to perform on points *before* tessellation.
+        inner_transform: &fuzzpaint_core::state::transform::Similarity,
         // TODO: implement.
         _take_scratch: bool,
     ) -> anyhow::Result<Option<TessOutput<impl GpuFuture>>> {
         #![allow(clippy::too_many_lines)]
         let mut group_index_counter = 0;
         let mut vertex_output_index_counter = 0;
+
+        // All lengths are uniformly scaled by this, thus all arclengths are too!
+        let distance_scale = inner_transform.scale();
 
         // For each info, how many workgroups are dispatched for it?
         let mut num_groups_per_info = Vec::with_capacity(batch.allocs.len());
@@ -172,6 +183,7 @@ impl GpuStampTess {
                 let num_expected_stamps = alloc
                     .summary
                     .arc_length
+                    .map(|arc_length| arc_length * distance_scale)
                     .map_or(0, |arc_length| (arc_length / density).ceil() as u32);
 
                 let num_points = alloc.summary.len as u32;
@@ -301,6 +313,18 @@ impl GpuStampTess {
         command_buffer
             .fill_buffer(output_infos.clone().reinterpret(), 0u32)?
             .bind_pipeline_compute(self.pipeline.clone())?
+            .push_constants(
+                self.layout.clone(),
+                0,
+                shaders::tessellate::InnerTransform {
+                    // Similarity -> Matrix -> floats. :P
+                    inner_transform: fuzzpaint_core::state::transform::Matrix::from(
+                        *inner_transform,
+                    )
+                    .into(),
+                    arclen_scale: inner_transform.scale(),
+                },
+            )?
             .bind_descriptor_sets(
                 vk::PipelineBindPoint::Compute,
                 self.layout.clone(),

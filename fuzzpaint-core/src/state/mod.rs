@@ -6,6 +6,7 @@ pub mod graph;
 pub mod palette;
 pub mod rich_text;
 pub mod stroke_collection;
+pub mod transform;
 
 pub type DocumentID = crate::FuzzID<Document>;
 

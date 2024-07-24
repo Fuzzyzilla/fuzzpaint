@@ -30,6 +30,7 @@ const HISTORY_ICON: char = '🕒';
 const HOME_ICON: char = '🏠';
 const PIN_ICON: char = '📌';
 const ALPHA_ICON: &str = "α";
+const RESET_ICON: &str = "⟲";
 
 /// Justify `(available_size, size, margin)` -> `(size', margin')`, such that `count` elements
 /// will fill available space completely.
@@ -330,6 +331,8 @@ impl MainUI {
                 state::graph::LeafType::StrokeLayer {
                     blend: Blend::default(),
                     collection: new_collection,
+                    inner_transform: state::transform::Similarity::default(),
+                    outer_transform: state::transform::Matrix::default(),
                 },
             )
             .ok();
@@ -767,7 +770,7 @@ impl MainUI {
             // as the rest of the world has no way to communicate into the UI (so, no reporting of current transform)
 
             //Zoom controls
-            if ui.small_button("⟲").clicked() {
+            if ui.small_button(RESET_ICON).clicked() {
                 let _ = requests.send(requests::UiRequest::Document {
                     target: document,
                     request: requests::DocumentRequest::View(requests::DocumentViewRequest::Fit),
@@ -809,7 +812,7 @@ impl MainUI {
             ui.add(egui::Separator::default().vertical());
 
             //Rotate controls
-            if ui.small_button("⟲").clicked() {
+            if ui.small_button(RESET_ICON).clicked() {
                 let _ = requests.send(requests::UiRequest::Document {
                     target: document,
                     request: requests::DocumentRequest::View(
@@ -1120,7 +1123,12 @@ fn leaf_props_panel(
             })
             .inner
         }
-        LeafType::StrokeLayer { collection, .. } => {
+        LeafType::StrokeLayer {
+            collection,
+            inner_transform,
+            outer_transform,
+            ..
+        } => {
             // Nothing interactible, but display some infos
             ui.label(
                 egui::RichText::new(format!(
@@ -1133,6 +1141,7 @@ fn leaf_props_panel(
                 .italics()
                 .weak(),
             );
+
             false
         }
         LeafType::Text {
@@ -1269,6 +1278,8 @@ fn layer_buttons(
                             state::graph::LeafType::StrokeLayer {
                                 blend: Blend::default(),
                                 collection: new_stroke_collection,
+                                inner_transform: state::transform::Similarity::default(),
+                                outer_transform: state::transform::Matrix::default(),
                             },
                             addition_location,
                             "Stroke Layer".to_string(),
@@ -1295,6 +1306,7 @@ fn layer_buttons(
                             blend: Blend::default(),
                             text: "Hello, world!".to_owned(),
                             px_per_em: 50.0,
+                            outer_transform: state::transform::Matrix::default(),
                         },
                         addition_location,
                         "Text".to_string(),
@@ -1341,6 +1353,180 @@ fn layer_buttons(
         };
     });
 }
+/// Modify an inner transform, returning a new transform when a change is submitted.
+fn inner_transform(
+    ui: &mut Ui,
+    inner: state::transform::Similarity,
+) -> Option<state::transform::Similarity> {
+    let reset = ui
+        .horizontal(|ui| {
+            ui.label("Inner Transform");
+            ui.small_button(RESET_ICON).on_hover_text("Reset").clicked()
+        })
+        .inner;
+
+    ui.separator();
+    ui.indent(ui.id().with("indent"), |ui| {
+        latch::latch(ui, ui.id().with("inner-transform"), inner, |ui, inner| {
+            // Are interactions ongoing?
+            let mut active = false;
+            // Has anything changed?
+            let mut changed = false;
+
+            if reset {
+                *inner = state::transform::Similarity::default();
+                changed = true;
+            }
+
+            let mut scale = inner.scale();
+
+            let response = ui.add(
+                egui::Slider::new(&mut scale, 0.01..=10.0)
+                    .text("Scale")
+                    .suffix("x")
+                    .clamp_to_range(true)
+                    .logarithmic(true),
+            );
+            // Try to derive a status from the response - this is just a heuristic, blegh.
+            active |= response.has_focus() | response.dragged();
+            changed |= response.changed() | response.lost_focus() || response.drag_released();
+            inner.set_scale(scale);
+
+            ui.horizontal(|ui| {
+                let mut flip = inner.hflip();
+                let flip_changed = ui.checkbox(&mut flip, "Flip").changed();
+                changed |= flip_changed;
+                if flip_changed {
+                    // Mirror the origin around the x = DOCUMENT_SIZE / 2.0 line.
+                    // Just a convinience since that's the most intuitive behavior, as opposed to
+                    // the default confusing behavior of mirroring across the left edge.
+                    // Since scale happens *before* translate, we don't need to worry about scale for this maths uwu
+                    inner.translation[0] = crate::DOCUMENT_DIMENSION as f32 - inner.translation[0];
+                }
+                inner.set_hflip(flip);
+
+                ui.separator();
+
+                ui.label("Rotate:");
+                let response = ui.drag_angle(&mut inner.rotation);
+                active |= response.has_focus() | response.dragged();
+                changed |= response.changed() | response.lost_focus() || response.drag_released();
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Position:");
+                let response = ui.add(
+                    egui::DragValue::new(&mut inner.translation[0])
+                        .speed(1.0)
+                        .suffix("px"),
+                );
+                active |= response.has_focus() | response.dragged();
+                changed |= response.changed() | response.lost_focus() || response.drag_released();
+                let response = ui.add(
+                    egui::DragValue::new(&mut inner.translation[1])
+                        .speed(1.0)
+                        .suffix("px"),
+                );
+                active |= response.has_focus() | response.dragged();
+                changed |= response.changed() | response.lost_focus() || response.drag_released();
+            });
+
+            match (changed, active) {
+                (_, true) => latch::Latch::Continue,
+                (true, false) => latch::Latch::Finish,
+                (false, false) => latch::Latch::None,
+            }
+        })
+        .result()
+    })
+    .inner
+}
+/// Modify an inner transform, returning a new transform when a change is submitted.
+fn outer_transform(
+    ui: &mut Ui,
+    outer: state::transform::Matrix,
+) -> Option<state::transform::Matrix> {
+    let reset = ui
+        .horizontal(|ui| {
+            ui.label("Outer Transform");
+            ui.small_button(RESET_ICON).on_hover_text("Reset").clicked()
+        })
+        .inner;
+    ui.separator();
+    ui.indent(ui.id().with("indent"), |ui| {
+        latch::latch(ui, ui.id().with("outer-scale"), outer, |ui, outer| {
+            // Are interactions ongoing?
+            let mut active = false;
+            // Has anything changed?
+            let mut changed = false;
+
+            if reset {
+                *outer = state::transform::Matrix::default();
+                changed = true;
+            }
+
+            let original_scale = outer.elements[0][0];
+
+            let mut scale = outer.elements[0][0];
+            let response = ui.add(
+                egui::Slider::new(&mut scale, 0.01..=10.0)
+                    .text("Scale")
+                    .suffix("x")
+                    .clamp_to_range(true)
+                    .logarithmic(true),
+            );
+            outer.elements[0][0] = scale;
+            outer.elements[1][1] = scale;
+
+            // Try to derive a status from the response - this is just a heuristic, blegh.
+            active |= response.has_focus() | response.dragged();
+            changed |= response.changed() | response.lost_focus() || response.drag_released();
+
+            ui.horizontal(|ui| {
+                // Convert skew values to angles, then back. For ease of use!
+                // E.g., a "vertical" (how to unambiguously name skews?!?) skew of 45 deg means the
+                // local X axis is skewed vertically into a 45 deg angle with the global Y axis
+                ui.label("Skew:");
+                let mut skew_angle = (outer.elements[1][0] / original_scale).atan();
+                if !skew_angle.is_finite() {
+                    skew_angle = 0.0;
+                };
+
+                let response = ui.drag_angle(&mut skew_angle);
+
+                active |= response.has_focus() | response.dragged();
+                changed |= response.changed() | response.lost_focus() || response.drag_released();
+                outer.elements[1][0] = skew_angle.tan() * scale;
+                if !outer.elements[1][0].is_finite() {
+                    outer.elements[1][0] = 0.0;
+                };
+
+                // Do it again for the other axis.
+                let mut skew_angle = (outer.elements[0][1] / original_scale).atan();
+                if !skew_angle.is_finite() {
+                    skew_angle = 0.0;
+                };
+
+                let response = ui.drag_angle(&mut skew_angle);
+
+                active |= response.has_focus() | response.dragged();
+                changed |= response.changed() | response.lost_focus() || response.drag_released();
+                outer.elements[0][1] = skew_angle.tan() * scale;
+                if !outer.elements[0][1].is_finite() {
+                    outer.elements[0][1] = 0.0;
+                };
+            });
+
+            match (changed, active) {
+                (_, true) => latch::Latch::Continue,
+                (true, false) => latch::Latch::Finish,
+                (false, false) => latch::Latch::None,
+            }
+        })
+        .result()
+    })
+    .inner
+}
 /// Side panel showing layer add buttons, layer tree, and layer options
 fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
     crate::global::provider().inspect(interface.id, |queue| {
@@ -1372,6 +1558,16 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                                 // match on ID says it must be a leaf.
                                 unreachable!();
                             };
+                            if let Some(xform) = leaf.inner_transform_mut() {
+                                if let Some(inner) = inner_transform(ui, *xform) {
+                                    let _ = writer.graph().set_inner_transform(leaf_id, inner);
+                                }
+                            }
+                            if let Some(xform) = leaf.outer_transform_mut() {
+                                if let Some(outer) = outer_transform(ui, *xform) {
+                                    let _ = writer.graph().set_outer_transform(leaf_id, outer);
+                                }
+                            }
                             if leaf_props_panel(
                                 ui,
                                 leaf_id,

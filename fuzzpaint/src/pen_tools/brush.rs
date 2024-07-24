@@ -154,6 +154,19 @@ impl StrokeBuilder {
         // Position is required.
         self.current_archetype = Archetype::POSITION;
     }
+    pub fn transform(&mut self, mat: &ultraviolet::Mat3) {
+        use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
+        self.position.par_iter_mut().for_each(|[x, y]| {
+            let xformed = *mat
+                * ultraviolet::Vec3 {
+                    x: *x,
+                    y: *y,
+                    z: 1.0,
+                };
+            *x = xformed.x;
+            *y = xformed.y;
+        });
+    }
     pub fn is_empty(&self) -> bool {
         self.position.is_empty()
     }
@@ -306,6 +319,7 @@ impl StrokeBuilder {
 fn brush(
     is_eraser: bool,
     builder: &mut StrokeBuilder,
+    transform_cache: &mut Option<TransformInfo>,
 
     view: &super::ViewInfo,
     stylus_input: crate::stylus_events::StylusEventFrame,
@@ -333,6 +347,29 @@ fn brush(
                 return;
             };
 
+            transform_cache.get_or_insert_with(|| {
+                crate::global::provider()
+                    .inspect(document, |queue| {
+                        use fuzzpaint_core::queue::state_reader::CommandQueueStateReader;
+                        let now = queue.peek_clone_state();
+
+                        let graph = now.graph();
+                        let node = graph.get(node).and_then(|node| node.leaf());
+                        if let Some(fuzzpaint_core::state::graph::LeafType::StrokeLayer {
+                            inner_transform,
+                            outer_transform,
+                            ..
+                        }) = node
+                        {
+                            TransformInfo::new(inner_transform, outer_transform)
+                        } else {
+                            // Uh oh.
+                            TransformInfo::default()
+                        }
+                    })
+                    .unwrap_or_default()
+            });
+
             builder.push(InputPoint {
                 position: [pos.x, pos.y],
                 time: None,
@@ -342,51 +379,59 @@ fn brush(
                 roll: None,
                 wheel: None,
             });
-        } else if !builder.is_empty() {
-            // Not pressed but a stroke exists - just finished, upload it!
-            // Insert the stroke into the document.
-            if let Some(Err(e)) = crate::global::provider().inspect(document, |queue| {
-                queue.write_with(|write| {
-                    // Find the collection to insert into.
-                    let collection_id = {
-                        let graph = write.graph();
-                        let node = graph.get(node).and_then(|node| node.leaf());
-                        if let Some(fuzzpaint_core::state::graph::LeafType::StrokeLayer {
-                            collection,
-                            ..
-                        }) = node
-                        {
-                            *collection
-                        } else {
-                            anyhow::bail!("Current layer is not a valid stroke layer.")
-                        }
-                    };
+        } else {
+            if !builder.is_empty() {
+                // Not pressed but a stroke exists - just finished, upload it!
+                // Insert the stroke into the document.
+                if let Some(Err(e)) = crate::global::provider().inspect(document, |queue| {
+                    queue.write_with(|write| {
+                        // Find the collection to insert into.
+                        let (collection_id, inner, outer) = {
+                            let graph = write.graph();
+                            let node = graph.get(node).and_then(|node| node.leaf());
+                            if let Some(fuzzpaint_core::state::graph::LeafType::StrokeLayer {
+                                collection,
+                                inner_transform,
+                                outer_transform,
+                                ..
+                            }) = node
+                            {
+                                (*collection, *inner_transform, *outer_transform)
+                            } else {
+                                anyhow::bail!("Current layer is not a valid stroke layer.")
+                            }
+                        };
 
-                    // Get the collection
-                    let mut collections = write.stroke_collections();
-                    let Some(mut collection_writer) = collections.get_mut(collection_id) else {
-                        anyhow::bail!("current layer references nonexistant stroke collection")
-                    };
+                        // Get the collection
+                        let mut collections = write.stroke_collections();
+                        let Some(mut collection_writer) = collections.get_mut(collection_id) else {
+                            anyhow::bail!("current layer references nonexistant stroke collection")
+                        };
 
-                    // Pack and store it away
-                    let stroke = builder.consume();
-                    let points = crate::global::points();
-                    let Some(point_collection) = points.insert(stroke) else {
-                        anyhow::bail!("stroke data too large")
-                    };
-                    // Destructure immutable stroke and push it.
-                    // Invokes an extra ID allocation, weh
-                    collection_writer.push_back(
-                        fuzzpaint_core::state::StrokeBrushSettings { is_eraser, ..brush },
-                        point_collection,
-                    );
+                        let transform = TransformInfo::new(&inner, &outer);
+                        builder.transform(&transform.inverse);
 
-                    Ok(())
-                })
-            }) {
-                builder.clear();
-                log::warn!("failed to insert stroke: {e:?}");
+                        // Pack and store it away
+                        let stroke = builder.consume();
+                        let points = crate::global::points();
+                        let Some(point_collection) = points.insert(stroke) else {
+                            anyhow::bail!("stroke data too large")
+                        };
+                        // Destructure immutable stroke and push it.
+                        // Invokes an extra ID allocation, weh
+                        collection_writer.push_back(
+                            fuzzpaint_core::state::StrokeBrushSettings { is_eraser, ..brush },
+                            point_collection,
+                        );
+
+                        Ok(())
+                    })
+                }) {
+                    builder.clear();
+                    log::warn!("failed to insert stroke: {e:?}");
+                }
             }
+            *transform_cache = None;
         }
     }
     render_output.render_as = if builder.is_empty() {
@@ -395,8 +440,15 @@ fn brush(
         ));
         super::RenderAs::None
     } else {
-        let base_size = brush.spacing_px.get();
-        let size_factor = brush.size_mul.get() - base_size;
+        // Get brush preview size factor due to layer unprojection
+        let transform_scale_factor = transform_cache
+            .as_ref()
+            .map_or(1.0, |xform| xform.preview_scale);
+
+        let base_size = transform_scale_factor * brush.spacing_px.get();
+        let size_factor = transform_scale_factor * brush.size_mul.get() - base_size;
+
+        // Calculate size for circular mouse cursor
         let last_pos = builder.position.last().unwrap();
         let last_size = if let Some(pressure) = builder.pressure.last() {
             pressure * size_factor + base_size
@@ -506,11 +558,67 @@ fn make_trail(
     }
 }
 
+struct TransformInfo {
+    /// Size scale that the preview line should be drawn with.
+    preview_scale: f32,
+    /// Document -> Local space matrix, so that finialized drawings appear in the correct place.
+    /// Since previews take place in document space, not local space, this need not be applied there.
+    inverse: ultraviolet::Mat3,
+}
+impl Default for TransformInfo {
+    fn default() -> Self {
+        Self {
+            preview_scale: 1.0,
+            inverse: ultraviolet::Mat3::identity(),
+        }
+    }
+}
+impl TransformInfo {
+    fn new(
+        inner: &fuzzpaint_core::state::transform::Similarity,
+        outer: &fuzzpaint_core::state::transform::Matrix,
+    ) -> Self {
+        // det(basis2 of outer) -- Not the same as det(outer)!
+        let det_outer = outer.elements[0][0] * outer.elements[1][1]
+            + outer.elements[1][0] * outer.elements[0][1];
+
+        let total = fuzzpaint_core::state::transform::Matrix::from(*inner).then(outer);
+        let total = ultraviolet::Mat3 {
+            cols: [
+                ultraviolet::Vec3 {
+                    x: total.elements[0][0],
+                    y: total.elements[0][1],
+                    z: 0.0,
+                },
+                ultraviolet::Vec3 {
+                    x: total.elements[1][0],
+                    y: total.elements[1][1],
+                    z: 0.0,
+                },
+                ultraviolet::Vec3 {
+                    x: total.elements[2][0],
+                    y: total.elements[2][1],
+                    z: 1.0,
+                },
+            ],
+        };
+
+        let inverse = total.inversed();
+
+        Self {
+            preview_scale: det_outer.sqrt(),
+            inverse,
+        }
+    }
+}
+
 pub struct Brush {
     stroke: StrokeBuilder,
+    transforms: Option<TransformInfo>,
 }
 pub struct Eraser {
     stroke: StrokeBuilder,
+    transforms: Option<TransformInfo>,
 }
 
 impl super::MakePenTool for Brush {
@@ -519,6 +627,7 @@ impl super::MakePenTool for Brush {
     ) -> anyhow::Result<Box<dyn super::PenTool>> {
         Ok(Box::new(Brush {
             stroke: StrokeBuilder::default(),
+            transforms: None,
         }))
     }
 }
@@ -528,6 +637,7 @@ impl super::MakePenTool for Eraser {
     ) -> anyhow::Result<Box<dyn super::PenTool>> {
         Ok(Box::new(Eraser {
             stroke: StrokeBuilder::default(),
+            transforms: None,
         }))
     }
 }
@@ -548,6 +658,7 @@ impl super::PenTool for Brush {
         brush(
             actions.is_action_held(crate::actions::Action::Erase),
             &mut self.stroke,
+            &mut self.transforms,
             view_info,
             stylus_input,
             render_output,
@@ -571,6 +682,7 @@ impl super::PenTool for Eraser {
         brush(
             true,
             &mut self.stroke,
+            &mut self.transforms,
             view_info,
             stylus_input,
             render_output,
