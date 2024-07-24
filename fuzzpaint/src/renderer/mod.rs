@@ -79,6 +79,7 @@ impl Renderer {
                 return Err(e.into());
             }
         };
+        let graph = changes.graph();
 
         // Draw just the changes!
         enum StrokeChanges {
@@ -94,7 +95,9 @@ impl Renderer {
         let mut graph_invalidated = false;
 
         let mut analyze_change = |change| -> std::ops::ControlFlow<()> {
-            use fuzzpaint_core::commands::{Command, DoUndo, MetaCommand, StrokeCollectionCommand};
+            use fuzzpaint_core::commands::{
+                Command, DoUndo, GraphCommand, MetaCommand, StrokeCollectionCommand,
+            };
             use state::stroke_collection::commands::StrokeCommand;
             match change {
                 // An added stroke can be executed as a delta.
@@ -122,8 +125,31 @@ impl Renderer {
                         let _ = stroke_changes.insert(id, StrokeChanges::Invalidated);
                     }
                 },
-                // Any modifications to the blend graph require a rebuild.
-                // (text can be delta'd but that's not really implemented at all yet.)
+                // Xform changes require full redraw of that leaf.
+                DoUndo::Do(Command::Graph(
+                    GraphCommand::LeafInnerTransformChanged { target, .. }
+                    | GraphCommand::LeafOuterTransformChanged { target, .. },
+                ))
+                | DoUndo::Undo(Command::Graph(
+                    GraphCommand::LeafInnerTransformChanged { target, .. }
+                    | GraphCommand::LeafOuterTransformChanged { target, .. },
+                )) => {
+                    // Find the relavent collection, and mark it as needing a full redraw.
+                    let Some(node) = graph.get(*target) else {
+                        return std::ops::ControlFlow::Continue(());
+                    };
+                    let Some(leaf) = node.leaf() else {
+                        return std::ops::ControlFlow::Continue(());
+                    };
+
+                    match leaf {
+                        graph::LeafType::StrokeLayer { collection, .. } => {
+                            let _ = stroke_changes.insert(*collection, StrokeChanges::Invalidated);
+                        }
+                        _ => unimplemented!(),
+                    }
+                }
+                // All other modifications require graph rebuild.
                 DoUndo::Do(Command::Graph(_)) | DoUndo::Undo(Command::Graph(_)) => {
                     graph_invalidated = true;
                 }
@@ -186,25 +212,37 @@ impl Renderer {
         }
 
         for (collection, stroke_changes) in stroke_changes {
-            let graph_id = changes
+            let (graph_id, leaf) = changes
                 .graph()
                 .iter()
                 .find_map(|(id, data)| {
                     // If this node is a stroke layer with our same collection ID, then we found it!
-                    data.leaf()
-                        .is_some_and(|leaf| match leaf {
-                            graph::LeafType::StrokeLayer {
-                                collection: this_leaf,
-                                ..
-                            } => collection == *this_leaf,
-                            _ => false,
-                        })
-                        .then_some(id)
+                    let this_leaf = data.leaf().filter(|leaf| match leaf {
+                        graph::LeafType::StrokeLayer {
+                            collection: this_leaf,
+                            ..
+                        } => collection == *this_leaf,
+                        _ => false,
+                    });
+
+                    this_leaf.map(|leaf| (id, leaf))
                 })
                 .ok_or_else(|| anyhow::anyhow!("delta references non-existent node"))?;
 
+            let graph::LeafType::StrokeLayer {
+                blend,
+                collection,
+                inner_transform,
+                outer_transform,
+            } = leaf
+            else {
+                // Checked in find_map
+                unreachable!()
+            };
+
             let Ok(graph_id) = graph::LeafID::try_from(graph_id) else {
-                continue;
+                // Checked in find_map
+                unreachable!()
             };
 
             let render_data = data
@@ -214,7 +252,7 @@ impl Renderer {
                 .ok_or_else(|| anyhow::anyhow!("missing render data for delta"))?;
             let collection = changes
                 .stroke_collections()
-                .get(collection)
+                .get(*collection)
                 .ok_or_else(|| anyhow::anyhow!("delta references non-existent collection"))?;
 
             let which = match &stroke_changes {
@@ -228,10 +266,14 @@ impl Renderer {
                 }
             };
 
-            if let Some(fence) =
-                self.engines
-                    .stroke_layer(collection, changes.palette(), render_data, which)?
-            {
+            if let Some(fence) = self.engines.stroke_layer(
+                collection,
+                inner_transform,
+                outer_transform,
+                changes.palette(),
+                render_data,
+                which,
+            )? {
                 fences.push(fence);
             }
         }
@@ -492,6 +534,8 @@ impl Engines {
     fn stroke_layer(
         &self,
         collection: &state::stroke_collection::StrokeCollection,
+        inner_transform: &state::transform::Similarity,
+        outer_transform: &state::transform::Matrix,
         palette: &state::palette::Palette,
         data: &LeafRenderData,
         which: Option<&[state::stroke_collection::ImmutableStrokeID]>,
@@ -544,7 +588,13 @@ impl Engines {
         .collect();
 
         self.strokes
-            .draw(strokes.as_ref(), data, clear)
+            .draw(
+                strokes.as_ref(),
+                inner_transform,
+                outer_transform,
+                data,
+                clear,
+            )
             .map(|()| None)
     }
     fn text_layer(
@@ -618,7 +668,12 @@ impl Engines {
 
             match data.leaf() {
                 // Render stroke image
-                Some(LeafType::StrokeLayer { collection, .. }) => {
+                Some(LeafType::StrokeLayer {
+                    collection,
+                    inner_transform,
+                    outer_transform,
+                    ..
+                }) => {
                     let data =
                         document_data
                             .graph_render_data
@@ -636,7 +691,14 @@ impl Engines {
                             .ok_or_else(|| {
                                 anyhow::anyhow!("Missing stroke collection {collection:?}")
                             })?;
-                    if let Some(fence) = self.stroke_layer(strokes, reader.palette(), data, None)? {
+                    if let Some(fence) = self.stroke_layer(
+                        strokes,
+                        inner_transform,
+                        outer_transform,
+                        reader.palette(),
+                        data,
+                        None,
+                    )? {
                         fences.push(fence);
                     };
                 }
@@ -933,6 +995,8 @@ mod stroke_renderer {
 
     use crate::{renderer::gpu_tess, vulkano_prelude::*};
     use anyhow::Result as AnyResult;
+    use cgmath::Zero;
+    use fuzzpaint_core::state;
     use std::sync::Arc;
     mod vert {
         vulkano_shaders::shader! {
@@ -1350,13 +1414,40 @@ mod stroke_renderer {
         pub fn draw(
             &self,
             strokes: &[fuzzpaint_core::state::stroke_collection::ImmutableStroke],
+            inner_transform: &state::transform::Similarity,
+            outer_transform: &state::transform::Matrix,
             renderbuf: &super::LeafRenderData,
             mut clear: bool,
         ) -> AnyResult<()> {
+            // Apply projection
             let mut matrix = cgmath::Matrix4::from_scale(2.0 / crate::DOCUMENT_DIMENSION as f32);
             matrix.y *= -1.0;
             matrix.w.x -= 1.0;
             matrix.w.y += 1.0;
+
+            // Apply outer transform
+            matrix = matrix
+                * cgmath::Matrix4 {
+                    x: cgmath::Vector4 {
+                        x: outer_transform.elements[0][0],
+                        y: outer_transform.elements[0][1],
+                        z: 0.0,
+                        w: 0.0,
+                    },
+                    y: cgmath::Vector4 {
+                        x: outer_transform.elements[1][0],
+                        y: outer_transform.elements[1][1],
+                        z: 0.0,
+                        w: 0.0,
+                    },
+                    z: cgmath::Vector4::zero(),
+                    w: cgmath::Vector4 {
+                        x: outer_transform.elements[2][0],
+                        y: outer_transform.elements[2][1],
+                        z: 0.0,
+                        w: 1.0,
+                    },
+                };
 
             let mut batch = super::stroke_batcher::StrokeBatcher::new(
                 self.context.allocators().memory().clone(),
@@ -1377,7 +1468,7 @@ mod stroke_renderer {
                     vertices,
                     mut indirects,
                     sources,
-                }) = self.gpu_tess.tess_batch(batch, true)? else {
+                }) = self.gpu_tess.tess_batch(batch, inner_transform, true)? else {
                     // Nothing to render. Still honor the clear.
                     if clear {
                         clear = false;

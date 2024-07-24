@@ -112,6 +112,11 @@ layout(set = 1, binding = 1) restrict writeonly buffer outputStrokeVertices {
 // The worker responsible for the first vertex is the "leader"
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
+// Transform to perform on input points before tess.
+layout(push_constant) uniform InnerTransform {
+    mat3x2 inner_transform;
+};
+
 vec4 vert_to_simd(in InputStrokeVertex v) {
     return vec4(
         v.pos.xy,
@@ -235,16 +240,21 @@ void main() {
 
     // We've now done all the very expensive work to figure out what to work on.
     // Now to do some bulk work to amortize that expense xP
-    const InputStrokeVertex a_vert = InputStrokeVertex(
+    InputStrokeVertex a_vert = InputStrokeVertex(
         LOCAL_POSITION_ELEMENT(before_vert),
         LOCAL_PRESSURE_ELEMENT_OR_ONE(before_vert),
         LOCAL_ARCLEN_ELEMENT(before_vert)
     );
-    const InputStrokeVertex b_vert = InputStrokeVertex(
+    InputStrokeVertex b_vert = InputStrokeVertex(
         LOCAL_POSITION_ELEMENT(before_vert + 1),
         LOCAL_PRESSURE_ELEMENT_OR_ONE(before_vert + 1),
         LOCAL_ARCLEN_ELEMENT(before_vert + 1)
     );
+
+    // Transform input points.
+    a_vert.pos = (inner_transform * vec3(a_vert.pos, 1.0)).xy;
+    b_vert.pos = (inner_transform * vec3(b_vert.pos, 1.0)).xy;
+
     const vec4 a = vert_to_simd(a_vert);
     const vec4 b = vert_to_simd(b_vert);
     // 0.0..1.0 range of where this worker falls between previous and next vert

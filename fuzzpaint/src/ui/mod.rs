@@ -330,6 +330,8 @@ impl MainUI {
                 state::graph::LeafType::StrokeLayer {
                     blend: Blend::default(),
                     collection: new_collection,
+                    inner_transform: state::transform::Similarity::default(),
+                    outer_transform: state::transform::Matrix::default(),
                 },
             )
             .ok();
@@ -1269,6 +1271,8 @@ fn layer_buttons(
                             state::graph::LeafType::StrokeLayer {
                                 blend: Blend::default(),
                                 collection: new_stroke_collection,
+                                inner_transform: state::transform::Similarity::default(),
+                                outer_transform: state::transform::Matrix::default(),
                             },
                             addition_location,
                             "Stroke Layer".to_string(),
@@ -1295,6 +1299,7 @@ fn layer_buttons(
                             blend: Blend::default(),
                             text: "Hello, world!".to_owned(),
                             px_per_em: 50.0,
+                            outer_transform: state::transform::Matrix::default(),
                         },
                         addition_location,
                         "Text".to_string(),

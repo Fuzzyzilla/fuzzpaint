@@ -21,6 +21,16 @@ pub enum Command {
         destination: Option<super::NodeID>,
         child_idx: usize,
     },
+    LeafInnerTransformChanged {
+        target: super::LeafID,
+        old_transform: super::transform::Similarity,
+        new_transform: super::transform::Similarity,
+    },
+    LeafOuterTransformChanged {
+        target: super::LeafID,
+        old_transform: super::transform::Matrix,
+        new_transform: super::transform::Matrix,
+    },
     LeafTyChanged {
         target: super::LeafID,
         old_ty: super::LeafType,
