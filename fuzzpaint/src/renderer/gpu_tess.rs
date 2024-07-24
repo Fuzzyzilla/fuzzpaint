@@ -85,7 +85,7 @@ impl GpuStampTess {
         let inner_transform_constant = vk::PushConstantRange {
             stages: vk::ShaderStages::COMPUTE,
             offset: 0,
-            size: std::mem::size_of::<[[f32; 2]; 3]>().try_into().unwrap(),
+            size: std::mem::size_of::<[[f32; 2]; 3]>() as u32 + std::mem::size_of::<f32>() as u32,
         };
 
         Ok((
@@ -316,10 +316,14 @@ impl GpuStampTess {
             .push_constants(
                 self.layout.clone(),
                 0,
-                // Similarity -> Matrix -> floats. :P
-                <[[f32; 2]; 3]>::from(fuzzpaint_core::state::transform::Matrix::from(
-                    *inner_transform,
-                )),
+                shaders::tessellate::InnerTransform {
+                    // Similarity -> Matrix -> floats. :P
+                    inner_transform: fuzzpaint_core::state::transform::Matrix::from(
+                        *inner_transform,
+                    )
+                    .into(),
+                    arclen_scale: inner_transform.scale(),
+                },
             )?
             .bind_descriptor_sets(
                 vk::PipelineBindPoint::Compute,

@@ -1122,7 +1122,12 @@ fn leaf_props_panel(
             })
             .inner
         }
-        LeafType::StrokeLayer { collection, .. } => {
+        LeafType::StrokeLayer {
+            collection,
+            inner_transform,
+            outer_transform,
+            ..
+        } => {
             // Nothing interactible, but display some infos
             ui.label(
                 egui::RichText::new(format!(
@@ -1135,6 +1140,7 @@ fn leaf_props_panel(
                 .italics()
                 .weak(),
             );
+
             false
         }
         LeafType::Text {
@@ -1346,6 +1352,63 @@ fn layer_buttons(
         };
     });
 }
+/// Modify an inner transform, returning a new transform when a change is submitted.
+fn inner_transform(
+    ui: &mut Ui,
+    inner: state::transform::Similarity,
+) -> Option<state::transform::Similarity> {
+    latch::latch(ui, ui.id().with("inner-scale"), inner, |ui, inner| {
+        let response = ui.add(
+            egui::Slider::new(&mut inner.flip_scale, 0.1..=10.0)
+                .clamp_to_range(true)
+                .logarithmic(true),
+        );
+
+        // There is, as far as I can tell, no way to do this right.
+        if response.has_focus() {
+            return latch::Latch::Continue;
+        }
+        if response.drag_released() || response.lost_focus() {
+            return latch::Latch::Finish;
+        }
+        match (response.changed(), response.dragged()) {
+            (_, true) => latch::Latch::Continue,
+            (true, false) => latch::Latch::Finish,
+            (false, false) => latch::Latch::None,
+        }
+    })
+    .result()
+}
+/// Modify an inner transform, returning a new transform when a change is submitted.
+fn outer_transform(
+    ui: &mut Ui,
+    outer: state::transform::Matrix,
+) -> Option<state::transform::Matrix> {
+    latch::latch(ui, ui.id().with("outer-scale"), outer, |ui, outer| {
+        let mut scale = outer.elements[0][0];
+        let response = ui.add(
+            egui::Slider::new(&mut scale, 0.1..=10.0)
+                .clamp_to_range(true)
+                .logarithmic(true),
+        );
+        outer.elements[0][0] = scale;
+        outer.elements[1][1] = scale;
+
+        // There is, as far as I can tell, no way to do this right.
+        if response.has_focus() {
+            return latch::Latch::Continue;
+        }
+        if response.drag_released() || response.lost_focus() {
+            return latch::Latch::Finish;
+        }
+        match (response.changed(), response.dragged()) {
+            (_, true) => latch::Latch::Continue,
+            (true, false) => latch::Latch::Finish,
+            (false, false) => latch::Latch::None,
+        }
+    })
+    .result()
+}
 /// Side panel showing layer add buttons, layer tree, and layer options
 fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
     crate::global::provider().inspect(interface.id, |queue| {
@@ -1377,6 +1440,16 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                                 // match on ID says it must be a leaf.
                                 unreachable!();
                             };
+                            if let Some(xform) = leaf.inner_transform_mut() {
+                                if let Some(inner) = inner_transform(ui, *xform) {
+                                    let _ = writer.graph().set_inner_transform(leaf_id, inner);
+                                }
+                            }
+                            if let Some(xform) = leaf.outer_transform_mut() {
+                                if let Some(outer) = outer_transform(ui, *xform) {
+                                    let _ = writer.graph().set_outer_transform(leaf_id, outer);
+                                }
+                            }
                             if leaf_props_panel(
                                 ui,
                                 leaf_id,

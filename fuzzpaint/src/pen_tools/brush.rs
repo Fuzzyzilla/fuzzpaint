@@ -446,7 +446,7 @@ fn brush(
             .map_or(1.0, |xform| xform.preview_scale);
 
         let base_size = transform_scale_factor * brush.spacing_px.get();
-        let size_factor = transform_scale_factor * (brush.size_mul.get() - base_size);
+        let size_factor = transform_scale_factor * brush.size_mul.get() - base_size;
 
         // Calculate size for circular mouse cursor
         let last_pos = builder.position.last().unwrap();
@@ -578,12 +578,9 @@ impl TransformInfo {
         inner: &fuzzpaint_core::state::transform::Similarity,
         outer: &fuzzpaint_core::state::transform::Matrix,
     ) -> Self {
-        let det_inner = inner.scale();
         // det(basis2 of outer) -- Not the same as det(outer)!
         let det_outer = outer.elements[0][0] * outer.elements[1][1]
             + outer.elements[1][0] * outer.elements[0][1];
-
-        let preview_scale = det_inner * det_outer;
 
         let total = fuzzpaint_core::state::transform::Matrix::from(*inner).then(outer);
         let total = ultraviolet::Mat3 {
@@ -609,7 +606,7 @@ impl TransformInfo {
         let inverse = total.inversed();
 
         Self {
-            preview_scale,
+            preview_scale: det_outer.sqrt(),
             inverse,
         }
     }

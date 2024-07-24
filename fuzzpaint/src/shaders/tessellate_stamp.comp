@@ -115,6 +115,7 @@ layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 // Transform to perform on input points before tess.
 layout(push_constant) uniform InnerTransform {
     mat3x2 inner_transform;
+    float arclen_scale;
 };
 
 vec4 vert_to_simd(in InputStrokeVertex v) {
@@ -190,7 +191,7 @@ void main() {
         uintBitsToFloat(in_elements[info.base_element_offset + ((idx) * point_element_len) + position_element_offset]),\
         uintBitsToFloat(in_elements[info.base_element_offset + ((idx) * point_element_len) + position_element_offset + 1])\
     )
-    #define LOCAL_ARCLEN_ELEMENT(idx) uintBitsToFloat(in_elements[info.base_element_offset + ((idx) * point_element_len) + arclen_element_offset])
+    #define LOCAL_ARCLEN_ELEMENT(idx) (uintBitsToFloat(in_elements[info.base_element_offset + ((idx) * point_element_len) + arclen_element_offset]) * arclen_scale)
 
     // 0 at the start of the stroke given by `info`
     const uint stroke_local_id = (workgroup_idx - info.start_group) * gl_WorkGroupSize.x + gl_LocalInvocationID.x;

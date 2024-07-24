@@ -224,4 +224,77 @@ impl<'a, Write: CommandWrite<Command>> GraphWriter<'a, Write> {
 
         Ok(())
     }
+    pub fn set_inner_transform(
+        &mut self,
+        target: super::LeafID,
+        transform: crate::state::transform::Similarity,
+    ) -> Result<(), TargetError> {
+        let node = self
+            .graph
+            .get_mut(target)
+            .ok_or(TargetError::TargetNotFound)?;
+        if node.deleted {
+            return Err(TargetError::TargetDeleted.into());
+        }
+
+        let Some(leaf) = node.leaf_mut() else {
+            return Err(CommandError::MismatchedState);
+        };
+        match leaf {
+            super::LeafType::StrokeLayer {
+                inner_transform, ..
+            } => {
+                let old = *inner_transform;
+                if old == transform {
+                    return Ok(());
+                }
+                *inner_transform = transform;
+                self.writer.write(Command::LeafInnerTransformChanged {
+                    target,
+                    old_transform: old,
+                    new_transform: transform,
+                });
+                Ok(())
+            }
+            _ => Err(CommandError::MismatchedState),
+        }
+    }
+    pub fn set_outer_transform(
+        &mut self,
+        target: super::LeafID,
+        transform: crate::state::transform::Matrix,
+    ) -> Result<(), TargetError> {
+        let node = self
+            .graph
+            .get_mut(target)
+            .ok_or(TargetError::TargetNotFound)?;
+        if node.deleted {
+            return Err(TargetError::TargetDeleted.into());
+        }
+
+        let Some(leaf) = node.leaf_mut() else {
+            return Err(CommandError::MismatchedState);
+        };
+        match leaf {
+            super::LeafType::StrokeLayer {
+                outer_transform, ..
+            }
+            | super::LeafType::Text {
+                outer_transform, ..
+            } => {
+                let old = *outer_transform;
+                if old == transform {
+                    return Ok(());
+                }
+                *outer_transform = transform;
+                self.writer.write(Command::LeafOuterTransformChanged {
+                    target,
+                    old_transform: old,
+                    new_transform: transform,
+                });
+                Ok(())
+            }
+            _ => Err(CommandError::MismatchedState),
+        }
+    }
 }

@@ -59,6 +59,25 @@ impl LeafType {
             Self::Note => None,
         }
     }
+    pub fn inner_transform_mut(&mut self) -> Option<&mut transform::Similarity> {
+        match self {
+            Self::StrokeLayer {
+                inner_transform, ..
+            } => Some(inner_transform),
+            Self::Note | Self::SolidColor { .. } | Self::Text { .. } => None,
+        }
+    }
+    pub fn outer_transform_mut(&mut self) -> Option<&mut transform::Matrix> {
+        match self {
+            Self::StrokeLayer {
+                outer_transform, ..
+            }
+            | Self::Text {
+                outer_transform, ..
+            } => Some(outer_transform),
+            Self::Note | Self::SolidColor { .. } => None,
+        }
+    }
 }
 #[derive(Clone, PartialEq, Debug)]
 pub enum NodeType {
