@@ -17,7 +17,7 @@ A graphics-accelerated digital art software combining the ease-of-use of raster 
 * A modular application design allowing CLI, headless servers, and graphical clients to all share the same codebase.
 
 ### Dreams
-* Client/Server design allowing realtime peer-to-peer collaboration.
+* Optional Client/Server system allowing realtime collaboration.
 
 ### Non goals
 * Image editing - though this project aims to provide my ideal digital art creation environment over traditional raster software, it does not aim to implement the other functions of a raster image editor.
@@ -69,6 +69,7 @@ To declare **0.2.0**, I would like to be able to freely doodle a thing and save 
    - [ ] Color, Object Pickers
    - [ ] Select strokes
      - [ ] Select parts of strokes
-   - [ ] Transform existing layers and strokes
+   - [X] Transform layers
+   - [ ] Transform strokes
    - [ ] Cut, Copy, Paste strokes (within program only)
 

@@ -16,14 +16,38 @@ pub struct Similarity {
 }
 
 impl Similarity {
+    /// Get the horizontal flip flag.
     #[must_use]
     pub fn hflip(&self) -> bool {
         // We want the literal sign bit, regardless of the numerical interpretation.
         self.flip_scale.is_sign_negative()
     }
+    /// Get the scale of the similarity. This is not the same as reading from [`Self::flip_scale`]!
     #[must_use]
     pub fn scale(&self) -> f32 {
         self.flip_scale.abs()
+    }
+    /// Set the horizontal flip flag.
+    pub fn set_hflip(&mut self, flip: bool) {
+        // We want to set the bit directly, regardless of numerical interpretation.
+        // (eg., we don't want negation of zero or NaN to get lost in translation)
+
+        // Reinterpret float ref into u32
+        // Safety: Every bitpattern of f32 is a valid u32 and vice-versa.
+        let bits = unsafe { &mut *std::ptr::from_mut(&mut self.flip_scale).cast::<u32>() };
+
+        if flip {
+            *bits |= 0x8000_0000;
+        } else {
+            *bits &= 0x7FFF_FFFF;
+        }
+    }
+    /// Set the scale. Negative values will be made positive.
+    pub fn set_scale(&mut self, scale: f32) {
+        // Funny lil dance :3
+        let flip = self.hflip();
+        self.flip_scale = scale;
+        self.set_hflip(flip);
     }
 }
 
