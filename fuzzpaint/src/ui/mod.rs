@@ -128,7 +128,7 @@ enum CloseState {
 
 #[derive(Clone)]
 struct PerDocumentData {
-    id: state::DocumentID,
+    id: state::document::ID,
     graph_selection: Option<state::graph::AnyID>,
     graph_focused_subtree: Option<state::graph::NodeID>,
     name: String,
@@ -142,7 +142,7 @@ pub struct MainUI {
     modal: Option<CurrentModal>,
     // Active document viewport
     // + Implicit layer: welcome screen if no active document.
-    cur_document: Option<state::DocumentID>,
+    cur_document: Option<state::document::ID>,
     documents: Vec<PerDocumentData>,
     picker_color: egui::ecolor::HsvaGamma,
     picker_in_flux: bool,
@@ -345,9 +345,9 @@ impl MainUI {
 
         // Give this state to a queue
         let new_doc = queue::DocumentCommandQueue::from_state(
-            state::Document {
-                path: None,
+            state::document::Document {
                 name: name.clone(),
+                ..Default::default()
             },
             graph,
             stroke_collection,
@@ -703,7 +703,7 @@ impl MainUI {
                     self.cur_document = None;
                 }
                 // Then show, a clicakble header for each document.
-                let mut deleted_ids = smallvec::SmallVec::<[state::DocumentID; 1]>::new();
+                let mut deleted_ids = smallvec::SmallVec::<[state::document::ID; 1]>::new();
                 for PerDocumentData { id, name, .. } in &self.documents {
                     let id = *id;
                     egui::containers::Frame::group(ui.style())
@@ -755,7 +755,7 @@ impl MainUI {
     /// Bottom trim showing view controls.
     fn nav_bar(
         ui: &mut Ui,
-        document: state::DocumentID,
+        document: state::document::ID,
         requests: &crossbeam::channel::Sender<requests::UiRequest>,
         frame: &crate::actions::ActionFrame,
     ) {
@@ -874,7 +874,7 @@ impl MainUI {
     fn colors_panel(
         &mut self,
         ui: &mut Ui,
-        current_doc: Option<state::DocumentID>,
+        current_doc: Option<state::document::ID>,
         actions: &crate::actions::ActionFrame,
     ) {
         use az::SaturatingAs;

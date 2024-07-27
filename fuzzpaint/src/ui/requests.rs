@@ -2,7 +2,7 @@
 #[derive(Debug, Clone)]
 pub enum UiRequest {
     Document {
-        target: fuzzpaint_core::state::DocumentID,
+        target: fuzzpaint_core::state::document::ID,
         request: DocumentRequest,
     },
     SetBaseTool {

@@ -2,30 +2,13 @@
 //!
 //! Objects that are owned by the document, representing it's internal state.
 
+pub mod document;
 pub mod graph;
 pub mod palette;
 pub mod rich_text;
 pub mod stroke_collection;
 pub mod transform;
 
-pub type DocumentID = crate::FuzzID<Document>;
-
-#[derive(Clone)]
-pub struct Document {
-    /// The path from which the file was loaded or saved, or None if opened as new.
-    pub path: Option<std::path::PathBuf>,
-    /// Name of the document, inferred from its path or generated.
-    pub name: String,
-    // Size, position, dpi, ect todo!
-}
-impl Default for Document {
-    fn default() -> Self {
-        Self {
-            path: None,
-            name: "New Document".into(),
-        }
-    }
-}
 #[derive(Copy, Clone, PartialEq, Debug)]
 /// Per-stroke settings, i.e. ones we expect the user to change frequently without counting it as a "new brush."
 pub struct StrokeBrushSettings {
