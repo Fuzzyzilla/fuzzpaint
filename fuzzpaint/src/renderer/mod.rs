@@ -31,7 +31,7 @@ struct PerDocumentData {
 /// Maintains a cache of document render data.
 struct Renderer {
     engines: Engines,
-    data: hashbrown::HashMap<state::DocumentID, PerDocumentData>,
+    data: hashbrown::HashMap<state::document::ID, PerDocumentData>,
 }
 impl Renderer {
     fn new(context: Arc<crate::render_device::RenderContext>) -> anyhow::Result<Self> {
@@ -42,7 +42,7 @@ impl Renderer {
     }
     fn render_one(
         &mut self,
-        id: state::DocumentID,
+        id: state::document::ID,
         into: &Arc<vk::ImageView>,
     ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn vk::sync::GpuFuture + Send>>> {
         let data = self.data.entry(id);
@@ -1270,20 +1270,14 @@ mod stroke_renderer {
                         super::gpu_tess::interface::OutputStrokeVertex::per_vertex()
                             .definition(&vert.info().input_interface)?,
                     ),
-                    viewport_state: Some(vk::ViewportState {
-                        viewports: smallvec::smallvec![vk::Viewport {
-                            depth_range: 0.0..=1.0,
-                            extent: [crate::DOCUMENT_DIMENSION as f32; 2],
-                            offset: [0.0; 2],
-                        }],
-                        ..Default::default()
-                    }),
+                    viewport_state: Some(vk::ViewportState::default()),
                     subpass: Some(vk::PipelineSubpassType::BeginRendering(
                         vk::PipelineRenderingCreateInfo {
                             color_attachment_formats: vec![Some(crate::DOCUMENT_FORMAT)],
                             ..Default::default()
                         },
                     )),
+                    dynamic_state: [vk::DynamicState::Viewport].into_iter().collect(),
                     stages: smallvec::smallvec![vert_stage, frag_stage,],
                     ..vk::GraphicsPipelineCreateInfo::layout(layout)
                 },

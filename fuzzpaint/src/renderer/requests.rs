@@ -35,7 +35,7 @@ pub enum PickerRequest {
 }
 pub enum RenderRequest {
     CreatePicker {
-        document: fuzzpaint_core::state::DocumentID,
+        document: fuzzpaint_core::state::document::ID,
         picker: PickerRequest,
         info: PickerInfo,
     },

@@ -7,7 +7,7 @@ use crate::state;
 
 pub struct State {
     //pub stroke_layers: Vec<state::StrokeLayer>,
-    pub document: state::Document,
+    pub document: state::document::Document,
     pub graph: state::graph::BlendGraph,
     pub stroke_state: state::stroke_collection::StrokeCollectionState,
     pub palette: state::palette::Palette,
@@ -17,7 +17,7 @@ pub struct State {
 impl State {
     pub fn new(root: slab_tree::NodeId) -> Self {
         Self {
-            document: state::Document::default(),
+            document: state::document::Document::default(),
             graph: state::graph::BlendGraph::default(),
             stroke_state: state::stroke_collection::StrokeCollectionState::default(),
             palette: state::palette::Palette::default(),

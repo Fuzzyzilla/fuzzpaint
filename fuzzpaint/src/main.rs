@@ -54,7 +54,7 @@ use anyhow::Result as AnyResult;
 /// There still needs to be a way to intercommunicate between UI selections, Pen actions, and renderer preview.
 #[derive(Clone)]
 pub struct AdHocGlobals {
-    pub document: fuzzpaint_core::state::DocumentID,
+    pub document: fuzzpaint_core::state::document::ID,
     pub brush: fuzzpaint_core::state::StrokeBrushSettings,
     pub node: Option<fuzzpaint_core::state::graph::AnyID>,
 }

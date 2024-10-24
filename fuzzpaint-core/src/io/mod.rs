@@ -264,13 +264,14 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
         )
         .unwrap();
 
-    let document_info = crate::state::Document {
+    let document_info = crate::state::document::Document {
         // File stem (without ext) if available, else the whole path.
         name: path_buf
             .file_stem()
             .map_or_else(|| path_buf.to_string_lossy(), |p| p.to_string_lossy())
             .into_owned(),
         path: Some(path_buf),
+        ..Default::default()
     };
     if let Some(size) = size {
         let duration = start_time.elapsed();

@@ -15,6 +15,28 @@ pub fn debug_assert_indices_safe<Vertex>(vertices: &[Vertex], indices: &[u16]) {
     }
 }
 
+/// High level description of how physical device limits translate into
+/// limits for fuzzpaint. Note that limits may still be larger than reasonable.
+pub struct HighLevelLimits {
+    pub max_document_size: [u32; 2],
+}
+impl HighLevelLimits {
+    fn from_device(device: &vk::Device) -> Self {
+        let p = device.physical_device().properties();
+        // May be greater for specific formats, but this is the guaranteed minimum for all.
+        // For now, just use this. (avoids nasty bugs if I forget to update this when I
+        // change a format somewhere.. lol)
+        let dimension = p.max_image_dimension2_d;
+        Self {
+            // Don't need to care about max_viewport* as the spec says they are >= max_framebuffer*.
+            max_document_size: [
+                dimension.min(p.max_framebuffer_width),
+                dimension.min(p.max_framebuffer_height),
+            ],
+        }
+    }
+}
+
 pub struct Queue {
     queue: Arc<vk::Queue>,
     family_idx: u32,
@@ -235,6 +257,7 @@ pub struct RenderContext {
     _library: Arc<vk::VulkanLibrary>,
     _instance: Arc<vk::Instance>,
     physical_device: Arc<vk::PhysicalDevice>,
+    high_level_limits: HighLevelLimits,
     device: Arc<vk::Device>,
     queues: Queues,
 
@@ -376,6 +399,7 @@ impl RenderContext {
                     },
                 ),
             },
+            high_level_limits: HighLevelLimits::from_device(&device),
             _library: library,
             _instance: instance,
             device,
@@ -591,5 +615,8 @@ impl RenderContext {
     }
     pub fn allocators(&self) -> &Allocators {
         &self.allocators
+    }
+    pub fn high_level_limits(&self) -> &HighLevelLimits {
+        &self.high_level_limits
     }
 }

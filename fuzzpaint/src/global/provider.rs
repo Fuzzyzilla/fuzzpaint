@@ -5,7 +5,7 @@
 //! Although only one is currently implemented, this interface will allow for placing the document data in a daemon,
 //! on a server, ect.
 
-use fuzzpaint_core::{queue::DocumentCommandQueue, state::DocumentID};
+use fuzzpaint_core::{queue::DocumentCommandQueue, state::document::ID};
 
 struct PerDocument {
     queue: DocumentCommandQueue,
@@ -14,13 +14,13 @@ struct PerDocument {
 pub struct Local {
     on_change: parking_lot::Mutex<bus::Bus<ChangeMessage>>,
     // We don't expect high contention - will only be locked for writing when a new queue is inserted.
-    documents: parking_lot::RwLock<hashbrown::HashMap<DocumentID, PerDocument>>,
+    documents: parking_lot::RwLock<hashbrown::HashMap<ID, PerDocument>>,
 }
 // Todo: This sould be a trait! For out-of-process providers, network providers, etc.
 // That's a ways away, though :3
 impl Local {
     /// Create and insert a new document, returning it's new ID.
-    pub fn insert_new(&self) -> DocumentID {
+    pub fn insert_new(&self) -> ID {
         let new_document = DocumentCommandQueue::new();
         let new_id = new_document.id();
         let new_document = PerDocument {
@@ -52,7 +52,7 @@ impl Local {
         Ok(())
     }
     /// Call the given closure on the document queue with the given ID, if found.
-    pub fn inspect<F, T>(&self, id: DocumentID, f: F) -> Option<T>
+    pub fn inspect<F, T>(&self, id: ID, f: F) -> Option<T>
     where
         F: FnOnce(&DocumentCommandQueue) -> T,
     {
@@ -73,13 +73,13 @@ impl Local {
         Some(result)
     }
     /// Iterate over all the open documents, by ID.
-    pub fn document_iter(&self) -> impl Iterator<Item = DocumentID> {
+    pub fn document_iter(&self) -> impl Iterator<Item = ID> {
         let ids: Vec<_> = self.documents.read().keys().copied().collect();
         ids.into_iter()
     }
     /// Broadcast a `ProviderMessage::Modified` with the given ID to any change listeners.
     /// Ensures the ID is valid before sending.
-    pub fn touch(&self, id: DocumentID) {
+    pub fn touch(&self, id: ID) {
         if self.documents.read().contains_key(&id) {
             self.on_change.lock().broadcast(ChangeMessage::Modified(id));
         }
@@ -103,17 +103,17 @@ impl Default for Local {
 #[derive(Copy, Clone, Debug)]
 pub enum ChangeMessage {
     /// A new document has been made available to the provider.
-    Opened(DocumentID),
+    Opened(ID),
     /// A document has been modified, i.e. it is likely that existing listeners
     /// will see new commands.
-    Modified(DocumentID),
+    Modified(ID),
     /// A document is no longer available.
-    Closed(DocumentID),
+    Closed(ID),
 }
 impl ChangeMessage {
     /// Gets the document this message refers to.
     #[must_use]
-    pub fn id(&self) -> DocumentID {
+    pub fn id(&self) -> ID {
         match self {
             Self::Closed(id) | Self::Modified(id) | Self::Opened(id) => *id,
         }

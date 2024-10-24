@@ -119,7 +119,7 @@ struct DocumentSource {
     // Installable = any doc can use it,
     // all others restrict usage to *this doc only.*
     restriction: EmbedRestriction,
-    src_document: crate::state::DocumentID,
+    src_document: crate::state::document::ID,
     // Font idx, Face idx, data (file ptr or owned?)
     todo: (),
 }
@@ -176,12 +176,12 @@ impl Faces {
     pub fn get_varied(
         &self,
         _face: VariedFaceID,
-        _document: Option<crate::state::DocumentID>,
+        _document: Option<crate::state::document::ID>,
     ) -> Result<(), FaceError> {
         todo!()
     }
     /// Clear all private (non-installable) fonts belonging to this document.
-    pub fn clear_private(&self, _document: crate::state::DocumentID) {
+    pub fn clear_private(&self, _document: crate::state::document::ID) {
         todo!()
     }
 }
