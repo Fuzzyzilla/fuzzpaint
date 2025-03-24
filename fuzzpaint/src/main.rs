@@ -3,8 +3,6 @@
 #![feature(once_cell_try)]
 #![feature(write_all_vectored)]
 #![feature(new_zeroed_alloc)]
-#![feature(new_uninit)]
-#![feature(float_next_up_down)]
 #![warn(clippy::pedantic)]
 // I know it's bad but while working on a focus it's not really something I wanna be bugged about
 // with a full screen of yellow lol.
