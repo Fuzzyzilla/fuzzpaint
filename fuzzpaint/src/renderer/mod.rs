@@ -1534,6 +1534,12 @@ mod stroke_renderer {
                         ..Default::default()
                     })?
                     .bind_pipeline_graphics(self.pipeline.clone())?
+                    .set_viewport(0, [
+                        vk::Viewport {
+                            extent: [crate::DOCUMENT_DIMENSION as f32; 2],
+                            ..Default::default()
+                        }].into_iter().collect()
+                    )?
                     .push_constants(
                         self.pipeline.layout().clone(),
                         0,

@@ -2,8 +2,7 @@
 #![feature(portable_simd)]
 #![feature(once_cell_try)]
 #![feature(write_all_vectored)]
-#![feature(new_uninit)]
-#![feature(float_next_up_down)]
+#![feature(new_zeroed_alloc)]
 #![warn(clippy::pedantic)]
 // I know it's bad but while working on a focus it's not really something I wanna be bugged about
 // with a full screen of yellow lol.
