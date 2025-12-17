@@ -17,7 +17,7 @@ cgmath = "0.18.0"
 crossbeam = "0.8.4"
 defer = "0.2.1"
 dhat = { version = "0.3.3", optional = true }
-dirs = "5.0.1"
+dirs = "6.0.0"
 # To enable default-font within egui-winit
 egui = "0.26.2"
 egui-winit = { version = "0.26.2", features = ["bytemuck"] }
