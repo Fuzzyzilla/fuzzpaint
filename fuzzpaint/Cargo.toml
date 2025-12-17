@@ -23,7 +23,7 @@ egui = "0.26.2"
 egui-winit = { version = "0.26.2", features = ["bytemuck"] }
 either = "1.15.0"
 env_logger = "0.11.8"
-hashbrown = { version = "0.14.5", features = ["serde"] }
+hashbrown = { version = "0.16.1", features = ["serde"] }
 human_bytes = "0.4.3"
 image = "0.25.9"
 log = "0.4.29"

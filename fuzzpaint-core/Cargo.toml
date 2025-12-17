@@ -21,7 +21,7 @@ crc = "3.4.0"
 dirs = "5.0.1"
 either = "1.15.0"
 fontdb = "0.16.2"
-hashbrown = { version = "0.14.5", features = ["serde"] }
+hashbrown = { version = "0.16.1", features = ["serde"] }
 human_bytes = "0.4.3"
 id_tree = "1.8.0"
 log = "0.4.29"
