@@ -43,7 +43,7 @@ tokio = { version = "1.48.0", features = [
     "macros",
     "parking_lot",
 ] }
-toml = "0.8.23"
+toml = "0.9.8"
 try-block = "0.1.0"
 ultraviolet = { version = "0.10.0", features = ["bytemuck"] }
 vulkano = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vulkano.git", branch = "backport-null-check"  }
@@ -52,7 +52,7 @@ vulkano-shaders = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vul
 # Also need legacy RWH version for `vulkano` + new version for `octotablet`
 winit = { version = "0.29.15", features = ["serde", "rwh_05", "rwh_06"] }
 bus = "2.4.1"
-strum = { version = "0.26.3", features = ["derive"] }
+strum = { version = "0.27.2", features = ["derive"] }
 png = "0.17.16"
 # For low-level vulkan crimes, use the same version as vulkano.
 ash = "^0.37.3"
