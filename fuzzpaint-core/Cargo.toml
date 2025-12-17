@@ -31,6 +31,6 @@ rustybuzz = "0.13.0"
 slab_tree = "0.3.2"
 smallvec = { version = "1.15.1", features = ["serde", "union"] }
 strum = { version = "0.26.3", features = ["derive"] }
-thiserror = "1.0.69"
+thiserror = "2.0.17"
 unicode-segmentation = "1.12.0"
 uuid = { version = "1.19.0", features = ["v4"] }
