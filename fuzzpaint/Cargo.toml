@@ -53,7 +53,7 @@ vulkano-shaders = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vul
 winit = { version = "0.29.15", features = ["serde", "rwh_05", "rwh_06"] }
 bus = "2.4.1"
 strum = { version = "0.27.2", features = ["derive"] }
-png = "0.17.16"
+png = "0.18.0"
 # For low-level vulkan crimes, use the same version as vulkano.
 ash = "^0.37.3"
 
