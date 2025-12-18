@@ -82,15 +82,9 @@ impl EmbedRestriction {
         let permissions = table.permissions()?;
         // These flags are meaningless unless ^^ is some, that's okay!
         let can_subset = table.is_subsetting_allowed();
-        // Misnomer - this checks if bit 9 is zero.
-        // If bit unset, this means all data embeddable, set means bitmap only.
-        let bitmap_only = !table.is_bitmap_embedding_allowed();
+        let outline_embedding_allowed = table.is_outline_embedding_allowed();
 
-        let level = if bitmap_only {
-            // Bitmap-only mode means there's no use in us embedding, at least for our purposes!
-            // (todo: for a bitmap-only font, this is actually permissive. We don't handle those yet anyway!)
-            EmbedRestrictionLevel::ReadOnly
-        } else {
+        let level = if outline_embedding_allowed {
             use rustybuzz::ttf_parser::Permissions;
             match permissions {
                 Permissions::Restricted => EmbedRestrictionLevel::LocalOnly,
@@ -98,6 +92,10 @@ impl EmbedRestriction {
                 Permissions::Editable => EmbedRestrictionLevel::Writable,
                 Permissions::Installable => EmbedRestrictionLevel::Installable,
             }
+        } else {
+            // Bitmap-only mode means there's no use in us embedding, at least for our purposes!
+            // (todo: for a bitmap-only font, this is actually permissive. We don't handle those yet anyway!)
+            EmbedRestrictionLevel::ReadOnly
         };
         Some(Self { can_subset, level })
     }
