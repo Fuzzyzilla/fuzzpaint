@@ -3,7 +3,7 @@
 
 /// A float which is non-NaN
 // Because of the preconditions invalidating many bitpatterns, this is not Pod.
-#[derive(Copy, Clone, PartialEq, PartialOrd, bytemuck::NoUninit, bytemuck::Zeroable, Debug)]
+#[derive(Copy, Clone, PartialEq, bytemuck::NoUninit, bytemuck::Zeroable, Debug)]
 #[repr(transparent)]
 pub struct FiniteF32(f32);
 impl FiniteF32 {
@@ -52,12 +52,16 @@ pub enum FiniteF32Error {
 // So PartialEq can act like Eq
 impl Eq for FiniteF32 {}
 // Doing this on purpose! taking partial ord logic to impl Ord because of struct invariants.
-#[allow(clippy::derive_ord_xor_partial_ord)]
 impl Ord for FiniteF32 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Unwrap OK - we guarantee that the wrapped f32's are non-NaN and thus will never
         // compare as None.
-        unsafe { self.partial_cmp(other).unwrap_unchecked() }
+        unsafe { self.0.partial_cmp(&other.0).unwrap_unchecked() }
+    }
+}
+impl PartialOrd for FiniteF32 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 impl std::hash::Hash for FiniteF32 {

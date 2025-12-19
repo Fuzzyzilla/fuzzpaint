@@ -37,16 +37,17 @@ impl Ctx {
         let mut renderer = Render::new(render_surface.context(), render_surface.format())?;
         renderer.gen_framebuffers(render_surface)?;
 
+        let properties = render_surface.context().physical_device().properties();
+        let max_size = properties.max_image_dimension2_d;
+
         let mut state = egui_winit::State::new(
             egui::Context::default(),
             egui::ViewportId::ROOT,
             &window,
             None,
             None,
+            Some(max_size as usize),
         );
-        let properties = render_surface.context().physical_device().properties();
-        let max_size = properties.max_image_dimension2_d;
-        state.set_max_texture_side(max_size as usize);
 
         Ok(Self {
             state,
@@ -78,7 +79,7 @@ impl Ctx {
     pub fn update<T>(
         &'_ mut self,
         window: &winit::window::Window,
-        f: impl FnOnce(&'_ egui::Context) -> T,
+        mut f: impl FnMut(&'_ egui::Context) -> T,
     ) -> T {
         let input = self.state.take_egui_input(window);
 
@@ -654,24 +655,14 @@ impl Render {
         for (_, delta) in &deltas.set {
             total_delta_size += match &delta.image {
                 egui::ImageData::Color(color) => color.width() * color.height() * 4,
-                //We'll covert to 8bpp on upload
-                egui::ImageData::Font(grey) => grey.width() * grey.height(),
             };
         }
 
-        let mut data_vec = Vec::with_capacity(total_delta_size);
+        let mut data_vec = Vec::<u8>::with_capacity(total_delta_size);
         for (_, delta) in &deltas.set {
             match &delta.image {
                 egui::ImageData::Color(data) => {
                     data_vec.extend_from_slice(bytemuck::cast_slice(&data.pixels[..]));
-                }
-                egui::ImageData::Font(data) => {
-                    //Convert f32 image to u8 unorm image
-                    data_vec.extend(
-                        data.pixels
-                            .iter()
-                            .map(|&f| (f * 255.0).clamp(0.0, 255.0) as u8),
-                    );
                 }
             }
         }
@@ -707,7 +698,6 @@ impl Render {
                 hashbrown::hash_map::Entry::Vacant(v) => {
                     let format = match delta.image {
                         egui::ImageData::Color(_) => vk::Format::R8G8B8A8_UNORM,
-                        egui::ImageData::Font(_) => vk::Format::R8_UNORM,
                     };
                     let extent = {
                         let mut extent = delta.pos.unwrap_or([0, 0]);
@@ -738,22 +728,9 @@ impl Render {
                             egui::TextureFilter::Nearest => vk::Filter::Nearest,
                         };
 
-                    let mapping = if let egui::ImageData::Font(_) = delta.image {
-                        //Font is one channel, representing percent coverage of white.
-                        vk::ComponentMapping {
-                            a: vk::ComponentSwizzle::Red,
-                            r: vk::ComponentSwizzle::One,
-                            g: vk::ComponentSwizzle::One,
-                            b: vk::ComponentSwizzle::One,
-                        }
-                    } else {
-                        vk::ComponentMapping::identity()
-                    };
-
                     let view = vk::ImageView::new(
                         image.clone(),
                         vk::ImageViewCreateInfo {
-                            component_mapping: mapping,
                             ..vk::ImageViewCreateInfo::from_image(&image)
                         },
                     )?;
@@ -792,7 +769,6 @@ impl Render {
 
             let size = match &delta.image {
                 egui::ImageData::Color(color) => color.width() * color.height() * 4,
-                egui::ImageData::Font(grey) => grey.width() * grey.height(),
             };
             let start_offset = current_base_offset as u64;
             current_base_offset += size;

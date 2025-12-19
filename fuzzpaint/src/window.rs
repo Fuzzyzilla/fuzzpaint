@@ -15,11 +15,13 @@ impl Surface {
         const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
         let event_loop = winit::event_loop::EventLoopBuilder::default().build()?;
-        let win = winit::window::WindowBuilder::default()
-            .with_title(format!("Fuzzpaint v{}", VERSION.unwrap_or("[unknown]")))
-            .with_min_inner_size(winit::dpi::LogicalSize::new(500u32, 500u32))
-            .with_transparent(false)
-            .build(&event_loop)?;
+
+        let win = event_loop.create_window(
+            winit::window::WindowAttributes::new()
+                .with_title(format!("Fuzzpaint v{}", VERSION.unwrap_or("[unknown]")))
+                .with_min_inner_size(winit::dpi::LogicalSize::new(500u32, 500u32))
+                .with_transparent(false),
+        )?;
 
         let win = Arc::new(win);
 
@@ -136,7 +138,7 @@ impl Renderer {
             ));
 
             if let crate::gizmos::CursorOrInvisible::Icon(i) = cursor {
-                self.win.set_cursor_icon(i);
+                self.win.set_cursor(i);
                 self.win.set_cursor_visible(true);
             }
             if let crate::gizmos::CursorOrInvisible::Invisible = cursor {
@@ -200,7 +202,7 @@ impl Renderer {
                             // Render and present the updated UI
                             if let Err(e) = self.paint() {
                                 log::error!("{e:?}");
-                            };
+                            }
                         }
                         _ => (),
                     }
@@ -246,6 +248,7 @@ impl Renderer {
                                     } {
                                         // Safety: Looking into the code of this, there is no path where the device ID is taken and given to winit.
                                         // If that occurs, it's UB - MAKE SURE TO CHECK BEFORE UPDATING VERS ;3
+                                        // Last checked `egui-winit` version: 0.33.3
                                         let ignore = self
                                             .egui_ctx
                                             .push_winit_event(&self.win, &winit_event)

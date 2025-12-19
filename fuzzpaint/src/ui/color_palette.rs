@@ -97,10 +97,10 @@ impl egui::Widget for ColorSquare {
         let size = ui.style().spacing.interact_size.min_elem();
         let (rect, this) = ui.allocate_exact_size(
             egui::Vec2::splat(size),
-            egui::Sense {
-                click: enabled,
-                drag: false,
-                focusable: enabled,
+            if enabled {
+                egui::Sense::CLICK | egui::Sense::FOCUSABLE
+            } else {
+                egui::Sense::empty()
             },
         );
         this.widget_info(|| egui::WidgetInfo {
@@ -113,6 +113,7 @@ impl egui::Widget for ColorSquare {
             selected: None,
             value: None,
             text_selection: None,
+            hint_text: None,
         });
 
         // false if all in the normal range of colors
@@ -169,6 +170,7 @@ impl egui::Widget for ColorSquare {
                 color: stroke_color,
                 width: 1.0,
             },
+            egui::StrokeKind::Outside,
         );
         if let Some(icon) = self.icon {
             painter.text(
@@ -194,10 +196,10 @@ impl egui::Widget for IconSquare {
         let size = ui.style().spacing.interact_size.min_elem();
         let (rect, this) = ui.allocate_exact_size(
             egui::Vec2::splat(size),
-            egui::Sense {
-                click: enabled,
-                drag: false,
-                focusable: false,
+            if enabled {
+                egui::Sense::CLICK
+            } else {
+                egui::Sense::empty()
             },
         );
         this.widget_info(|| egui::WidgetInfo {
@@ -210,6 +212,7 @@ impl egui::Widget for IconSquare {
             selected: None,
             value: None,
             text_selection: None,
+            hint_text: None,
         });
 
         let painter = ui.painter();
@@ -361,14 +364,14 @@ impl<
     > ColorPalette<'_, '_, Writer>
 {
     pub fn show(self, ui: &mut egui::Ui) -> ColorPaletteResponse {
-        let mut changed = false;
         const BTN_BASE_SIZE: f32 = 12.0;
+        let mut changed = false;
         let width = ui.available_width();
 
         let mut response = egui::Frame::canvas(ui.style())
             .shadow(egui::epaint::Shadow::NONE)
             .stroke(egui::Stroke::NONE)
-            .rounding(0.0)
+            .corner_radius(0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     // Expand to width, dynamic height
@@ -444,11 +447,11 @@ impl<
                                     ui.separator();
                                     if ui.small_button("Pin").clicked() {
                                         new_pins.push(idx.into());
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                     if ui.small_button("Replace contents with active color").clicked() {
                                         replace_color = Some((idx, deref_color));
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                 });
 
@@ -469,7 +472,7 @@ impl<
                                 .clicked()
                             {
                                 *self.color = self.palette.insert(deref_color).into();
-                            };
+                            }
 
                             // Issue write, if requested.
                             if let Some((idx, color)) = replace_color {
@@ -502,7 +505,7 @@ impl<
                                     response.context_menu(|ui| {
                                         if ui.small_button("Unpin").clicked() {
                                             new_unpins.push(color);
-                                            ui.close_menu();
+                                            ui.close();
                                         }
                                     });
                                     if response.clicked() {
@@ -535,7 +538,7 @@ impl<
                                     response.context_menu(|ui| {
                                         if ui.small_button("Pin").clicked() {
                                             new_pins.push(color);
-                                            ui.close_menu();
+                                            ui.close();
                                         }
                                     });
                                     if response.clicked() {
@@ -580,7 +583,7 @@ impl<
             .on_hover_cursor(egui::CursorIcon::Crosshair);
 
         if changed {
-            response.mark_changed()
+            response.mark_changed();
         }
 
         ColorPaletteResponse {
@@ -601,8 +604,12 @@ pub struct PickerResponse {
 
 /// Show a collapsing color picker in the top left of the free area.
 pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> PickerResponse {
-    egui::containers::Area::new("color-picker")
-        .anchor(egui::Align2::LEFT_TOP, [0.0f32; 2])
+    egui::containers::Area::new(egui::Id::new("color-picker"))
+        .anchor(
+            egui::Align2::LEFT_TOP,
+            ctx.available_rect().left_top().to_vec2(),
+        )
+        .order(egui::Order::Background)
         .show(ctx, |ui| {
             /// number of edge "rays" from the center of the picker arc to the edge.
             const MAIN_RAYS: usize = 16;
@@ -628,7 +635,7 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
                 Hover,
                 SaturationValue,
                 Hue,
-            };
+            }
 
             // Remember if we were expanded last frame, make the interact area much larger.
             let click_marker = ui.id().with("click");
@@ -645,7 +652,7 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
             );
 
             let expanded_proportion = ctx.animate_bool(response.id, last_target.is_some());
-            let not_closed = expanded_proportion > 0.0;
+            let skip_mesh = expanded_proportion < 0.01 || ui.ctx().will_discard();
             let radius = egui::lerp(CONTRACTED_RADIUS..=EXPANDED_RADIUS, expanded_proportion);
             let origin_offset = egui::lerp(CONTRACTED_OFFSET..=0.0, expanded_proportion);
             let origin = rect.left_top() + [origin_offset; 2].into();
@@ -694,8 +701,13 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
             }
 
             let painter = ui.painter();
+            // Clip painter to within this Area. (It used to do this automatically ??)
+            let painter = painter.with_clip_rect(egui::Rect {
+                min: rect.min,
+                max: painter.clip_rect().max,
+            });
 
-            let mesh = not_closed.then(|| {
+            let mesh = (!skip_mesh).then(|| {
                 // Reserve exact amount of space. We do this all every frame so any bit of extra perf is nice.
                 // First step has a single shared vertex for all. Every ray then has STEPS more verts on it.
                 const MAIN_VERTICES: usize = 1 + (MAIN_RAYS + 1) * MAIN_STEPS;
@@ -861,13 +873,21 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
                     _ => unselected_stroke,
                 };
                 // Main picker
-                painter.circle_stroke(mesh_origin, mesh_radius, main_stroke);
+                painter.circle_stroke(
+                    mesh_origin,
+                    mesh_radius - main_stroke.width / 2.0,
+                    main_stroke,
+                );
                 // Inner for hue circle
-                painter.circle_stroke(mesh_origin, mesh_radius + RADIAL_MARGIN, hue_stroke);
+                painter.circle_stroke(
+                    mesh_origin,
+                    mesh_radius + RADIAL_MARGIN - hue_stroke.width / 2.0,
+                    hue_stroke,
+                );
                 // outer
                 painter.circle_stroke(
                     mesh_origin,
-                    mesh_radius + RADIAL_MARGIN + HUE_WIDTH,
+                    mesh_radius + RADIAL_MARGIN + HUE_WIDTH - hue_stroke.width / 2.0,
                     hue_stroke,
                 );
 
@@ -875,7 +895,7 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
                     mesh_origin
                         + egui::Vec2::angled(hue_angle)
                             * (mesh_radius + RADIAL_MARGIN + HUE_WIDTH / 2.0),
-                    PICKER_SIZE,
+                    PICKER_SIZE - hue_stroke.width / 2.0,
                     egui::ecolor::Hsva::new(hsva.h, 1.0, 1.0, 1.0),
                     hue_stroke,
                 );
@@ -886,7 +906,7 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
             // it's position on the wheel when expanded.
             painter.circle(
                 origin + expanded_proportion * egui::Vec2::angled(sv_angle) * sv_radius,
-                egui::lerp(CONTRACTED_RADIUS..=PICKER_SIZE, expanded_proportion),
+                egui::lerp(CONTRACTED_RADIUS..=PICKER_SIZE, expanded_proportion) - 0.5,
                 egui::ecolor::HsvaGamma { a: 1.0, ..*hsva },
                 egui::Stroke {
                     color: grayscale_contrasting(*hsva, egui::Rgba::WHITE),
@@ -931,6 +951,7 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
                             selected: None,
                             value: Some(hsva.h.into()),
                             text_selection: None,
+                            hint_text: None,
                         });
                     }
                     Some(ClickTarget::SaturationValue) => {
@@ -943,6 +964,7 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
                             selected: None,
                             value: None,
                             text_selection: None,
+                            hint_text: None,
                         });
                     }
                     _ => (),
