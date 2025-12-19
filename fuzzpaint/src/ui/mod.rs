@@ -80,7 +80,7 @@ trait ResponseExt {
         self,
         frame: &crate::actions::ActionFrame,
         action: crate::actions::Action,
-    ) -> Self;
+    ) -> bool;
     fn clicked_or_escape(self) -> bool;
 }
 impl ResponseExt for egui::Response {
@@ -88,25 +88,17 @@ impl ResponseExt for egui::Response {
         self,
         frame: &crate::actions::ActionFrame,
         action: crate::actions::Action,
-    ) -> Self {
-        if !self.enabled || !self.sense.click {
-            return self;
+    ) -> bool {
+        if !self.enabled() || !self.sense.senses_click() {
+            return false;
         }
         let triggered = frame.action_trigger_count(action) > 0;
         let held = frame.is_action_held(action);
-
-        Self {
-            clicked: [
-                self.clicked[0] || triggered,
-                self.clicked[1],
-                self.clicked[2],
-                self.clicked[3],
-                self.clicked[4],
-            ],
-            is_pointer_button_down_on: self.is_pointer_button_down_on || held,
-
-            ..if held { self.highlight() } else { self }
+        let clicked = self.clicked();
+        if held {
+            self.highlight();
         }
+        clicked || triggered
     }
     /// Returns true if [`egui::Response::clicked`] or `Escape` key is pressed, useful for cancel buttons.
     /// This does not take into account focus.
@@ -266,7 +258,7 @@ impl MainUI {
                     }
                 });
             })
-            .map_or(false, |resp| resp.response.clicked_elsewhere());
+            .is_some_and(|resp| resp.response.clicked_elsewhere());
 
         // If the user clicks away from the window assume they cancelled.
         if clicked_elsewhere {
@@ -422,7 +414,9 @@ impl MainUI {
         let interface = self.get_cur_interface().cloned();
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            ui.set_enabled(enabled);
+            if !enabled {
+                ui.disable();
+            }
             self.menu_bar(ui);
         });
 
@@ -431,7 +425,9 @@ impl MainUI {
             // Don't show the bar if it has nothing to say!
             if !self.documents.is_empty() {
                 egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
-                    ui.set_enabled(enabled);
+                    if !enabled {
+                        ui.disable();
+                    }
                     self.document_bar(ui);
                 });
             }
@@ -442,13 +438,17 @@ impl MainUI {
         } else {
             // A document is open, show the main view.
             egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
-                ui.set_enabled(enabled);
+                if !enabled {
+                    ui.disable();
+                }
                 if let Some(interface) = interface {
                     Self::nav_bar(ui, interface.id, &self.requests_send, &action_frame);
                 }
             });
             egui::SidePanel::right("layers").show(ctx, |ui| {
-                ui.set_enabled(enabled);
+                if !enabled {
+                    ui.disable();
+                }
                 ui.label("Layers");
                 ui.separator();
                 if let Some(interface) = self.get_cur_interface() {
@@ -474,7 +474,9 @@ impl MainUI {
             egui::SidePanel::left("inspector")
                 .resizable(true)
                 .show(ctx, |ui| {
-                    ui.set_enabled(enabled);
+                    if !enabled {
+                        ui.disable();
+                    }
                     // Stats at bottom
                     egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
                     // Toolbox above that
@@ -484,7 +486,9 @@ impl MainUI {
                     self.colors_panel(ui, self.cur_document, &action_frame);
                 });
             egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
-                ui.set_enabled(enabled);
+                if !enabled {
+                    ui.disable();
+                }
                 self.document_bar(ui);
             });
 
@@ -511,7 +515,7 @@ impl MainUI {
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
                 .on_hover_text("Baa");
-            egui::menu::bar(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     let add_button = |ui: &mut Ui, label, shortcut| -> egui::Response {
                         let mut button = egui::Button::new(label);
@@ -522,7 +526,7 @@ impl MainUI {
                     };
                     if add_button(ui, "New", Some("Ctrl+N")).clicked() {
                         self.new_document();
-                    };
+                    }
                     if add_button(ui, "Save", Some("Ctrl+S")).clicked() {
                         // Dirty testing implementation!
                         if let Some(current) = self.cur_document {
@@ -576,7 +580,7 @@ impl MainUI {
                 ui.menu_button("Edit", |ui| {
                     if ui.button("Settings").clicked() {
                         self.modal = Some(CurrentModal::Settings(settings::Settings::default()));
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
             });
@@ -641,15 +645,17 @@ impl MainUI {
                     let big_button =
                         |ui: &mut egui::Ui, at: egui::Rect, name: &str| -> egui::Response {
                             // Create a UI in the rect, "justify" (fill) in both axes
-                            let mut ui = ui.child_ui(
-                                at,
-                                egui::Layout::left_to_right(egui::Align::Center)
-                                    .with_main_justify(true)
-                                    .with_cross_justify(true),
-                            );
-                            let button = egui::Button::new(name);
-
-                            ui.add(button)
+                            ui.scope_builder(
+                                egui::UiBuilder::new()
+                                    .layout(
+                                        egui::Layout::left_to_right(egui::Align::Center)
+                                            .with_main_justify(true)
+                                            .with_cross_justify(true),
+                                    )
+                                    .max_rect(at),
+                                |ui| ui.button(name),
+                            )
+                            .inner
                         };
 
                     let top_center = ui.next_widget_position();
@@ -707,16 +713,16 @@ impl MainUI {
                 for PerDocumentData { id, name, .. } in &self.documents {
                     let id = *id;
                     egui::containers::Frame::group(ui.style())
-                        .outer_margin(egui::Margin::symmetric(0.0, 0.0))
-                        .inner_margin(egui::Margin::symmetric(0.0, 0.0))
+                        .outer_margin(egui::Margin::symmetric(0, 0))
+                        .inner_margin(egui::Margin::symmetric(0, 0))
                         .multiply_with_opacity(if self.cur_document == Some(id) {
                             1.0
                         } else {
                             0.5
                         })
-                        .rounding(egui::Rounding {
-                            ne: 2.0,
-                            nw: 2.0,
+                        .corner_radius(egui::CornerRadius {
+                            ne: 0,
+                            nw: 0,
                             ..0.0.into()
                         })
                         .show(ui, |ui| {
@@ -819,7 +825,7 @@ impl MainUI {
                         requests::DocumentViewRequest::RotateTo(0.0),
                     ),
                 });
-            };
+            }
             latch::latch(ui, (document, "rotation"), 0.0, |ui, rotation: &mut f32| {
                 let before = *rotation;
                 let rotation_response = ui.add(
@@ -857,10 +863,10 @@ impl MainUI {
             // RTL - add in reverse :P
             if ui.add(redo).clicked() {
                 redos += 1;
-            };
+            }
             if ui.add(undo).clicked() {
                 undos += 1;
-            };
+            }
             // Submit undo/redos as requested.
             if redos != 0 {
                 crate::global::provider().inspect(document, |document| document.redo_n(redos));
@@ -970,7 +976,7 @@ impl MainUI {
                     .text("Spacing")
                     .suffix("px")
                     .max_decimals(2)
-                    .clamp_to_range(false),
+                    .clamping(egui::SliderClamping::Always),
             );
             // Prevent negative
             spacing_px = spacing_px.max(0.1);
@@ -979,7 +985,7 @@ impl MainUI {
                     .text("Size")
                     .suffix("px")
                     .max_decimals(2)
-                    .clamp_to_range(false),
+                    .clamping(egui::SliderClamping::Always),
             );
             // Prevent negative
             size_mul = size_mul.max(0.1);
@@ -1050,12 +1056,12 @@ fn tools_panel(
                     .min_size(egui::Vec2::splat(button_size));
                 // Add button. Trigger if button clicked or action occured.
                 let response = ui.add(button).on_hover_text(tooltip);
-                let response = if let Some(action) = opt_action {
+                let clicked = if let Some(action) = opt_action {
                     response.or_action_clicked(action_frame, action)
                 } else {
-                    response
+                    response.clicked()
                 };
-                if response.clicked() {
+                if clicked {
                     let _ = requests.send(requests::UiRequest::SetBaseTool { tool });
                 }
             }
@@ -1081,7 +1087,9 @@ fn leaf_props_panel(
             let mut current_color = globals.as_mut().map(|g| &mut g.brush.color_modulate);
 
             ui.horizontal(|ui| {
-                ui.set_enabled(current_color.is_some());
+                if current_color.is_none() {
+                    ui.disable();
+                }
                 // Add a preview button that also allows the user to select this color.
                 if ui
                     .add_enabled(
@@ -1125,8 +1133,8 @@ fn leaf_props_panel(
         }
         LeafType::StrokeLayer {
             collection,
-            inner_transform,
-            outer_transform,
+            inner_transform: _,
+            outer_transform: _,
             ..
         } => {
             // Nothing interactible, but display some infos
@@ -1151,7 +1159,7 @@ fn leaf_props_panel(
                 latch::latch(ui, (leaf_id, "pix-per-em"), *px_per_em, |ui, px_per_em| {
                     let response = ui.add(
                         egui::Slider::new(px_per_em, 20.0..=2000.0)
-                            .clamp_to_range(true)
+                            .clamping(egui::SliderClamping::Always)
                             .logarithmic(true),
                     );
 
@@ -1159,7 +1167,7 @@ fn leaf_props_panel(
                     if response.has_focus() {
                         return latch::Latch::Continue;
                     }
-                    if response.drag_released() || response.lost_focus() {
+                    if response.drag_stopped() || response.lost_focus() {
                         return latch::Latch::Finish;
                     }
                     match (response.changed(), response.dragged()) {
@@ -1205,7 +1213,7 @@ fn layer_buttons(
             Note,
             Group,
         }
-        let new_layer_button = egui::ComboBox::from_id_source("layer-add")
+        let new_layer_button = egui::ComboBox::from_id_salt("layer-add")
             .selected_text(PLUS_ICON.to_string())
             // Minimize size to fit around the icon.
             .width(0.0)
@@ -1332,7 +1340,7 @@ fn layer_buttons(
                     .ok()
                     .map(Into::into),
             };
-        };
+        }
 
         let mut graph = writer.graph();
 
@@ -1350,7 +1358,7 @@ fn layer_buttons(
             // Explicitly ignore error.
             let _ = graph.delete(interface.graph_selection.unwrap());
             interface.graph_selection = None;
-        };
+        }
     });
 }
 /// Modify an inner transform, returning a new transform when a change is submitted.
@@ -1384,12 +1392,12 @@ fn inner_transform(
                 egui::Slider::new(&mut scale, 0.01..=10.0)
                     .text("Scale")
                     .suffix("x")
-                    .clamp_to_range(true)
+                    .clamping(egui::SliderClamping::Always)
                     .logarithmic(true),
             );
             // Try to derive a status from the response - this is just a heuristic, blegh.
             active |= response.has_focus() | response.dragged();
-            changed |= response.changed() | response.lost_focus() || response.drag_released();
+            changed |= response.changed() | response.lost_focus() || response.drag_stopped();
             inner.set_scale(scale);
 
             ui.horizontal(|ui| {
@@ -1410,7 +1418,7 @@ fn inner_transform(
                 ui.label("Rotate:");
                 let response = ui.drag_angle(&mut inner.rotation);
                 active |= response.has_focus() | response.dragged();
-                changed |= response.changed() | response.lost_focus() || response.drag_released();
+                changed |= response.changed() | response.lost_focus() || response.drag_stopped();
             });
 
             ui.horizontal(|ui| {
@@ -1421,14 +1429,14 @@ fn inner_transform(
                         .suffix("px"),
                 );
                 active |= response.has_focus() | response.dragged();
-                changed |= response.changed() | response.lost_focus() || response.drag_released();
+                changed |= response.changed() | response.lost_focus() || response.drag_stopped();
                 let response = ui.add(
                     egui::DragValue::new(&mut inner.translation[1])
                         .speed(1.0)
                         .suffix("px"),
                 );
                 active |= response.has_focus() | response.dragged();
-                changed |= response.changed() | response.lost_focus() || response.drag_released();
+                changed |= response.changed() | response.lost_focus() || response.drag_stopped();
             });
 
             match (changed, active) {
@@ -1472,7 +1480,7 @@ fn outer_transform(
                 egui::Slider::new(&mut scale, 0.01..=10.0)
                     .text("Scale")
                     .suffix("x")
-                    .clamp_to_range(true)
+                    .clamping(egui::SliderClamping::Always)
                     .logarithmic(true),
             );
             outer.elements[0][0] = scale;
@@ -1480,7 +1488,7 @@ fn outer_transform(
 
             // Try to derive a status from the response - this is just a heuristic, blegh.
             active |= response.has_focus() | response.dragged();
-            changed |= response.changed() | response.lost_focus() || response.drag_released();
+            changed |= response.changed() | response.lost_focus() || response.drag_stopped();
 
             ui.horizontal(|ui| {
                 // Convert skew values to angles, then back. For ease of use!
@@ -1490,31 +1498,31 @@ fn outer_transform(
                 let mut skew_angle = (outer.elements[1][0] / original_scale).atan();
                 if !skew_angle.is_finite() {
                     skew_angle = 0.0;
-                };
+                }
 
                 let response = ui.drag_angle(&mut skew_angle);
 
                 active |= response.has_focus() | response.dragged();
-                changed |= response.changed() | response.lost_focus() || response.drag_released();
+                changed |= response.changed() | response.lost_focus() || response.drag_stopped();
                 outer.elements[1][0] = skew_angle.tan() * scale;
                 if !outer.elements[1][0].is_finite() {
                     outer.elements[1][0] = 0.0;
-                };
+                }
 
                 // Do it again for the other axis.
                 let mut skew_angle = (outer.elements[0][1] / original_scale).atan();
                 if !skew_angle.is_finite() {
                     skew_angle = 0.0;
-                };
+                }
 
                 let response = ui.drag_angle(&mut skew_angle);
 
                 active |= response.has_focus() | response.dragged();
-                changed |= response.changed() | response.lost_focus() || response.drag_released();
+                changed |= response.changed() | response.lost_focus() || response.drag_stopped();
                 outer.elements[0][1] = skew_angle.tan() * scale;
                 if !outer.elements[0][1].is_finite() {
                     outer.elements[0][1] = 0.0;
-                };
+                }
             });
 
             match (changed, active) {
@@ -1792,7 +1800,9 @@ fn ui_layer_blend(
         let mut finished = false;
         let mut changed = false;
         ui.horizontal(|ui| {
-            ui.set_enabled(!disable);
+            if disable {
+                ui.disable();
+            }
             finished |= ui
                 .toggle_value(
                     &mut blend.alpha_clip,
@@ -1806,12 +1816,12 @@ fn ui_layer_blend(
                 egui::DragValue::new(&mut blend.opacity)
                     .fixed_decimals(2)
                     .speed(0.01)
-                    .clamp_range(0.0..=1.0),
+                    .range(0.0..=1.0),
             );
             changed |= response.dragged();
             // Bug: This reports a release on every frame when dragged and an egui
             // modal (eg, the combobox below) is open. wh y
-            finished |= response.drag_released();
+            finished |= response.drag_stopped();
 
             egui::ComboBox::new(&id, "")
                 .selected_text(blend.mode.as_ref())
@@ -1842,7 +1852,9 @@ fn ui_passthrough_or_blend(
         let mut finished = false;
         let mut changed = false;
         ui.horizontal(|ui| {
-            ui.set_enabled(!disable);
+            if disable {
+                ui.disable();
+            }
             if let Some(blend) = blend.as_mut() {
                 changed |= ui
                     .toggle_value(
@@ -1857,13 +1869,13 @@ fn ui_passthrough_or_blend(
                     egui::DragValue::new(&mut blend.opacity)
                         .fixed_decimals(2)
                         .speed(0.01)
-                        .clamp_range(0.0..=1.0),
+                        .range(0.0..=1.0),
                 );
                 changed |= response.dragged();
                 // Bug: This reports a release on every frame when dragged and an egui
                 // modal (eg, the combobox below) is open. wh y
-                finished |= response.drag_released();
-            };
+                finished |= response.drag_stopped();
+            }
 
             egui::ComboBox::new(&id, "")
                 .selected_text(
@@ -1955,14 +1967,16 @@ fn graph_edit_recurse<
         if head_separator.show(ui).selected {
             // Unwrap OK - isn't available for selection if None.
             dnd_state.as_mut().unwrap().drop_target = Some(dnd_target);
-        };
+        }
 
         // Name and selection
         let header_response = ui.horizontal(|ui| {
             let data = graph.get(id).unwrap();
 
             // Disable everything if dragging a layer around.
-            ui.set_enabled(dnd_state.is_none());
+            if dnd_state.is_none() {
+                ui.disable();
+            }
 
             // Drag-n-drop handle
             let dragged = ui
@@ -2061,7 +2075,7 @@ fn graph_edit_recurse<
 
                 // display children!
                 egui::CollapsingHeader::new(egui::RichText::new("Children").italics().weak())
-                    .id_source(id)
+                    .id_salt(id)
                     .default_open(true)
                     .show(ui, |ui| {
                         graph_edit_recurse(
@@ -2092,7 +2106,7 @@ fn graph_edit_recurse<
             if first_child_separator.show(ui).selected {
                 // Unwrap OK - isn't available for selection if None.
                 dnd_state.as_mut().unwrap().drop_target = Some(target);
-            };
+            }
         }
 
         ui.label(
@@ -2110,6 +2124,6 @@ fn graph_edit_recurse<
         if tail_separator.show(ui).selected {
             // Unwrap OK - isn't available for selection if None.
             dnd_state.as_mut().unwrap().drop_target = Some(target);
-        };
+        }
     }
 }

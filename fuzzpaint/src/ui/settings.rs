@@ -221,11 +221,11 @@ enum Pane {
     Hotkeys,
 }
 
-fn egui_key_to_winit_key(key: egui::Key) -> winit::keyboard::KeyCode {
+fn egui_key_to_winit_key(key: egui::Key) -> Option<winit::keyboard::KeyCode> {
     use egui::Key as EKey;
     use winit::keyboard::KeyCode as WKey;
     // Adapted from egui_winit, nightmare match statement!
-    match key {
+    Some(match key {
         EKey::Tab => WKey::Tab,
         EKey::ArrowDown => WKey::ArrowDown,
         EKey::ArrowLeft => WKey::ArrowLeft,
@@ -313,7 +313,29 @@ fn egui_key_to_winit_key(key: egui::Key) -> winit::keyboard::KeyCode {
         EKey::F18 => WKey::F18,
         EKey::F19 => WKey::F19,
         EKey::F20 => WKey::F20,
-    }
+        EKey::F21 => WKey::F21,
+        EKey::F22 => WKey::F22,
+        EKey::F23 => WKey::F23,
+        EKey::F24 => WKey::F24,
+        EKey::F25 => WKey::F25,
+        EKey::F26 => WKey::F26,
+        EKey::F27 => WKey::F27,
+        EKey::F28 => WKey::F28,
+        EKey::F29 => WKey::F29,
+        EKey::F30 => WKey::F30,
+        EKey::F31 => WKey::F31,
+        EKey::F32 => WKey::F32,
+        EKey::F33 => WKey::F33,
+        EKey::F34 => WKey::F34,
+        EKey::F35 => WKey::F35,
+
+        EKey::BrowserBack => WKey::BrowserBack,
+        EKey::Quote => WKey::Quote,
+
+        EKey::CloseCurlyBracket => return None,
+        EKey::Exclamationmark => return None,
+        EKey::OpenCurlyBracket => return None,
+    })
 }
 
 enum ClickedHotkeyResponse {
@@ -342,7 +364,9 @@ fn clicked_hotkey(ui: &mut egui::Ui) -> ClickedHotkeyResponse {
             }
         }) {
             // Return it as a hotkey!
-            let key = egui_key_to_winit_key(key);
+            let Some(key) = egui_key_to_winit_key(key) else {
+                return ClickedHotkeyResponse::Cancel;
+            };
             ClickedHotkeyResponse::Finished(crate::actions::hotkeys::KeyboardHotkey {
                 alt: modifiers.alt,
                 ctrl: modifiers.ctrl,

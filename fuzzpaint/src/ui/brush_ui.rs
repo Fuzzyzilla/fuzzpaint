@@ -58,7 +58,7 @@ impl super::Modal for CreationModal {
                 ui.add(
                     egui::Slider::new(&mut self.spacing_proportion, 2.0..=100.0)
                         .text("Spacing")
-                        .clamp_to_range(true)
+                        .clamping(egui::SliderClamping::Edits)
                         .suffix("%"),
                 );
             }
@@ -68,7 +68,7 @@ impl super::Modal for CreationModal {
                         let try_load = || -> anyhow::Result<egui::TextureHandle> {
                             // `image` crate is probably not the choice here. It sweeps a lot of details under the rug and doesn't
                             // exactly do those details justice lol (colorspaces are wayy off)
-                            let image = image::open(file)?.to_luma32f();
+                            let image = image::open(file)?.to_rgba8();
                             let manager = ui.ctx().tex_manager();
                             let mut write = manager.write();
 
@@ -77,14 +77,29 @@ impl super::Modal for CreationModal {
                             // Create a reference-counted image out of it, refs = 1
                             let texture_id = write.alloc(
                                 "Preview brush texture".to_owned(),
-                                egui::ImageData::Font(egui::FontImage {
-                                    pixels: image.to_vec(),
-                                    size,
-                                }),
+                                egui::ImageData::Color(
+                                    egui::ColorImage {
+                                        pixels: image
+                                            .pixels()
+                                            .map(|rgba| {
+                                                egui::Color32::from_rgba_unmultiplied(
+                                                    rgba.0[0], rgba.0[1], rgba.0[2], rgba.0[3],
+                                                )
+                                            })
+                                            .collect(),
+                                        size,
+                                        source_size: egui::Vec2 {
+                                            x: size[0] as f32,
+                                            y: size[1] as f32,
+                                        },
+                                    }
+                                    .into(),
+                                ),
                                 egui::TextureOptions {
                                     magnification: egui::TextureFilter::Nearest,
                                     minification: egui::TextureFilter::Linear,
                                     wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                                    mipmap_mode: None,
                                 },
                             );
 
@@ -119,14 +134,7 @@ impl super::Modal for CreationModal {
             let height = width / 3.0;
             let size = egui::vec2(width, height);
 
-            let (response, painter) = ui.allocate_painter(
-                size,
-                egui::Sense {
-                    click: false,
-                    drag: false,
-                    focusable: false,
-                },
-            );
+            let (response, painter) = ui.allocate_painter(size, egui::Sense::empty());
 
             let mesh = tessellate(
                 texture.id(),
@@ -179,9 +187,9 @@ struct ImageManager {
 /// When a change is made that effects the image, it will be destroyed and rebuilt and the new handle will be
 /// left in it's place. Returns `true` if the handle changed in this way.
 fn image_mode(
-    ui: &mut egui::Ui,
-    image: &image::DynamicImage,
-    handle: &mut egui::TextureHandle,
+    _ui: &mut egui::Ui,
+    _image: &image::DynamicImage,
+    _handle: &mut egui::TextureHandle,
 ) -> bool {
     false
 }
@@ -194,14 +202,8 @@ fn uv_picker(
     max_uv: egui::Rect,
     texture: egui::TextureId,
 ) -> egui::Response {
-    let (mut response, painter) = ui.allocate_painter(
-        size,
-        egui::Sense {
-            click: false,
-            drag: true,
-            focusable: true,
-        },
-    );
+    let (mut response, painter) =
+        ui.allocate_painter(size, egui::Sense::DRAG | egui::Sense::FOCUSABLE);
     let rect = response.rect;
     if response.drag_started() {
         uv.min = egui::Pos2::ZERO
@@ -219,7 +221,7 @@ fn uv_picker(
     let mut mesh = egui::Mesh::with_texture(texture);
     mesh.add_rect_with_uv(rect, FULL_UV, egui::Color32::WHITE);
 
-    painter.add(egui::Shape::Mesh(mesh));
+    painter.add(egui::Shape::Mesh(mesh.into()));
 
     // Where the current UV area is in UI space.
     let mut visual_uv_rect = egui::Rect::from_min_max(
@@ -233,9 +235,14 @@ fn uv_picker(
         ),
     );
 
+    use egui::emath::GuiRounding;
     // Round to px so that tiny gaps don't show up (very obvious lol)
-    visual_uv_rect.min = painter.round_pos_to_pixels(visual_uv_rect.min);
-    visual_uv_rect.max = painter.round_pos_to_pixels(visual_uv_rect.max);
+    visual_uv_rect.min = visual_uv_rect
+        .min
+        .round_to_pixels(painter.pixels_per_point());
+    visual_uv_rect.max = visual_uv_rect
+        .max
+        .round_to_pixels(painter.pixels_per_point());
 
     // Inverted UV rect is fine, but avoid visual artifacting with the below logic!
     if visual_uv_rect.min.x > visual_uv_rect.max.x {
@@ -253,6 +260,7 @@ fn uv_picker(
             color: egui::Color32::BLACK,
             width: 1.0,
         },
+        egui::StrokeKind::Outside,
     );
     // Darken the region outside the selection.
     let ghost_color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 200);
@@ -294,7 +302,7 @@ fn change_tessellated_uv(mesh: &mut egui::Mesh, uv: egui::Rect) {
     });
 }
 /// Remap a mesh from the given size to a new size in-place.
-fn resize(mesh: &mut egui::Mesh, from: egui::Rect, to: egui::Rect) {}
+fn resize(_mesh: &mut egui::Mesh, _from: egui::Rect, _to: egui::Rect) {}
 
 /// Should be in same layout as specified in `archetype`!
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
@@ -337,7 +345,7 @@ fn make_demo_stroke(width: f32, height: f32) -> Vec<DemoStrokePoint> {
 
     for i in 0..=NUM_SAMPLES {
         // [-1, 1]
-        let t = (f32::from(2 * i) / f32::from(NUM_SAMPLES) - 1.0);
+        let t = f32::from(2 * i) / f32::from(NUM_SAMPLES) - 1.0;
 
         // Go from 0 - 1 over time.
         let pressure = (t / 2.0 + 0.5).sqrt();
@@ -507,14 +515,17 @@ pub fn test(ui: &mut egui::Ui) {
             width: 2.0,
         },
     ));*/
-    painter.add(egui::Shape::Mesh(tessellate(
-        egui::TextureId::default(),
-        egui::Rect::from_min_size(egui::epaint::WHITE_UV, egui::Vec2::ZERO),
-        egui::Color32::BLACK.linear_multiply(0.2),
-        rect,
-        2.0,
-        10.0,
-    )));
+    painter.add(egui::Shape::Mesh(
+        tessellate(
+            egui::TextureId::default(),
+            egui::Rect::from_min_size(egui::epaint::WHITE_UV, egui::Vec2::ZERO),
+            egui::Color32::BLACK.linear_multiply(0.2),
+            rect,
+            2.0,
+            10.0,
+        )
+        .into(),
+    ));
     painter.rect_stroke(
         rect,
         5.0,
@@ -522,6 +533,7 @@ pub fn test(ui: &mut egui::Ui) {
             color: egui::Color32::BLACK,
             width: 2.0,
         },
+        egui::StrokeKind::Outside,
     );
 }
 

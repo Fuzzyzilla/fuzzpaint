@@ -62,11 +62,7 @@ impl DropSeparator {
             if self.active {
                 egui::Sense::hover()
             } else {
-                egui::Sense {
-                    click: false,
-                    drag: false,
-                    focusable: false,
-                }
+                egui::Sense::empty()
             },
         );
 

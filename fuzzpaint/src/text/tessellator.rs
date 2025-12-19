@@ -178,12 +178,13 @@ pub enum ColorError {
     #[error("internal error")]
     StagerError,
 }
+/*
 struct ColorPainter<'infos> {
     staged: Option<ttf_parser::GlyphId>,
     infos_into: &'infos mut Vec<(ttf_parser::GlyphId, super::GlyphColorMode)>,
     borked: bool,
 }
-impl ttf_parser::colr::Painter for ColorPainter<'_> {
+impl ttf_parser::colr::Painter<'_> for ColorPainter<'_> {
     fn outline(&mut self, glyph_id: ttf_parser::GlyphId) {
         // Render this glyph, and stage it in anticipation of a color command.
 
@@ -243,4 +244,4 @@ pub fn colrv0_layers(
         } else {
             Ok(())
         })
-}
+}*/

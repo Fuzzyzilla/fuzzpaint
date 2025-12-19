@@ -1,73 +1,117 @@
+use crate::document_viewport_proxy::PreviewRenderProxy;
 use crate::egui_impl;
 use crate::render_device;
 use crate::vulkano_prelude::*;
 
-use std::sync::Arc;
+type UserEvent = std::convert::Infallible;
+
+use std::sync::{Arc, Weak};
 
 use anyhow::Result as AnyResult;
 
-pub struct Surface {
-    event_loop: winit::event_loop::EventLoop<()>,
-    win: Arc<winit::window::Window>,
-}
-impl Surface {
-    pub fn new() -> AnyResult<Self> {
-        const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
-
-        let event_loop = winit::event_loop::EventLoopBuilder::default().build()?;
-        let win = winit::window::WindowBuilder::default()
-            .with_title(format!("Fuzzpaint v{}", VERSION.unwrap_or("[unknown]")))
-            .with_min_inner_size(winit::dpi::LogicalSize::new(500u32, 500u32))
-            .with_transparent(false)
-            .build(&event_loop)?;
-
-        let win = Arc::new(win);
-
-        Ok(Self { event_loop, win })
-    }
-    pub fn window(&self) -> Arc<winit::window::Window> {
-        self.win.clone()
-    }
-    pub fn event_loop(&self) -> &winit::event_loop::EventLoop<()> {
-        &self.event_loop
-    }
-    pub fn with_render_surface(
-        self,
-        render_surface: render_device::RenderSurface,
-        render_context: Arc<render_device::RenderContext>,
-        preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
-    ) -> anyhow::Result<Renderer> {
-        let egui_ctx = egui_impl::Ctx::new(self.win.as_ref(), &render_surface)?;
-
-        let tablet_manager = octotablet::Builder::new()
-            .emulate_tool_from_mouse(false)
-            .build_shared(&self.win)
-            .ok();
-
-        let (send, stream) = crate::actions::create_action_stream();
-
-        Ok(Renderer {
-            win: self.win,
-            render_surface: Some(render_surface),
-            swapchain_generation: 0,
-            render_context,
-            event_loop: Some(self.event_loop),
-            last_frame_fence: None,
-            egui_ctx,
-            tablet_manager,
-            ui: crate::ui::MainUI::new(stream.listen()),
-            enable_document_view: true,
-            preview_renderer,
-            action_collector:
-                crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
-            action_stream: stream,
-            stylus_events: crate::stylus_events::WinitStylusEventCollector::default(),
-        })
-    }
+enum State<T> {
+    Deferred,
+    Extant(T),
+    Killed,
 }
 
-pub struct Renderer {
-    event_loop: Option<winit::event_loop::EventLoop<()>>,
+pub struct Application {
+    // Objects that depend on a window, including the window itself.
+    window_objects: State<WindowObjects>,
+    // Channel that will be notified when the renderer is made, once the window
+    // is ready.
+    renderer_sender: Option<oneshot::Sender<Receivers>>,
+    renderer_reciever: Option<oneshot::Receiver<Receivers>>,
+}
+impl Application {
+    pub fn new() -> Self {
+        let (send, recv) = oneshot::channel();
+        Self {
+            window_objects: State::Deferred,
+            renderer_sender: Some(send),
+            renderer_reciever: Some(recv),
+        }
+    }
+    /// Take a channel that will recieve the rendering context, once it is created.
+    pub fn take_renderer_reciever(&mut self) -> Option<oneshot::Receiver<Receivers>> {
+        self.renderer_reciever.take()
+    }
+    pub fn run(mut self) -> AnyResult<()> {
+        let event_loop = winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
+        event_loop.run_app(&mut self).map_err(Into::into)
+    }
+}
+impl winit::application::ApplicationHandler<UserEvent> for Application {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if matches!(self.window_objects, State::Deferred) {
+            // Always emitted first, even on platforms without a suspend-resume
+            // cycle. Only recreate if it's the first time (i.e. dont attempt to
+            // recreate after a suspend.)
+            match WindowObjects::new(event_loop) {
+                Ok(window_objects) => {
+                    if let Some(send) = self.renderer_sender.take() {
+                        let _ = send.send(window_objects.receivers());
+                    }
+                    self.window_objects = State::Extant(window_objects);
+                }
+                Err(e) => {
+                    log::error!("FATAL: Failed to create window: {e}");
+                    self.window_objects = State::Killed;
+                    event_loop.exit();
+                }
+            }
+        }
+    }
+    fn suspended(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        // We can't currently handle the suspend-resume lifecycle, just die :(
+        // Drop the window objects immediately if any, and request an exit.
+        self.window_objects = State::Killed;
+        event_loop.exit();
+    }
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    ) {
+        let State::Extant(window_objects) = &mut self.window_objects else {
+            return;
+        };
+        window_objects.window_event(event_loop, event);
+    }
+    fn device_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        let State::Extant(window_objects) = &mut self.window_objects else {
+            return;
+        };
+        window_objects.device_event(event_loop, device_id, event);
+    }
+    fn user_event(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop, event: UserEvent) {
+        match event {}
+    }
+    fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        let State::Extant(window_objects) = &mut self.window_objects else {
+            return;
+        };
+        window_objects.about_to_wait(event_loop);
+    }
+    fn exiting(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        // Drop the window objects if any.
+        self.window_objects = State::Killed;
+    }
+}
+pub struct Receivers {
+    pub actions: crate::actions::ActionListener,
+    pub ui_actions: crossbeam::channel::Receiver<crate::ui::requests::UiRequest>,
+    pub stylus_events: tokio::sync::broadcast::Receiver<crate::stylus_events::StylusEventFrame>,
+    pub render_context: Arc<render_device::RenderContext>,
+    pub document_view: Arc<crate::document_viewport_proxy::Proxy>,
+}
+pub struct WindowObjects {
     win: Arc<winit::window::Window>,
     /// Always Some. This is to allow it to be take-able to be remade.
     /// Could None represent a temporary loss of surface that can be recovered from?
@@ -87,22 +131,65 @@ pub struct Renderer {
 
     last_frame_fence: Option<vk::sync::future::FenceSignalFuture<Box<dyn GpuFuture>>>,
 
-    preview_renderer: Arc<dyn crate::document_viewport_proxy::PreviewRenderProxy>,
+    preview_renderer: Arc<crate::document_viewport_proxy::Proxy>,
 }
-impl Renderer {
+impl WindowObjects {
+    fn new(event_loop: &winit::event_loop::ActiveEventLoop) -> AnyResult<Self> {
+        const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
+        let win = event_loop.create_window(
+            winit::window::Window::default_attributes()
+                .with_title(format!("Fuzzpaint v{}", VERSION.unwrap_or("[unknown]")))
+                .with_min_inner_size(winit::dpi::LogicalSize::new(500u32, 500u32))
+                .with_transparent(false),
+        )?;
+        let win = Arc::new(win);
+
+        let (render_context, render_surface) =
+            render_device::RenderContext::new_with_window_surface(
+                win.clone(),
+                win.inner_size().into(),
+            )?;
+        let preview_renderer =
+            Arc::new(crate::document_viewport_proxy::Proxy::new(&render_surface)?);
+
+        let tablet_manager = octotablet::Builder::new()
+            .emulate_tool_from_mouse(false)
+            .build_shared(&win)
+            .ok();
+
+        let (send, stream) = crate::actions::create_action_stream();
+
+        let egui_ctx = egui_impl::Ctx::new(win.as_ref(), &render_surface)?;
+        win.request_redraw();
+
+        Ok(Self {
+            win,
+            render_surface: Some(render_surface),
+            swapchain_generation: 0,
+            render_context,
+            last_frame_fence: None,
+            egui_ctx,
+            tablet_manager,
+            ui: crate::ui::MainUI::new(stream.listen()),
+            enable_document_view: true,
+            preview_renderer,
+            action_collector:
+                crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
+            action_stream: stream,
+            stylus_events: crate::stylus_events::WinitStylusEventCollector::default(),
+        })
+    }
     pub fn window(&self) -> Arc<winit::window::Window> {
         self.win.clone()
     }
-    pub fn action_listener(&self) -> crate::actions::ActionListener {
-        self.action_stream.listen()
-    }
-    pub fn ui_listener(&self) -> crossbeam::channel::Receiver<crate::ui::requests::UiRequest> {
-        self.ui.listen_requests()
-    }
-    pub fn stylus_events(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<crate::stylus_events::StylusEventFrame> {
-        self.stylus_events.frame_receiver()
+    fn receivers(&self) -> Receivers {
+        Receivers {
+            actions: self.action_stream.listen(),
+            ui_actions: self.ui.listen_requests(),
+            stylus_events: self.stylus_events.frame_receiver(),
+            render_context: self.render_context.clone(),
+            document_view: self.preview_renderer.clone(),
+        }
     }
     pub fn render_surface(&self) -> &render_device::RenderSurface {
         //this will ALWAYS be Some. The option is for taking from a mutable reference for recreation.
@@ -136,7 +223,7 @@ impl Renderer {
             ));
 
             if let crate::gizmos::CursorOrInvisible::Icon(i) = cursor {
-                self.win.set_cursor_icon(i);
+                self.win.set_cursor(i);
                 self.win.set_cursor_visible(true);
             }
             if let crate::gizmos::CursorOrInvisible::Invisible = cursor {
@@ -144,170 +231,167 @@ impl Renderer {
             }
         }
     }
-    pub fn run(mut self) -> Result<(), winit::error::EventLoopError> {
-        //There WILL be an event loop if we got here
-        let event_loop = self.event_loop.take().unwrap();
-        self.window().request_redraw();
+    pub fn window_event(
+        &mut self,
+        _vent_loop: &winit::event_loop::ActiveEventLoop,
+        event: winit::event::WindowEvent,
+    ) {
+        use winit::event::WindowEvent;
+        let consumed = self
+            .egui_ctx
+            .push_winit_event(&self.window(), &event)
+            .consumed;
+        if !consumed {
+            self.action_collector.push_event(&event);
+        }
+        match event {
+            WindowEvent::CloseRequested => {
+                // Mark the UI, allowing it to veto this close.
+                self.ui.close_requested();
+            }
+            WindowEvent::Resized(..) => {
+                self.recreate_surface().expect("Failed to rebuild surface");
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.stylus_events.set_mouse_pressed(false);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                // Only take if egui doesn't want it!
+                if !consumed {
+                    self.stylus_events.push_position(position.into());
+                }
+            }
+            WindowEvent::MouseInput { state, .. } => {
+                let pressed = winit::event::ElementState::Pressed == state;
 
-        event_loop.run(move |event, target| {
-            use winit::event::{Event, WindowEvent};
-            match event {
-                Event::WindowEvent { event, window_id } if window_id == self.window().id() => {
-                    let consumed = self
-                        .egui_ctx
-                        .push_winit_event(&self.window(), &event)
-                        .consumed;
+                if pressed {
+                    // Only take if egui doesn't want it!
                     if !consumed {
-                        self.action_collector.push_event(&event);
+                        self.stylus_events.set_mouse_pressed(true);
                     }
+                } else {
+                    self.stylus_events.set_mouse_pressed(false);
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                // run UI logics
+                if self.egui_ctx.take_wants_update() {
+                    self.do_ui();
+                }
+                // Overwrite the Egui provided cursor over the doc area.
+                self.apply_document_cursor();
+
+                // Render and present the updated UI
+                if let Err(e) = self.paint() {
+                    log::error!("{e:?}");
+                }
+            }
+            _ => (),
+        }
+    }
+    pub fn device_event(
+        &mut self,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        use winit::event::DeviceEvent;
+        if let DeviceEvent::Motion { axis: 2, value } = event {
+            //Pressure out of 65535
+            self.stylus_events.set_pressure(value as f32 / 65535.0);
+            // Other axes (undocumented and X11 only)
+            // 0 -> x in display space
+            // 1 -> y in display space
+            // 2 -> pressure out of 65535, 0 if not pressed
+            // 3 -> Tilt X, degrees from vertical, + to the right
+            // 4 -> Tilt Y, degrees from vertical, + towards user
+            // 5 -> unknown, always zero (barrel rotation?)
+        }
+    }
+    pub fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        // The UI has requested the app exit. Do so!
+        if self.ui.should_close() {
+            event_loop.exit();
+            // No need to redraw.
+            return;
+        }
+
+        let has_tablet_update = if let Some(tab_events) =
+            self.tablet_manager.as_mut().and_then(|m| m.pump().ok())
+        {
+            let mut has_tablet_update = false;
+            for event in tab_events {
+                if let octotablet::events::Event::Tool { event, tool } = event {
+                    // If the event isn't emulated from some other device, send the event to winit_egui
+                    // so that the stylus can be used to interact with the egui layers.
+                    if !matches!(tool.tool_type, Some(octotablet::tool::Type::Emulated)) {
+                        // Safety: we must not pass the returned event deviceID into any winit functions.
+                        if let Some(winit_event) = unsafe {
+                            crate::stylus_events::winit_event_from_octotablet(
+                                &event,
+                                self.win.scale_factor(),
+                            )
+                        } {
+                            // Safety: Looking into the code of this, there is no path where the device ID is taken and given to winit.
+                            // If that occurs, it's UB - MAKE SURE TO CHECK BEFORE UPDATING VERS ;3
+                            // Last checked `egui-winit` version: 0.33.3
+                            let ignore = self
+                                .egui_ctx
+                                .push_winit_event(&self.win, &winit_event)
+                                .consumed;
+
+                            // Egui ate the event, skip further processing.
+                            if ignore {
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Wasn't consumed, forward it to the event stream for the tools to use.
                     match event {
-                        WindowEvent::CloseRequested => {
-                            // Mark the UI, allowing it to veto this close.
-                            self.ui.close_requested();
+                        octotablet::events::ToolEvent::Pose(p) => {
+                            if let Some(p) = p.pressure.get() {
+                                self.stylus_events.set_pressure(p);
+                            }
+                            self.stylus_events
+                                .push_position((p.position[0], p.position[1]));
+
+                            has_tablet_update = true;
                         }
-                        WindowEvent::Resized(..) => {
-                            self.recreate_surface().expect("Failed to rebuild surface");
-                        }
-                        WindowEvent::CursorLeft { .. } => {
+                        octotablet::events::ToolEvent::Up | octotablet::events::ToolEvent::Out => {
                             self.stylus_events.set_mouse_pressed(false);
+                            has_tablet_update = true;
                         }
-                        WindowEvent::CursorMoved { position, .. } => {
-                            // Only take if egui doesn't want it!
-                            if !consumed {
-                                self.stylus_events.push_position(position.into());
-                            }
-                        }
-                        WindowEvent::MouseInput { state, .. } => {
-                            let pressed = winit::event::ElementState::Pressed == state;
-
-                            if pressed {
-                                // Only take if egui doesn't want it!
-                                if !consumed {
-                                    self.stylus_events.set_mouse_pressed(true);
-                                }
-                            } else {
-                                self.stylus_events.set_mouse_pressed(false);
-                            }
-                        }
-                        WindowEvent::RedrawRequested => {
-                            // run UI logics
-                            if self.egui_ctx.take_wants_update() {
-                                self.do_ui();
-                            }
-                            // Overwrite the Egui provided cursor over the doc area.
-                            self.apply_document_cursor();
-
-                            // Render and present the updated UI
-                            if let Err(e) = self.paint() {
-                                log::error!("{e:?}");
-                            };
+                        octotablet::events::ToolEvent::Down => {
+                            self.stylus_events.set_mouse_pressed(true);
+                            has_tablet_update = true;
                         }
                         _ => (),
                     }
                 }
-                Event::DeviceEvent {
-                    event: winit::event::DeviceEvent::Motion { axis: 2, value },
-                    ..
-                } => {
-                    //Pressure out of 65535
-                    self.stylus_events.set_pressure(value as f32 / 65535.0);
-                    // Other axes (undocumented and X11 only)
-                    // 0 -> x in display space
-                    // 1 -> y in display space
-                    // 2 -> pressure out of 65535, 0 if not pressed
-                    // 3 -> Tilt X, degrees from vertical, + to the right
-                    // 4 -> Tilt Y, degrees from vertical, + towards user
-                    // 5 -> unknown, always zero (barrel rotation?)
-                }
-                Event::AboutToWait => {
-                    // The UI has requested the app exit. Do so!
-                    if self.ui.should_close() {
-                        target.exit();
-                        // No need to redraw.
-                        return;
-                    }
-
-                    let has_tablet_update = if let Some(tab_events) =
-                        self.tablet_manager.as_mut().and_then(|m| m.pump().ok())
-                    {
-                        let mut has_tablet_update = false;
-                        for event in tab_events {
-                            if let octotablet::events::Event::Tool { event, tool } = event {
-                                // If the event isn't emulated from some other device, send the event to winit_egui
-                                // so that the stylus can be used to interact with the egui layers.
-                                if !matches!(tool.tool_type, Some(octotablet::tool::Type::Emulated))
-                                {
-                                    // Safety: we must not pass the returned event deviceID into any winit functions.
-                                    if let Some(winit_event) = unsafe {
-                                        crate::stylus_events::winit_event_from_octotablet(
-                                            &event,
-                                            self.win.scale_factor(),
-                                        )
-                                    } {
-                                        // Safety: Looking into the code of this, there is no path where the device ID is taken and given to winit.
-                                        // If that occurs, it's UB - MAKE SURE TO CHECK BEFORE UPDATING VERS ;3
-                                        let ignore = self
-                                            .egui_ctx
-                                            .push_winit_event(&self.win, &winit_event)
-                                            .consumed;
-
-                                        // Egui ate the event, skip further processing.
-                                        if ignore {
-                                            continue;
-                                        };
-                                    }
-                                }
-
-                                // Wasn't consumed, forward it to the event stream for the tools to use.
-                                match event {
-                                    octotablet::events::ToolEvent::Pose(p) => {
-                                        if let Some(p) = p.pressure.get() {
-                                            self.stylus_events.set_pressure(p);
-                                        }
-                                        self.stylus_events
-                                            .push_position((p.position[0], p.position[1]));
-
-                                        has_tablet_update = true;
-                                    }
-                                    octotablet::events::ToolEvent::Up
-                                    | octotablet::events::ToolEvent::Out => {
-                                        self.stylus_events.set_mouse_pressed(false);
-                                        has_tablet_update = true;
-                                    }
-                                    octotablet::events::ToolEvent::Down => {
-                                        self.stylus_events.set_mouse_pressed(true);
-                                        has_tablet_update = true;
-                                    }
-                                    _ => (),
-                                };
-                            }
-                        }
-                        has_tablet_update
-                    } else {
-                        false
-                    };
-
-                    // Request draw if any interactive element wants it (UI, document, or tablet)
-                    if has_tablet_update
-                        || self.egui_ctx.peek_wants_update()
-                        || self.preview_renderer.has_update()
-                    {
-                        // winit automagically coalesces these if we call it too often, that's okay ;3
-                        self.window().request_redraw();
-                    }
-
-                    // End stylus frame
-                    self.stylus_events.finish();
-
-                    // Wait. We'll be notified when to redraw UI, but the document preview or octotablet could assert
-                    // an update at any time! Thus, we must poll. U_U
-                    target.set_control_flow(winit::event_loop::ControlFlow::wait_duration(
-                        std::time::Duration::from_millis(50),
-                    ));
-                }
-                _ => (),
             }
-        })
+            has_tablet_update
+        } else {
+            false
+        };
+
+        // Request draw if any interactive element wants it (UI, document, or tablet)
+        if has_tablet_update
+            || self.egui_ctx.peek_wants_update()
+            || self.preview_renderer.has_update()
+        {
+            // winit automagically coalesces these if we call it too often, that's okay ;3
+            self.window().request_redraw();
+        }
+
+        // End stylus frame
+        self.stylus_events.finish();
+
+        // Wait. We'll be notified when to redraw UI, but the document preview or octotablet could assert
+        // an update at any time! Thus, we must poll. U_U
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::wait_duration(
+            std::time::Duration::from_millis(50),
+        ));
     }
     fn do_ui(&mut self) {
         let viewport = self
@@ -317,8 +401,16 @@ impl Renderer {
         // Todo: only change if... actually changed :P
         if let Some(viewport) = viewport {
             self.enable_document_view = true;
-            self.preview_renderer
-                .viewport_changed(viewport.0, viewport.1);
+            self.preview_renderer.viewport_changed(
+                cgmath::Point2 {
+                    x: viewport.0.x,
+                    y: viewport.0.y,
+                },
+                cgmath::Vector2 {
+                    x: viewport.1.x,
+                    y: viewport.1.y,
+                },
+            );
         } else {
             self.enable_document_view = false;
         }

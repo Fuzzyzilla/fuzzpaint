@@ -270,14 +270,21 @@ impl RenderContext {
     pub fn new_headless() -> AnyResult<Self> {
         unimplemented!()
     }
-    pub fn new_with_window_surface(
-        win: &crate::window::Surface,
+    pub fn new_with_window_surface<
+        Window: winit::raw_window_handle_05::HasRawDisplayHandle
+            + winit::raw_window_handle_05::HasRawWindowHandle
+            + Send
+            + Sync
+            + 'static,
+    >(
+        win: Arc<Window>,
+        image_size: [u32; 2],
     ) -> AnyResult<(Arc<Self>, RenderSurface)> {
         use vulkano::instance::debug as vkDebug;
 
         let library = vk::VulkanLibrary::new()?;
 
-        let mut required_instance_extensions = vk::Surface::required_extensions(win.event_loop());
+        let mut required_instance_extensions = vk::Surface::required_extensions(&win);
         required_instance_extensions.ext_debug_utils = true;
 
         let instance = vk::Instance::new(
@@ -345,7 +352,7 @@ impl RenderContext {
             },
         )?;
 
-        let surface = vk::Surface::from_window(instance.clone(), win.window())?;
+        let surface = vk::Surface::from_window(instance.clone(), win)?;
         let required_device_extensions = vk::DeviceExtensions {
             khr_swapchain: true,
             ext_line_rasterization: true,
@@ -382,8 +389,6 @@ impl RenderContext {
         )?;
 
         // We have a device! Now to create the swapchain..
-        let image_size = win.window().inner_size();
-
         let context = Arc::new(Self {
             allocators: Allocators {
                 command_buffer_alloc: vk::StandardCommandBufferAllocator::new(
@@ -408,8 +413,7 @@ impl RenderContext {
 
             _debugger: Some(debugger),
         });
-        let render_surface =
-            RenderSurface::new(context.clone(), surface.clone(), image_size.into())?;
+        let render_surface = RenderSurface::new(context.clone(), surface.clone(), image_size)?;
 
         Ok((context, render_surface))
     }

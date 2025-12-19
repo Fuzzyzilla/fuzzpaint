@@ -2,7 +2,6 @@
 #![feature(portable_simd)]
 #![feature(once_cell_try)]
 #![feature(write_all_vectored)]
-#![feature(new_zeroed_alloc)]
 #![warn(clippy::pedantic)]
 // I know it's bad but while working on a focus it's not really something I wanna be bugged about
 // with a full screen of yellow lol.
@@ -172,31 +171,25 @@ fn main() -> AnyResult<()> {
         log::warn!("Failed to load any provided document.");
     }
 
-    let window_surface = window::Surface::new()?;
-    let (render_context, render_surface) =
-        render_device::RenderContext::new_with_window_surface(&window_surface)?;
-
-    let document_view = Arc::new(document_viewport_proxy::Proxy::new(&render_surface)?);
-    let window_renderer = window_surface.with_render_surface(
-        render_surface,
-        render_context.clone(),
-        document_view.clone(),
-    )?;
-
-    let event_stream = window_renderer.stylus_events();
-    let action_listener = window_renderer.action_listener();
-    let ui_requests = window_renderer.ui_listener();
+    let mut application = window::Application::new();
+    let recievers = application.take_renderer_reciever().unwrap();
 
     std::thread::Builder::new()
         .name("Stylus+Render worker".to_owned())
         .spawn(move || {
             #[cfg(feature = "dhat_heap")]
-            // Keep alive. Winit takes ownership of main, and will never
-            // drop this unless we steal it.
+            // Keep alive. Winit takes ownership of main, and may never drop
+            // this unless we steal it.
             let _profiler = _profiler;
 
+            let Ok(receivers) = recievers.recv() else {
+                log::error!("Didn't recieve a renderer. Exiting.");
+                return;
+            };
+
             let result: Result<((), ()), anyhow::Error> = 'block: {
-                let tools = match pen_tools::ToolState::new_from_renderer(&render_context) {
+                let tools = match pen_tools::ToolState::new_from_renderer(&receivers.render_context)
+                {
                     Ok(tools) => tools,
                     Err(e) => break 'block Err(e),
                 };
@@ -211,14 +204,18 @@ fn main() -> AnyResult<()> {
                 // for now, just a note for future self UwU
                 runtime.block_on(async {
                     tokio::try_join!(
-                        renderer::render_worker(render_context, recv, document_view.clone(),),
+                        renderer::render_worker(
+                            receivers.render_context,
+                            recv,
+                            receivers.document_view.clone(),
+                        ),
                         stylus_event_collector(
-                            event_stream,
-                            ui_requests,
+                            receivers.stylus_events,
+                            receivers.ui_actions,
                             send,
-                            action_listener,
+                            receivers.actions,
                             tools,
-                            document_view,
+                            receivers.document_view,
                         ),
                     )
                 })
@@ -229,5 +226,5 @@ fn main() -> AnyResult<()> {
         })
         .unwrap();
 
-    window_renderer.run().map_err(Into::into)
+    application.run()
 }
