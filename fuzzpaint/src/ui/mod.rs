@@ -1973,8 +1973,8 @@ fn graph_edit_recurse<
         let header_response = ui.horizontal(|ui| {
             let data = graph.get(id).unwrap();
 
-            // Disable everything if dragging a layer around.
-            if dnd_state.is_none() {
+            // Disable everything else if dragging a layer.
+            if dnd_state.is_some_and(|state| state.drag_target != id) {
                 ui.disable();
             }
 

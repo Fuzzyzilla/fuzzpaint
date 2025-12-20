@@ -115,6 +115,9 @@ impl egui::Widget for ColorSquare {
             text_selection: None,
             hint_text: None,
         });
+        if ui.ctx().will_discard() {
+            return this;
+        }
 
         // false if all in the normal range of colors
         let out_of_gammut = self
