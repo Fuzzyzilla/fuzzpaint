@@ -115,18 +115,21 @@ async fn stylus_event_collector(
     }
 }
 
-//If we return, it was due to an error.
-//convert::Infallible is a quite ironic name for this useage, isn't it? :P
 fn main() -> AnyResult<()> {
-    let has_term = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let has_term = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let default_log_level = if cfg!(debug_assertions) {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
     // Log to a terminal, if available. Else, log to "log.out" in the working directory.
     if has_term {
         env_logger::Builder::new()
-            .filter_level(log::LevelFilter::Debug)
+            .filter_level(default_log_level)
             .parse_default_env()
             .init();
     } else {
-        let _ = simple_logging::log_to_file("log.out", log::LevelFilter::Debug);
+        let _ = simple_logging::log_to_file("log.out", default_log_level);
     }
     #[cfg(feature = "dhat_heap")]
     let _profiler = {
@@ -151,7 +154,7 @@ fn main() -> AnyResult<()> {
 
             match try_block() {
                 Err(e) => {
-                    log::error!("failed to open file {path:?}: {e:#}");
+                    log::error!("failed to open file {}: {e:#}", path.display());
                 }
                 Ok(queue) => {
                     // We don't care when it's stored, so long as it gets there eventually.
@@ -177,11 +180,6 @@ fn main() -> AnyResult<()> {
     std::thread::Builder::new()
         .name("Stylus+Render worker".to_owned())
         .spawn(move || {
-            #[cfg(feature = "dhat_heap")]
-            // Keep alive. Winit takes ownership of main, and may never drop
-            // this unless we steal it.
-            let _profiler = _profiler;
-
             let Ok(receivers) = recievers.recv() else {
                 log::error!("Didn't recieve a renderer. Exiting.");
                 return;
