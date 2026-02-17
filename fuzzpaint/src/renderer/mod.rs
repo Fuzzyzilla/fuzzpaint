@@ -1016,6 +1016,8 @@ mod stroke_renderer {
         texture_descriptors: fuzzpaint_core::brush::UniqueIDMap<Arc<vk::PersistentDescriptorSet>>,
         gpu_tess: super::gpu_tess::GpuStampTess,
         pipeline: Arc<vk::GraphicsPipeline>,
+        // Array of 1D R8 textures, used for brush curve LUTs.
+        // curve_luts: Arc<vk::Image>,
     }
     impl StrokeLayerRenderer {
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {

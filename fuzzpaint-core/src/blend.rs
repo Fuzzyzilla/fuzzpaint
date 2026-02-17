@@ -1,18 +1,11 @@
-#[derive(
-    strum::AsRefStr,
-    PartialEq,
-    Eq,
-    strum::EnumIter,
-    Copy,
-    Clone,
-    Hash,
-    Debug,
-    /*serde::Serialize,
-    serde::Deserialize,*/
-)]
+#[derive(strum::AsRefStr, PartialEq, Eq, strum::EnumIter, Copy, Clone, Hash, Debug, Default)]
+// Krita, which has the most blend modes of any software i've ever seen, only
+// has ~100 blend modes. This smol repr is more than enough :3
 #[repr(u8)]
 pub enum BlendMode {
-    Normal,
+    // 0 is reserved for "passthrough" or "none" on nodes that support it.
+    #[default]
+    Normal = 1,
     Add,
     Multiply,
     Screen,
@@ -20,14 +13,9 @@ pub enum BlendMode {
     Lighten,
     Erase,
 }
-impl Default for BlendMode {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 /// Blend mode for an object, including a mode, opacity modulate, and alpha clip
-#[derive(Copy, Clone, Debug, PartialEq /*serde::Serialize, serde::Deserialize*/)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Blend {
     pub mode: BlendMode,
     pub opacity: f32,
