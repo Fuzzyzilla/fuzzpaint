@@ -1,0 +1,17 @@
+[package]
+name = "fuzzpaint-connection"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fuzzpaint-collections = { path = "../fuzzpaint-collections" }
+fuzzpaint-types = { path = "../fuzzpaint-types" }
+bitcode = "0.6.9"
+log = "0.4.29"
+
+[features]
+default = ["client", "server", "tcp"]
+client = []
+server = []
+tcp = []
+# ipc-shm = []

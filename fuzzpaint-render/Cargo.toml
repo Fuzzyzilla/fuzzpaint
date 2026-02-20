@@ -1,0 +1,10 @@
+[package]
+name = "fuzzpaint-render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fuzzpaint-types = { path = "../fuzzpaint-types" }
+
+[features]
+ui = []
