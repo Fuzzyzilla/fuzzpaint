@@ -1,6 +1,7 @@
 use crate::vulkano_prelude::*;
 use anyhow::Result as AnyResult;
 use std::sync::Arc;
+use winit::raw_window_handle_05::HasRawDisplayHandle;
 
 /// Check that every index is less than the number of vertices in debug builds, nop in release mode.
 /// # Panics
@@ -12,6 +13,80 @@ pub fn debug_assert_indices_safe<Vertex>(vertices: &[Vertex], indices: &[u16]) {
         .any(|&index| usize::from(index) >= vertices.len())
     {
         panic!("index buffer includes invalid indices");
+    }
+}
+
+unsafe fn physical_device_display_support(
+    instance: &vk::Instance,
+    phys: &vk::PhysicalDevice,
+    queue_family_idx: u32,
+    dpy: &winit::raw_window_handle_05::RawDisplayHandle,
+) -> bool {
+    use vulkano::VulkanObject;
+    assert_eq!(phys.instance().handle(), instance.handle());
+    let phys = phys.handle();
+    match dpy {
+        winit::raw_window_handle_05::RawDisplayHandle::UiKit(_) => false,
+        winit::raw_window_handle_05::RawDisplayHandle::AppKit(_) => false,
+        winit::raw_window_handle_05::RawDisplayHandle::Orbital(_) => false,
+        winit::raw_window_handle_05::RawDisplayHandle::Xlib(xlib_display_handle)
+            if instance.enabled_extensions().khr_xlib_surface =>
+        unsafe {
+            (instance
+                .fns()
+                .khr_xlib_surface
+                .get_physical_device_xlib_presentation_support_khr)(
+                phys,
+                queue_family_idx,
+                xlib_display_handle.display.cast(),
+                xlib_display_handle.screen as _,
+            ) != 0
+        },
+        winit::raw_window_handle_05::RawDisplayHandle::Xcb(xcb_display_handle)
+            if instance.enabled_extensions().khr_xcb_surface =>
+        unsafe {
+            (instance
+                .fns()
+                .khr_xcb_surface
+                .get_physical_device_xcb_presentation_support_khr)(
+                phys,
+                queue_family_idx,
+                xcb_display_handle.connection,
+                xcb_display_handle.screen as _,
+            ) != 0
+        },
+        winit::raw_window_handle_05::RawDisplayHandle::Wayland(wayland_display_handle)
+            if instance.enabled_extensions().khr_wayland_surface =>
+        unsafe {
+            (instance
+                .fns()
+                .khr_wayland_surface
+                .get_physical_device_wayland_presentation_support_khr)(
+                phys,
+                queue_family_idx,
+                wayland_display_handle.display,
+            ) != 0
+        },
+        winit::raw_window_handle_05::RawDisplayHandle::Drm(_) => false,
+        winit::raw_window_handle_05::RawDisplayHandle::Gbm(_) => false,
+        winit::raw_window_handle_05::RawDisplayHandle::Windows(windows_display_handle)
+            if instance.enabled_extensions().khr_win32_surface =>
+        unsafe {
+            (instance
+                .fns()
+                .khr_win32_surface
+                .get_physical_device_win32_presentation_support_khr)(
+                phys, queue_family_idx
+            ) != 0
+        },
+        winit::raw_window_handle_05::RawDisplayHandle::Web(_) => false,
+        // On android, all devices are required to be able to present to any
+        // window.
+        winit::raw_window_handle_05::RawDisplayHandle::Android(_) => {
+            instance.enabled_extensions().khr_android_surface
+        }
+        winit::raw_window_handle_05::RawDisplayHandle::Haiku(_) => false,
+        _ => false,
     }
 }
 
@@ -59,7 +134,6 @@ enum QueueSrc {
 
 #[derive(Clone, Copy, Debug)]
 struct QueueIndices {
-    /// Also present, if that was required.
     graphics: u32,
     graphics_can_present: bool,
     compute: u32,
@@ -116,12 +190,15 @@ impl Queues {
         }
     }
 }
-
+pub struct RenderSwapchain {
+    swapchain: Arc<vk::Swapchain>,
+    swapchain_images: Vec<Arc<vk::Image>>,
+}
 pub struct RenderSurface {
     context: Arc<RenderContext>,
-    swapchain: Arc<vk::Swapchain>,
-    _surface: Arc<vk::Surface>,
-    swapchain_images: Vec<Arc<vk::Image>>,
+    surface: Arc<vk::Surface>,
+    // May be none if surface is zero-sized.
+    swapchain: Option<RenderSwapchain>,
 
     swapchain_create_info: vk::SwapchainCreateInfo,
 }
@@ -135,23 +212,28 @@ impl RenderSurface {
         self.swapchain_create_info.image_format
     }
     #[must_use]
-    pub fn swapchain(&self) -> &Arc<vk::Swapchain> {
-        &self.swapchain
+    pub fn swapchain(&self) -> Option<&Arc<vk::Swapchain>> {
+        self.swapchain.as_ref().map(|s| &s.swapchain)
     }
     #[must_use]
-    pub fn swapchain_images(&self) -> &[Arc<vk::Image>] {
-        &self.swapchain_images
+    pub fn swapchain_images(&self) -> Option<&[Arc<vk::Image>]> {
+        self.swapchain
+            .as_ref()
+            .map(|s| s.swapchain_images.as_slice())
     }
     #[must_use]
     pub fn context(&self) -> &Arc<RenderContext> {
         &self.context
     }
-    fn new(
-        context: Arc<RenderContext>,
-        surface: Arc<vk::Surface>,
-        size: [u32; 2],
-    ) -> AnyResult<Self> {
+    pub fn new(context: Arc<RenderContext>, window: Arc<winit::window::Window>) -> AnyResult<Self> {
+        let size = window.inner_size();
+        let size = [size.width, size.height];
+
+        let surface = vk::Surface::from_window(context.instance.clone(), window)?;
         let physical_device = context.physical_device();
+        if !physical_device.surface_support(context.queues.graphics().idx(), &surface)? {
+            anyhow::bail!("does not support present");
+        }
 
         let surface_info = vk::SurfaceInfo::default();
         let capabilies = physical_device.surface_capabilities(&surface, surface_info.clone())?;
@@ -204,34 +286,41 @@ impl RenderSurface {
             clipped: true, // We wont read the framebuffer.
             ..Default::default()
         };
-
-        let (swapchain, images) = vk::Swapchain::new(
-            context.device().clone(),
-            surface.clone(),
-            swapchain_create_info.clone(),
-        )?;
-
-        Ok(Self {
+        let mut this = Self {
             context,
-            swapchain,
-            _surface: surface,
-            swapchain_images: images,
+            surface,
+            swapchain: None,
             swapchain_create_info,
-        })
+        };
+        this.recreate(size)?;
+        Ok(this)
     }
-    pub fn recreate(self, new_size: Option<[u32; 2]>) -> AnyResult<Self> {
-        let mut new_info = self.swapchain_create_info;
-        if let Some(new_size) = new_size {
-            new_info.image_extent = new_size;
-        }
-        let (swapchain, swapchain_images) = self.swapchain.recreate(new_info.clone())?;
+    pub fn recreate(&mut self, new_size: [u32; 2]) -> AnyResult<()> {
+        let old_swapchain = self.swapchain.take();
+        self.swapchain_create_info.image_extent = new_size;
 
-        Ok(Self {
+        if new_size[0] == 0 || new_size[1] == 0 {
+            return Ok(());
+        }
+
+        self.swapchain_create_info.image_extent = new_size;
+        let (swapchain, swapchain_images) = if let Some(old_swapchain) = old_swapchain {
+            drop(old_swapchain.swapchain_images);
+            old_swapchain
+                .swapchain
+                .recreate(self.swapchain_create_info.clone())?
+        } else {
+            vk::Swapchain::new(
+                self.context.device().clone(),
+                self.surface.clone(),
+                self.swapchain_create_info.clone(),
+            )?
+        };
+        self.swapchain = Some(RenderSwapchain {
             swapchain,
             swapchain_images,
-            swapchain_create_info: new_info,
-            ..self
-        })
+        });
+        Ok(())
     }
 }
 
@@ -255,7 +344,7 @@ impl Allocators {
 
 pub struct RenderContext {
     _library: Arc<vk::VulkanLibrary>,
-    _instance: Arc<vk::Instance>,
+    instance: Arc<vk::Instance>,
     physical_device: Arc<vk::PhysicalDevice>,
     high_level_limits: HighLevelLimits,
     device: Arc<vk::Device>,
@@ -267,24 +356,21 @@ pub struct RenderContext {
 }
 
 impl RenderContext {
-    pub fn new_headless() -> AnyResult<Self> {
-        unimplemented!()
+    /// Create a device without any display or window compatibility.
+    pub fn new_headless() -> AnyResult<Arc<Self>> {
+        Self::new_with_display(None::<&winit::window::Window>)
     }
-    pub fn new_with_window_surface<
-        Window: winit::raw_window_handle_05::HasRawDisplayHandle
-            + winit::raw_window_handle_05::HasRawWindowHandle
-            + Send
-            + Sync
-            + 'static,
-    >(
-        win: Arc<Window>,
-        image_size: [u32; 2],
-    ) -> AnyResult<(Arc<Self>, RenderSurface)> {
+    /// Create a device compatible with windows from the given display.
+    pub fn new_with_display(dpy: Option<&impl HasRawDisplayHandle>) -> AnyResult<Arc<Self>> {
         use vulkano::instance::debug as vkDebug;
 
         let library = vk::VulkanLibrary::new()?;
 
-        let mut required_instance_extensions = vk::Surface::required_extensions(&win);
+        let mut required_instance_extensions = if let Some(dpy) = &dpy {
+            vk::Surface::required_extensions(&dpy)
+        } else {
+            vulkano::instance::InstanceExtensions::empty()
+        };
         required_instance_extensions.ext_debug_utils = true;
 
         let instance = vk::Instance::new(
@@ -352,9 +438,8 @@ impl RenderContext {
             },
         )?;
 
-        let surface = vk::Surface::from_window(instance.clone(), win)?;
         let required_device_extensions = vk::DeviceExtensions {
-            khr_swapchain: true,
+            khr_swapchain: dpy.is_some(),
             ext_line_rasterization: true,
             ..Default::default()
         };
@@ -365,15 +450,15 @@ impl RenderContext {
             ..Default::default()
         };
 
-        let Some((physical_device, queue_indices)) = Self::choose_physical_device(
-            &instance,
-            &required_device_extensions,
-            &required_device_extensions_lt_1_3,
-            Some(&surface),
-        )?
-        else {
-            return Err(anyhow::anyhow!("Failed to find a suitable Vulkan device."));
-        };
+        let (physical_device, queue_indices) = unsafe {
+            Self::choose_physical_device(
+                &instance,
+                &required_device_extensions,
+                &required_device_extensions_lt_1_3,
+                dpy.map(|dpy| dpy.raw_display_handle()),
+            )
+        }?
+        .ok_or_else(|| anyhow::anyhow!("Failed to find a suitable Vulkan device."))?;
 
         log::info!(
             "Chose physical device {} ({:?})",
@@ -406,16 +491,15 @@ impl RenderContext {
             },
             high_level_limits: HighLevelLimits::from_device(&device),
             _library: library,
-            _instance: instance,
+            instance,
             device,
             physical_device,
             queues,
 
             _debugger: Some(debugger),
         });
-        let render_surface = RenderSurface::new(context.clone(), surface.clone(), image_size)?;
 
-        Ok((context, render_surface))
+        Ok(context)
     }
     fn create_device(
         physical_device: Arc<vk::PhysicalDevice>,
@@ -515,11 +599,12 @@ impl RenderContext {
     }
     /// Find a device that fits our needs, including the ability to present to the surface if in non-headless mode.
     /// Horrible signature - Returns Ok(None) if no device found, Ok(Some((device, queue indices))) if suitable device found.
-    fn choose_physical_device(
+    #[deny(unsafe_op_in_unsafe_fn)]
+    unsafe fn choose_physical_device(
         instance: &Arc<vk::Instance>,
         required_extensions: &vk::DeviceExtensions,
         required_extensions_lt_1_3: &vk::DeviceExtensions,
-        compatible_surface: Option<&vk::Surface>,
+        supports_display: Option<winit::raw_window_handle_05::RawDisplayHandle>,
     ) -> AnyResult<Option<(Arc<vk::PhysicalDevice>, QueueIndices)>> {
         //TODO: does not respect queue family max queue counts. This will need to be redone in some sort of
         //multi-pass shenanigan to properly find a good queue setup. Also requires that graphics and compute queues be transfer as well.
@@ -539,30 +624,17 @@ impl RenderContext {
 
                 let families = device.queue_family_properties();
 
-                //Find a queue that supports the requested surface, if any
-                let present_queue = compatible_surface.and_then(|surface| {
-                    families.iter().enumerate().find(|(family_idx, _)| {
-                        //Assume error is false. Todo?
-                        device
-                            .surface_support(*family_idx as u32, surface)
-                            .unwrap_or(false)
-                    })
-                });
-
-                //We needed a present queue, but none was found. Disqualify this device!
-                if compatible_surface.is_some() && present_queue.is_none() {
-                    return None;
-                }
-
                 // We need a graphics queue, always! Otherwise, disqualify.
-                // If we require present to the surface, ensure that this queue can also do it.
-                let graphics_queue = families.iter().enumerate().find(|q| {
-                    let is_graphics = q.1.queue_flags.contains(QueueFlags::GRAPHICS);
-                    let can_present = compatible_surface.is_none()
-                        || device
-                            .surface_support(q.0 as u32, compatible_surface.unwrap())
-                            .unwrap_or(false);
-                    is_graphics && can_present
+                // Additionally, our graphics queue should be able to present.
+                let graphics_queue = families.iter().enumerate().find(|(i, properties)| {
+                    if let Some(dpy) = &supports_display
+                        && !unsafe {
+                            physical_device_display_support(instance, &device, *i as _, dpy)
+                        }
+                    {
+                        return false;
+                    }
+                    properties.queue_flags.contains(QueueFlags::GRAPHICS)
                 })?;
 
                 //We need a compute queue. This can be the same as graphics, but preferably not.
@@ -587,7 +659,7 @@ impl RenderContext {
                     QueueIndices {
                         compute: compute_queue.unwrap_or(graphics_queue).0 as u32,
                         // Would have bailed if not!
-                        graphics_can_present: compatible_surface.is_some(),
+                        graphics_can_present: supports_display.is_some(),
                         graphics: graphics_queue.0 as u32,
                     },
                 ))

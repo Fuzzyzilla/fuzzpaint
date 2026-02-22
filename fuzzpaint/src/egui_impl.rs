@@ -415,6 +415,7 @@ impl Render {
     ) -> anyhow::Result<()> {
         let framebuffers: anyhow::Result<Vec<_>> = surface
             .swapchain_images()
+            .unwrap()
             .iter()
             .map(|image| -> anyhow::Result<_> {
                 let fb = vk::Framebuffer::new(
@@ -525,9 +526,9 @@ impl Render {
         if clear {
             command_buffer_builder.clear_color_image(vk::ClearColorImageInfo {
                 clear_value: [0.0, 0.0, 0.0, 1.0].into(),
-                regions: smallvec::smallvec![framebuffer.attachments()[0]
-                    .subresource_range()
-                    .clone()],
+                regions: smallvec::smallvec![
+                    framebuffer.attachments()[0].subresource_range().clone()
+                ],
                 ..vk::ClearColorImageInfo::image(framebuffer.attachments()[0].image().clone())
             })?;
         }

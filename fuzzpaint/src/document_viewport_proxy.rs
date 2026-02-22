@@ -1,7 +1,7 @@
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
 
-use crate::{gizmos::GizmoTree, pen_tools, render_device, view_transform, AnyResult};
+use crate::{AnyResult, gizmos::GizmoTree, pen_tools, render_device, view_transform};
 
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
 /// behind the Egui content.
@@ -178,6 +178,7 @@ impl SurfaceData {
     ) -> Self {
         let framebuffers: AnyResult<Vec<_>> = render_surface
             .swapchain_images()
+            .unwrap()
             .iter()
             .map(|image| -> AnyResult<_> {
                 // Todo: duplication of view resources.
@@ -197,7 +198,7 @@ impl SurfaceData {
         let framebuffers = framebuffers.unwrap().into_boxed_slice();
 
         let mut prerecorded_command_buffers =
-            Vec::with_capacity(render_surface.swapchain_images().len());
+            Vec::with_capacity(render_surface.swapchain_images().unwrap().len());
         prerecorded_command_buffers.resize_with(prerecorded_command_buffers.capacity(), || {
             [std::sync::OnceLock::new(), std::sync::OnceLock::new()]
         });

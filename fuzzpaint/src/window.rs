@@ -118,9 +118,7 @@ pub struct Receivers {
 }
 pub struct WindowObjects {
     win: Arc<winit::window::Window>,
-    /// Always Some. This is to allow it to be take-able to be remade.
-    /// Could None represent a temporary loss of surface that can be recovered from?
-    render_surface: Option<render_device::RenderSurface>,
+    render_surface: render_device::RenderSurface,
     render_context: Arc<render_device::RenderContext>,
     egui_ctx: egui_impl::Ctx,
     ui: crate::ui::MainUI,
@@ -149,11 +147,9 @@ impl WindowObjects {
         )?;
         let win = Arc::new(win);
 
-        let (render_context, render_surface) =
-            render_device::RenderContext::new_with_window_surface(
-                win.clone(),
-                win.inner_size().into(),
-            )?;
+        let render_context = render_device::RenderContext::new_with_display(Some(&win))?;
+        let render_surface =
+            render_device::RenderSurface::new(render_context.clone(), win.clone())?;
         let preview_renderer =
             Arc::new(crate::document_viewport_proxy::Proxy::new(&render_surface)?);
 
@@ -169,7 +165,7 @@ impl WindowObjects {
 
         Ok(Self {
             win,
-            render_surface: Some(render_surface),
+            render_surface,
             swapchain_generation: 0,
             render_context,
             last_frame_fence: None,
@@ -197,24 +193,17 @@ impl WindowObjects {
         }
     }
     pub fn render_surface(&self) -> &render_device::RenderSurface {
-        //this will ALWAYS be Some. The option is for taking from a mutable reference for recreation.
-        self.render_surface.as_ref().unwrap()
+        &self.render_surface
     }
     /// Recreate surface after loss or out-of-date. Todo: This only handles out-of-date and resize.
     pub fn recreate_surface(&mut self) -> AnyResult<()> {
-        let new_surface = self
-            .render_surface
-            .take()
-            .unwrap()
-            .recreate(Some(self.window().inner_size().into()))?;
+        self.render_surface
+            .recreate(self.window().inner_size().into())?;
+        self.egui_ctx.replace_surface(&self.render_surface)?;
 
-        self.egui_ctx.replace_surface(&new_surface)?;
-
-        self.render_surface = Some(new_surface);
         self.swapchain_generation = self.swapchain_generation.wrapping_add(1);
 
-        self.preview_renderer
-            .surface_changed(self.render_surface.as_ref().unwrap());
+        self.preview_renderer.surface_changed(&self.render_surface);
 
         Ok(())
     }
@@ -421,22 +410,24 @@ impl WindowObjects {
         }
     }
     fn paint(&mut self) -> AnyResult<()> {
-        let (idx, suboptimal, image_future) =
-            match vk::acquire_next_image(self.render_surface().swapchain().clone(), None) {
-                Err(vk::Validated::Error(vk::VulkanError::OutOfDate)) => {
-                    log::info!("Swapchain unusable. Recreating");
-                    //We cannot draw on this surface as-is. Recreate and request another try next frame.
-                    //TODO: Race condition, somehow! Surface is recreated with an out-of-date size.
-                    self.recreate_surface()?;
-                    self.window().request_redraw();
-                    return Ok(());
-                }
-                Err(e) => {
-                    //Todo. Many of these errors are recoverable!
-                    anyhow::bail!("Surface image acquire failed! {e:?}");
-                }
-                Ok(r) => r,
-            };
+        let (idx, suboptimal, image_future) = match vk::acquire_next_image(
+            self.render_surface().swapchain().unwrap().clone(),
+            None,
+        ) {
+            Err(vk::Validated::Error(vk::VulkanError::OutOfDate)) => {
+                log::info!("Swapchain unusable. Recreating");
+                //We cannot draw on this surface as-is. Recreate and request another try next frame.
+                //TODO: Race condition, somehow! Surface is recreated with an out-of-date size.
+                self.recreate_surface()?;
+                self.window().request_redraw();
+                return Ok(());
+            }
+            Err(e) => {
+                //Todo. Many of these errors are recoverable!
+                anyhow::bail!("Surface image acquire failed! {e:?}");
+            }
+            Ok(r) => r,
+        };
 
         // Print a warning if swapchain image future is dropped. Per a dire warning in the comments of vulkano,
         // dropping futures can result in that swapchain image being lost forever...!
@@ -447,7 +438,7 @@ impl WindowObjects {
 
         let preview_commands = self.enable_document_view.then(|| unsafe {
             self.preview_renderer.render(
-                self.render_surface.as_ref().unwrap().swapchain_images()[idx as usize].clone(),
+                self.render_surface.swapchain_images().unwrap()[idx as usize].clone(),
                 idx,
             )
         });
@@ -534,7 +525,7 @@ impl WindowObjects {
                     .queue()
                     .clone(),
                 vk::SwapchainPresentInfo::swapchain_image_index(
-                    self.render_surface.as_ref().unwrap().swapchain().clone(),
+                    self.render_surface.swapchain().unwrap().clone(),
                     idx,
                 ),
             )
