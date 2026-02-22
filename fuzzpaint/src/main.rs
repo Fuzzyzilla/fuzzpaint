@@ -115,66 +115,32 @@ async fn stylus_event_collector(
     }
 }
 
-fn main() -> AnyResult<()> {
-    let has_term = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let default_log_level = if cfg!(debug_assertions) {
-        log::LevelFilter::Debug
-    } else {
-        log::LevelFilter::Info
-    };
-    // Log to a terminal, if available. Else, log to "log.out" in the working directory.
-    if has_term {
-        env_logger::Builder::new()
-            .filter_level(default_log_level)
-            .parse_default_env()
-            .init();
-    } else {
-        let _ = simple_logging::log_to_file("log.out", default_log_level);
-    }
-    #[cfg(feature = "dhat_heap")]
-    let _profiler = {
-        log::trace!("Installed dhat");
-        dhat::Profiler::new_heap()
-    };
+struct InitialConnection {
+    // lazy: bool,
+    ty: InitialConnectionType,
+}
+enum InitialConnectionType {
+    Tcp(std::net::SocketAddr),
+    // IPC(),
+    // Inprocess,
+}
 
-    let loading_succeeded = {
-        use rayon::iter::{IntoParallelIterator, ParallelIterator};
-        // Args are a simple list of paths to open at startup.
-        // Paths are OSStrings, let the system handle character encoding restrictions.
-        // Todo: Expand glob patterns on windows (on unix this is handled by shell)
-        let paths: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
-        // Did we have at least one success? No paths is a success.
-        let had_success: std::sync::atomic::AtomicBool = paths.is_empty().into();
-        let repo = crate::global::points();
-        paths.into_par_iter().for_each(|path| {
-            let try_block =
-                || -> Result<fuzzpaint_core::queue::DocumentCommandQueue, std::io::Error> {
-                    fuzzpaint_core::io::read_path(&path, repo)
-                };
-
-            match try_block() {
-                Err(e) => {
-                    log::error!("failed to open file {}: {e:#}", path.display());
-                }
-                Ok(queue) => {
-                    // We don't care when it's stored, so long as it gets there eventually.
-                    had_success.store(true, std::sync::atomic::Ordering::Relaxed);
-                    // Defaulted ID, can't fail
-                    let _ = global::provider().insert(queue);
-                }
-            }
-        });
-
-        had_success.into_inner()
+fn client(connection: InitialConnection) -> AnyResult<()> {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
+    // Tokio globals *weeps*
+    let _guard = executor.enter();
+    let client = match connection.ty {
+        InitialConnectionType::Tcp(addr) => {
+            println!("attempting connection to {addr}");
+            let client = fuzzpaint_connection::tcp::client::Client::connect(addr);
+            executor.block_on(client)?
+        }
     };
-    // False if every file failed.
-    // This should abort the startup if ran from commandline, or give a visual warning and continue
-    // if using a GUI.
-    if !loading_succeeded {
-        log::warn!("Failed to load any provided document.");
-    }
 
     let mut application = window::Application::new();
+    application.add_connection(client);
     let recievers = application.take_renderer_reciever().unwrap();
 
     std::thread::Builder::new()
@@ -225,4 +191,101 @@ fn main() -> AnyResult<()> {
         .unwrap();
 
     application.run()
+}
+fn server() -> AnyResult<()> {
+    use fuzzpaint_connection::server::{ClientConnection, Connection};
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
+    // Tokio globals *weeps*
+    let _guard = executor.enter();
+    let server = fuzzpaint_connection::tcp::server::Builder::default()
+        .allow_loopback_nodelay(true)
+        .oneshot(true)
+        .bind_local();
+    let server = executor.block_on(server)?;
+    let addr = server.local_addr()?;
+
+    // Crappy cross-platform `fork()`
+    let mut child = tokio::process::Command::new(std::env::current_exe()?)
+        .arg("--client")
+        .arg("--tcp")
+        .arg(format!("{addr}"))
+        .spawn()?;
+
+    executor.block_on(async {
+        let mut t_try = async move || -> AnyResult<()> {
+            let mut client = server.wait_client().await?;
+            let mut msg_loop = async move || -> AnyResult<()> {
+                loop {
+                    let msg = client.recv().await?;
+                    match msg {
+                        fuzzpaint_connection::client_msg::Message::ClientMessage(msg) => {
+                            let message = msg.message.to_owned();
+                            client
+                            .send(&fuzzpaint_connection::server_msg::Message {
+                                last_processed: (),
+                                message:
+                                    fuzzpaint_connection::server_msg::MessageKind::ServerMessage(
+                                        fuzzpaint_connection::server_msg::ServerMessage {
+                                            user_id: Some(()),
+                                            message: &message,
+                                        },
+                                    ),
+                            })
+                            .await?;
+                        }
+                    }
+                }
+            };
+            // this is effectively "kill the loop when the child closes" lol.
+            tokio::select! {
+                _ = msg_loop() => (),
+                _ = child.wait() => (),
+            }
+            Ok(())
+        };
+        t_try().await
+    })
+}
+
+fn main() -> AnyResult<()> {
+    let has_term = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let default_log_level = if cfg!(debug_assertions) {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+    // Log to a terminal, if available. Else, log to "log.out" in the working directory.
+    if has_term {
+        env_logger::Builder::new()
+            .filter_level(default_log_level)
+            .parse_default_env()
+            .init();
+    } else {
+        let _ = simple_logging::log_to_file("log.out", default_log_level);
+    }
+    #[cfg(feature = "dhat_heap")]
+    let _profiler = {
+        log::trace!("Installed dhat");
+        dhat::Profiler::new_heap();
+        // Concurrent process filenames.
+        todo!()
+    };
+
+    let mut args = std::env::args().fuse();
+    let _exec = args.next();
+    // :3 grog not care (these are not public facing)
+    if args.next().as_deref() == Some("--client")
+        && args.next().as_deref() == Some("--tcp")
+        && let Some(addr) = args.next()
+    {
+        client(InitialConnection {
+            ty: InitialConnectionType::Tcp(addr.parse()?),
+        })
+    } else if std::env::args().count() == 1 {
+        server()
+    } else {
+        Err(anyhow::anyhow!("invalid arguments"))
+    }
 }

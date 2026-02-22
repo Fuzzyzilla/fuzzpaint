@@ -18,6 +18,7 @@ enum State<T> {
 pub struct Application {
     // Objects that depend on a window, including the window itself.
     window_objects: State<WindowObjects>,
+    connections: Vec<fuzzpaint_connection::tcp::client::Client>,
     // Channel that will be notified when the renderer is made, once the window
     // is ready.
     renderer_sender: Option<oneshot::Sender<Receivers>>,
@@ -28,9 +29,13 @@ impl Application {
         let (send, recv) = oneshot::channel();
         Self {
             window_objects: State::Deferred,
+            connections: Vec::new(),
             renderer_sender: Some(send),
             renderer_reciever: Some(recv),
         }
+    }
+    pub fn add_connection(&mut self, client: fuzzpaint_connection::tcp::client::Client) {
+        self.connections.push(client);
     }
     /// Take a channel that will recieve the rendering context, once it is created.
     pub fn take_renderer_reciever(&mut self) -> Option<oneshot::Receiver<Receivers>> {
