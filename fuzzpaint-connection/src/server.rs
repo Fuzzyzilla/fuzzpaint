@@ -6,13 +6,16 @@ pub trait Connection {
     /// client connection. Returned value may be immediately out of date if
     /// connections are occuring on other threads.
     fn allows_incoming(&self) -> bool;
-    fn wait_client(&self) -> Result<Self::Client, Self::Error>;
+    async fn wait_client(&self) -> Result<Self::Client, Self::Error>;
 }
 pub trait ClientConnection {
     type Error;
-    fn send(&mut self, message: &crate::server_msg::Message<'_>) -> Result<(), Self::Error>;
-    fn flush(&mut self) -> Result<(), Self::Error>;
-    fn recv(&mut self) -> Result<crate::client_msg::Message<'_>, Self::Error>;
+    async fn send(
+        &mut self,
+        message: &crate::server_msg::Message<'_>,
+    ) -> Result<&mut Self, Self::Error>;
+    async fn flush(&mut self) -> Result<&mut Self, Self::Error>;
+    async fn recv(&mut self) -> Result<crate::client_msg::Message<'_>, Self::Error>;
 }
 /// Represents a server with the ability to accept client(s).
 pub struct Server<Conn: Connection> {

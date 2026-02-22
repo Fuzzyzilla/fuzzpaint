@@ -5,8 +5,8 @@ pub mod server;
 
 const PROTOCOL_VERSION: &[u8] = b"owo lmao hai this is a fuzzpaint connection";
 
-fn streaming_read<'a, T: bitcode::Decode<'a>>(
-    mut stream: impl std::io::Read,
+async fn streaming_read<'a, T: bitcode::Decode<'a>>(
+    mut stream: impl tokio::io::AsyncReadExt + Unpin,
     buffer: &mut bitcode::Buffer,
     staging: &'a mut Vec<u8>,
 ) -> std::io::Result<T> {
@@ -46,7 +46,7 @@ fn streaming_read<'a, T: bitcode::Decode<'a>>(
         spare.fill(std::mem::MaybeUninit::zeroed());
         let spare = unsafe { spare.assume_init_mut() };
 
-        let read = stream.read(spare);
+        let read = stream.read(spare).await;
         let read = match read {
             Ok(read) => read,
             Err(e) => {
@@ -94,8 +94,8 @@ fn streaming_read<'a, T: bitcode::Decode<'a>>(
         .decode(data)
         .map_err(|e| Error::new(ErrorKind::InvalidData, e))
 }
-fn streaming_write<T: bitcode::Encode>(
-    mut stream: impl std::io::Write,
+async fn streaming_write<T: bitcode::Encode>(
+    mut stream: impl tokio::io::AsyncWriteExt + Unpin,
     buffer: &mut bitcode::Buffer,
     staging: &mut Vec<u8>,
     t: &T,
@@ -113,7 +113,7 @@ fn streaming_write<T: bitcode::Encode>(
     staging.extend_from_slice(bytes);
 
     // Send as much as we can, buffer the rest for later.
-    let sent = stream.write(staging)?;
+    let sent = stream.write(staging).await?;
     if sent == 0 {
         // 0 = unlikely to ever accept bytes again
         return Err(Error::new(ErrorKind::NotConnected, "connection closed"));
@@ -130,60 +130,69 @@ mod test {
         server::{ClientConnection as _, Connection as _},
     };
     use std::io::Result;
+
     #[cfg(all(feature = "client", feature = "server"))]
     #[test]
     fn wawa() -> Result<()> {
-        let server = server::Builder::default().bind_local()?;
-        let address = server.local_addr()?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()?;
+        let server = rt.block_on(server::Builder::default().bind_local())?;
+        let addr = server.local_addr()?;
+        let (client, server) = rt.block_on(async { tokio::join!(client(addr), serve(server)) });
+        return client.and(server);
 
-        let thread = std::thread::Builder::new()
-            .spawn(move || -> std::io::Result<()> {
-                let mut client = client::Client::connect(address)?;
-                let message = client.recv()?;
-                assert!(matches!(
-                    message,
-                    crate::server_msg::Message {
-                        last_processed: (),
-                        message: crate::server_msg::MessageKind::ServerMessage(
-                            crate::server_msg::ServerMessage {
-                                user_id: None,
-                                message: "hai from server :3",
-                            },
-                        ),
-                    }
-                ));
-                client.send(&crate::client_msg::Message::ClientMessage(
+        async fn serve(server: server::Server) -> Result<()> {
+            let mut client = server.wait_client().await?;
+
+            client
+                .send(&crate::server_msg::Message {
+                    last_processed: (),
+                    message: crate::server_msg::MessageKind::ServerMessage(
+                        crate::server_msg::ServerMessage {
+                            user_id: None,
+                            message: "hai from server :3",
+                        },
+                    ),
+                })
+                .await?
+                .flush()
+                .await?;
+            let message = client.recv().await?;
+            assert!(matches!(
+                message,
+                crate::client_msg::Message::ClientMessage(crate::client_msg::ClientMessage {
+                    message: "hello in turn ;3",
+                },)
+            ));
+            Ok(())
+        }
+        async fn client(addr: std::net::SocketAddr) -> Result<()> {
+            let mut client = client::Client::connect(addr).await?;
+            let message = client.recv().await?;
+            assert!(matches!(
+                message,
+                crate::server_msg::Message {
+                    last_processed: (),
+                    message: crate::server_msg::MessageKind::ServerMessage(
+                        crate::server_msg::ServerMessage {
+                            user_id: None,
+                            message: "hai from server :3",
+                        },
+                    ),
+                }
+            ));
+            client
+                .send(&crate::client_msg::Message::ClientMessage(
                     crate::client_msg::ClientMessage {
                         message: "hello in turn ;3",
                     },
-                ))?;
-                client.flush()?;
+                ))
+                .await?
+                .flush()
+                .await?;
 
-                Ok(())
-            })
-            .unwrap();
-
-        let mut client = server.wait_client()?;
-
-        client.send(&crate::server_msg::Message {
-            last_processed: (),
-            message: crate::server_msg::MessageKind::ServerMessage(
-                crate::server_msg::ServerMessage {
-                    user_id: None,
-                    message: "hai from server :3",
-                },
-            ),
-        })?;
-        client.flush()?;
-        let message = client.recv()?;
-        assert!(matches!(
-            message,
-            crate::client_msg::Message::ClientMessage(crate::client_msg::ClientMessage {
-                message: "hello in turn ;3",
-            },)
-        ));
-
-        thread.join().unwrap()?;
-        Ok(())
+            Ok(())
+        }
     }
 }

@@ -1,5 +1,6 @@
-use std::{
-    io::{Error, ErrorKind, Read, Result, Write},
+use std::io::{Error, ErrorKind, Result};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     net,
 };
 pub struct Client {
@@ -11,12 +12,12 @@ pub struct Client {
     send_staging: Vec<u8>,
 }
 impl Client {
-    pub fn connect<A: net::ToSocketAddrs>(addr: A) -> Result<Self> {
-        let mut stream = net::TcpStream::connect(addr)?;
+    pub async fn connect<A: net::ToSocketAddrs>(addr: A) -> Result<Self> {
+        let mut stream = net::TcpStream::connect(addr).await?;
         // "negotiate" a protocol "version"
         let mut protocol = [0u8; super::PROTOCOL_VERSION.len()];
-        stream.read_exact(&mut protocol)?;
-        stream.write_all(super::PROTOCOL_VERSION)?;
+        stream.read_exact(&mut protocol).await?;
+        stream.write_all(super::PROTOCOL_VERSION).await?;
         if protocol != super::PROTOCOL_VERSION {
             return Err(Error::new(
                 ErrorKind::InvalidData,
@@ -33,24 +34,26 @@ impl Client {
 }
 impl crate::client::Connection for Client {
     type Error = Error;
-    fn send(
+    async fn send(
         &mut self,
         message: &crate::client_msg::Message<'_>,
-    ) -> std::result::Result<(), Self::Error> {
+    ) -> std::result::Result<&mut Self, Self::Error> {
         super::streaming_write(
             &mut self.stream,
             &mut self.buffer,
             &mut self.send_staging,
             message,
         )
+        .await?;
+        Ok(self)
     }
-    fn flush(&mut self) -> std::result::Result<(), Self::Error> {
-        self.stream.write_all(&self.send_staging)?;
+    async fn flush(&mut self) -> std::result::Result<&mut Self, Self::Error> {
+        self.stream.write_all(&self.send_staging).await?;
         self.send_staging.clear();
-        self.stream.flush()?;
-        Ok(())
+        self.stream.flush().await?;
+        Ok(self)
     }
-    fn recv(&mut self) -> std::result::Result<crate::server_msg::Message<'_>, Self::Error> {
-        super::streaming_read(&mut self.stream, &mut self.buffer, &mut self.recv_staging)
+    async fn recv(&mut self) -> std::result::Result<crate::server_msg::Message<'_>, Self::Error> {
+        super::streaming_read(&mut self.stream, &mut self.buffer, &mut self.recv_staging).await
     }
 }
