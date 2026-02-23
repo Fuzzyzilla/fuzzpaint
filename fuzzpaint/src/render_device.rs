@@ -30,7 +30,8 @@ unsafe fn physical_device_display_support(
         winit::raw_window_handle_05::RawDisplayHandle::AppKit(_) => false,
         winit::raw_window_handle_05::RawDisplayHandle::Orbital(_) => false,
         winit::raw_window_handle_05::RawDisplayHandle::Xlib(xlib_display_handle)
-            if instance.enabled_extensions().khr_xlib_surface =>
+            if instance.enabled_extensions().khr_xlib_surface
+                && !xlib_display_handle.display.is_null() =>
         unsafe {
             (instance
                 .fns()
@@ -39,11 +40,12 @@ unsafe fn physical_device_display_support(
                 phys,
                 queue_family_idx,
                 xlib_display_handle.display.cast(),
-                xlib_display_handle.screen as _,
+                xlib_display_handle.screen.cast_unsigned(),
             ) != 0
         },
         winit::raw_window_handle_05::RawDisplayHandle::Xcb(xcb_display_handle)
-            if instance.enabled_extensions().khr_xcb_surface =>
+            if instance.enabled_extensions().khr_xcb_surface
+                && !xcb_display_handle.connection.is_null() =>
         unsafe {
             (instance
                 .fns()
@@ -52,11 +54,12 @@ unsafe fn physical_device_display_support(
                 phys,
                 queue_family_idx,
                 xcb_display_handle.connection,
-                xcb_display_handle.screen as _,
+                xcb_display_handle.screen.cast_unsigned(),
             ) != 0
         },
         winit::raw_window_handle_05::RawDisplayHandle::Wayland(wayland_display_handle)
-            if instance.enabled_extensions().khr_wayland_surface =>
+            if instance.enabled_extensions().khr_wayland_surface
+                && !wayland_display_handle.display.is_null() =>
         unsafe {
             (instance
                 .fns()
@@ -69,7 +72,7 @@ unsafe fn physical_device_display_support(
         },
         winit::raw_window_handle_05::RawDisplayHandle::Drm(_) => false,
         winit::raw_window_handle_05::RawDisplayHandle::Gbm(_) => false,
-        winit::raw_window_handle_05::RawDisplayHandle::Windows(windows_display_handle)
+        winit::raw_window_handle_05::RawDisplayHandle::Windows(_windows_display_handle)
             if instance.enabled_extensions().khr_win32_surface =>
         unsafe {
             (instance
@@ -358,16 +361,33 @@ pub struct RenderContext {
 impl RenderContext {
     /// Create a device without any display or window compatibility.
     pub fn new_headless() -> AnyResult<Arc<Self>> {
-        Self::new_with_display(None::<&winit::window::Window>)
+        // Trivially safe.
+        unsafe { Self::new_with_display_handle(None) }
     }
     /// Create a device compatible with windows from the given display.
     pub fn new_with_display(dpy: Option<&impl HasRawDisplayHandle>) -> AnyResult<Arc<Self>> {
+        // Safe by unsafe precondition of HasRawDisplayHandle
+        unsafe { Self::new_with_display_handle(dpy.map(|dpy| dpy.raw_display_handle())) }
+    }
+    /// #Safety: `dpy` must represent a valid display handle for the duration of
+    /// the call.
+    unsafe fn new_with_display_handle(
+        dpy: Option<winit::raw_window_handle_05::RawDisplayHandle>,
+    ) -> AnyResult<Arc<Self>> {
         use vulkano::instance::debug as vkDebug;
 
         let library = vk::VulkanLibrary::new()?;
 
-        let mut required_instance_extensions = if let Some(dpy) = &dpy {
-            vk::Surface::required_extensions(&dpy)
+        let mut required_instance_extensions = if let Some(dpy) = dpy {
+            struct Carrier {
+                dpy: winit::raw_window_handle_05::RawDisplayHandle,
+            }
+            unsafe impl HasRawDisplayHandle for Carrier {
+                fn raw_display_handle(&self) -> winit::raw_window_handle_05::RawDisplayHandle {
+                    self.dpy
+                }
+            }
+            vk::Surface::required_extensions(&Carrier { dpy })
         } else {
             vulkano::instance::InstanceExtensions::empty()
         };
@@ -455,7 +475,7 @@ impl RenderContext {
                 &instance,
                 &required_device_extensions,
                 &required_device_extensions_lt_1_3,
-                dpy.map(|dpy| dpy.raw_display_handle()),
+                dpy,
             )
         }?
         .ok_or_else(|| anyhow::anyhow!("Failed to find a suitable Vulkan device."))?;

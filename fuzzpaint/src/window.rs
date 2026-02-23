@@ -16,23 +16,34 @@ enum State<T> {
 }
 
 pub struct Application {
+    pre_setup_loop: Option<winit::event_loop::EventLoop<UserEvent>>,
     // Objects that depend on a window, including the window itself.
     window_objects: State<WindowObjects>,
     connections: Vec<fuzzpaint_connection::tcp::client::Client>,
+    render_context: Arc<render_device::RenderContext>,
     // Channel that will be notified when the renderer is made, once the window
     // is ready.
     renderer_sender: Option<oneshot::Sender<Receivers>>,
     renderer_reciever: Option<oneshot::Receiver<Receivers>>,
 }
 impl Application {
-    pub fn new() -> Self {
+    pub fn new() -> AnyResult<Self> {
+        let pre_setup_loop =
+            winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
+        let render_context = render_device::RenderContext::new_with_display(Some(&pre_setup_loop))?;
         let (send, recv) = oneshot::channel();
-        Self {
+
+        Ok(Self {
+            pre_setup_loop: Some(pre_setup_loop),
             window_objects: State::Deferred,
             connections: Vec::new(),
+            render_context,
             renderer_sender: Some(send),
             renderer_reciever: Some(recv),
-        }
+        })
+    }
+    pub fn render_context(&self) -> &Arc<render_device::RenderContext> {
+        &self.render_context
     }
     pub fn add_connection(&mut self, client: fuzzpaint_connection::tcp::client::Client) {
         self.connections.push(client);
@@ -42,8 +53,11 @@ impl Application {
         self.renderer_reciever.take()
     }
     pub fn run(mut self) -> AnyResult<()> {
-        let event_loop = winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
-        event_loop.run_app(&mut self).map_err(Into::into)
+        self.pre_setup_loop
+            .take()
+            .unwrap()
+            .run_app(&mut self)
+            .map_err(Into::into)
     }
 }
 impl winit::application::ApplicationHandler<UserEvent> for Application {
@@ -52,7 +66,7 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
             // Always emitted first, even on platforms without a suspend-resume
             // cycle. Only recreate if it's the first time (i.e. dont attempt to
             // recreate after a suspend.)
-            match WindowObjects::new(event_loop) {
+            match WindowObjects::new(self.render_context.clone(), event_loop) {
                 Ok(window_objects) => {
                     if let Some(send) = self.renderer_sender.take() {
                         let _ = send.send(window_objects.receivers());
@@ -113,7 +127,6 @@ pub struct Receivers {
     pub actions: crate::actions::ActionListener,
     pub ui_actions: crossbeam::channel::Receiver<crate::ui::requests::UiRequest>,
     pub stylus_events: tokio::sync::broadcast::Receiver<crate::stylus_events::StylusEventFrame>,
-    pub render_context: Arc<render_device::RenderContext>,
     pub document_view: Arc<crate::document_viewport_proxy::Proxy>,
 }
 pub struct WindowObjects {
@@ -137,7 +150,10 @@ pub struct WindowObjects {
     preview_renderer: Arc<crate::document_viewport_proxy::Proxy>,
 }
 impl WindowObjects {
-    fn new(event_loop: &winit::event_loop::ActiveEventLoop) -> AnyResult<Self> {
+    fn new(
+        render_context: Arc<render_device::RenderContext>,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) -> AnyResult<Self> {
         const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
         let win = event_loop.create_window(
             winit::window::Window::default_attributes()
@@ -147,7 +163,6 @@ impl WindowObjects {
         )?;
         let win = Arc::new(win);
 
-        let render_context = render_device::RenderContext::new_with_display(Some(&win))?;
         let render_surface =
             render_device::RenderSurface::new(render_context.clone(), win.clone())?;
         let preview_renderer =
@@ -188,7 +203,6 @@ impl WindowObjects {
             actions: self.action_stream.listen(),
             ui_actions: self.ui.listen_requests(),
             stylus_events: self.stylus_events.frame_receiver(),
-            render_context: self.render_context.clone(),
             document_view: self.preview_renderer.clone(),
         }
     }

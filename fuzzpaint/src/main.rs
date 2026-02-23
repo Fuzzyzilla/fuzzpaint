@@ -139,9 +139,10 @@ fn client(connection: InitialConnection) -> AnyResult<()> {
         }
     };
 
-    let mut application = window::Application::new();
+    let mut application = window::Application::new()?;
     application.add_connection(client);
     let recievers = application.take_renderer_reciever().unwrap();
+    let render_context = application.render_context().clone();
 
     std::thread::Builder::new()
         .name("Stylus+Render worker".to_owned())
@@ -152,8 +153,7 @@ fn client(connection: InitialConnection) -> AnyResult<()> {
             };
 
             let result: Result<((), ()), anyhow::Error> = 'block: {
-                let tools = match pen_tools::ToolState::new_from_renderer(&receivers.render_context)
-                {
+                let tools = match pen_tools::ToolState::new_from_renderer(&render_context) {
                     Ok(tools) => tools,
                     Err(e) => break 'block Err(e),
                 };
@@ -169,7 +169,7 @@ fn client(connection: InitialConnection) -> AnyResult<()> {
                 runtime.block_on(async {
                     tokio::try_join!(
                         renderer::render_worker(
-                            receivers.render_context,
+                            render_context,
                             recv,
                             receivers.document_view.clone(),
                         ),
