@@ -4,6 +4,8 @@
 //! does not expose a stable wire protocol,** all protocols are considered
 //! implementation details and may change at any time (for now~).
 
+#[cfg(feature = "channel")]
+pub mod channel;
 #[cfg(feature = "client")]
 pub mod client;
 #[cfg(feature = "server")]

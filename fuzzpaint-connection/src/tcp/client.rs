@@ -12,6 +12,8 @@ pub struct Client {
     send_staging: Vec<u8>,
 }
 impl Client {
+    /// This function is *not* cancel safe. Cancelling the future may result in
+    /// a spurious connection to the address.
     pub async fn connect<A: net::ToSocketAddrs>(addr: A) -> Result<Self> {
         let mut stream = net::TcpStream::connect(addr).await?;
         // "negotiate" a protocol "version"
@@ -34,6 +36,7 @@ impl Client {
 }
 impl crate::client::Connection for Client {
     type Error = Error;
+    /// Cancel-safe.
     async fn send(
         &mut self,
         message: &crate::client_msg::Message<'_>,
@@ -47,12 +50,14 @@ impl crate::client::Connection for Client {
         .await?;
         Ok(self)
     }
+    /// Cancel-safe.
     async fn flush(&mut self) -> std::result::Result<&mut Self, Self::Error> {
         self.stream.write_all(&self.send_staging).await?;
         self.send_staging.clear();
         self.stream.flush().await?;
         Ok(self)
     }
+    /// Cancel-safe.
     async fn recv(&mut self) -> std::result::Result<crate::server_msg::Message<'_>, Self::Error> {
         super::streaming_read(&mut self.stream, &mut self.buffer, &mut self.recv_staging).await
     }

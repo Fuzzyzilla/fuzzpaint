@@ -142,7 +142,7 @@ mod test {
         let (client, server) = rt.block_on(async { tokio::join!(client(addr), serve(server)) });
         return client.and(server);
 
-        async fn serve(server: server::Server) -> Result<()> {
+        async fn serve(mut server: server::Server) -> Result<()> {
             let mut client = server.wait_client().await?;
 
             client

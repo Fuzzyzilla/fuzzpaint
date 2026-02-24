@@ -69,7 +69,9 @@ impl crate::server::Connection for Server {
                 .allows_incoming
                 .load(std::sync::atomic::Ordering::Relaxed)
     }
-    async fn wait_client(&self) -> Result<Self::Client> {
+    /// This function is *not* cancel safe. Cancelling the future may result in
+    /// losing pending connections.
+    async fn wait_client(&mut self) -> Result<Self::Client> {
         if self.oneshot && !self.allows_incoming() {
             return Err(Error::new(ErrorKind::NotConnected, ONESHOT_ERROR));
         }
@@ -119,6 +121,7 @@ pub struct Client {
 }
 impl crate::server::ClientConnection for Client {
     type Error = Error;
+    /// Cancel-safe.
     async fn send(
         &mut self,
         message: &crate::server_msg::Message<'_>,
@@ -132,12 +135,14 @@ impl crate::server::ClientConnection for Client {
         .await?;
         Ok(self)
     }
+    /// Cancel-safe.
     async fn flush(&mut self) -> std::result::Result<&mut Self, Self::Error> {
         self.stream.write_all(&self.send_staging).await?;
         self.send_staging.clear();
         self.stream.flush().await?;
         Ok(self)
     }
+    /// Cancel-safe.
     async fn recv(&mut self) -> std::result::Result<crate::client_msg::Message<'_>, Self::Error> {
         super::streaming_read(&mut self.stream, &mut self.buffer, &mut self.recv_staging).await
     }

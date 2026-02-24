@@ -14,7 +14,7 @@ log = "0.4.29"
 tokio = { version = "1.49.0", optional = true }
 
 [features]
-default = ["client", "server", "tcp"]
+default = ["client", "server", "tcp", "channel"]
 client = []
 server = []
 
@@ -22,7 +22,7 @@ server = []
 tcp = ["dep:tokio", "tokio/net", "tokio/io-util"]
 
 # A channel-based connection for a server and client within the same process.
-# inprocess = ["dep:tokio", "tokio/sync"]
+channel = ["dep:tokio", "tokio/sync"]
 
 # An interprocess-channel-based connection, using unidirectional shared mem to
 # share blobs in an insulated manner.

@@ -6,7 +6,7 @@ pub trait Connection {
     /// client connection. Returned value may be immediately out of date if
     /// connections are occuring on other threads.
     fn allows_incoming(&self) -> bool;
-    async fn wait_client(&self) -> Result<Self::Client, Self::Error>;
+    async fn wait_client(&mut self) -> Result<Self::Client, Self::Error>;
 }
 pub trait ClientConnection {
     type Error;
