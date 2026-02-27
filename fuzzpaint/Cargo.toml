@@ -59,6 +59,7 @@ png = "0.18.0"
 # For low-level vulkan crimes, use the same version as vulkano.
 ash = "^0.37.3"
 oneshot = "0.1.11"
+futures-util = "0.3.32"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.6.1", optional = true, default-features = false }

@@ -32,6 +32,17 @@ const PIN_ICON: char = '📌';
 const ALPHA_ICON: &str = "α";
 const RESET_ICON: &str = "⟲";
 
+struct Main {
+    executor: tokio::runtime::Runtime,
+    connections: Vec<fuzzpaint_connection::tcp::client::Client>,
+    on_recv: tokio::sync::Notify,
+}
+impl Main {
+    async fn wait_recv(&mut self) {
+        self.on_recv.notified().await;
+    }
+}
+
 /// Justify `(available_size, size, margin)` -> `(size', margin')`, such that `count` elements
 /// will fill available space completely.
 ///
@@ -215,7 +226,11 @@ impl MainUI {
     /// Main UI and any modals, with the top bar, layers, brushes, color, etc. To be displayed in front of the document and it's gizmos.
     /// Returns the size of the document's viewport space - that is, the size of the rect not covered by any side/top/bottom panels.
     /// None if a full-screen menu is shown.
-    pub fn ui(&mut self, ctx: &egui::Context) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        connections: &mut crate::connections::ConnectionsLock,
+    ) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
         // Close modal, on top of everything.
         if self.modal_enable() {
             self.do_close_modal(ctx);
@@ -225,7 +240,36 @@ impl MainUI {
         self.do_modal(ctx, !self.modal_enable());
 
         // Show, but disable if modal exists.
-        self.main_ui(ctx, !self.background_enable())
+        let res = self.main_ui(ctx, !self.background_enable());
+
+        for (id, mut connection) in connections.iter_connections() {
+            egui::Window::new(format!("{id:?}")).show(ctx, |ui| {
+                egui::TopBottomPanel::bottom(ui.id().with("text-input")).show_inside(ui, |ui| {
+                    latch::latch(ui, "text", String::new(), |ui, string| {
+                        let response = ui.text_edit_singleline(string);
+                        if response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            // Entered, return the text.
+                            latch::Latch::Finish
+                        } else if string.is_empty() {
+                            // Nothing to store
+                            latch::Latch::None
+                        } else {
+                            // Retain typing progress
+                            latch::Latch::Continue
+                        }
+                    })
+                    .on_finish(|string| connection.message(&string));
+                });
+                egui::Grid::new("text").num_columns(1).show(ui, |ui| {
+                    for message in connection.messages() {
+                        ui.label(message);
+                        ui.end_row();
+                    }
+                });
+            });
+        }
+
+        res
     }
     fn get_cur_interface(&mut self) -> Option<&mut PerDocumentData> {
         // Get the document's interface, or reset to none if not found.
@@ -418,6 +462,14 @@ impl MainUI {
                 ui.disable();
             }
             self.menu_bar(ui);
+            ui.painter().add(egui::PaintCallback {
+                rect: egui::Rect::ZERO,
+                callback: std::sync::Arc::new(crate::egui_impl::Callback {
+                    kind: crate::egui_impl::CallbackKind::DocumentView {
+                        dummy_color: [1, 2, 3, 4],
+                    },
+                }),
+            })
         });
 
         if self.cur_document.is_none() {

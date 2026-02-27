@@ -119,6 +119,13 @@ pub struct Client {
     recv_staging: Vec<u8>,
     send_staging: Vec<u8>,
 }
+impl Client {
+    /// Push a message to be sent on the next call to [`Connection::send`]
+    pub fn defer_send(&mut self, message: &crate::server_msg::Message<'_>) -> Result<&mut Self> {
+        super::encode_append(&mut self.buffer, &mut self.send_staging, message)?;
+        Ok(self)
+    }
+}
 impl crate::server::ClientConnection for Client {
     type Error = Error;
     /// Cancel-safe.

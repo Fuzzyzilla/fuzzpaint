@@ -94,8 +94,7 @@ async fn streaming_read<'a, T: bitcode::Decode<'a>>(
         .decode(data)
         .map_err(|e| Error::new(ErrorKind::InvalidData, e))
 }
-async fn streaming_write<T: bitcode::Encode>(
-    mut stream: impl tokio::io::AsyncWriteExt + Unpin,
+fn encode_append<T: bitcode::Encode>(
     buffer: &mut bitcode::Buffer,
     staging: &mut Vec<u8>,
     t: &T,
@@ -111,6 +110,17 @@ async fn streaming_write<T: bitcode::Encode>(
         .map_err(|_| Error::new(ErrorKind::InvalidData, "message too long"))?;
     staging.extend_from_slice(&len.to_le_bytes());
     staging.extend_from_slice(bytes);
+
+    Ok(())
+}
+async fn streaming_write<T: bitcode::Encode>(
+    mut stream: impl tokio::io::AsyncWriteExt + Unpin,
+    buffer: &mut bitcode::Buffer,
+    staging: &mut Vec<u8>,
+    t: &T,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    encode_append(buffer, staging, t)?;
 
     // Send as much as we can, buffer the rest for later.
     let sent = stream.write(staging).await?;

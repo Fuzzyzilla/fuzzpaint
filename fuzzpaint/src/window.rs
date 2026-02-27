@@ -3,7 +3,8 @@ use crate::egui_impl;
 use crate::render_device;
 use crate::vulkano_prelude::*;
 
-type UserEvent = std::convert::Infallible;
+struct RemoteChanged();
+type UserEvent = RemoteChanged;
 
 use std::sync::{Arc, Weak};
 
@@ -19,7 +20,7 @@ pub struct Application {
     pre_setup_loop: Option<winit::event_loop::EventLoop<UserEvent>>,
     // Objects that depend on a window, including the window itself.
     window_objects: State<WindowObjects>,
-    connections: Vec<fuzzpaint_connection::tcp::client::Client>,
+    connections: crate::connections::ClientConnectionsManager,
     render_context: Arc<render_device::RenderContext>,
     // Channel that will be notified when the renderer is made, once the window
     // is ready.
@@ -28,25 +29,42 @@ pub struct Application {
 }
 impl Application {
     pub fn new() -> AnyResult<Self> {
+        impl crate::connections::Waker for winit::event_loop::EventLoopProxy<UserEvent> {
+            fn wake(&self, which: crate::connections::ConnectionID) {
+                self.send_event(RemoteChanged());
+            }
+        }
+        // This is needed to coerce T: Trait -> Box<dyn Trait>. For some reason
+        // `as` unsizing syntax breaks, it's genuinely haunted.
+        fn unsize_waker<T: crate::connections::Waker + Send + 'static>(
+            t: T,
+        ) -> Box<dyn crate::connections::Waker + Send> {
+            Box::new(t)
+        }
+
         let pre_setup_loop =
             winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
         let render_context = render_device::RenderContext::new_with_display(Some(&pre_setup_loop))?;
         let (send, recv) = oneshot::channel();
 
+        let connections = crate::connections::ClientConnectionsManager::spawn(unsize_waker(
+            pre_setup_loop.create_proxy(),
+        ))?;
+
         Ok(Self {
             pre_setup_loop: Some(pre_setup_loop),
             window_objects: State::Deferred,
-            connections: Vec::new(),
+            connections,
             render_context,
             renderer_sender: Some(send),
             renderer_reciever: Some(recv),
         })
     }
+    pub fn connections(&mut self) -> &mut crate::connections::ClientConnectionsManager {
+        &mut self.connections
+    }
     pub fn render_context(&self) -> &Arc<render_device::RenderContext> {
         &self.render_context
-    }
-    pub fn add_connection(&mut self, client: fuzzpaint_connection::tcp::client::Client) {
-        self.connections.push(client);
     }
     /// Take a channel that will recieve the rendering context, once it is created.
     pub fn take_renderer_reciever(&mut self) -> Option<oneshot::Receiver<Receivers>> {
@@ -89,28 +107,40 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
     }
     fn window_event(
         &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
         _window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
         let State::Extant(window_objects) = &mut self.window_objects else {
             return;
         };
-        window_objects.window_event(event_loop, event);
+        match event {
+            winit::event::WindowEvent::RedrawRequested => {
+                window_objects.redraw_requested(self.connections.lock())
+            }
+            event => window_objects.window_event(event),
+        }
     }
     fn device_event(
         &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
         device_id: winit::event::DeviceId,
         event: winit::event::DeviceEvent,
     ) {
         let State::Extant(window_objects) = &mut self.window_objects else {
             return;
         };
-        window_objects.device_event(event_loop, device_id, event);
+        window_objects.device_event(device_id, event);
     }
     fn user_event(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop, event: UserEvent) {
-        match event {}
+        let State::Extant(window_objects) = &mut self.window_objects else {
+            return;
+        };
+        match event {
+            // Must be called by the main thread for portability, hence the use
+            // of a user event.
+            RemoteChanged() => window_objects.win.request_redraw(),
+        }
     }
     fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let State::Extant(window_objects) = &mut self.window_objects else {
@@ -239,11 +269,7 @@ impl WindowObjects {
             }
         }
     }
-    pub fn window_event(
-        &mut self,
-        _vent_loop: &winit::event_loop::ActiveEventLoop,
-        event: winit::event::WindowEvent,
-    ) {
+    pub fn window_event(&mut self, event: winit::event::WindowEvent) {
         use winit::event::WindowEvent;
         let consumed = self
             .egui_ctx
@@ -282,24 +308,24 @@ impl WindowObjects {
                 }
             }
             WindowEvent::RedrawRequested => {
-                // run UI logics
-                if self.egui_ctx.take_wants_update() {
-                    self.do_ui();
-                }
-                // Overwrite the Egui provided cursor over the doc area.
-                self.apply_document_cursor();
-
-                // Render and present the updated UI
-                if let Err(e) = self.paint() {
-                    log::error!("{e:?}");
-                }
+                // Handled externally with a call to Self::redraw_requested
+                unreachable!()
             }
             _ => (),
         }
     }
+    pub fn redraw_requested(&mut self, connections: crate::connections::ConnectionsLock) {
+        self.do_ui(connections);
+        // Overwrite the Egui provided cursor over the doc area.
+        self.apply_document_cursor();
+
+        // Render and present the updated UI
+        if let Err(e) = self.paint() {
+            log::error!("{e:?}");
+        }
+    }
     pub fn device_event(
         &mut self,
-        _event_loop: &winit::event_loop::ActiveEventLoop,
         _device_id: winit::event::DeviceId,
         event: winit::event::DeviceEvent,
     ) {
@@ -322,6 +348,9 @@ impl WindowObjects {
             event_loop.exit();
             // No need to redraw.
             return;
+        }
+        if self.egui_ctx.take_wants_update() {
+            self.win.request_redraw();
         }
 
         let has_tablet_update = if let Some(tab_events) =
@@ -401,10 +430,12 @@ impl WindowObjects {
             std::time::Duration::from_millis(50),
         ));
     }
-    fn do_ui(&mut self) {
+    fn do_ui(&mut self, mut connections: crate::connections::ConnectionsLock) {
         let viewport = self
             .egui_ctx
-            .update(self.win.as_ref(), |ctx| self.ui.ui(ctx));
+            .update(self.win.as_ref(), |ctx| self.ui.ui(ctx, &mut connections));
+        // Drop the lock ASAP.
+        drop(connections);
 
         // Todo: only change if... actually changed :P
         if let Some(viewport) = viewport {

@@ -8,6 +8,7 @@
 #![allow(clippy::too_many_lines)]
 
 use std::sync::Arc;
+pub mod connections;
 mod egui_impl;
 pub mod renderer;
 pub mod vulkano_prelude;
@@ -17,6 +18,7 @@ pub mod actions;
 pub mod document_viewport_proxy;
 pub mod gizmos;
 pub mod global;
+pub mod my_futures;
 pub mod pen_tools;
 pub mod picker;
 pub mod render_device;
@@ -126,21 +128,13 @@ enum InitialConnectionType {
 }
 
 fn client(connection: InitialConnection) -> AnyResult<()> {
-    let executor = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()?;
-    // Tokio globals *weeps*
-    let _guard = executor.enter();
-    let client = match connection.ty {
-        InitialConnectionType::Tcp(addr) => {
-            println!("attempting connection to {addr}");
-            let client = fuzzpaint_connection::tcp::client::Client::connect(addr);
-            executor.block_on(client)?
-        }
-    };
-
     let mut application = window::Application::new()?;
-    application.add_connection(client);
+    match connection.ty {
+        InitialConnectionType::Tcp(addr) => {
+            application.connections().connect_tcp(addr);
+        }
+    }
+
     let recievers = application.take_renderer_reciever().unwrap();
     let render_context = application.render_context().clone();
 
@@ -193,7 +187,10 @@ fn client(connection: InitialConnection) -> AnyResult<()> {
     application.run()
 }
 fn server() -> AnyResult<()> {
-    use fuzzpaint_connection::server::{ClientConnection, Connection};
+    use fuzzpaint_connection::{
+        server::{ClientConnection, Connection},
+        tcp::server::Client,
+    };
     let executor = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()?;
@@ -203,7 +200,7 @@ fn server() -> AnyResult<()> {
         .allow_loopback_nodelay(true)
         .oneshot(true)
         .bind_local();
-    let server = executor.block_on(server)?;
+    let mut server = executor.block_on(server)?;
     let addr = server.local_addr()?;
 
     // Crappy cross-platform `fork()`
@@ -213,40 +210,76 @@ fn server() -> AnyResult<()> {
         .arg(format!("{addr}"))
         .spawn()?;
 
-    executor.block_on(async {
-        let mut t_try = async move || -> AnyResult<()> {
-            let mut client = server.wait_client().await?;
-            let mut msg_loop = async move || -> AnyResult<()> {
-                loop {
-                    let msg = client.recv().await?;
-                    match msg {
-                        fuzzpaint_connection::client_msg::Message::ClientMessage(msg) => {
-                            let message = msg.message.to_owned();
-                            client
-                            .send(&fuzzpaint_connection::server_msg::Message {
-                                last_processed: (),
-                                message:
-                                    fuzzpaint_connection::server_msg::MessageKind::ServerMessage(
-                                        fuzzpaint_connection::server_msg::ServerMessage {
-                                            user_id: Some(()),
-                                            message: &message,
-                                        },
-                                    ),
-                            })
-                            .await?;
-                        }
+    let (new_connections, mut recv_new_connections) = tokio::sync::mpsc::channel(1);
+
+    let new_client_loop = async {
+        loop {
+            match server.wait_client().await {
+                Ok(client) => {
+                    if new_connections.send(client).await.is_err() {
+                        break Ok(());
                     }
                 }
-            };
-            // this is effectively "kill the loop when the child closes" lol.
-            tokio::select! {
-                _ = msg_loop() => (),
-                _ = child.wait() => (),
+                Err(e) => break Err(e),
             }
-            Ok(())
-        };
-        t_try().await
-    })
+        }
+    };
+    let client_poll = async {
+        use fuzzpaint_connection::{client_msg, server_msg};
+        let mut clients = Vec::<Client>::new();
+        let mut messages = Vec::new();
+        loop {
+            let await_new_client = recv_new_connections.recv();
+            let mut new_client = None;
+            let recv_any = clients
+                .iter_mut()
+                .map(|client| async { client.recv().await.expect("todo") })
+                .collect::<Vec<_>>();
+            let recv_any = my_futures::race(recv_any);
+            tokio::select! {
+                biased;
+                Some(message) = recv_any => {
+                    match message {
+                        client_msg::Message::ClientMessage(client_msg::ClientMessage{message}) => messages.push(message.to_owned()),
+                    }
+                },
+                // If returns None, this branch is decarded and does not
+                // participate in the selection.
+                Some(client) = await_new_client => {
+                    new_client = Some(client);
+                }
+            }
+            if let Some(new_client) = new_client {
+                clients.push(new_client);
+            }
+            if !messages.is_empty() {
+                for message in messages.drain(..) {
+                    let message = server_msg::Message {
+                        last_processed: (),
+                        message: server_msg::MessageKind::ServerMessage(
+                            server_msg::ServerMessage {
+                                user_id: Some(()),
+                                message: &message,
+                            },
+                        ),
+                    };
+                    for client in &mut clients {
+                        client.defer_send(&message).unwrap();
+                    }
+                }
+                futures_util::future::join_all(
+                    clients
+                        .iter_mut()
+                        .map(|client| async { client.flush().await.expect("todo") }),
+                )
+                .await;
+            }
+        }
+    };
+    let res = executor.block_on(async {
+        tokio::join! {biased; new_client_loop, client_poll}
+    });
+    res.0.map_err(Into::into)
 }
 
 fn main() -> AnyResult<()> {

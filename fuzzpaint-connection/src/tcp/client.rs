@@ -33,6 +33,11 @@ impl Client {
             buffer: bitcode::Buffer::new(),
         })
     }
+    /// Push a message to be sent on the next call to [`Connection::send`]
+    pub fn defer_send(&mut self, message: &crate::client_msg::Message<'_>) -> Result<&mut Self> {
+        super::encode_append(&mut self.buffer, &mut self.send_staging, message)?;
+        Ok(self)
+    }
 }
 impl crate::client::Connection for Client {
     type Error = Error;

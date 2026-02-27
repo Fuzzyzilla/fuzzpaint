@@ -4,6 +4,13 @@ use std::sync::Arc;
 
 use egui_winit::{egui, winit};
 
+pub struct Callback {
+    pub kind: CallbackKind,
+}
+pub enum CallbackKind {
+    DocumentView { dummy_color: [u8; 4] },
+}
+
 /// Merge the textures data from one egui output into another. Useful for discarding Egui geomety
 /// while maintaining its side-effects.
 pub fn prepend_textures_delta(into: &mut egui::TexturesDelta, mut from: egui::TexturesDelta) {
@@ -450,9 +457,16 @@ impl Render {
                     vert_buff_size += mesh.vertices.len();
                     index_buff_size += mesh.indices.len();
                 }
-                egui::epaint::Primitive::Callback(..) => {
-                    //Todo. But I'm not sure I mind this feature being unimplemented :P
-                    unimplemented!("Primitive Callback is not supported.");
+                egui::epaint::Primitive::Callback(callback) => {
+                    let Some(callback) = callback.callback.downcast_ref::<Callback>() else {
+                        log::error!(
+                            "unknown callback type {}",
+                            std::any::type_name_of_val(callback.callback.as_ref())
+                        );
+                        continue;
+                    };
+                    let CallbackKind::DocumentView { dummy_color } = callback.kind;
+                    log::debug!("{dummy_color:?}");
                 }
             }
         }
