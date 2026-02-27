@@ -155,8 +155,7 @@ impl StrokeBuilder {
         self.current_archetype = Archetype::POSITION;
     }
     pub fn transform(&mut self, mat: &ultraviolet::Mat3) {
-        use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
-        self.position.par_iter_mut().for_each(|[x, y]| {
+        self.position.iter_mut().for_each(|[x, y]| {
             let xformed = *mat
                 * ultraviolet::Vec3 {
                     x: *x,
@@ -500,7 +499,7 @@ fn make_trail(
     size_factor: f32,
     color: Option<fuzzpaint_core::color::Color>,
 ) -> crate::gizmos::Gizmo {
-    use crate::gizmos::{transform::Transform, Gizmo, MeshMode, TextureMode, Visual};
+    use crate::gizmos::{Gizmo, MeshMode, TextureMode, Visual, transform::Transform};
 
     // Make trail:
     let mut points = Vec::with_capacity(stroke.len());

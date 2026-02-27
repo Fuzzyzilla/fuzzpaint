@@ -549,10 +549,10 @@ impl Engines {
             Which(B),
         }
         impl<
-                'a,
-                A: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
-                B: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
-            > Iterator for EitherIter<'a, A, B>
+            'a,
+            A: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
+            B: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
+        > Iterator for EitherIter<'a, A, B>
         {
             type Item = &'a state::stroke_collection::ImmutableStroke;
             fn next(&mut self) -> Option<Self::Item> {
@@ -674,16 +674,13 @@ impl Engines {
                     outer_transform,
                     ..
                 }) => {
-                    let data =
-                        document_data
-                            .graph_render_data
-                            .leaves
-                            .get(&id)
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
+                    let data = document_data.graph_render_data.leaves.get(&id).ok_or_else(
+                        || {
+                            anyhow::anyhow!(
                                 "Expected image to be created by allocate_prune_graph for {id:?}"
                             )
-                            })?;
+                        },
+                    )?;
                     let strokes =
                         reader
                             .stroke_collections()
@@ -706,16 +703,13 @@ impl Engines {
                 Some(LeafType::Text {
                     text, px_per_em, ..
                 }) => {
-                    let data =
-                        document_data
-                            .graph_render_data
-                            .leaves
-                            .get(&id)
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
+                    let data = document_data.graph_render_data.leaves.get(&id).ok_or_else(
+                        || {
+                            anyhow::anyhow!(
                                 "Expected image to be created by allocate_prune_graph for {id:?}"
                             )
-                            })?;
+                        },
+                    )?;
                     fences.push(self.text_layer(text, *px_per_em, data)?);
                 }
                 // No rendering or lazily rendered.
@@ -891,62 +885,35 @@ async fn render_changes(
     renderer: Arc<crate::render_device::RenderContext>,
     document_preview: Arc<crate::document_viewport_proxy::Proxy>,
 ) -> anyhow::Result<()> {
-    // Sync -> Async bridge for change notification. Bleh..
-    let (send, mut changes_recv) = tokio::sync::mpsc::unbounded_channel();
-    let exit_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let exit_flag_move = exit_flag.clone();
-    let _thread = std::thread::spawn(move || {
-        let mut change_listener = crate::global::provider().change_listener();
-        loop {
-            // Parent requested child exit.
-            if exit_flag_move.load(std::sync::atomic::Ordering::Relaxed) {
-                return;
-            }
-            // Poll every so often, so an assertion of the exit flag is not missed.
-            match change_listener.recv_timeout(std::time::Duration::from_millis(250)) {
-                Ok(change) => {
-                    // Got a change. Broadcast this one (and all others that are ready now)
-                    if send.send(change.id()).is_err() {
-                        // Disconnected!
-                        return;
-                    }
-                    while let Ok(change) = change_listener.try_recv() {
-                        if send.send(change.id()).is_err() {
-                            // Disconnected!
-                            return;
-                        }
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-            }
-        }
-    });
-    // Drop order - this will run before thread is joined, otherwise deadlock occurs!
-    defer::defer!(exit_flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    let mut change_listener = crate::global::provider().change_listener();
 
     let mut changes: Vec<_> = crate::global::provider().document_iter().collect();
     let mut renderer = Renderer::new(renderer)?;
 
     loop {
-        let changes = async {
-            // Already has some! Report immediately.
-            if !changes.is_empty() {
-                return Some(&mut changes);
+        if changes.is_empty() {
+            match change_listener.recv().await {
+                Ok(change) => {
+                    changes.push(change.id());
+                    while let Ok(change) = change_listener.try_recv() {
+                        changes.push(change.id());
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // We lost a change!
+                    // Clear out all messages
+                    while change_listener.try_recv().is_ok() {}
+                    // Mark all as changed.
+                    changes.clear();
+                    // Important to do this *after* draining the
+                    // change_listener, otherwise there's a logical race (new
+                    // doc could be added between this extend and the channel
+                    // drain)
+                    changes.extend(crate::global::provider().document_iter());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
             }
-            let first = changes_recv.recv().await?;
-            changes.push(first);
-            // Collect all others that are available without blocking as well:
-            while let Ok(next) = changes_recv.try_recv() {
-                changes.push(next);
-            }
-            Some(&mut changes)
-        };
-
-        let Some(changes) = changes.await else {
-            // Channel closed
-            return Ok(());
-        };
+        }
         // Implicitly handles deletion - when the renderer goes to fetch changes,
         // it will see that the document has closed.
         //renderer.render(&changed)?;

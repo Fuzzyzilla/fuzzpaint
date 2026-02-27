@@ -31,7 +31,6 @@ log = "0.4.29"
 lyon_tessellation = "1.0.16"
 octotablet = "0.1.0"
 parking_lot = "0.12.5"
-rayon = "1.11.0"
 rfd = "0.16.0"
 rustybuzz = "0.20.1"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
@@ -53,7 +52,6 @@ vulkano-shaders = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vul
 # Can't inherit from egui_winit since it doesn't enable serde feature.
 # Also need legacy RWH version for `vulkano` + new version for `octotablet`
 winit = { version = "0.30.12", features = ["serde", "rwh_05", "rwh_06"] }
-bus = "2.4.1"
 strum = { version = "0.27.2", features = ["derive"] }
 png = "0.18.0"
 # For low-level vulkan crimes, use the same version as vulkano.
