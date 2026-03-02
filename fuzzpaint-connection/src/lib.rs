@@ -131,12 +131,34 @@ pub mod server_msg {
 
     #[cfg_attr(feature = "server", derive(bitcode::Encode))]
     #[cfg_attr(feature = "client", derive(bitcode::Decode))]
-    enum LogLevel {
+    pub enum LogLevel {
         Warn,
         Error,
         Info,
         Debug,
         Trace,
+    }
+    impl From<log::Level> for LogLevel {
+        fn from(value: log::Level) -> Self {
+            match value {
+                log::Level::Debug => Self::Debug,
+                log::Level::Error => Self::Error,
+                log::Level::Info => Self::Info,
+                log::Level::Trace => Self::Trace,
+                log::Level::Warn => Self::Warn,
+            }
+        }
+    }
+    impl From<LogLevel> for log::Level {
+        fn from(value: LogLevel) -> Self {
+            match value {
+                LogLevel::Debug => Self::Debug,
+                LogLevel::Error => Self::Error,
+                LogLevel::Info => Self::Info,
+                LogLevel::Trace => Self::Trace,
+                LogLevel::Warn => Self::Warn,
+            }
+        }
     }
     #[cfg_attr(feature = "server", derive(bitcode::Encode))]
     #[cfg_attr(feature = "client", derive(bitcode::Decode))]

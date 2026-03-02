@@ -228,7 +228,30 @@ fn server() -> AnyResult<()> {
         use fuzzpaint_connection::{client_msg, server_msg};
         let mut clients = Vec::<Client>::new();
         let mut messages = Vec::new();
+
+        async fn broadcast(
+            clients: &mut Vec<Client>,
+            message: &server_msg::Message<'_>,
+        ) -> std::io::Result<()> {
+            if clients.is_empty() {
+                return Ok(());
+            }
+            let results = futures_util::future::join_all(
+                clients.iter_mut().map(|client| client.send(message)),
+            )
+            .await;
+            for result in results {
+                if let Err(e) = result {
+                    return Err(e);
+                }
+            }
+            Ok(())
+        }
+
         loop {
+            if child.try_wait().is_ok() {
+                return;
+            }
             let await_new_client = recv_new_connections.recv();
             let mut new_client = None;
             let recv_any = clients
@@ -282,22 +305,41 @@ fn server() -> AnyResult<()> {
     res.0.map_err(Into::into)
 }
 
-fn main() -> AnyResult<()> {
-    let has_term = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let default_log_level = if cfg!(debug_assertions) {
-        log::LevelFilter::Debug
-    } else {
-        log::LevelFilter::Info
-    };
-    // Log to a terminal, if available. Else, log to "log.out" in the working directory.
-    if has_term {
-        env_logger::Builder::new()
-            .filter_level(default_log_level)
-            .parse_default_env()
-            .init();
-    } else {
-        let _ = simple_logging::log_to_file("log.out", default_log_level);
+fn log_collector() -> &'static fuzzpaint_logger::CollectLogger {
+    static LOGGER: std::sync::OnceLock<&fuzzpaint_logger::CollectLogger> =
+        std::sync::OnceLock::new();
+    #[cold]
+    fn init() -> &'static fuzzpaint_logger::CollectLogger {
+        let (base_logger, level) = {
+            let default_log_level = if cfg!(debug_assertions) {
+                log::LevelFilter::Debug
+            } else {
+                log::LevelFilter::Info
+            };
+
+            // Log to a terminal.
+            let logger = env_logger::Builder::new()
+                .filter_level(default_log_level)
+                .parse_default_env()
+                .build();
+            let level = logger.filter();
+            let logger = Box::leak(Box::new(logger)) as &dyn log::Log;
+            (logger, level)
+        };
+        // But also collect the logs to a vec.
+        fuzzpaint_logger::CollectLogger::new()
+            .with_tee(base_logger)
+            .with_level(level)
+            .install()
+            .unwrap()
     }
+    LOGGER.get_or_init(init)
+}
+
+fn main() -> AnyResult<()> {
+    // Install logger
+    let _ = log_collector();
+
     #[cfg(feature = "dhat_heap")]
     let _profiler = {
         log::trace!("Installed dhat");

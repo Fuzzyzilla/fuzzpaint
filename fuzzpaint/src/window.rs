@@ -5,6 +5,11 @@ use crate::vulkano_prelude::*;
 
 struct RemoteChanged();
 type UserEvent = RemoteChanged;
+impl crate::connections::Waker for winit::event_loop::EventLoopProxy<UserEvent> {
+    fn wake(&mut self, _which: crate::connections::ConnectionID) {
+        let _ = self.send_event(RemoteChanged());
+    }
+}
 
 use std::sync::{Arc, Weak};
 
@@ -29,25 +34,12 @@ pub struct Application {
 }
 impl Application {
     pub fn new() -> AnyResult<Self> {
-        impl crate::connections::Waker for winit::event_loop::EventLoopProxy<UserEvent> {
-            fn wake(&self, which: crate::connections::ConnectionID) {
-                self.send_event(RemoteChanged());
-            }
-        }
-        // This is needed to coerce T: Trait -> Box<dyn Trait>. For some reason
-        // `as` unsizing syntax breaks, it's genuinely haunted.
-        fn unsize_waker<T: crate::connections::Waker + Send + 'static>(
-            t: T,
-        ) -> Box<dyn crate::connections::Waker + Send> {
-            Box::new(t)
-        }
-
         let pre_setup_loop =
             winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
         let render_context = render_device::RenderContext::new_with_display(Some(&pre_setup_loop))?;
         let (send, recv) = oneshot::channel();
 
-        let connections = crate::connections::ClientConnectionsManager::spawn(unsize_waker(
+        let connections = crate::connections::ClientConnectionsManager::spawn(Box::new(
             pre_setup_loop.create_proxy(),
         ))?;
 

@@ -1,9 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "fuzzpaint", "fuzzpaint-collections", "fuzzpaint-connection",
-    "fuzzpaint-core"
-, "fuzzpaint-io", "fuzzpaint-render", "fuzzpaint-types", "fuzzpaint-ui"]
+    "fuzzpaint",
+    "fuzzpaint-collections",
+    "fuzzpaint-connection",
+    "fuzzpaint-core",
+    "fuzzpaint-io",
+    "fuzzpaint-logger",
+    "fuzzpaint-render",
+    "fuzzpaint-types",
+    "fuzzpaint-ui",
+]
 
 [profile.profiling]
 inherits = "release"

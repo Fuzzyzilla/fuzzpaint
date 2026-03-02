@@ -424,10 +424,9 @@ impl RenderContext {
                     | vkDebug::DebugUtilsMessageType::PERFORMANCE
                     | vkDebug::DebugUtilsMessageType::VALIDATION,
                 ..vkDebug::DebugUtilsMessengerCreateInfo::user_callback(
-                    // SAFETY: the closure must not access vulkan API in any way.
-                    // Not a problem, as it simply logs to console or file, depending on log target.
-                    // In the future when this prints to an internal log however, I must keep
-                    // this in mind!
+                    // SAFETY: the closure must not access vulkan API in any
+                    // way. Trivially true, see the implementation of
+                    // `fuzzpaint_logger`
                     unsafe {
                         vulkano::instance::debug::DebugUtilsMessengerCallback::new(
                             |severity, ty, data| {

@@ -1,6 +1,33 @@
+pub enum LogScope {
+    /// A message from the remote server.
+    /// # Warning
+    /// It is important to make it clear to the user that this is an UNTRUSTED,
+    /// ARBITRARY MESSAGE FROM THE REMOTE!
+    Remote(ConnectionID),
+    /// A message about the status of this connection.
+    Regarding(ConnectionID),
+    /// A message from the connections thread itself, not regarding any extant
+    /// connection.
+    Internal,
+}
+
 pub trait Waker: Sync {
     /// This should not block.
-    fn wake(&self, which: ConnectionID);
+    fn wake(&mut self, which: ConnectionID);
+    /// Recieve a log message from the connections daemon. See [`LogScope`] for
+    /// the different kinds of messages. Default implementation forwards
+    /// messages to the delivering thread's [`log::log!`].
+    /// # Warning
+    /// Beware the handling of [`LogScope::Remote`], see its docs for details.
+    fn log(&mut self, scope: LogScope, level: log::Level, msg: &str) {
+        match scope {
+            LogScope::Internal => log::log!(level, "{msg}"),
+            LogScope::Regarding(re) => log::log!(level, "[regarding {re:?}] {msg}"),
+            // Use Dbg formatting for string to escape newlines (which can be
+            // used maliciously). I wont pretend this is fool-proof.
+            LogScope::Remote(re) => log::log!(level, "[untrusted message from {re:?}] {msg:?}"),
+        }
+    }
 }
 
 mod inner {
@@ -8,6 +35,7 @@ mod inner {
     use fuzzpaint_connection::{client::Connection, tcp::client};
 
     pub struct Client {
+        pub name: String,
         conn: client::Client,
         needs_flush: bool,
         pub messages: Vec<String>,
@@ -33,12 +61,12 @@ mod inner {
         pub clients: tokio::sync::Mutex<Vec<Client>>,
         // Acts semaphore with only one permit, but between async and sync contexts.
         pub exclusion: tokio::sync::Mutex<()>,
-        pub on_recv: Box<dyn Waker + Send>,
     }
     impl Inner {
         pub fn daemon(
             &self,
             mut requests: tokio::sync::mpsc::UnboundedReceiver<Request>,
+            mut waker: Box<dyn Waker + Send>,
         ) -> anyhow::Result<()> {
             let rt = {
                 let mut builder = tokio::runtime::Builder::new_current_thread();
@@ -62,11 +90,16 @@ mod inner {
                             Request::ConnectTcp(addr) => {
                                 match client::Client::connect(addr).await {
                                     Ok(client) => lock.push(Client {
+                                        name: format!("{addr}"),
                                         conn: client,
                                         messages: Vec::new(),
                                         needs_flush: false,
                                     }),
-                                    Err(e) => log::error!("failed to connect to {addr}: {e}"),
+                                    Err(e) => waker.log(
+                                        crate::connections::LogScope::Internal,
+                                        log::Level::Error,
+                                        &format!("failed to connect to {addr}: {e}"),
+                                    ),
                                 }
                             }
                         }
@@ -111,7 +144,7 @@ mod inner {
                     tokio::select! {
                         biased;
                         Some(()) = race => {
-                            self.on_recv.wake(crate::connections::ConnectionID(0));
+                            waker.wake(crate::connections::ConnectionID(0));
                         },
                         _ = request => (),
                     };
@@ -135,13 +168,12 @@ impl ClientConnectionsManager {
         let inner = std::sync::Arc::new(Inner {
             clients: Vec::new().into(),
             exclusion: ().into(),
-            on_recv,
         });
         let daemon = {
             let inner = inner.clone();
             std::thread::Builder::new()
                 .name("connection-poller".to_owned())
-                .spawn(move || inner.daemon(recv))?
+                .spawn(move || inner.daemon(recv, on_recv))?
         };
 
         Ok(Self {
@@ -192,6 +224,9 @@ impl ConnectionsLock<'_> {
     }
 }
 impl ConnectionLock<'_> {
+    pub fn name(&self) -> &str {
+        &self.client.name
+    }
     pub fn message<'m>(&'_ mut self, message: &'m str) -> std::io::Result<&'_ mut Self> {
         self.client
             .defer_send(&fuzzpaint_connection::client_msg::Message::ClientMessage(

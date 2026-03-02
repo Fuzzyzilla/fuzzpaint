@@ -1,6 +1,7 @@
 mod brush_ui;
 mod color_palette;
 mod drag;
+mod error_display;
 mod modal;
 pub mod requests;
 mod settings;
@@ -154,6 +155,8 @@ pub struct MainUI {
     requests_send: crossbeam::channel::Sender<requests::UiRequest>,
     requests_recv: crossbeam::channel::Receiver<requests::UiRequest>,
     action_listener: crate::actions::ActionListener,
+
+    error_display: error_display::ErrorDisplay,
 }
 impl MainUI {
     #[must_use]
@@ -188,6 +191,8 @@ impl MainUI {
             requests_send,
             requests_recv,
             action_listener,
+
+            error_display: Default::default(),
         }
     }
     /// Marks that a close has been requested by the windower
@@ -242,12 +247,13 @@ impl MainUI {
         // Show, but disable if modal exists.
         let res = self.main_ui(ctx, !self.background_enable());
 
-        for (id, mut connection) in connections.iter_connections() {
-            egui::Window::new(format!("{id:?}")).show(ctx, |ui| {
+        for (_id, mut connection) in connections.iter_connections() {
+            egui::Window::new(connection.name()).show(ctx, |ui| {
                 egui::TopBottomPanel::bottom(ui.id().with("text-input")).show_inside(ui, |ui| {
                     latch::latch(ui, "text", String::new(), |ui, string| {
                         let response = ui.text_edit_singleline(string);
-                        if response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            response.request_focus();
                             // Entered, return the text.
                             latch::Latch::Finish
                         } else if string.is_empty() {
@@ -268,6 +274,8 @@ impl MainUI {
                 });
             });
         }
+
+        self.error_display.show(ctx, crate::log_collector());
 
         res
     }
