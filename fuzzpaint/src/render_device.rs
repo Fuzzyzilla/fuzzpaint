@@ -256,17 +256,9 @@ impl RenderSurface {
             ));
         };
 
-        //Use mailbox for low-latency, if supported. Otherwise, FIFO is always supported.
-        let present_mode = physical_device
-            .surface_present_modes(&surface, vulkano::swapchain::SurfaceInfo::default())
-            .map(|mut modes| {
-                if modes.any(|mode| mode == vk::PresentMode::Mailbox) {
-                    vk::PresentMode::Mailbox
-                } else {
-                    vk::PresentMode::Fifo
-                }
-            })
-            .unwrap_or(vk::PresentMode::Fifo);
+        // Use FIFO until we come up with a good solution for pacing MAILBOX.
+        // FIFO is *always* supported, so no need to query.
+        let present_mode = vk::PresentMode::Fifo;
 
         // Use the minimum - Only one frame will be rendered at once.
         let image_count = capabilies.min_image_count;

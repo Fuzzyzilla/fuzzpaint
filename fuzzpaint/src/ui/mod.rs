@@ -575,6 +575,7 @@ impl MainUI {
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
                 .on_hover_text("Baa");
+            ui.label(format!("{}", ui.ctx().cumulative_frame_nr()));
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     let add_button = |ui: &mut Ui, label, shortcut| -> egui::Response {

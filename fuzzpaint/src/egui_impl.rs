@@ -34,7 +34,7 @@ pub struct Ctx {
     redraw_this_frame: bool,
     redraw_next_frame: bool,
     full_output: Option<egui::FullOutput>,
-    repaint_times: std::collections::VecDeque<std::time::Instant>,
+    next_repaint: Option<std::time::Instant>,
 }
 impl Ctx {
     pub fn new(
@@ -62,7 +62,7 @@ impl Ctx {
             redraw_this_frame: false,
             redraw_next_frame: true,
             full_output: None,
-            repaint_times: std::collections::VecDeque::new(),
+            next_repaint: None,
         })
     }
     pub fn wants_pointer_input(&self) -> bool {
@@ -128,8 +128,11 @@ impl Ctx {
     }
     /// Peek the update flag without destroying it.
     pub fn peek_wants_update(&self) -> bool {
-        let now = &std::time::Instant::now();
-        self.redraw_this_frame || self.repaint_times.iter().any(|t| t <= now)
+        let now = std::time::Instant::now();
+        self.redraw_this_frame
+            || self
+                .next_repaint
+                .is_some_and(|next_repaint| now >= next_repaint)
     }
     /// Wants to re-draw the screen. Check this after you've checked [`Self::wants_update`] and updated accordingly, but repaints may
     /// be requested even if an update is not. Check this frequently, but note that querying this destroys the flag.
@@ -142,35 +145,23 @@ impl Ctx {
         // involved significant distress in order to discover:
         // * Re-running UI and re-rendering UI are *not* distinct events in egui and are referred to jointly as "repainting"
         // * a repaint delay of 0ms means "rerun ui logic again ASAP" (the most painful to figure out lmao)
-        self.redraw_this_frame || self.take_past_repaints().is_some()
+        self.take_past_repaints().is_some() || self.redraw_this_frame
     }
     /// Insert a repaint time into the queue.
     fn insert_repaint(&mut self, when: std::time::Instant) {
-        // Err means not found and gives where it *would* be.
-        // Ignore OK, a redraw is already scheduled, despite how unlikely that case would be :P
-        if let Err(idx) = self.repaint_times.binary_search(&when) {
-            self.repaint_times.insert(idx, when);
+        if let Some(next) = self.next_repaint.take() {
+            if when < next {
+                self.next_repaint = Some(when);
+            }
+        } else {
+            self.next_repaint = Some(when);
         }
     }
     /// Take from the repaint time queue. All past times will be popped, and the latest will
     /// be returned, or None if no repaint times have passed.
     fn take_past_repaints(&mut self) -> Option<std::time::Instant> {
         let now = std::time::Instant::now();
-        let first_in_future_idx = self.repaint_times.partition_point(|elem| elem <= &now);
-        if first_in_future_idx != 0 {
-            // Some are in the past!
-            let last = self
-                .repaint_times
-                .get(first_in_future_idx - 1)
-                .copied()
-                .unwrap();
-            // Delete all in the past
-            self.repaint_times.drain(..first_in_future_idx);
-            // Return the latest past time.
-            Some(last)
-        } else {
-            None
-        }
+        self.next_repaint.take_if(|next| now >= *next)
     }
     pub fn build_commands(
         &mut self,
