@@ -249,16 +249,18 @@ fn server() -> AnyResult<()> {
         }
 
         loop {
-            if child.try_wait().is_ok() {
+            if let Ok(Some(_)) | Err(_) = child.try_wait() {
                 return;
             }
-            let await_new_client = recv_new_connections.recv();
-            let mut new_client = None;
             let recv_any = clients
                 .iter_mut()
                 .map(|client| async { client.recv().await.expect("todo") })
                 .collect::<Vec<_>>();
+
             let recv_any = my_futures::race(recv_any);
+            let await_new_client = recv_new_connections.recv();
+            let mut new_client = None;
+
             tokio::select! {
                 biased;
                 Some(message) = recv_any => {

@@ -83,27 +83,7 @@ mod inner {
                     // Allows the controller thread to block the daemon at will.
                     drop(self.exclusion.lock().await);
                     let mut lock = self.clients.lock().await;
-                    while let Ok(request) = requests.try_recv() {
-                        match request {
-                            Request::Poke => (),
-                            Request::Exit => return Ok(()),
-                            Request::ConnectTcp(addr) => {
-                                match client::Client::connect(addr).await {
-                                    Ok(client) => lock.push(Client {
-                                        name: format!("{addr}"),
-                                        conn: client,
-                                        messages: Vec::new(),
-                                        needs_flush: false,
-                                    }),
-                                    Err(e) => waker.log(
-                                        crate::connections::LogScope::Internal,
-                                        log::Level::Error,
-                                        &format!("failed to connect to {addr}: {e}"),
-                                    ),
-                                }
-                            }
-                        }
-                    }
+
                     futures_util::future::join_all(lock.iter_mut().map(|client| async {
                         if client.needs_flush {
                             let res = client.conn.flush().await;
@@ -140,14 +120,45 @@ mod inner {
                             })
                             .collect::<Vec<_>>();
                     let race = crate::my_futures::race(fs);
-                    let request = requests.recv();
+                    let mut request = None;
                     tokio::select! {
                         biased;
+                        // Bias towards requests that way "Exit" is handled
+                        // eagerly.
+                        new_request = requests.recv() => {
+                            if let Some(new_request) = new_request {
+                                request = Some(new_request);
+                            } else {
+                                return Ok(());
+                            }
+                        },
+                        // Yields None if nothing to race. In that case, this
+                        // fails to match, and the arm is disqualified.
                         Some(()) = race => {
                             waker.wake(crate::connections::ConnectionID(0));
                         },
-                        _ = request => (),
                     };
+                    if let Some(request) = request {
+                        match request {
+                            Request::Poke => (),
+                            Request::Exit => return Ok(()),
+                            Request::ConnectTcp(addr) => {
+                                match client::Client::connect(addr).await {
+                                    Ok(client) => lock.push(Client {
+                                        name: format!("{addr}"),
+                                        conn: client,
+                                        messages: Vec::new(),
+                                        needs_flush: false,
+                                    }),
+                                    Err(e) => waker.log(
+                                        crate::connections::LogScope::Internal,
+                                        log::Level::Error,
+                                        &format!("failed to connect to {addr}: {e}"),
+                                    ),
+                                }
+                            }
+                        }
+                    }
                 }
             };
             rt.block_on(block)
