@@ -108,9 +108,17 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
         };
         match event {
             winit::event::WindowEvent::RedrawRequested => {
-                window_objects.redraw_requested(self.connections.lock())
+                window_objects.redraw_requested(self.connections.lock());
             }
-            event => window_objects.window_event(event),
+            event => {
+                let events = window_objects
+                    .pointer_bridge
+                    .push_winit(event)
+                    .collect::<Vec<_>>();
+                for event in events {
+                    window_objects.window_event(event);
+                }
+            }
         }
     }
     fn device_event(
@@ -164,6 +172,7 @@ pub struct WindowObjects {
     action_stream: crate::actions::ActionStream,
     // May be None on unsupported platforms.
     tablet_manager: Option<octotablet::Manager>,
+    pointer_bridge: crate::stylus_events::PointerBridge,
     stylus_events: crate::stylus_events::WinitStylusEventCollector,
     swapchain_generation: u32,
 
@@ -215,6 +224,7 @@ impl WindowObjects {
                 crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
             action_stream: stream,
             stylus_events: crate::stylus_events::WinitStylusEventCollector::default(),
+            pointer_bridge: crate::stylus_events::PointerBridge::default(),
         })
     }
     pub fn window(&self) -> Arc<winit::window::Window> {
@@ -350,17 +360,25 @@ impl WindowObjects {
         {
             let mut has_tablet_update = false;
             for event in tab_events {
+                let events = self
+                    .pointer_bridge
+                    .push_octotablet(event)
+                    .collect::<Vec<_>>();
+                for event in events {
+                    let _ = self.egui_ctx.push_winit_event(&self.win, &event);
+                }
+                if self.egui_ctx.context().wants_pointer_input() {
+                    continue;
+                }
                 if let octotablet::events::Event::Tool { event, tool } = event {
                     // If the event isn't emulated from some other device, send the event to winit_egui
                     // so that the stylus can be used to interact with the egui layers.
+                    /*
                     if !matches!(tool.tool_type, Some(octotablet::tool::Type::Emulated)) {
-                        // Safety: we must not pass the returned event deviceID into any winit functions.
-                        if let Some(winit_event) = unsafe {
-                            crate::stylus_events::winit_event_from_octotablet(
-                                &event,
-                                self.win.scale_factor(),
-                            )
-                        } {
+                        if let Some(winit_event) = crate::stylus_events::winit_event_from_octotablet(
+                            &event,
+                            self.win.scale_factor(),
+                        ) {
                             // Safety: Looking into the code of this, there is no path where the device ID is taken and given to winit.
                             // If that occurs, it's UB - MAKE SURE TO CHECK BEFORE UPDATING VERS ;3
                             // Last checked `egui-winit` version: 0.33.3
@@ -374,7 +392,7 @@ impl WindowObjects {
                                 continue;
                             }
                         }
-                    }
+                    }*/
 
                     // Wasn't consumed, forward it to the event stream for the tools to use.
                     match event {

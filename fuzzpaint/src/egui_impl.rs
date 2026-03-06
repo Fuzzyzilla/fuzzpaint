@@ -65,6 +65,9 @@ impl Ctx {
             next_repaint: None,
         })
     }
+    pub fn context(&self) -> &egui::Context {
+        self.state.egui_ctx()
+    }
     pub fn wants_pointer_input(&self) -> bool {
         self.state.egui_ctx().wants_pointer_input()
     }
