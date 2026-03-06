@@ -29,34 +29,70 @@ unsafe fn physical_device_display_support(
         winit::raw_window_handle_05::RawDisplayHandle::UiKit(_) => false,
         winit::raw_window_handle_05::RawDisplayHandle::AppKit(_) => false,
         winit::raw_window_handle_05::RawDisplayHandle::Orbital(_) => false,
+        #[cfg(feature = "x11")]
         winit::raw_window_handle_05::RawDisplayHandle::Xlib(xlib_display_handle)
             if instance.enabled_extensions().khr_xlib_surface
                 && !xlib_display_handle.display.is_null() =>
-        unsafe {
-            (instance
-                .fns()
-                .khr_xlib_surface
-                .get_physical_device_xlib_presentation_support_khr)(
-                phys,
-                queue_family_idx,
-                xlib_display_handle.display.cast(),
-                xlib_display_handle.screen.cast_unsigned(),
-            ) != 0
-        },
+        {
+            let t_try = || -> Option<bool> {
+                unsafe {
+                    use x11rb::connection::Connection;
+                    let xlib = x11_dl::xlib_xcb::Xlib_xcb::open().ok()?;
+                    let xcb = (xlib.XGetXCBConnection)(xlib_display_handle.display.cast());
+                    let xcb =
+                        x11rb::xcb_ffi::XCBConnection::from_raw_xcb_connection(xcb, false).ok()?;
+                    let visual = xcb
+                        .setup()
+                        .roots
+                        .get(usize::try_from(xlib_display_handle.screen).ok()?)?
+                        .root_visual;
+                    Some(
+                        (instance
+                            .fns()
+                            .khr_xlib_surface
+                            .get_physical_device_xlib_presentation_support_khr)(
+                            phys,
+                            queue_family_idx,
+                            xlib_display_handle.display.cast(),
+                            visual,
+                        ) != 0,
+                    )
+                }
+            };
+            t_try() == Some(true)
+        }
         winit::raw_window_handle_05::RawDisplayHandle::Xcb(xcb_display_handle)
             if instance.enabled_extensions().khr_xcb_surface
                 && !xcb_display_handle.connection.is_null() =>
-        unsafe {
-            (instance
-                .fns()
-                .khr_xcb_surface
-                .get_physical_device_xcb_presentation_support_khr)(
-                phys,
-                queue_family_idx,
-                xcb_display_handle.connection,
-                xcb_display_handle.screen.cast_unsigned(),
-            ) != 0
-        },
+        {
+            let t_try = || -> Option<bool> {
+                unsafe {
+                    use x11rb::connection::Connection;
+                    let xcb = x11rb::xcb_ffi::XCBConnection::from_raw_xcb_connection(
+                        xcb_display_handle.connection,
+                        false,
+                    )
+                    .ok()?;
+                    let visual = xcb
+                        .setup()
+                        .roots
+                        .get(usize::try_from(xcb_display_handle.screen).ok()?)?
+                        .root_visual;
+                    Some(
+                        (instance
+                            .fns()
+                            .khr_xcb_surface
+                            .get_physical_device_xcb_presentation_support_khr)(
+                            phys,
+                            queue_family_idx,
+                            xcb_display_handle.connection,
+                            visual,
+                        ) != 0,
+                    )
+                }
+            };
+            t_try() == Some(true)
+        }
         winit::raw_window_handle_05::RawDisplayHandle::Wayland(wayland_display_handle)
             if instance.enabled_extensions().khr_wayland_surface
                 && !wayland_display_handle.display.is_null() =>
