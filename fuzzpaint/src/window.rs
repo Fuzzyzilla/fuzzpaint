@@ -185,10 +185,16 @@ impl WindowObjects {
         render_context: Arc<render_device::RenderContext>,
         event_loop: &winit::event_loop::ActiveEventLoop,
     ) -> AnyResult<Self> {
-        const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
         let win = event_loop.create_window(
             winit::window::Window::default_attributes()
-                .with_title(format!("Fuzzpaint v{}", VERSION.unwrap_or("[unknown]")))
+                .with_title(format!(
+                    "Fuzzpaint v{}",
+                    crate::VERSION.unwrap_or("[unknown]")
+                ))
+                // Tbh i just like it better, i spent a lot of time on the CSD
+                // support and i want it to pay off on not just 0.1% of all
+                // computers (e.g. Gnome). Should make this a user preference.
+                .with_decorations(false)
                 .with_min_inner_size(winit::dpi::LogicalSize::new(500u32, 500u32))
                 .with_transparent(false),
         )?;
@@ -273,6 +279,31 @@ impl WindowObjects {
     }
     pub fn window_event(&mut self, event: winit::event::WindowEvent) {
         use winit::event::WindowEvent;
+        // The mouse was pressed on a CSD. Handle it~
+        // FIXME: Touchscreens!
+        if let WindowEvent::MouseInput {
+            device_id: _,
+            state: winit::event::ElementState::Pressed,
+            button,
+        } = event
+            && let Some(csd) = self.ui.hovered_csd_element()
+        {
+            let consumed = if button == winit::event::MouseButton::Left {
+                match csd {
+                    crate::ui::HoveredCSD::Title(_) => self.win.drag_window().is_ok(),
+                    crate::ui::HoveredCSD::Edge(e) => self.win.drag_resize_window(e).is_ok(),
+                }
+            } else if let crate::ui::HoveredCSD::Title(position) = csd {
+                self.win.show_window_menu(position);
+                true
+            } else {
+                false
+            };
+            // Dont continue processing.
+            if consumed {
+                return;
+            }
+        }
         let consumed = self
             .egui_ctx
             .push_winit_event(&self.window(), &event)
@@ -346,10 +377,21 @@ impl WindowObjects {
     }
     pub fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         // The UI has requested the app exit. Do so!
-        if self.ui.should_close() {
-            event_loop.exit();
-            // No need to redraw.
-            return;
+        if let Some(action) = self.ui.take_window_action() {
+            match action {
+                crate::ui::WindowAction::Close => {
+                    event_loop.exit();
+                    // No need to redraw.
+                    return;
+                }
+                crate::ui::WindowAction::Maximize => {
+                    self.win.set_maximized(!self.win.is_maximized());
+                }
+                crate::ui::WindowAction::Minimize => {
+                    self.win
+                        .set_minimized(self.win.is_minimized() != Some(true));
+                }
+            }
         }
         if self.egui_ctx.take_wants_update() {
             self.win.request_redraw();
@@ -441,6 +483,8 @@ impl WindowObjects {
         ));
     }
     fn do_ui(&mut self, mut connections: crate::connections::ConnectionsLock) {
+        self.ui.set_csd(!self.win.is_decorated());
+
         let viewport = self
             .egui_ctx
             .update(self.win.as_ref(), |ctx| self.ui.ui(ctx, &mut connections));

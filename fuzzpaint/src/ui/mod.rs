@@ -127,7 +127,20 @@ enum CurrentModal {
 enum CloseState {
     None,
     Modal,
-    Confirmed,
+}
+const CSD_RESIZE_WIDTH_LOGICAL_PX: f32 = 5.0;
+#[derive(Clone, Copy)]
+pub enum WindowAction {
+    Close,
+    Minimize,
+    Maximize,
+}
+#[derive(Clone, Copy)]
+pub enum HoveredCSD {
+    /// The titlebar, but not any menu button on that bar. Contains the position.
+    Title(winit::dpi::LogicalPosition<f32>),
+    /// The edge or corner of the window.
+    Edge(winit::window::ResizeDirection),
 }
 
 #[derive(Clone)]
@@ -142,6 +155,10 @@ pub struct MainUI {
 
     // On top of everything, a "do you want to exit" dialog.
     close_state: CloseState,
+    window_action: Option<WindowAction>,
+    // Whether or not to render Client-Side Decorations.
+    csd: bool,
+    hovered_csd: Option<HoveredCSD>,
     // A Ui-defined modal (creating brushes, application settings, etc)
     modal: Option<CurrentModal>,
     // Active document viewport
@@ -175,6 +192,9 @@ impl MainUI {
         let (requests_send, requests_recv) = crossbeam::channel::unbounded();
         Self {
             close_state: CloseState::None,
+            window_action: None,
+            hovered_csd: None,
+            csd: false,
             documents,
             cur_document,
 
@@ -195,24 +215,31 @@ impl MainUI {
             error_display: Default::default(),
         }
     }
+    pub fn set_csd(&mut self, csd: bool) {
+        self.csd = csd;
+    }
     /// Marks that a close has been requested by the windower
     pub fn close_requested(&mut self) {
         // Close unconditionally if
         // * A close was requested again even though the modal is up.
         //   (Either we crashed and the modal isn't seen or the user *really* wants us to close lol)
         // * No open documents to save anyway.
-        self.close_state =
-            if matches!(self.close_state, CloseState::Modal) || self.documents.is_empty() {
-                CloseState::Confirmed
-            } else {
-                // There are open docs, prompt
-                CloseState::Modal
-            }
+        if matches!(self.close_state, CloseState::Modal) || self.documents.is_empty() {
+            self.window_action = Some(WindowAction::Close);
+        } else {
+            self.close_state = CloseState::Modal
+        }
     }
     /// Returns true if the app should close.
     #[must_use]
-    pub fn should_close(&self) -> bool {
-        matches!(self.close_state, CloseState::Confirmed)
+    pub fn take_window_action(&mut self) -> Option<WindowAction> {
+        self.window_action.take()
+    }
+    /// Returns the Client-Side window Decoration the mouse is currently over, if any.
+    /// None if CSD is not in use.
+    #[must_use]
+    pub fn hovered_csd_element(&self) -> Option<HoveredCSD> {
+        self.hovered_csd
     }
     /// Returns true if a top-level modal exists asking whether to close the app.
     #[must_use]
@@ -266,18 +293,105 @@ impl MainUI {
                     })
                     .on_finish(|string| connection.message(&string));
                 });
-                egui::Grid::new("text").num_columns(1).show(ui, |ui| {
-                    for message in connection.messages() {
-                        ui.label(message);
-                        ui.end_row();
-                    }
-                });
+                egui::Grid::new("text")
+                    .striped(true)
+                    .num_columns(1)
+                    .show(ui, |ui| {
+                        for message in connection.messages() {
+                            ui.label(message);
+                            ui.end_row();
+                        }
+                    });
             });
         }
 
         self.error_display.show(ctx, crate::log_collector());
 
+        self.do_csd_edges(ctx);
+
         res
+    }
+    fn do_csd_edges(&mut self, ctx: &egui::Context) {
+        if !self.csd {
+            return;
+        }
+        {
+            // Draw a visual resize handle in the bottom right, always, cuz i wanna.
+            const CIRCLE_RADIUS_PX: f32 = 1.0;
+            const MARGIN_PX: f32 = 1.0;
+            const SPACING_PX: f32 = 3.0;
+
+            let painter = ctx.layer_painter(egui::LayerId {
+                order: egui::Order::Foreground,
+                id: egui::Id::new("csd-resize"),
+            });
+            let color = ctx.style().visuals.weak_text_color();
+            let bottom_right = ctx.viewport_rect().right_bottom() - egui::Vec2::splat(MARGIN_PX);
+
+            for row in 0..3u8 {
+                for column in 0..(3u8 - row) {
+                    painter.circle_filled(
+                        bottom_right - egui::vec2(column.into(), row.into()) * SPACING_PX,
+                        CIRCLE_RADIUS_PX,
+                        color,
+                    );
+                }
+            }
+        }
+
+        // FIXME: only if no widget is listening to the mouse. Seems impossible?
+        // Weird :3
+        if let Some(pos) = ctx.pointer_latest_pos() {
+            use egui::CursorIcon as Icon;
+            use winit::window::ResizeDirection as Resize;
+            enum Dir {
+                Minus,
+                Zero,
+                Plus,
+            }
+
+            let x_dir = if pos.x <= ctx.viewport_rect().left() + CSD_RESIZE_WIDTH_LOGICAL_PX {
+                Dir::Minus
+            } else if pos.x >= ctx.viewport_rect().right() - CSD_RESIZE_WIDTH_LOGICAL_PX {
+                Dir::Plus
+            } else {
+                Dir::Zero
+            };
+            let y_dir = if pos.y <= ctx.viewport_rect().top() + CSD_RESIZE_WIDTH_LOGICAL_PX {
+                Dir::Minus
+            } else if pos.y >= ctx.viewport_rect().bottom() - CSD_RESIZE_WIDTH_LOGICAL_PX {
+                Dir::Plus
+            } else {
+                Dir::Zero
+            };
+
+            let resize_dir = match (x_dir, y_dir) {
+                (Dir::Minus, Dir::Minus) => Resize::NorthWest,
+                (Dir::Minus, Dir::Zero) => Resize::West,
+                (Dir::Minus, Dir::Plus) => Resize::SouthWest,
+
+                (Dir::Zero, Dir::Minus) => Resize::North,
+                (Dir::Zero, Dir::Zero) => return,
+                (Dir::Zero, Dir::Plus) => Resize::South,
+
+                (Dir::Plus, Dir::Minus) => Resize::NorthEast,
+                (Dir::Plus, Dir::Zero) => Resize::East,
+                (Dir::Plus, Dir::Plus) => Resize::SouthEast,
+            };
+
+            ctx.set_cursor_icon(match resize_dir {
+                Resize::East => Icon::ResizeEast,
+                Resize::North => Icon::ResizeNorth,
+                Resize::NorthEast => Icon::ResizeNorthEast,
+                Resize::NorthWest => Icon::ResizeNorthWest,
+                Resize::South => Icon::ResizeSouth,
+                Resize::SouthEast => Icon::ResizeSouthEast,
+                Resize::SouthWest => Icon::ResizeSouthWest,
+                Resize::West => Icon::ResizeWest,
+            });
+
+            self.hovered_csd = Some(HoveredCSD::Edge(resize_dir));
+        }
     }
     fn get_cur_interface(&mut self) -> Option<&mut PerDocumentData> {
         // Get the document's interface, or reset to none if not found.
@@ -306,7 +420,7 @@ impl MainUI {
                         self.close_state = CloseState::None;
                     }
                     if ui.button("Exit").clicked() {
-                        self.close_state = CloseState::Confirmed;
+                        self.window_action = Some(WindowAction::Close);
                     }
                 });
             })
@@ -451,6 +565,8 @@ impl MainUI {
         ctx: &egui::Context,
         enabled: bool,
     ) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
+        self.hovered_csd = None;
+
         let Ok(action_frame) = self.action_listener.frame() else {
             let viewport = ctx.available_rect();
             let pos = viewport.left_top();
@@ -470,14 +586,6 @@ impl MainUI {
                 ui.disable();
             }
             self.menu_bar(ui);
-            ui.painter().add(egui::PaintCallback {
-                rect: egui::Rect::ZERO,
-                callback: std::sync::Arc::new(crate::egui_impl::Callback {
-                    kind: crate::egui_impl::CallbackKind::DocumentView {
-                        dummy_color: [1, 2, 3, 4],
-                    },
-                }),
-            })
         });
 
         if self.cur_document.is_none() {
@@ -570,82 +678,140 @@ impl MainUI {
             ))
         }
     }
-    /// File, Edit, ect
+    /// File, Edit, ect. `csd` adds client-side-decorations (Close, maximize,
+    /// minimize).
     fn menu_bar(&mut self, ui: &mut Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
+        let bar = ui.horizontal_wrapped(|ui| {
+            // Logo on the left.
+            if self.csd {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)),
+                    )
+                    .selectable(false),
+                )
                 .on_hover_text("Baa");
-            ui.label(format!("{}", ui.ctx().cumulative_frame_nr()));
-            egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    let add_button = |ui: &mut Ui, label, shortcut| -> egui::Response {
-                        let mut button = egui::Button::new(label);
-                        if let Some(shortcut) = shortcut {
-                            button = button.shortcut_text(shortcut);
-                        }
-                        ui.add(button)
-                    };
-                    if add_button(ui, "New", Some("Ctrl+N")).clicked() {
-                        self.new_document();
+
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Fuzzpaint").font(egui::FontId::proportional(15.0)),
+                    )
+                    .selectable(false),
+                )
+                .on_hover_text(crate::VERSION.unwrap_or("Unknown version"));
+            }
+            // CSD buttons on the right.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.csd {
+                    if ui
+                        .add(egui::Button::new("🗙").frame_when_inactive(false))
+                        .clicked()
+                    {
+                        self.close_requested();
                     }
-                    if add_button(ui, "Save", Some("Ctrl+S")).clicked() {
-                        // Dirty testing implementation!
-                        if let Some(current) = self.cur_document {
-                            std::thread::spawn(move || {
-                                if let Some(reader) = crate::global::provider()
-                                    .inspect(current, queue::DocumentCommandQueue::peek_clone_state)
-                                {
-                                    let repo = crate::global::points();
+                    if ui
+                        .add(egui::Button::new("🗖").frame_when_inactive(false))
+                        .clicked()
+                    {
+                        self.window_action =
+                            Some(self.window_action.unwrap_or(WindowAction::Maximize));
+                    }
+                    if ui
+                        .add(egui::Button::new("🗕").frame_when_inactive(false))
+                        .clicked()
+                    {
+                        self.window_action =
+                            Some(self.window_action.unwrap_or(WindowAction::Minimize));
+                    }
+                }
 
-                                    let try_block = || -> anyhow::Result<()> {
-                                        let mut path = dirs::document_dir().unwrap();
-                                        path.push("temp.fzp");
-                                        let file = std::fs::File::create(path)?;
+                // Random debug stuf :V
+                ui.label(format!("{}", ui.ctx().cumulative_frame_nr()));
 
-                                        let start = std::time::Instant::now();
-                                        io::write_into(&reader, repo, &file)?;
-                                        let duration = start.elapsed();
+                // Menu from left to right, taking up the middle space.
+                egui::MenuBar::new().ui(ui, |ui| {
+                    ui.menu_button("File", |ui| {
+                        let add_button = |ui: &mut Ui, label, shortcut| -> egui::Response {
+                            let mut button = egui::Button::new(label);
+                            if let Some(shortcut) = shortcut {
+                                button = button.shortcut_text(shortcut);
+                            }
+                            ui.add(button)
+                        };
+                        if add_button(ui, "New", Some("Ctrl+N")).clicked() {
+                            self.new_document();
+                        }
+                        if add_button(ui, "Save", Some("Ctrl+S")).clicked() {
+                            // Dirty testing implementation!
+                            if let Some(current) = self.cur_document {
+                                std::thread::spawn(move || {
+                                    if let Some(reader) = crate::global::provider().inspect(
+                                        current,
+                                        queue::DocumentCommandQueue::peek_clone_state,
+                                    ) {
+                                        let repo = crate::global::points();
 
-                                        file.sync_all()?;
-                                        if let Some(size) =
-                                            file.metadata().ok().map(|meta| meta.len())
-                                        {
-                                            let size = size as f64;
-                                            let speed = size / duration.as_secs_f64();
-                                            log::info!(
-                                                "Wrote {} in {}us ({}/s)",
-                                                human_bytes::human_bytes(size),
-                                                duration.as_micros(),
-                                                human_bytes::human_bytes(speed)
-                                            );
-                                        } else {
-                                            log::info!("Wrote in {}us", duration.as_micros());
+                                        let try_block = || -> anyhow::Result<()> {
+                                            let mut path = dirs::document_dir().unwrap();
+                                            path.push("temp.fzp");
+                                            let file = std::fs::File::create(path)?;
+
+                                            let start = std::time::Instant::now();
+                                            io::write_into(&reader, repo, &file)?;
+                                            let duration = start.elapsed();
+
+                                            file.sync_all()?;
+                                            if let Some(size) =
+                                                file.metadata().ok().map(|meta| meta.len())
+                                            {
+                                                let size = size as f64;
+                                                let speed = size / duration.as_secs_f64();
+                                                log::info!(
+                                                    "Wrote {} in {}us ({}/s)",
+                                                    human_bytes::human_bytes(size),
+                                                    duration.as_micros(),
+                                                    human_bytes::human_bytes(speed)
+                                                );
+                                            } else {
+                                                log::info!("Wrote in {}us", duration.as_micros());
+                                            }
+                                            Ok(())
+                                        };
+
+                                        if let Err(e) = try_block() {
+                                            log::error!("Failed to write document: {e:?}");
                                         }
-                                        Ok(())
-                                    };
-
-                                    if let Err(e) = try_block() {
-                                        log::error!("Failed to write document: {e:?}");
                                     }
-                                }
-                            });
+                                });
+                            }
                         }
-                    }
-                    // let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
-                    if add_button(ui, "Open", Some("Ctrl+O")).clicked() {
-                        self.open_documents();
-                    }
-                    //let _ = add_button(ui, "Open as new", None);
-                    //let _ = add_button(ui, "Export", None);
-                });
-                ui.menu_button("Edit", |ui| {
-                    if ui.button("Settings").clicked() {
-                        self.modal = Some(CurrentModal::Settings(settings::Settings::default()));
-                        ui.close();
-                    }
+                        // let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
+                        if add_button(ui, "Open", Some("Ctrl+O")).clicked() {
+                            self.open_documents();
+                        }
+                        //let _ = add_button(ui, "Open as new", None);
+                        //let _ = add_button(ui, "Export", None);
+                    });
+                    ui.menu_button("Edit", |ui| {
+                        if ui.button("Settings").clicked() {
+                            self.modal =
+                                Some(CurrentModal::Settings(settings::Settings::default()));
+                            ui.close();
+                        }
+                    });
                 });
             });
         });
+        // Report hovers over the title bar, for window dragging. False if a
+        // sub-object (menu button) is hovered. Neat!
+        if self.csd
+            && let Some(hover) = bar.response.hover_pos()
+        {
+            self.hovered_csd = Some(HoveredCSD::Title(winit::dpi::LogicalPosition {
+                x: hover.x,
+                y: hover.y,
+            }));
+        }
     }
     /// Show a center welcome/"home" panel when no document is selected.
     fn welcome_screen(&mut self, ctx: &egui::Context) {

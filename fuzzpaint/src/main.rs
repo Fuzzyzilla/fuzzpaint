@@ -29,6 +29,8 @@ pub mod view_transform;
 
 use fuzzpaint_core::id::FuzzID;
 
+const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
+
 #[cfg(feature = "dhat_heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
