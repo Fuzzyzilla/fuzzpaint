@@ -47,7 +47,7 @@ impl Ctx {
         let properties = render_surface.context().physical_device().properties();
         let max_size = properties.max_image_dimension2_d;
 
-        let mut state = egui_winit::State::new(
+        let state = egui_winit::State::new(
             egui::Context::default(),
             egui::ViewportId::ROOT,
             &window,
@@ -55,6 +55,21 @@ impl Ctx {
             None,
             Some(max_size as usize),
         );
+        {
+            use egui::epaint::text;
+            state.egui_ctx().add_font(egui::epaint::text::FontInsert {
+                name: "Google Material Icons".to_owned(),
+                data: egui::FontData {
+                    font: std::borrow::Cow::Borrowed(material_icons::FONT),
+                    index: 0,
+                    tweak: egui::FontTweak::default(),
+                },
+                families: vec![text::InsertFontFamily {
+                    family: text::FontFamily::Name("Google Material Icons".into()),
+                    priority: text::FontPriority::Highest,
+                }],
+            });
+        }
 
         Ok(Self {
             state,
@@ -179,7 +194,7 @@ impl Ctx {
         let output = self.full_output.take()?;
 
         let res: AnyResult<_> = try_block::try_block! {
-            let transfer_commands = self.renderer.do_image_deltas(output.textures_delta).transpose()?;
+            let transfer_commands = self.renderer.do_image_deltas(output.textures_delta)?;
             let tess_geom = self.state.egui_ctx().tessellate(output.shapes, output.pixels_per_point);
             let draw_commands = self.renderer.upload_and_render(output.pixels_per_point, swapchain_idx, &tess_geom, clear)?;
             drop(tess_geom);
@@ -246,8 +261,8 @@ mod vs {
         } matrix;
 
         layout(location = 0) in vec2 pos;
-        layout(location = 1) in vec4 color;
-        layout(location = 2) in vec2 uv;
+        layout(location = 1) in vec2 uv;
+        layout(location = 2) in vec4 color;
 
         layout(location = 0) out vec2 out_uv;
         layout(location = 1) out vec4 vertex_color;
@@ -259,23 +274,20 @@ mod vs {
         }",
     }
 }
-#[derive(vk::BufferContents, vk::Vertex)]
+#[derive(vk::Vertex, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct EguiVertex {
     #[format(R32G32_SFLOAT)]
     pos: [f32; 2],
-    #[format(R8G8B8A8_UNORM)]
-    color: [u8; 4],
     #[format(R32G32_SFLOAT)]
     uv: [f32; 2],
+    #[format(R8G8B8A8_UNORM)]
+    color: [u8; 4],
 }
-impl From<egui::epaint::Vertex> for EguiVertex {
-    fn from(value: egui::epaint::Vertex) -> Self {
-        Self {
-            pos: value.pos.into(),
-            color: value.color.to_array(),
-            uv: value.uv.into(),
-        }
+impl EguiVertex {
+    fn from_slice(egui: &[egui::epaint::Vertex]) -> &[Self] {
+        // These are identical structs. :3
+        bytemuck::cast_slice(egui)
     }
 }
 struct Texture {
@@ -285,12 +297,15 @@ struct Texture {
 }
 struct Render {
     remove_next_frame: Vec<egui::TextureId>,
+    samplers: hashbrown::HashMap<egui::epaint::textures::TextureOptions, Arc<vk::Sampler>>,
     images: hashbrown::HashMap<egui::TextureId, Texture>,
     context: Arc<crate::render_device::RenderContext>,
 
     render_pass: Arc<vk::RenderPass>,
     pipeline: Arc<vk::GraphicsPipeline>,
     framebuffers: Vec<Arc<vk::Framebuffer>>,
+
+    vertex_index_arena: vulkano::buffer::allocator::SubbufferAllocator,
 }
 impl Render {
     pub fn new(
@@ -401,13 +416,30 @@ impl Render {
             },
         )?;
 
+        let vertex_index_arena = vulkano::buffer::allocator::SubbufferAllocator::new(
+            render_context.allocators().memory().clone(),
+            vulkano::buffer::allocator::SubbufferAllocatorCreateInfo {
+                // Usual per-frame usage is about 0x3_00_00
+                arena_size: 0x4_00_00,
+                buffer_usage: vk::BufferUsage::VERTEX_BUFFER | vk::BufferUsage::INDEX_BUFFER,
+                // One write, one read. Staging is unnecessary, but we'd really
+                // prefer it to be on the device if possible.
+                memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
+                    | vk::MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
+        );
+
         Ok(Self {
             remove_next_frame: Vec::new(),
+            samplers: hashbrown::HashMap::default(),
             images: hashbrown::HashMap::default(),
             render_pass: renderpass,
             pipeline,
             context: render_context.clone(),
             framebuffers: Vec::new(),
+
+            vertex_index_arena,
         })
     }
     pub fn gen_framebuffers(
@@ -443,13 +475,19 @@ impl Render {
         tesselated_geom: &[egui::epaint::ClippedPrimitive],
         clear: bool,
     ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
-        let mut vert_buff_size = 0;
-        let mut index_buff_size = 0;
+        let mut command_buffer_builder = vk::AutoCommandBufferBuilder::primary(
+            self.context.allocators().command_buffer(),
+            self.context.queues().graphics().idx(),
+            vk::CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        let mut num_verts = 0;
+        let mut num_indices = 0;
         for clipped in tesselated_geom {
             match &clipped.primitive {
                 egui::epaint::Primitive::Mesh(mesh) => {
-                    vert_buff_size += mesh.vertices.len();
-                    index_buff_size += mesh.indices.len();
+                    num_verts += mesh.vertices.len();
+                    num_indices += mesh.indices.len();
                 }
                 egui::epaint::Primitive::Callback(callback) => {
                     let Some(callback) = callback.callback.downcast_ref::<Callback>() else {
@@ -465,48 +503,35 @@ impl Render {
             }
         }
 
-        if vert_buff_size == 0 || index_buff_size == 0 {
-            let builder = vk::AutoCommandBufferBuilder::primary(
-                self.context.allocators().command_buffer(),
-                self.context.queues().graphics().idx(),
-                vk::CommandBufferUsage::OneTimeSubmit,
-            )?;
-            return Ok(builder.build()?);
+        if num_verts == 0 || num_indices == 0 {
+            // Nothing to do.
+            return Ok(command_buffer_builder.build()?);
         }
 
-        let mut vertex_vec = Vec::with_capacity(vert_buff_size);
-        let mut index_vec = Vec::with_capacity(index_buff_size);
+        // It's possible to do these both in the same buffer, but its a lot less
+        // convinient uwu.
+        let vertices = self
+            .vertex_index_arena
+            .allocate_slice::<EguiVertex>(num_verts as _)?;
+        let indices = self
+            .vertex_index_arena
+            .allocate_slice::<u32>(num_indices as _)?;
+        {
+            // Just allocated, no access conflicts possible.
+            let mut vertices = &mut vertices.write().unwrap()[..];
+            let mut indices = &mut indices.write().unwrap()[..];
 
-        for clipped in tesselated_geom {
-            if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
-                vertex_vec.extend(mesh.vertices.iter().copied().map(EguiVertex::from));
-                index_vec.extend_from_slice(&mesh.indices);
+            for clipped in tesselated_geom {
+                if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
+                    vertices[..mesh.vertices.len()]
+                        .copy_from_slice(EguiVertex::from_slice(&mesh.vertices));
+                    vertices = &mut vertices[mesh.vertices.len()..];
+
+                    indices[..mesh.indices.len()].copy_from_slice(&mesh.indices);
+                    indices = &mut indices[mesh.indices.len()..];
+                };
             }
         }
-        let vertices = vk::Buffer::from_iter(
-            self.context.allocators().memory().clone(),
-            vk::BufferCreateInfo {
-                usage: vk::BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            vk::AllocationCreateInfo {
-                memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vertex_vec,
-        )?;
-        let indices = vk::Buffer::from_iter(
-            self.context.allocators().memory().clone(),
-            vk::BufferCreateInfo {
-                usage: vk::BufferUsage::INDEX_BUFFER,
-                ..Default::default()
-            },
-            vk::AllocationCreateInfo {
-                memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            index_vec,
-        )?;
 
         let framebuffer = self
             .framebuffers
@@ -526,11 +551,6 @@ impl Render {
         let (texture_set_idx, _) = self.texture_set_layout();
         let pipeline_layout = self.pipeline.layout();
 
-        let mut command_buffer_builder = vk::AutoCommandBufferBuilder::primary(
-            self.context.allocators().command_buffer(),
-            self.context.queues().graphics().idx(),
-            vk::CommandBufferUsage::OneTimeSubmit,
-        )?;
         if clear {
             command_buffer_builder.clear_color_image(vk::ClearColorImageInfo {
                 clear_value: [0.0, 0.0, 0.0, 1.0].into(),
@@ -570,23 +590,41 @@ impl Render {
         let mut start_vertex_buffer_offset: usize = 0;
         let mut start_index_buffer_offset: usize = 0;
 
+        let mut current_texture = None;
         for clipped in tesselated_geom {
             if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
-                // *Technically* it wants a float scissor rect. But.. oh well
-                let offset = clipped.clip_rect.left_top();
-                let offset = [
-                    (offset.x.max(0.0) * scale_factor) as u32,
-                    (offset.y.max(0.0) * scale_factor) as u32,
+                let top_left = clipped.clip_rect.left_top() * scale_factor;
+                let top_left = [
+                    top_left.x.max(0.0).floor() as u32,
+                    top_left.y.max(0.0).floor() as u32,
+                ];
+                // Calculate the bottom right using ceiling rounding, and then
+                // take the difference to find the extent. This is better than
+                // just using the size of the rect, as it takes the differences
+                // in how the two points got rounded into account. Otherwise,
+                // there are single-pixel panel gaps!
+                let bottom_right = clipped.clip_rect.right_bottom() * scale_factor;
+                let bottom_right = [
+                    bottom_right.x.min(u32::MAX as f32).ceil() as u32,
+                    bottom_right.y.min(u32::MAX as f32).ceil() as u32,
                 ];
 
-                let extent = clipped.clip_rect.size() * scale_factor;
-                let extent = [extent.x as u32, extent.y as u32];
+                let extent = [bottom_right[0] - top_left[0], bottom_right[1] - top_left[1]];
 
-                command_buffer_builder
-                    .set_scissor(0, smallvec::smallvec![vk::Scissor { offset, extent }])?
+                // Egui tessellator dedups by scissor, no need to check for
+                // changes.
+                command_buffer_builder.set_scissor(
+                    0,
+                    smallvec::smallvec![vk::Scissor {
+                        offset: top_left,
+                        extent
+                    }],
+                )?;
+                // Only bind texture on changes.
+                if current_texture != Some(mesh.texture_id) {
                     //Maybe there's a better way than rebinding every draw.
                     //shaderSampledImageArrayDynamicIndexing perhaps?
-                    .bind_descriptor_sets(
+                    command_buffer_builder.bind_descriptor_sets(
                         self.pipeline.bind_point(),
                         pipeline_layout.clone(),
                         texture_set_idx,
@@ -595,14 +633,16 @@ impl Render {
                             .expect("Egui draw requested non-existent texture")
                             .descriptor_set
                             .clone(),
-                    )?
-                    .draw_indexed(
-                        mesh.indices.len() as u32,
-                        1,
-                        start_index_buffer_offset as u32,
-                        start_vertex_buffer_offset as i32,
-                        0,
                     )?;
+                    current_texture = Some(mesh.texture_id);
+                }
+                command_buffer_builder.draw_indexed(
+                    mesh.indices.len() as u32,
+                    1,
+                    start_index_buffer_offset as u32,
+                    start_vertex_buffer_offset as i32,
+                    0,
+                )?;
                 start_index_buffer_offset += mesh.indices.len();
                 start_vertex_buffer_offset += mesh.vertices.len();
             }
@@ -612,6 +652,48 @@ impl Render {
         let command_buffer = command_buffer_builder.build()?;
 
         Ok(command_buffer)
+    }
+    /// Get or create the sampler for the given egui texture options. Mipmaps
+    /// are not supported and mipmap mode is always treated as None.
+    fn sampler_for(
+        &mut self,
+        mut options: egui::epaint::textures::TextureOptions,
+    ) -> anyhow::Result<Arc<vk::Sampler>> {
+        // We dont support mipmaps.
+        options.mipmap_mode = None;
+        match self.samplers.entry(options) {
+            hashbrown::hash_map::Entry::Occupied(o) => Ok(o.get().clone()),
+            hashbrown::hash_map::Entry::Vacant(v) => {
+                use egui::epaint::textures;
+                use vulkano::image::sampler::SamplerAddressMode;
+                fn egui_to_vk_filter(egui_filter: textures::TextureFilter) -> vk::Filter {
+                    match egui_filter {
+                        textures::TextureFilter::Linear => vk::Filter::Linear,
+                        textures::TextureFilter::Nearest => vk::Filter::Nearest,
+                    }
+                }
+
+                let sampler = vk::Sampler::new(
+                    self.context.device().clone(),
+                    vk::SamplerCreateInfo {
+                        mag_filter: egui_to_vk_filter(options.magnification),
+                        min_filter: egui_to_vk_filter(options.minification),
+                        address_mode: match options.wrap_mode {
+                            egui::TextureWrapMode::ClampToEdge => {
+                                [SamplerAddressMode::ClampToEdge; 3]
+                            }
+                            egui::TextureWrapMode::Repeat => [SamplerAddressMode::Repeat; 3],
+                            egui::TextureWrapMode::MirroredRepeat => {
+                                [SamplerAddressMode::MirroredRepeat; 3]
+                            }
+                        },
+                        ..Default::default()
+                    },
+                )?;
+                v.insert(sampler.clone());
+                Ok(sampler)
+            }
+        }
     }
     ///Get the descriptor set layout for the texture uniform. `(set_idx, layout)`
     fn texture_set_layout(&self) -> (u32, Arc<vk::DescriptorSetLayout>) {
@@ -634,7 +716,7 @@ impl Render {
     pub fn do_image_deltas(
         &mut self,
         deltas: egui::TexturesDelta,
-    ) -> Option<anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>>> {
+    ) -> anyhow::Result<Option<Arc<vk::PrimaryAutoCommandBuffer>>> {
         // Deltas order of operations:
         // Set -> Draw -> Free
 
@@ -646,37 +728,37 @@ impl Render {
         // Queue up removals for next frame
         self.remove_next_frame.extend_from_slice(&deltas.free);
 
-        // Perform changes
-        if deltas.set.is_empty() {
-            None
-        } else {
-            Some(self.do_image_deltas_set(deltas))
-        }
+        // Perform Writes
+        self.do_image_deltas_set(deltas)
     }
     fn do_image_deltas_set(
         &mut self,
         deltas: egui::TexturesDelta,
-    ) -> anyhow::Result<Arc<vk::PrimaryAutoCommandBuffer>> {
+    ) -> anyhow::Result<Option<Arc<vk::PrimaryAutoCommandBuffer>>> {
         //Free is handled by do_image_deltas
 
-        //Pre-allocate on the heap so we don't end up re-allocating a bunch as we populate
-        let mut total_delta_size = 0;
-        for (_, delta) in &deltas.set {
-            total_delta_size += match &delta.image {
-                egui::ImageData::Color(color) => color.width() * color.height() * 4,
-            };
+        let staging_size_bytes = deltas
+            .set
+            .iter()
+            .map(|(_, delta)| {
+                [
+                    u64::try_from(delta.image.bytes_per_pixel()),
+                    delta.image.width().try_into(),
+                    delta.image.height().try_into(),
+                ]
+                .into_iter()
+                .product::<Result<u64, _>>()
+            })
+            .sum::<Result<u64, _>>()?;
+
+        if staging_size_bytes == 0 {
+            // Nothing to do.
+            return Ok(None);
         }
 
-        let mut data_vec = Vec::<u8>::with_capacity(total_delta_size);
-        for (_, delta) in &deltas.set {
-            match &delta.image {
-                egui::ImageData::Color(data) => {
-                    data_vec.extend_from_slice(bytemuck::cast_slice(&data.pixels[..]));
-                }
-            }
-        }
-
-        let staging_buffer = vk::Buffer::from_iter(
+        // Doesn't currently make sense to arena this, since (with my usage
+        // pattern) it grows each time.
+        let staging_buffer = vk::Buffer::new_slice::<u8>(
             self.context.allocators().memory().clone(),
             vk::BufferCreateInfo {
                 sharing: vk::Sharing::Exclusive,
@@ -687,8 +769,22 @@ impl Render {
                 memory_type_filter: vk::MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            data_vec.into_iter(),
+            staging_size_bytes,
         )?;
+        {
+            // Fill it up, in order. Just allocated, no access conflicts
+            // possible.
+            let mut staging_buffer = &mut staging_buffer.write().unwrap()[..];
+            for (_, delta) in &deltas.set {
+                let bytes = match &delta.image {
+                    egui::ImageData::Color(c) => bytemuck::cast_slice(&c.pixels),
+                };
+                // Copy this chunk..
+                staging_buffer[..bytes.len()].copy_from_slice(bytes);
+                // then advance the starting pointer
+                staging_buffer = &mut staging_buffer[bytes.len()..];
+            }
+        }
 
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             self.context.allocators().command_buffer(),
@@ -699,12 +795,33 @@ impl Render {
         //In case we need to allocate new textures.
         let (texture_set_idx, texture_set_layout) = self.texture_set_layout();
 
+        // Find and delete any images that are being upsized,
+        // that way they can be reallocated from scratch.
+        for (id, image) in &deltas.set {
+            let hashbrown::hash_map::Entry::Occupied(entry) = self.images.entry(*id) else {
+                continue;
+            };
+            let vk_image = &entry.get().image;
+            let pos = image.pos.unwrap_or([0; 2]);
+            let new_size = [pos[0] + image.image.width(), pos[1] + image.image.height()];
+
+            if vk_image.extent()[0] < new_size[0] as u32
+                || vk_image.extent()[1] < new_size[1] as u32
+            {
+                let _ = entry.remove();
+            }
+        }
+
         let mut current_base_offset = 0;
         for (id, delta) in deltas.set {
+            // Create the sampler, given the egui sampling options.
+            let sampler = self.sampler_for(delta.options)?;
             let entry = self.images.entry(id);
-            //Generate if non-existent yet!
-            let image: anyhow::Result<_> = match entry {
+
+            let image = match entry {
+                hashbrown::hash_map::Entry::Occupied(o) => o.get().image.clone(),
                 hashbrown::hash_map::Entry::Vacant(v) => {
+                    // Generate if non-existent yet!
                     let format = match delta.image {
                         egui::ImageData::Color(_) => vk::Format::R8G8B8A8_UNORM,
                     };
@@ -731,27 +848,10 @@ impl Render {
                         },
                     )?;
 
-                    let egui_to_vk_filter =
-                        |egui_filter: egui::epaint::textures::TextureFilter| match egui_filter {
-                            egui::TextureFilter::Linear => vk::Filter::Linear,
-                            egui::TextureFilter::Nearest => vk::Filter::Nearest,
-                        };
-
                     let view = vk::ImageView::new(
                         image.clone(),
                         vk::ImageViewCreateInfo {
                             ..vk::ImageViewCreateInfo::from_image(&image)
-                        },
-                    )?;
-
-                    //Could optimize here, re-using the four possible options of sampler.
-                    let sampler = vk::Sampler::new(
-                        self.context.device().clone(),
-                        vk::SamplerCreateInfo {
-                            mag_filter: egui_to_vk_filter(delta.options.magnification),
-                            min_filter: egui_to_vk_filter(delta.options.minification),
-
-                            ..Default::default()
                         },
                     )?;
 
@@ -761,42 +861,39 @@ impl Render {
                         [vk::WriteDescriptorSet::image_view_sampler(
                             texture_set_idx,
                             view.clone(),
-                            sampler.clone(),
+                            sampler,
                         )],
                         [],
                     )?;
-                    Ok(v.insert(Texture {
+                    v.insert(Texture {
                         image,
                         descriptor_set,
                     })
                     .image
-                    .clone())
+                    .clone()
                 }
-                hashbrown::hash_map::Entry::Occupied(o) => Ok(o.get().image.clone()),
             };
-            let image = image?;
 
-            let size = match &delta.image {
-                egui::ImageData::Color(color) => color.width() * color.height() * 4,
-            };
+            let size = delta.image.bytes_per_pixel() * delta.image.width() * delta.image.height();
+
             let start_offset = current_base_offset as u64;
             current_base_offset += size;
 
             let transfer_offset = delta.pos.unwrap_or([0, 0]);
-
             //Update regions according to delta
             let region = vk::BufferImageCopy {
                 buffer_offset: start_offset,
 
                 image_offset: [transfer_offset[0] as u32, transfer_offset[1] as u32, 0],
-                buffer_image_height: delta.image.height() as u32,
-                buffer_row_length: delta.image.width() as u32,
                 image_extent: [delta.image.width() as u32, delta.image.height() as u32, 1],
                 image_subresource: vk::ImageSubresourceLayers {
                     array_layers: 0..1,
                     aspects: vk::ImageAspects::COLOR,
                     mip_level: 0,
                 },
+                // Packed.
+                buffer_image_height: 0,
+                buffer_row_length: 0,
                 ..Default::default()
             };
 
@@ -808,6 +905,6 @@ impl Render {
             command_buffer.copy_buffer_to_image(transfer_info)?;
         }
 
-        Ok(command_buffer.build()?)
+        Ok(Some(command_buffer.build()?))
     }
 }
