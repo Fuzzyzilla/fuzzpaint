@@ -212,22 +212,21 @@ impl Renderer {
         }
 
         for (collection, stroke_changes) in stroke_changes {
-            let (graph_id, leaf) = changes
-                .graph()
-                .iter()
-                .find_map(|(id, data)| {
-                    // If this node is a stroke layer with our same collection ID, then we found it!
-                    let this_leaf = data.leaf().filter(|leaf| match leaf {
-                        graph::LeafType::StrokeLayer {
-                            collection: this_leaf,
-                            ..
-                        } => collection == *this_leaf,
-                        _ => false,
-                    });
+            // Find the leaf that uses this stroke collection: (May be none if
+            // it was deleted)
+            let Some((graph_id, leaf)) = changes.graph().iter().find_map(|(id, data)| {
+                let this_leaf = data.leaf().filter(|leaf| match leaf {
+                    graph::LeafType::StrokeLayer {
+                        collection: this_leaf,
+                        ..
+                    } => collection == *this_leaf,
+                    _ => false,
+                });
 
-                    this_leaf.map(|leaf| (id, leaf))
-                })
-                .ok_or_else(|| anyhow::anyhow!("delta references non-existent node"))?;
+                this_leaf.map(|leaf| (id, leaf))
+            }) else {
+                continue;
+            };
 
             let graph::LeafType::StrokeLayer {
                 blend,
