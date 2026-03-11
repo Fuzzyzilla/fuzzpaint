@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 egui = "0.33.3"
-fuzzpaint-collections = { path = "../fuzzpaint-collections" }
+fuzzpaint-doc = { path = "../fuzzpaint-doc" }
 fuzzpaint-types = { path = "../fuzzpaint-types" }

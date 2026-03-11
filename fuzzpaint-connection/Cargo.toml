@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-fuzzpaint-collections = { path = "../fuzzpaint-collections" }
+fuzzpaint-doc = { path = "../fuzzpaint-doc" }
 fuzzpaint-types = { path = "../fuzzpaint-types" }
 bitcode = "0.6.9"
 log = "0.4.29"

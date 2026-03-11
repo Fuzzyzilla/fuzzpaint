@@ -2,9 +2,9 @@
 resolver = "2"
 members = [
     "fuzzpaint",
-    "fuzzpaint-collections",
     "fuzzpaint-connection",
     "fuzzpaint-core",
+    "fuzzpaint-doc",
     "fuzzpaint-io",
     "fuzzpaint-logger",
     "fuzzpaint-render",
