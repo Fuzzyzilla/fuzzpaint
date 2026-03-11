@@ -1,18 +1,18 @@
-use super::hotkeys::HotkeyShadow;
+use crate::actions::{self, hotkeys::HotkeyShadow};
 
 pub struct WinitKeyboardActionCollector {
     /// Maps keys to the number of times they are shadowed.
-    current_hotkeys: hashbrown::HashMap<super::hotkeys::KeyboardHotkey, usize>,
+    current_hotkeys: hashbrown::HashMap<actions::hotkeys::KeyboardHotkey, usize>,
     currently_pressed: hashbrown::HashSet<winit::keyboard::KeyCode>,
     ctrl: bool,
     shift: bool,
     alt: bool,
 
-    sender: super::ActionSender,
+    sender: actions::ActionSender,
 }
 impl WinitKeyboardActionCollector {
     #[must_use]
-    pub fn new(sender: super::ActionSender) -> Self {
+    pub fn new(sender: actions::ActionSender) -> Self {
         Self {
             ctrl: false,
             alt: false,
@@ -64,7 +64,7 @@ impl WinitKeyboardActionCollector {
                                 false
                             }
                         };
-                        super::hotkeys::KeyboardHotkey {
+                        actions::hotkeys::KeyboardHotkey {
                             key: code,
                             alt: consume(alt),
                             shift: consume(shift),
@@ -138,7 +138,7 @@ impl WinitKeyboardActionCollector {
     }
     /// Release any events that have stopped being relavent.
     fn cull(&mut self) {
-        let mut to_remove = Vec::<super::hotkeys::KeyboardHotkey>::new();
+        let mut to_remove = Vec::<actions::hotkeys::KeyboardHotkey>::new();
 
         for (hotkey, _) in &self.current_hotkeys {
             let no_longer_applies = (hotkey.alt && !self.alt)
@@ -161,7 +161,7 @@ impl WinitKeyboardActionCollector {
     /// A hotkey was detected, apply it. Will go through and shadow any
     /// hotkeys this one overrides, and potentially shadow this hotkey
     /// immediately if it's shadowed by an existing key.
-    fn push_key(&mut self, action: super::Action, new: super::hotkeys::KeyboardHotkey) {
+    fn push_key(&mut self, action: actions::Action, new: actions::hotkeys::KeyboardHotkey) {
         // Already pressed, skip to avoid breaking shadow counters
         if self.current_hotkeys.contains_key(&new) {
             return;
@@ -194,7 +194,7 @@ impl WinitKeyboardActionCollector {
     }
     /// A hotkey was ended, discard it. Will go through and unshadow any
     /// hotkeys this one overrode, provided they are not shadowed by another.
-    fn pop_key(&mut self, action: super::Action, remove: super::hotkeys::KeyboardHotkey) {
+    fn pop_key(&mut self, action: actions::Action, remove: actions::hotkeys::KeyboardHotkey) {
         // Early return if the hotkey wasn't previously detected as pressed,
         // to avoid committing chaos to the shadow counters.
         if self.current_hotkeys.remove(&remove).is_none() {

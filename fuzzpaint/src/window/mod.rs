@@ -3,6 +3,9 @@ use crate::egui_impl;
 use crate::render_device;
 use crate::vulkano_prelude::*;
 
+pub mod action_collector;
+pub mod stylus_events;
+
 struct RemoteChanged();
 type UserEvent = RemoteChanged;
 impl crate::connections::Waker for winit::event_loop::EventLoopProxy<UserEvent> {
@@ -156,7 +159,7 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
 pub struct Receivers {
     pub actions: crate::actions::ActionListener,
     pub ui_actions: crossbeam::channel::Receiver<crate::ui::requests::UiRequest>,
-    pub stylus_events: tokio::sync::broadcast::Receiver<crate::stylus_events::StylusEventFrame>,
+    pub stylus_events: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     pub document_view: Arc<crate::document_viewport_proxy::Proxy>,
 }
 pub struct WindowObjects {
@@ -168,12 +171,12 @@ pub struct WindowObjects {
 
     enable_document_view: bool,
 
-    action_collector: crate::actions::winit_action_collector::WinitKeyboardActionCollector,
+    action_collector: action_collector::WinitKeyboardActionCollector,
     action_stream: crate::actions::ActionStream,
     // May be None on unsupported platforms.
     tablet_manager: Option<octotablet::Manager>,
-    pointer_bridge: crate::stylus_events::PointerBridge,
-    stylus_events: crate::stylus_events::WinitStylusEventCollector,
+    pointer_bridge: stylus_events::PointerBridge,
+    stylus_events: stylus_events::WinitStylusEventCollector,
     swapchain_generation: u32,
 
     last_frame_fence: Option<vk::sync::future::FenceSignalFuture<Box<dyn GpuFuture>>>,
@@ -226,11 +229,10 @@ impl WindowObjects {
             ui: crate::ui::MainUI::new(stream.listen()),
             enable_document_view: true,
             preview_renderer,
-            action_collector:
-                crate::actions::winit_action_collector::WinitKeyboardActionCollector::new(send),
+            action_collector: action_collector::WinitKeyboardActionCollector::new(send),
             action_stream: stream,
-            stylus_events: crate::stylus_events::WinitStylusEventCollector::default(),
-            pointer_bridge: crate::stylus_events::PointerBridge::default(),
+            stylus_events: stylus_events::WinitStylusEventCollector::default(),
+            pointer_bridge: stylus_events::PointerBridge::default(),
         })
     }
     pub fn window(&self) -> Arc<winit::window::Window> {

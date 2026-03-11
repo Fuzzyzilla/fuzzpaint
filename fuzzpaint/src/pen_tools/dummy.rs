@@ -12,7 +12,7 @@ impl super::PenTool for Dummy {
     async fn process(
         &mut self,
         _view_transform: &super::ViewInfo,
-        _stylus_input: crate::stylus_events::StylusEventFrame,
+        _stylus_input: crate::window::stylus_events::StylusEventFrame,
         _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
         _render_output: &mut super::ToolRenderOutput,

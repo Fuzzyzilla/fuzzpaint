@@ -150,7 +150,7 @@ impl super::PenTool for Lasso {
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,
-        stylus_input: crate::stylus_events::StylusEventFrame,
+        stylus_input: crate::window::stylus_events::StylusEventFrame,
         _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,

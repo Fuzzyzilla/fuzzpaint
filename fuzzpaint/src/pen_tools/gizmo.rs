@@ -194,14 +194,14 @@ impl super::PenTool for Gizmo {
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,
-        stylus_input: crate::stylus_events::StylusEventFrame,
+        stylus_input: crate::window::stylus_events::StylusEventFrame,
         _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
     ) {
         use crate::gizmos::{
-            transform, Collection, CursorOrInvisible, Gizmo, GizmoInteraction, GizmoShape,
-            GizmoTree, MeshMode, MutGizmoTree, RenderShape, TextureMode, Visual,
+            Collection, CursorOrInvisible, Gizmo, GizmoInteraction, GizmoShape, GizmoTree,
+            MeshMode, MutGizmoTree, RenderShape, TextureMode, Visual, transform,
         };
         let collection = self.shared_collection.get_or_insert_with(|| {
             let mut collection = Collection::new(transform::Transform {

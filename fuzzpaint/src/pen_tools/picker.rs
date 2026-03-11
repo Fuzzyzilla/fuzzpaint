@@ -16,7 +16,7 @@ impl super::PenTool for Picker {
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,
-        _stylus_input: crate::stylus_events::StylusEventFrame,
+        _stylus_input: crate::window::stylus_events::StylusEventFrame,
         _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
         _render_output: &mut super::ToolRenderOutput,

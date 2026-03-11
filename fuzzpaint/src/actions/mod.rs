@@ -10,7 +10,6 @@
 use std::sync::Arc;
 
 pub mod hotkeys;
-pub mod winit_action_collector;
 
 #[derive(
     serde::Serialize,
@@ -157,7 +156,7 @@ impl ActionSender {
     pub fn unshadow(&self, action: Action) {
         self.push(ActionEvent::Unshadowed, action);
     }
-    fn oneshot(&self, action: Action) {
+    pub fn oneshot(&self, action: Action) {
         // Double locks, could speed up.
         self.press(action);
         self.release(action);

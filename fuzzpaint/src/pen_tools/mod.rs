@@ -31,7 +31,7 @@ trait PenTool {
     async fn process(
         &mut self,
         view_info: &ViewInfo,
-        stylus_input: crate::stylus_events::StylusEventFrame,
+        stylus_input: crate::window::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         tool_output: &mut ToolStateOutput,
         render_output: &mut ToolRenderOutput,
@@ -204,7 +204,7 @@ impl ToolState {
     pub async fn process(
         &mut self,
         view_info: &ViewInfo,
-        stylus_input: crate::stylus_events::StylusEventFrame,
+        stylus_input: crate::window::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         ui_requests: &crossbeam::channel::Receiver<crate::ui::requests::UiRequest>,
     ) -> ToolRenderOutput {

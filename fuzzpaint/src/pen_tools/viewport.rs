@@ -39,7 +39,7 @@ impl Base {
     fn process(
         &mut self,
         view_info: &super::ViewInfo,
-        stylus_input: crate::stylus_events::StylusEventFrame,
+        stylus_input: crate::window::stylus_events::StylusEventFrame,
         _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
@@ -177,7 +177,7 @@ impl super::PenTool for Scrub {
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,
-        stylus_input: crate::stylus_events::StylusEventFrame,
+        stylus_input: crate::window::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
@@ -211,7 +211,7 @@ impl super::PenTool for Pan {
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,
-        stylus_input: crate::stylus_events::StylusEventFrame,
+        stylus_input: crate::window::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,
@@ -245,7 +245,7 @@ impl super::PenTool for Rotate {
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,
-        stylus_input: crate::stylus_events::StylusEventFrame,
+        stylus_input: crate::window::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         tool_output: &mut super::ToolStateOutput,
         render_output: &mut super::ToolRenderOutput,

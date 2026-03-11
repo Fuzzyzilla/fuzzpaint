@@ -22,7 +22,6 @@ pub mod my_futures;
 pub mod pen_tools;
 pub mod picker;
 pub mod render_device;
-pub mod stylus_events;
 pub mod text;
 pub mod ui;
 pub mod view_transform;
@@ -75,7 +74,7 @@ impl AdHocGlobals {
 }
 
 async fn stylus_event_collector(
-    mut event_stream: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
+    mut event_stream: tokio::sync::broadcast::Receiver<window::stylus_events::StylusEventFrame>,
     ui_requests: crossbeam::channel::Receiver<ui::requests::UiRequest>,
     _: tokio::sync::mpsc::Sender<renderer::requests::RenderRequest>,
     mut action_listener: actions::ActionListener,
@@ -214,6 +213,8 @@ fn server() -> AnyResult<()> {
 
     let (new_connections, mut recv_new_connections) = tokio::sync::mpsc::channel(1);
 
+    // wait_client is not cancel safe, so it cant be part of the main race-loop.
+    // The channel acts as a not-cancel-safe -> cancel-safe bridge.
     let new_client_loop = async {
         loop {
             match server.wait_client().await {
