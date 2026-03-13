@@ -1560,18 +1560,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "fuzzpaint-collections"
-version = "0.1.0"
-dependencies = [
- "fuzzpaint-types",
-]
-
-[[package]]
 name = "fuzzpaint-connection"
 version = "0.1.0"
 dependencies = [
  "bitcode",
- "fuzzpaint-collections",
+ "fuzzpaint-doc",
  "fuzzpaint-types",
  "log",
  "tokio",
@@ -1609,10 +1602,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuzzpaint-doc"
+version = "0.1.0"
+dependencies = [
+ "fuzzpaint-types",
+]
+
+[[package]]
 name = "fuzzpaint-io"
 version = "0.1.0"
 dependencies = [
- "fuzzpaint-collections",
+ "fuzzpaint-doc",
  "fuzzpaint-types",
 ]
 
@@ -1635,13 +1635,16 @@ dependencies = [
 [[package]]
 name = "fuzzpaint-types"
 version = "0.1.0"
+dependencies = [
+ "ultraviolet",
+]
 
 [[package]]
 name = "fuzzpaint-ui"
 version = "0.1.0"
 dependencies = [
  "egui",
- "fuzzpaint-collections",
+ "fuzzpaint-doc",
  "fuzzpaint-types",
 ]
 

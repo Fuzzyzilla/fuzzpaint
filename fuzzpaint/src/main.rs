@@ -36,7 +36,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 // Use jemalloc global if enabled + supported playform + not mem profiling
 #[cfg(all(
-    not(any(feature = "dhat_heap", target_env = "msvc")),
+    not(any(feature = "dhat_heap", target_os = "windows")),
     feature = "jemallocator"
 ))]
 #[global_allocator]

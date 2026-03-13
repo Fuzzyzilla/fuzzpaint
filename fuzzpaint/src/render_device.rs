@@ -29,7 +29,7 @@ unsafe fn physical_device_display_support(
         winit::raw_window_handle_05::RawDisplayHandle::UiKit(_) => false,
         winit::raw_window_handle_05::RawDisplayHandle::AppKit(_) => false,
         winit::raw_window_handle_05::RawDisplayHandle::Orbital(_) => false,
-        #[cfg(feature = "x11")]
+        #[cfg(all(feature = "x11", not(target_os = "windows")))]
         winit::raw_window_handle_05::RawDisplayHandle::Xlib(xlib_display_handle)
             if instance.enabled_extensions().khr_xlib_surface
                 && !xlib_display_handle.display.is_null() =>
@@ -61,6 +61,7 @@ unsafe fn physical_device_display_support(
             };
             t_try() == Some(true)
         }
+        #[cfg(all(feature = "x11", not(target_os = "windows")))]
         winit::raw_window_handle_05::RawDisplayHandle::Xcb(xcb_display_handle)
             if instance.enabled_extensions().khr_xcb_surface
                 && !xcb_display_handle.connection.is_null() =>
@@ -357,7 +358,7 @@ impl RenderSurface {
 
 pub struct Allocators {
     command_buffer_alloc: vk::StandardCommandBufferAllocator,
-    memory_alloc: Arc<dyn vulkano::memory::allocator::MemoryAllocator>,
+    memory_alloc: Arc<vulkano::memory::allocator::StandardMemoryAllocator>,
     descriptor_set_alloc: vk::StandardDescriptorSetAllocator,
 }
 
@@ -365,7 +366,7 @@ impl Allocators {
     pub fn command_buffer(&self) -> &vk::StandardCommandBufferAllocator {
         &self.command_buffer_alloc
     }
-    pub fn memory(&self) -> &Arc<dyn vulkano::memory::allocator::MemoryAllocator> {
+    pub fn memory(&self) -> &Arc<vulkano::memory::allocator::StandardMemoryAllocator> {
         &self.memory_alloc
     }
     pub fn descriptor_set(&self) -> &vk::StandardDescriptorSetAllocator {
