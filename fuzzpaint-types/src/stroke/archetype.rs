@@ -1,5 +1,5 @@
 bitflags::bitflags! {
-    #[derive(Copy, Clone, Eq, PartialEq, Hash, bytemuck::Pod, bytemuck::Zeroable, Debug)]
+    #[derive(Default, Copy, Clone, Eq, PartialEq, Hash, bytemuck::Pod, bytemuck::Zeroable, Debug)]
     /// Description of a point's data fields. Organized such that devices that have later flags are
     /// also likely to have prior flags.
     ///

@@ -1,121 +1,7 @@
-pub mod archetype;
-pub use archetype::Archetype;
-
-//U32::MAX us == 71 minutes. If someone draws one continuous stroke for that long, other problems would certainly arise. D:
-#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-#[repr(transparent)]
-pub struct Microseconds(pub u32);
-
-/// A single dynamically structured point.
-#[derive(Clone, Copy)]
-pub struct BorrowedPoint<'a> {
-    /// Invariant: `data.len == archetype.elements`
-    elements: &'a [u32],
-    archetype: Archetype,
-}
-impl<'a> BorrowedPoint<'a> {
-    pub fn empty() -> Self {
-        BorrowedPoint {
-            elements: &[],
-            archetype: Archetype::empty(),
-        }
-    }
-    /// Borrow a slice as a point. Returns `None` if the length of the data is not `archetype.elements()`
-    ///
-    /// The elements in data will be interpreted as a series of packed elements. For each flag of `archetype` in order, sequential `u32`
-    /// values will be interpreted as the relevant type as documented in [`Archetype`].
-    /// This is a safe function as all such `transmutes` from any `u32` to any of the relevant types is sound.
-    #[must_use]
-    pub fn new(elements: &'a [u32], archetype: Archetype) -> Option<Self> {
-        // Check that lengths make sense
-        if elements.len() == archetype.elements() {
-            Some(Self {
-                elements,
-                archetype,
-            })
-        } else {
-            None
-        }
-    }
-    pub fn position(&self) -> Option<[f32; 2]> {
-        self.archetype.offset_of(Archetype::POSITION).map(|idx| {
-            let data: [u32; 2] = self.elements[idx..idx + 2].try_into().unwrap();
-            bytemuck::cast(data)
-        })
-    }
-    pub fn time(&self) -> Option<Microseconds> {
-        self.archetype.offset_of(Archetype::TIME).map(|idx| {
-            let data = self.elements[idx];
-            bytemuck::cast(data)
-        })
-    }
-    pub fn arc_length(&self) -> Option<f32> {
-        self.archetype.offset_of(Archetype::ARC_LENGTH).map(|idx| {
-            let data = self.elements[idx];
-            bytemuck::cast(data)
-        })
-    }
-    pub fn pressure(&self) -> Option<f32> {
-        self.archetype.offset_of(Archetype::PRESSURE).map(|idx| {
-            let data = self.elements[idx];
-            bytemuck::cast(data)
-        })
-    }
-    pub fn tilt(&self) -> Option<[f32; 2]> {
-        self.archetype.offset_of(Archetype::TILT).map(|idx| {
-            let data: [u32; 2] = self.elements[idx..idx + 2].try_into().unwrap();
-            bytemuck::cast(data)
-        })
-    }
-    pub fn distance(&self) -> Option<f32> {
-        self.archetype.offset_of(Archetype::DISTANCE).map(|idx| {
-            let data = self.elements[idx];
-            bytemuck::cast(data)
-        })
-    }
-    pub fn roll(&self) -> Option<f32> {
-        self.archetype.offset_of(Archetype::ROLL).map(|idx| {
-            let data = self.elements[idx];
-            bytemuck::cast(data)
-        })
-    }
-    pub fn wheel(&self) -> Option<f32> {
-        self.archetype.offset_of(Archetype::WHEEL).map(|idx| {
-            let data = self.elements[idx];
-            bytemuck::cast(data)
-        })
-    }
-}
-impl std::fmt::Debug for BorrowedPoint<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut d = f.debug_struct("BorrowedPoint");
-        if let Some(position) = self.position() {
-            d.field("position", &position);
-        }
-        if let Some(time) = self.time() {
-            d.field("time", &time);
-        }
-        if let Some(arc_length) = self.arc_length() {
-            d.field("arc_length", &arc_length);
-        }
-        if let Some(pressure) = self.pressure() {
-            d.field("pressure", &pressure);
-        }
-        if let Some(tilt) = self.tilt() {
-            d.field("tilt", &tilt);
-        }
-        if let Some(distance) = self.distance() {
-            d.field("distance", &distance);
-        }
-        if let Some(roll) = self.roll() {
-            d.field("roll", &roll);
-        }
-        if let Some(wheel) = self.wheel() {
-            d.field("wheel", &wheel);
-        }
-        d.finish()
-    }
-}
+//! # Array-of-Structures representation.
+//!
+//! Most efficient for general use.
+use super::{Archetype, Microseconds};
 
 /// A dynamic layout structure containing many packed points based on an archetype.
 #[derive(Clone, Copy)]
@@ -251,4 +137,119 @@ impl std::fmt::Debug for StrokeSlice<'_> {
         );
         d.finish()
     }
+}
+
+/// A single dynamically structured point.
+#[derive(Clone, Copy)]
+pub struct BorrowedPoint<'a> {
+    /// Invariant: `data.len == archetype.elements`
+    elements: &'a [u32],
+    archetype: Archetype,
+}
+impl<'a> BorrowedPoint<'a> {
+    pub fn empty() -> Self {
+        BorrowedPoint {
+            elements: &[],
+            archetype: Archetype::empty(),
+        }
+    }
+    /// Borrow a slice as a point. Returns `None` if the length of the data is not `archetype.elements()`
+    ///
+    /// The elements in data will be interpreted as a series of packed elements. For each flag of `archetype` in order, sequential `u32`
+    /// values will be interpreted as the relevant type as documented in [`Archetype`].
+    /// This is a safe function as all such `transmutes` from any `u32` to any of the relevant types is sound.
+    #[must_use]
+    pub fn new(elements: &'a [u32], archetype: Archetype) -> Option<Self> {
+        // Check that lengths make sense
+        if elements.len() == archetype.elements() {
+            Some(Self {
+                elements,
+                archetype,
+            })
+        } else {
+            None
+        }
+    }
+    pub fn position(&self) -> Option<[f32; 2]> {
+        self.archetype.offset_of(Archetype::POSITION).map(|idx| {
+            let data: [u32; 2] = self.elements[idx..idx + 2].try_into().unwrap();
+            bytemuck::cast(data)
+        })
+    }
+    pub fn time(&self) -> Option<Microseconds> {
+        self.archetype.offset_of(Archetype::TIME).map(|idx| {
+            let data = self.elements[idx];
+            bytemuck::cast(data)
+        })
+    }
+    pub fn arc_length(&self) -> Option<f32> {
+        self.archetype.offset_of(Archetype::ARC_LENGTH).map(|idx| {
+            let data = self.elements[idx];
+            bytemuck::cast(data)
+        })
+    }
+    pub fn pressure(&self) -> Option<f32> {
+        self.archetype.offset_of(Archetype::PRESSURE).map(|idx| {
+            let data = self.elements[idx];
+            bytemuck::cast(data)
+        })
+    }
+    pub fn tilt(&self) -> Option<[f32; 2]> {
+        self.archetype.offset_of(Archetype::TILT).map(|idx| {
+            let data: [u32; 2] = self.elements[idx..idx + 2].try_into().unwrap();
+            bytemuck::cast(data)
+        })
+    }
+    pub fn distance(&self) -> Option<f32> {
+        self.archetype.offset_of(Archetype::DISTANCE).map(|idx| {
+            let data = self.elements[idx];
+            bytemuck::cast(data)
+        })
+    }
+    pub fn roll(&self) -> Option<f32> {
+        self.archetype.offset_of(Archetype::ROLL).map(|idx| {
+            let data = self.elements[idx];
+            bytemuck::cast(data)
+        })
+    }
+    pub fn wheel(&self) -> Option<f32> {
+        self.archetype.offset_of(Archetype::WHEEL).map(|idx| {
+            let data = self.elements[idx];
+            bytemuck::cast(data)
+        })
+    }
+}
+impl std::fmt::Debug for BorrowedPoint<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("BorrowedPoint");
+        if let Some(position) = self.position() {
+            d.field("position", &position);
+        }
+        if let Some(time) = self.time() {
+            d.field("time", &time);
+        }
+        if let Some(arc_length) = self.arc_length() {
+            d.field("arc_length", &arc_length);
+        }
+        if let Some(pressure) = self.pressure() {
+            d.field("pressure", &pressure);
+        }
+        if let Some(tilt) = self.tilt() {
+            d.field("tilt", &tilt);
+        }
+        if let Some(distance) = self.distance() {
+            d.field("distance", &distance);
+        }
+        if let Some(roll) = self.roll() {
+            d.field("roll", &roll);
+        }
+        if let Some(wheel) = self.wheel() {
+            d.field("wheel", &wheel);
+        }
+        d.finish()
+    }
+}
+pub struct Stroke {
+    archetype: super::Archetype,
+    data: Vec<u32>,
 }

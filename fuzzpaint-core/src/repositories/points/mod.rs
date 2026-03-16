@@ -10,7 +10,7 @@ pub mod io;
 mod slab;
 use slab::Slab;
 
-use crate::stroke::{Archetype, StrokeSlice};
+use fuzzpaint_types::stroke::{aos::StrokeSlice, Archetype};
 
 fn summarize(stroke: StrokeSlice) -> CollectionSummary {
     // Funny `try`

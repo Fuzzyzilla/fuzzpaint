@@ -1,4 +1,4 @@
-use fuzzpaint_core::stroke::{Archetype, Microseconds, StrokeSlice};
+use fuzzpaint_types::stroke::{Archetype, Microseconds, aos::StrokeSlice};
 
 #[derive(Clone, Copy)]
 pub struct InputPoint {

@@ -11,7 +11,6 @@ pub mod io;
 pub mod queue;
 pub mod repositories;
 pub mod state;
-pub mod stroke;
 pub mod units;
 pub mod util;
 

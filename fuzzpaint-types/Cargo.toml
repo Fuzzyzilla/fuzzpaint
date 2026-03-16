@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bitflags = { version = "2.10.0", features = ["bytemuck"] }
+bytemuck = { version = "1.24.0", features = ["derive"] }
 ultraviolet = "0.10.0"

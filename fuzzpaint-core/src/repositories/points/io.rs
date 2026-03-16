@@ -11,7 +11,7 @@ struct DictMetadata {
     offset: u32,
     // Len, in *bytes*
     len: u32,
-    arch: crate::stroke::Archetype,
+    arch: fuzzpaint_types::stroke::Archetype,
 }
 
 // Collect all subsequent ones that will also fit

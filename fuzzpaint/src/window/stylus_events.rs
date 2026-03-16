@@ -1,3 +1,5 @@
+use fuzzpaint_types::stroke::{Archetype, aos::StrokeSlice};
+
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug)]
 pub enum StylusAxis {
@@ -212,6 +214,9 @@ pub struct MouseState {
     pressure: Option<f32>,
 }
 impl MouseState {
+    fn logically_down(&self) -> bool {
+        self.down_buttons.contains(&winit::event::MouseButton::Left)
+    }
     fn transition_away(&self, events: &mut Vec<winit::event::WindowEvent>) {
         // Release all buttons.
         for button in &self.down_buttons {
@@ -258,6 +263,10 @@ impl MouseState {
     }
 }
 
+pub struct Stroke {
+    generation: u8,
+}
+
 #[derive(Default)]
 pub struct PointerBridge {
     // Keep track of the full state of all pointing devices at all time. Thus,
@@ -266,6 +275,9 @@ pub struct PointerBridge {
     in_tools: hashbrown::HashMap<ToolID, ToolState>,
     active_touches: hashbrown::HashMap<TouchID, TouchState>,
     in_mice: hashbrown::HashMap<MouseID, MouseState>,
+
+    ongoing_strokes: hashbrown::HashMap<DeviceID, ()>,
+    new_strokes: Vec<StrokeListener>,
 
     synthetic_events: Vec<winit::event::WindowEvent>,
 }
@@ -630,7 +642,7 @@ impl PointerBridge {
                     }
                     ToolEvent::Up => {
                         if let Some(state) = self.in_tools.get_mut(&id) {
-                            state.down = true;
+                            state.down = false;
                             if self.is_egui_main(id) {
                                 self.synthetic_events
                                     .push(winit::event::WindowEvent::MouseInput {
@@ -681,6 +693,194 @@ impl PointerBridge {
             Event::Pad { .. } => (),
         }
         self.synthetic_events.drain(..)
+    }
+    /// Take the newly started strokes since the last time this function was
+    /// called. Once the listener is taken, there is no way to access that
+    /// stroke operation for the remainder of its lifetime.
+    ///
+    /// *New listeners should be polled in order,* as some of these listeners
+    /// may represent already-complete strokes.
+    pub fn take_new_listeners(&mut self) -> Vec<StrokeListener> {
+        std::mem::take(&mut self.new_strokes)
+    }
+    /// Get the pose of the current primary pointer. You should check if egui is
+    /// eating this hover first.
+    ///
+    /// Returns None if there is no primary pointer or if it is down (not
+    /// hovering).
+    pub fn primary_hover(&self) -> Option<Hover> {
+        let main = self.get_egui_main()?;
+        match main {
+            DeviceID::Mouse(m) => {
+                let mouse = self.in_mice.get(&m)?;
+                (!mouse.logically_down()).then_some(Hover {
+                    position: mouse.position.into(),
+                    distance: None,
+                })
+            }
+            DeviceID::Tool(t) => {
+                let tool = self.in_tools.get(&t)?;
+                (!tool.down).then_some(Hover::from_pose(&tool.pose))
+            }
+            DeviceID::Touch(_) => {
+                // Touches cannot hover.
+                None
+            }
+        }
+    }
+    /// Get a copy of **non-primary** pointers hovering the window. Subject to
+    /// filtering (e.g. mice will never be reported while there is any stylus in
+    /// range.)
+    pub fn auxiliary_hovers(&self) -> Vec<Hover> {
+        let mut vec = Vec::new();
+        let Some(main) = self.get_egui_main() else {
+            return vec;
+        };
+
+        // Ignore mice if there are active tools or touches.
+        if self.in_tools.is_empty() && self.active_touches.is_empty() {
+            // Collect mice.
+            for (id, mouse) in &self.in_mice {
+                // Only collect if not the main pointer and not currently down.
+                if !mouse.logically_down() && main != DeviceID::Mouse(id.clone()) {
+                    vec.push(Hover {
+                        position: mouse.position.into(),
+                        distance: None,
+                    });
+                }
+            }
+        } else {
+            // Collect styluses. No need to collect touches, as touches have no
+            // concept of a hover.
+            for (id, tool) in &self.in_tools {
+                // Only collect if not the main pointer and not currently down.
+                if !tool.down && main != DeviceID::Tool(id.clone()) {
+                    vec.push(Hover::from_pose(&tool.pose));
+                }
+            }
+        }
+        vec
+    }
+}
+
+/// An auxiliary pointer hovering the window.
+pub struct Hover {
+    /// Logical pixels.
+    position: ultraviolet::Vec2,
+    /// Normalized
+    distance: Option<f32>,
+}
+impl Hover {
+    /// Get the position of the hover, in logical pixels.
+    pub fn position(&self) -> ultraviolet::Vec2 {
+        self.position
+    }
+    /// Get the perpenicular distance from the screen, normalized.
+    pub fn distance(&self) -> Option<f32> {
+        self.distance
+    }
+    fn from_pose(pose: &octotablet::axis::Pose) -> Self {
+        Self {
+            position: pose.position.into(),
+            distance: pose.distance.get(),
+        }
+    }
+}
+
+fn archetype_of(p: &octotablet::axis::Pose) -> Archetype {
+    [
+        Some(Archetype::POSITION),
+        p.tilt.is_some().then_some(Archetype::TILT),
+        p.distance.get().is_some().then_some(Archetype::DISTANCE),
+        p.pressure.get().is_some().then_some(Archetype::PRESSURE),
+        p.roll.get().is_some().then_some(Archetype::ROLL),
+        p.wheel.is_some().then_some(Archetype::WHEEL),
+    ]
+    .iter()
+    .flatten()
+    // Rust syntax looks funny sometimes :3
+    .fold(Archetype::empty(), |acc, &item| acc | item)
+}
+/// Collect many poses into a stroke slice.
+fn collect(
+    poses: impl Iterator<Item = octotablet::axis::Pose>,
+    mut base_archetype: Archetype,
+    stage: &'_ mut Vec<u32>,
+) -> StrokeSlice<'_> {
+    stage.clear();
+    for pose in poses {
+        let archetype = archetype_of(&pose);
+        if !base_archetype.contains(archetype) {
+            // Expand to make room for the new archetype axes.
+        }
+    }
+    todo!()
+}
+
+pub enum Ended {
+    /// The stroke was retroactively cancelled, and the interaction should be
+    /// discarded.
+    Cancelled,
+    /// The stroke is finished and should be committed.
+    Ended,
+}
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct StrokeListenerID {
+    device: DeviceID,
+    generation: u8,
+}
+/// Stream to listen for input from a device for the duration of a
+/// click-and-drag. This listener has no capability to query down-ness of the
+/// pointer, as a Stroke is by definition always logically down until it ends.
+pub struct StrokeListener {
+    id: StrokeListenerID,
+    archetype: Archetype,
+    position: ultraviolet::Vec2,
+    stream: std::sync::mpsc::Receiver<octotablet::axis::Pose>,
+    staging: Vec<u32>,
+}
+impl StrokeListener {
+    /// Get an identifier for this listener. Identifiers may be reused after the
+    /// previous listener of that ID is dropped. *It is important to drop a
+    /// listener soon after it is no longer needed to avoid ID exhaustion.*
+    pub fn id(&self) -> StrokeListenerID {
+        self.id.clone()
+    }
+    /// Get the maximum possible archetype for the device creating this stroke.
+    /// If a pointer *might* report values for the given archetype, it should be
+    /// reported here even if it isn't currently.
+    ///
+    /// This is only a best-effort hint. The values returned by
+    /// [`Self::take_stroke`] may differ.
+    pub fn maximal_archetype(&self) -> Archetype {
+        self.archetype
+    }
+    /// Take the new points this frame.
+    /// # Errors
+    /// If there are no points to take and the stroke has ended, an error is
+    /// returned describing how the stroke ended. The value of [`Ended`] should
+    /// be respected for how this is handled.
+    ///
+    /// Notably, that means that just because this function doesn't return an
+    /// error doesn't mean that the stroke *hasn't* already ended.
+    ///
+    /// *On error, this listener should be dropped soon.*
+    pub fn take_stroke(&'_ mut self) -> Result<StrokeSlice<'_>, Ended> {
+        let poses = self.stream.try_iter();
+        Ok(collect(poses, self.archetype, &mut self.staging))
+    }
+    /// Get the latest position of the pointer, in logical pixels.
+    pub fn latest_position(&self) -> ultraviolet::Vec2 {
+        todo!()
+    }
+    /// `Some` if the stroke has ended. You should respect the value of
+    /// [`Ended`] to decided whether the action of this stroke should be ignored
+    /// or committed.
+    ///
+    /// This may return `Some` even if there are pending points that can be
+    /// acquired using `take_stroke`.
+    pub fn is_ended(&self) -> Option<Ended> {
+        todo!()
     }
 }
 trait StylusAxes {

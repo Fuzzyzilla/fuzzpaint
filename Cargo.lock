@@ -1532,11 +1532,13 @@ dependencies = [
  "fuzzpaint-connection",
  "fuzzpaint-core",
  "fuzzpaint-logger",
+ "fuzzpaint-types",
  "hashbrown",
  "human_bytes",
  "image",
  "log",
  "lyon_tessellation",
+ "material-icons",
  "octotablet",
  "oneshot",
  "parking_lot",
@@ -1586,6 +1588,7 @@ dependencies = [
  "dirs",
  "either",
  "fontdb",
+ "fuzzpaint-types",
  "hashbrown",
  "human_bytes",
  "id_tree",
@@ -1606,6 +1609,7 @@ name = "fuzzpaint-doc"
 version = "0.1.0"
 dependencies = [
  "fuzzpaint-types",
+ "ultraviolet",
 ]
 
 [[package]]
@@ -1636,6 +1640,8 @@ dependencies = [
 name = "fuzzpaint-types"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.10.0",
+ "bytemuck",
  "ultraviolet",
 ]
 
@@ -2164,6 +2170,12 @@ checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "material-icons"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51749189f2b4bf6a522337b504a85a543b5e2af670cb08bcf48297ada61dc2d7"
 
 [[package]]
 name = "maybe-rayon"
