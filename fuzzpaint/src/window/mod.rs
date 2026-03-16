@@ -261,24 +261,6 @@ impl WindowObjects {
 
         Ok(())
     }
-    fn apply_document_cursor(&mut self) {
-        // If egui did not assert a cursor, allow the document to provide an icon.
-        // winit_egui handles egui's requests for cursor otherwise.
-        if !self.egui_ctx.wants_pointer_input() {
-            let cursor = self.preview_renderer.cursor();
-            let cursor = cursor.unwrap_or(crate::gizmos::CursorOrInvisible::Icon(
-                winit::window::CursorIcon::Default,
-            ));
-
-            if let crate::gizmos::CursorOrInvisible::Icon(i) = cursor {
-                self.win.set_cursor(i);
-                self.win.set_cursor_visible(true);
-            }
-            if let crate::gizmos::CursorOrInvisible::Invisible = cursor {
-                self.win.set_cursor_visible(false);
-            }
-        }
-    }
     pub fn window_event(&mut self, event: winit::event::WindowEvent) {
         use winit::event::WindowEvent;
         // The mouse was pressed on a CSD. Handle it~
@@ -351,8 +333,6 @@ impl WindowObjects {
     }
     pub fn redraw_requested(&mut self, connections: crate::connections::ConnectionsLock) {
         self.do_ui(connections);
-        // Overwrite the Egui provided cursor over the doc area.
-        self.apply_document_cursor();
 
         // Render and present the updated UI
         if let Err(e) = self.paint() {
@@ -487,9 +467,17 @@ impl WindowObjects {
     fn do_ui(&mut self, mut connections: crate::connections::ConnectionsLock) {
         self.ui.set_csd(!self.win.is_decorated());
 
-        let viewport = self
-            .egui_ctx
-            .update(self.win.as_ref(), |ctx| self.ui.ui(ctx, &mut connections));
+        let viewport = self.egui_ctx.update(self.win.as_ref(), |ctx| {
+            self.ui.ui(
+                ctx,
+                crate::ui::Interface {
+                    actions: (),
+                    pointers: &mut self.pointer_bridge,
+                    connections: &mut connections,
+                    preview: (),
+                },
+            )
+        });
         // Drop the lock ASAP.
         drop(connections);
 

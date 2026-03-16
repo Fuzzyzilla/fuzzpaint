@@ -19,7 +19,6 @@ mod dummy;
 mod gizmo;
 mod lasso;
 mod picker;
-mod viewport;
 use crate::view_transform::ViewInfo;
 trait MakePenTool {
     fn new_from_renderer(
@@ -63,13 +62,7 @@ impl ToolStateOutput {
     fn do_default(actions: &crate::actions::ActionFrame) -> Transition {
         use crate::actions::Action;
         // Wowie.. horrible... uhm uh
-        if actions.is_action_held(Action::ViewportPan) {
-            Transition::ToLayer(StateLayer::ViewportPan)
-        } else if actions.is_action_held(Action::ViewportRotate) {
-            Transition::ToLayer(StateLayer::ViewportRotate)
-        } else if actions.is_action_held(Action::ViewportScrub) {
-            Transition::ToLayer(StateLayer::ViewportScrub)
-        } else if actions.is_action_held(Action::Gizmo) {
+        if actions.is_action_held(Action::Gizmo) {
             Transition::ToLayer(StateLayer::Gizmos)
         } else {
             Transition::ToBase
@@ -103,9 +96,6 @@ pub enum StateLayer {
     Eraser,
     Gizmos,
     Lasso,
-    ViewportPan,
-    ViewportScrub,
-    ViewportRotate,
 }
 #[derive(Clone, Copy)]
 enum Transition {
@@ -176,9 +166,6 @@ pub struct ToolState {
     brush: Box<dyn PenTool>,
     eraser: Box<dyn PenTool>,
     picker: Box<dyn PenTool>,
-    document_pan: Box<dyn PenTool>,
-    document_scrub: Box<dyn PenTool>,
-    document_rotate: Box<dyn PenTool>,
     gizmos: Box<dyn PenTool>,
     lasso: Box<dyn PenTool>,
 }
@@ -192,9 +179,6 @@ impl ToolState {
             brush: brush::Brush::new_from_renderer(context)?,
             eraser: brush::Eraser::new_from_renderer(context)?,
             picker: picker::Picker::new_from_renderer(context)?,
-            document_pan: viewport::Pan::new_from_renderer(context)?,
-            document_scrub: viewport::Scrub::new_from_renderer(context)?,
-            document_rotate: viewport::Rotate::new_from_renderer(context)?,
             gizmos: gizmo::Gizmo::new_from_renderer(context)?,
             lasso: lasso::Lasso::new_from_renderer(context)?,
         })
@@ -264,9 +248,6 @@ impl ToolState {
             StateLayer::Brush => self.brush.as_mut(),
             StateLayer::Eraser => self.eraser.as_mut(),
             StateLayer::Picker => self.picker.as_mut(),
-            StateLayer::ViewportPan => self.document_pan.as_mut(),
-            StateLayer::ViewportScrub => self.document_scrub.as_mut(),
-            StateLayer::ViewportRotate => self.document_rotate.as_mut(),
             StateLayer::Gizmos => self.gizmos.as_mut(),
             StateLayer::Lasso => self.lasso.as_mut(),
         }

@@ -5,6 +5,7 @@ mod error_display;
 mod modal;
 pub mod requests;
 mod settings;
+mod tools;
 
 use modal::Modal;
 
@@ -33,15 +34,24 @@ const PIN_ICON: char = '📌';
 const ALPHA_ICON: &str = "α";
 const RESET_ICON: &str = "⟲";
 
-struct Main {
-    executor: tokio::runtime::Runtime,
-    connections: Vec<fuzzpaint_connection::tcp::client::Client>,
-    on_recv: tokio::sync::Notify,
-}
-impl Main {
-    async fn wait_recv(&mut self) {
-        self.on_recv.notified().await;
-    }
+pub const GOOGLE_MATERIAL_ICONS_FAMILY: std::sync::LazyLock<egui::epaint::text::FontFamily> =
+    std::sync::LazyLock::new(|| {
+        egui::epaint::text::FontFamily::Name("Google Material Icons".into())
+    });
+
+/// The interface between the UI and the outside world. (the renderer, active
+/// connections, etc).
+pub struct Interface<'a, 'b: 'a> {
+    /// Keyboard hotkey input.
+    pub actions: (),
+    /// Rich pointer input.
+    pub pointers: &'a mut crate::window::stylus_events::PointerBridge,
+    /// Remote and local connections.
+    pub connections: &'a mut crate::connections::ConnectionsLock<'b>,
+    /// Proxy for previews (any action in progress - dragging an opacity slider,
+    /// in the process of drawing, etc.), optionally forwarding them to the
+    /// renderer and the remote for realtime visual updates.
+    pub preview: (),
 }
 
 /// Justify `(available_size, size, margin)` -> `(size', margin')`, such that `count` elements
@@ -168,6 +178,7 @@ pub struct MainUI {
     picker_color: egui::ecolor::HsvaGamma,
     picker_in_flux: bool,
     picker_changed: bool,
+    tool_state: tools::ToolState,
 
     requests_send: crossbeam::channel::Sender<requests::UiRequest>,
     requests_recv: crossbeam::channel::Receiver<requests::UiRequest>,
@@ -207,6 +218,7 @@ impl MainUI {
             },
             picker_in_flux: false,
             picker_changed: false,
+            tool_state: tools::ToolState::default(),
 
             requests_send,
             requests_recv,
@@ -261,7 +273,7 @@ impl MainUI {
     pub fn ui(
         &mut self,
         ctx: &egui::Context,
-        connections: &mut crate::connections::ConnectionsLock,
+        mut interface: Interface,
     ) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
         // Close modal, on top of everything.
         if self.modal_enable() {
@@ -274,35 +286,47 @@ impl MainUI {
         // Show, but disable if modal exists.
         let res = self.main_ui(ctx, !self.background_enable());
 
-        for (_id, mut connection) in connections.iter_connections() {
-            egui::Window::new(connection.name()).show(ctx, |ui| {
-                egui::TopBottomPanel::bottom(ui.id().with("text-input")).show_inside(ui, |ui| {
-                    latch::latch(ui, "text", String::new(), |ui, string| {
-                        let response = ui.text_edit_singleline(string);
-                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            response.request_focus();
-                            // Entered, return the text.
-                            latch::Latch::Finish
-                        } else if string.is_empty() {
-                            // Nothing to store
-                            latch::Latch::None
-                        } else {
-                            // Retain typing progress
-                            latch::Latch::Continue
-                        }
-                    })
-                    .on_finish(|string| connection.message(&string));
+        for (_id, mut connection) in interface.connections.iter_connections() {
+            egui::Window::new(connection.name())
+                .default_open(false)
+                .show(ctx, |ui| {
+                    egui::TopBottomPanel::bottom(ui.id().with("text-input")).show_inside(
+                        ui,
+                        |ui| {
+                            latch::latch(ui, "text", String::new(), |ui, string| {
+                                let response = ui.text_edit_singleline(string);
+                                if response.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                {
+                                    response.request_focus();
+                                    // Entered, return the text.
+                                    latch::Latch::Finish
+                                } else if string.is_empty() {
+                                    // Nothing to store
+                                    latch::Latch::None
+                                } else {
+                                    // Retain typing progress
+                                    latch::Latch::Continue
+                                }
+                            })
+                            .on_finish(|string| connection.message(&string));
+                        },
+                    );
+                    egui::Grid::new("text")
+                        .striped(true)
+                        .num_columns(1)
+                        .show(ui, |ui| {
+                            for message in connection.messages() {
+                                ui.label(message);
+                                ui.end_row();
+                            }
+                        });
                 });
-                egui::Grid::new("text")
-                    .striped(true)
-                    .num_columns(1)
-                    .show(ui, |ui| {
-                        for message in connection.messages() {
-                            ui.label(message);
-                            ui.end_row();
-                        }
-                    });
-            });
+        }
+
+        if self.cur_document.is_some() {
+            self.tool_state
+                .gizmos(ctx, ctx.available_rect(), &mut interface);
         }
 
         self.error_display.show(ctx, crate::log_collector());
@@ -617,8 +641,10 @@ impl MainUI {
                 if !enabled {
                     ui.disable();
                 }
-                ui.label("Layers");
+                egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
+                self.colors_panel(ui, self.cur_document, &action_frame);
                 ui.separator();
+                ui.label("Layers");
                 if let Some(interface) = self.get_cur_interface() {
                     layers_panel(ui, interface);
 
@@ -639,20 +665,8 @@ impl MainUI {
                 }
             });
 
-            egui::SidePanel::left("inspector")
-                .resizable(true)
-                .show(ctx, |ui| {
-                    if !enabled {
-                        ui.disable();
-                    }
-                    // Stats at bottom
-                    egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
-                    // Toolbox above that
-                    egui::TopBottomPanel::bottom("tools-panel")
-                        .show_inside(ui, |ui| tools_panel(ui, &action_frame, &self.requests_send));
-                    // Brush panel takes the rest
-                    self.colors_panel(ui, self.cur_document, &action_frame);
-                });
+            self.tool_state
+                .show_toolbox_column(ctx, egui::panel::Side::Left, enabled);
             egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
                 if !enabled {
                     ui.disable();
@@ -797,6 +811,17 @@ impl MainUI {
                             self.modal =
                                 Some(CurrentModal::Settings(settings::Settings::default()));
                             ui.close();
+                        }
+                    });
+                    ui.menu_button("Remote", |ui| {
+                        ui.button("Connect...");
+                    });
+                    ui.menu_button("Info", |ui| {
+                        if ui.button("View Log").clicked() {
+                            self.error_display.show_list();
+                        }
+                        if ui.button("Print a log!").clicked() {
+                            log::warn!("User triggered log.");
                         }
                     });
                 });
@@ -1224,75 +1249,6 @@ impl MainUI {
                 brush.spacing_px = spacing_px;
             }
         }
-    }
-}
-/// For any tool, `(icon string, tooltip, opt_hotkey)`
-fn tool_button_for(
-    tool: crate::pen_tools::StateLayer,
-) -> (&'static str, &'static str, Option<crate::actions::Action>) {
-    use crate::{actions::Action, pen_tools::StateLayer};
-    match tool {
-        StateLayer::Brush => (STROKE_LAYER_ICON, "Brush", Some(Action::Brush)),
-        StateLayer::Picker => ("✒", "Picker", Some(Action::Picker)),
-        StateLayer::Gizmos => ("⌖", "Gizmos", Some(Action::Gizmo)),
-        StateLayer::Lasso => ("?", "Lasso", Some(Action::Lasso)),
-        // NO action for these! pen_tools takes care of it without latching.
-        // TODO: that's a weird mixing of roles lol
-        StateLayer::Eraser => ("?", "Eraser", None),
-        StateLayer::ViewportPan => ("✋", "Pan View", None),
-        StateLayer::ViewportRotate => ("🔃", "Rotate View", None),
-        StateLayer::ViewportScrub => ("🔍", "Scrub View", None),
-    }
-}
-fn tools_panel(
-    ui: &mut Ui,
-    action_frame: &crate::actions::ActionFrame,
-    requests: &crossbeam::channel::Sender<requests::UiRequest>,
-) {
-    use crate::pen_tools::StateLayer;
-    const TOOL_GROUPS: [&[StateLayer]; 3] = [
-        &[StateLayer::Brush, StateLayer::Eraser, StateLayer::Picker],
-        &[StateLayer::Lasso, StateLayer::Gizmos],
-        &[
-            StateLayer::ViewportPan,
-            StateLayer::ViewportRotate,
-            StateLayer::ViewportScrub,
-        ],
-    ];
-    // size, grows to justify
-    const BTN_BASE_SIZE: f32 = 20.0;
-    const ICON_SIZE: f32 = 15.0;
-    // Margin
-    const BTN_BASE_MARGIN: f32 = 5.0;
-
-    let button_size = justify_mut(ui, JustifyAxis::Horizontal, BTN_BASE_SIZE, BTN_BASE_MARGIN);
-
-    let spacing = ui.spacing_mut();
-    spacing.interact_size = egui::Vec2::splat(button_size);
-    spacing.button_padding = egui::Vec2::ZERO;
-
-    let font_height = ICON_SIZE / ui.ctx().pixels_per_point();
-    let font = egui::FontId::monospace(font_height);
-
-    for tool_group in TOOL_GROUPS {
-        ui.horizontal_wrapped(|ui| {
-            for &tool in tool_group {
-                let (icon, tooltip, opt_action) = tool_button_for(tool);
-
-                let button = egui::Button::new(egui::RichText::new(icon).font(font.clone()))
-                    .min_size(egui::Vec2::splat(button_size));
-                // Add button. Trigger if button clicked or action occured.
-                let response = ui.add(button).on_hover_text(tooltip);
-                let clicked = if let Some(action) = opt_action {
-                    response.or_action_clicked(action_frame, action)
-                } else {
-                    response.clicked()
-                };
-                if clicked {
-                    let _ = requests.send(requests::UiRequest::SetBaseTool { tool });
-                }
-            }
-        });
     }
 }
 /// Edit a leaf layer's data. If modifications were made that should be pushed to the queue,

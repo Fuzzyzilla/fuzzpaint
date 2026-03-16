@@ -1,6 +1,6 @@
 use crate::render_device::RenderSurface;
 use crate::vulkano_prelude::*;
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 use egui_winit::{egui, winit};
 
@@ -65,7 +65,7 @@ impl Ctx {
                     tweak: egui::FontTweak::default(),
                 },
                 families: vec![text::InsertFontFamily {
-                    family: text::FontFamily::Name("Google Material Icons".into()),
+                    family: crate::ui::GOOGLE_MATERIAL_ICONS_FAMILY.clone(),
                     priority: text::FontPriority::Highest,
                 }],
             });
