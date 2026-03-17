@@ -8,6 +8,7 @@ edition = "2024"
 [dependencies]
 fuzzpaint-core = { path = "../fuzzpaint-core" }
 fuzzpaint-connection = { path = "../fuzzpaint-connection" }
+fuzzpaint-types = { path = "../fuzzpaint-types" }
 fuzzpaint-logger = { path = "../fuzzpaint-logger" }
 ahash = { version = "0.8.12", default-features = false, features = ["std"] }
 anyhow = "1.0.100"
@@ -58,6 +59,7 @@ png = "0.18.0"
 ash = "^0.37.3"
 oneshot = "0.1.11"
 futures-util = "0.3.32"
+material-icons = "0.3.0"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator = { version = "0.6.1", optional = true, default-features = false }

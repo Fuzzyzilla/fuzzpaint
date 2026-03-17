@@ -1,14 +1,10 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+pub struct LoadOptions {
+    /// If true, allow extra space in the document's collections, which will
+    /// make edits more efficient. Otherwise, attempt to allocate as little as
+    /// possible.
+    overcommit: bool,
+    /// If true, provide the decoded thumbnail.
+    load_thumb: bool,
+    /// If false, skip loading the history tree.
+    load_history: bool,
 }
