@@ -16,8 +16,6 @@
 // that and there's really no need :'P
 mod brush;
 mod dummy;
-mod gizmo;
-mod lasso;
 mod picker;
 use crate::view_transform::ViewInfo;
 trait MakePenTool {
@@ -59,43 +57,22 @@ impl ToolStateOutput {
     /// Compute default transition for the given actions.
     /// Does not have access to the current state on purpose, as custom
     /// behavior per-state should be implemented in the tool itself.
-    fn do_default(actions: &crate::actions::ActionFrame) -> Transition {
-        use crate::actions::Action;
-        // Wowie.. horrible... uhm uh
-        if actions.is_action_held(Action::Gizmo) {
-            Transition::ToLayer(StateLayer::Gizmos)
-        } else {
-            Transition::ToBase
-        }
+    fn do_default(_actions: &crate::actions::ActionFrame) -> Transition {
+        Transition::ToBase
     }
 }
 /// Interface for tools to (optionally) insert and read render data.
 pub struct ToolRenderOutput {
     // A reference, to avoid the potentially expensive cost of cloning 500 times per second when the tool
     // doesn't end up caring :P
-    pub render_as: RenderAs,
     pub set_view: Option<crate::view_transform::DocumentTransform>,
-    /// Set the cursor icon to this if Some, or default if None.
-    pub cursor: Option<crate::gizmos::CursorOrInvisible>,
 }
 
-pub enum RenderAs {
-    /// Render as these gizmos, in order.
-    /// Gizmos are not interactible.
-    InlineGizmos(smallvec::SmallVec<[crate::gizmos::Gizmo; 1]>),
-    /// Render as this shared collection. Will be read locked during rendering.
-    /// Gizmo is not interactible.
-    SharedGizmoCollection(std::sync::Arc<tokio::sync::RwLock<crate::gizmos::Collection>>),
-    /// Nothing to render.
-    None,
-}
 #[derive(Copy, Clone, strum::EnumIter, Hash, PartialEq, Eq, Debug)]
 pub enum StateLayer {
     Picker,
     Brush,
     Eraser,
-    Gizmos,
-    Lasso,
 }
 #[derive(Clone, Copy)]
 enum Transition {
@@ -166,8 +143,6 @@ pub struct ToolState {
     brush: Box<dyn PenTool>,
     eraser: Box<dyn PenTool>,
     picker: Box<dyn PenTool>,
-    gizmos: Box<dyn PenTool>,
-    lasso: Box<dyn PenTool>,
 }
 impl ToolState {
     pub fn new_from_renderer(
@@ -179,8 +154,6 @@ impl ToolState {
             brush: brush::Brush::new_from_renderer(context)?,
             eraser: brush::Eraser::new_from_renderer(context)?,
             picker: picker::Picker::new_from_renderer(context)?,
-            gizmos: gizmo::Gizmo::new_from_renderer(context)?,
-            lasso: lasso::Lasso::new_from_renderer(context)?,
         })
     }
     /// Allow the tool to process the given stylus data and actions, optionally returning preview render commands,
@@ -195,11 +168,7 @@ impl ToolState {
         use crate::ui::requests::{DocumentRequest, UiRequest};
         // Prepare output structs
         let mut tool_output = ToolStateOutput { transition: None };
-        let mut render_output = ToolRenderOutput {
-            render_as: RenderAs::None,
-            set_view: None,
-            cursor: None,
-        };
+        let mut render_output = ToolRenderOutput { set_view: None };
 
         // Handle ui requests
         for request in ui_requests.try_iter() {
@@ -248,8 +217,6 @@ impl ToolState {
             StateLayer::Brush => self.brush.as_mut(),
             StateLayer::Eraser => self.eraser.as_mut(),
             StateLayer::Picker => self.picker.as_mut(),
-            StateLayer::Gizmos => self.gizmos.as_mut(),
-            StateLayer::Lasso => self.lasso.as_mut(),
         }
     }
     fn apply_state_transition(&mut self, transition: Transition) {

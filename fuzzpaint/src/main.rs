@@ -16,7 +16,6 @@ pub mod window;
 use vulkano_prelude::*;
 pub mod actions;
 pub mod document_viewport_proxy;
-pub mod gizmos;
 pub mod global;
 pub mod my_futures;
 pub mod pen_tools;
@@ -106,8 +105,6 @@ async fn stylus_event_collector(
                 if let Some(transform) = render.set_view {
                     document_preview.insert_document_transform(transform).await;
                 }
-                document_preview.insert_cursor(render.cursor);
-                document_preview.insert_tool_render(render.render_as);
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
                 log::warn!("Lost {num} stylus frames!");
@@ -286,7 +283,7 @@ fn server() -> AnyResult<()> {
                         last_processed: (),
                         message: server_msg::MessageKind::ServerMessage(
                             server_msg::ServerMessage {
-                                user_id: Some(()),
+                                user_id: None,
                                 message: &message,
                             },
                         ),

@@ -470,12 +470,12 @@ impl WindowObjects {
         let viewport = self.egui_ctx.update(self.win.as_ref(), |ctx| {
             self.ui.ui(
                 ctx,
-                crate::ui::Interface {
-                    actions: (),
+                &mut (crate::ui::interface::InterfaceInner {
                     pointers: &mut self.pointer_bridge,
                     connections: &mut connections,
                     preview: (),
-                },
+                }
+                .into()),
             )
         });
         // Drop the lock ASAP.
@@ -525,26 +525,27 @@ impl WindowObjects {
         //Wait for previous frame to end. (required for safety of preview render proxy)
         self.last_frame_fence.take().map(|fence| fence.wait(None));
 
-        let preview_commands = self.enable_document_view.then(|| unsafe {
-            self.preview_renderer.render(
-                self.render_surface.swapchain_images().unwrap()[idx as usize].clone(),
-                idx,
-            )
-        });
-        let preview_commands = match preview_commands {
-            Some(Ok(commands)) => commands,
-            None => smallvec::SmallVec::new(),
-            Some(Err(e)) => {
-                log::warn!("Failed to build preview commands {e:?}");
-                smallvec::SmallVec::new()
-            }
-        };
+        let preview_commands = self
+            .enable_document_view
+            .then(|| unsafe {
+                self.preview_renderer.render(
+                    self.render_surface.swapchain_images().unwrap()[idx as usize].clone(),
+                    idx,
+                )
+            })
+            .and_then(|res| match res {
+                Ok(res) => Some(res),
+                Err(e) => {
+                    log::warn!("Failed to build preview commands {e:?}");
+                    None
+                }
+            });
 
         let commands = self
             .egui_ctx
             // Preview commands are responsible for turning the UNDEFINED image into a well-defined state.
             // If there are none, instruct egui renderer to clear it first.
-            .build_commands(idx, preview_commands.is_empty());
+            .build_commands(idx, preview_commands.is_none());
 
         let render_complete = match commands {
             Some((Some(transfer), draw)) => {
@@ -566,11 +567,11 @@ impl WindowObjects {
 
                 let mut future = image_future.boxed();
 
-                for buffer in preview_commands {
+                if let Some(preview_commands) = preview_commands {
                     future = future
                         .then_execute(
                             self.render_context.queues().graphics().queue().clone(),
-                            buffer,
+                            preview_commands,
                         )?
                         .boxed();
                 }
@@ -585,11 +586,11 @@ impl WindowObjects {
             Some((None, draw)) => {
                 let mut future = image_future.boxed();
 
-                for buffer in preview_commands {
+                if let Some(preview_commands) = preview_commands {
                     future = future
                         .then_execute(
                             self.render_context.queues().graphics().queue().clone(),
-                            buffer,
+                            preview_commands,
                         )?
                         .boxed();
                 }

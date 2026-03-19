@@ -2,6 +2,7 @@ mod brush_ui;
 mod color_palette;
 mod drag;
 mod error_display;
+pub mod interface;
 mod modal;
 pub mod requests;
 mod settings;
@@ -38,21 +39,6 @@ pub const GOOGLE_MATERIAL_ICONS_FAMILY: std::sync::LazyLock<egui::epaint::text::
     std::sync::LazyLock::new(|| {
         egui::epaint::text::FontFamily::Name("Google Material Icons".into())
     });
-
-/// The interface between the UI and the outside world. (the renderer, active
-/// connections, etc).
-pub struct Interface<'a, 'b: 'a> {
-    /// Keyboard hotkey input.
-    pub actions: (),
-    /// Rich pointer input.
-    pub pointers: &'a mut crate::window::stylus_events::PointerBridge,
-    /// Remote and local connections.
-    pub connections: &'a mut crate::connections::ConnectionsLock<'b>,
-    /// Proxy for previews (any action in progress - dragging an opacity slider,
-    /// in the process of drawing, etc.), optionally forwarding them to the
-    /// renderer and the remote for realtime visual updates.
-    pub preview: (),
-}
 
 /// Justify `(available_size, size, margin)` -> `(size', margin')`, such that `count` elements
 /// will fill available space completely.
@@ -273,7 +259,7 @@ impl MainUI {
     pub fn ui(
         &mut self,
         ctx: &egui::Context,
-        mut interface: Interface,
+        interface: &mut interface::Interface,
     ) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
         // Close modal, on top of everything.
         if self.modal_enable() {
@@ -286,7 +272,7 @@ impl MainUI {
         // Show, but disable if modal exists.
         let res = self.main_ui(ctx, !self.background_enable());
 
-        for (_id, mut connection) in interface.connections.iter_connections() {
+        for (_id, mut connection) in interface.iter_connections() {
             egui::Window::new(connection.name())
                 .default_open(false)
                 .show(ctx, |ui| {
@@ -325,8 +311,7 @@ impl MainUI {
         }
 
         if self.cur_document.is_some() {
-            self.tool_state
-                .gizmos(ctx, ctx.available_rect(), &mut interface);
+            self.tool_state.gizmos(ctx, ctx.available_rect(), interface);
         }
 
         self.error_display.show(ctx, crate::log_collector());

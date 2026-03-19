@@ -1,7 +1,7 @@
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
 
-use crate::{AnyResult, gizmos::GizmoTree, pen_tools, render_device, view_transform};
+use crate::{AnyResult, pen_tools, render_device, view_transform};
 
 /// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
 /// behind the Egui content.
@@ -15,7 +15,7 @@ pub trait PreviewRenderProxy {
         &self,
         swapchain_image: Arc<vk::Image>,
         swapchain_image_idx: u32,
-    ) -> AnyResult<smallvec::SmallVec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>>;
+    ) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>>;
     /// The window surface has been invalidated and remade.
     fn surface_changed(&self, render_surface: &render_device::RenderSurface);
     /// Is this proxy requesting a redraw?
@@ -23,9 +23,6 @@ pub trait PreviewRenderProxy {
     /// The area used for this viewport has changed. Not the same as the surface - rather, the central area
     /// between UI elements where this proxy is visible. Proxies should still initialize the whole screen, however.
     fn viewport_changed(&self, position: ultraviolet::Vec2, size: ultraviolet::Vec2);
-
-    /// The cursor requested by the preview, or None for default.
-    fn cursor(&self) -> Option<crate::gizmos::CursorOrInvisible>;
 }
 
 mod shaders {
@@ -390,14 +387,9 @@ pub struct Proxy {
     // Static render data ============
     render_pass: Arc<vk::RenderPass>,
     pipeline: Arc<vk::GraphicsPipeline>,
-    gizmo_renderer: Arc<crate::gizmos::renderer::Renderer>,
 
     // Surface-derived render data ===============
     surface_data: tokio::sync::RwLock<SurfaceData>,
-
-    // User render data ============
-    cursor: parking_lot::RwLock<Option<crate::gizmos::CursorOrInvisible>>,
-    tool_render_as: parking_lot::RwLock<crate::pen_tools::RenderAs>,
 }
 
 impl Proxy {
@@ -627,9 +619,6 @@ impl Proxy {
         // Start as notified - write buffer is available immediately.
         notify.notify_one();
 
-        let gizmo_renderer =
-            crate::gizmos::renderer::Renderer::new(render_surface.context().clone())?;
-
         Ok(Self {
             render_context: render_surface.context().clone(),
 
@@ -647,10 +636,6 @@ impl Proxy {
             document_image_bindings,
 
             surface_data: surface_data.into(),
-            gizmo_renderer: gizmo_renderer.into(),
-
-            cursor: None.into(),
-            tool_render_as: pen_tools::RenderAs::None.into(),
         })
     }
     /// Internal use only. After the user's buffer is deemed swappable, the read index in switched over and returned.
@@ -735,12 +720,6 @@ impl Proxy {
             },
         })
     }
-    pub fn insert_cursor(&self, new_cursor: Option<crate::gizmos::CursorOrInvisible>) {
-        *self.cursor.write() = new_cursor;
-    }
-    pub fn insert_tool_render(&self, new_render_as: crate::pen_tools::RenderAs) {
-        *self.tool_render_as.write() = new_render_as;
-    }
     pub fn get_view_transform_sync(&self) -> Option<crate::view_transform::ViewTransform> {
         // lock, clone, release asap
         match *self.document_transform.blocking_read() {
@@ -768,59 +747,11 @@ impl PreviewRenderProxy for Proxy {
         &self,
         swapchain_image: Arc<vk::Image>,
         swapchain_idx: u32,
-    ) -> AnyResult<smallvec::SmallVec<[Arc<vk::PrimaryAutoCommandBuffer>; 2]>> {
+    ) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>> {
         // Safety: contract forwarded to the contract of this fn.
         let image_idx = unsafe { self.read() };
         let read = self.surface_data.blocking_read();
-        let commands = read.get_commands(swapchain_idx, image_idx)?;
-
-        // Do we have anything to render?
-        let tool_render_as = self.tool_render_as.read();
-        let tool_buffer = if matches!(
-            *tool_render_as,
-            pen_tools::RenderAs::SharedGizmoCollection(..) | pen_tools::RenderAs::InlineGizmos(..)
-        ) {
-            let proj = crate::vk::projection::orthographic_vk(
-                0.0,
-                read.surface_dimensions[0] as f32,
-                0.0,
-                read.surface_dimensions[1] as f32,
-                -1.0,
-                1.0,
-            );
-            let proj: [[f32; 4]; 4] = proj.into();
-            let proj: cgmath::Matrix4<f32> = proj.into();
-            let mut visitor = self.gizmo_renderer.render_visit(
-                swapchain_image,
-                [
-                    read.surface_dimensions[0] as f32,
-                    read.surface_dimensions[1] as f32,
-                ],
-                self.get_view_transform_sync().unwrap(),
-                proj,
-            )?;
-            match &*tool_render_as {
-                pen_tools::RenderAs::SharedGizmoCollection(shared) => {
-                    shared.blocking_read().visit_painter(&mut visitor);
-                }
-                pen_tools::RenderAs::InlineGizmos(gizmos) => {
-                    for gizmo in gizmos {
-                        gizmo.visit_painter(&mut visitor);
-                    }
-                }
-                pen_tools::RenderAs::None => unreachable!(), // Guarded above
-            }
-            Some(visitor.build()?)
-        } else {
-            None
-        };
-        let mut vec = smallvec::SmallVec::with_capacity(2);
-        vec.push(commands);
-        if let Some(tool_buffer) = tool_buffer {
-            vec.push(tool_buffer);
-        }
-
-        Ok(vec)
+        read.get_commands(swapchain_idx, image_idx)
     }
     fn surface_changed(&self, render_surface: &render_device::RenderSurface) {
         let viewport = *self.viewport.read();
@@ -857,8 +788,5 @@ impl PreviewRenderProxy for Proxy {
     }
     fn has_update(&self) -> bool {
         self.redraw_requested()
-    }
-    fn cursor(&self) -> Option<crate::gizmos::CursorOrInvisible> {
-        *self.cursor.read()
     }
 }

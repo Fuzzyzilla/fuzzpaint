@@ -1,4 +1,4 @@
-use fuzzpaint_types::stroke::{Archetype, Microseconds, aos::StrokeSlice};
+use fuzzpaint_types::stroke::{Archetype, Microseconds, aos::Slice};
 
 #[derive(Clone, Copy)]
 pub struct InputPoint {
@@ -234,7 +234,7 @@ impl StrokeBuilder {
         }
     }
     /// Pack the contents and borrow them as a stroke.
-    pub fn consume(&mut self) -> StrokeSlice {
+    pub fn consume(&mut self) -> Slice {
         self.packed_elements.clear();
 
         let archetype = self.current_archetype | Archetype::ARC_LENGTH;
@@ -310,7 +310,7 @@ impl StrokeBuilder {
         }
 
         self.clear();
-        StrokeSlice::new(&self.packed_elements, archetype).unwrap()
+        Slice::new(&self.packed_elements, archetype).unwrap()
     }
 }
 
@@ -432,128 +432,6 @@ fn brush(
             }
             *transform_cache = None;
         }
-    }
-    render_output.render_as = if builder.is_empty() {
-        render_output.cursor = Some(crate::gizmos::CursorOrInvisible::Icon(
-            winit::window::CursorIcon::Crosshair,
-        ));
-        super::RenderAs::None
-    } else {
-        // Get brush preview size factor due to layer unprojection
-        let transform_scale_factor = transform_cache
-            .as_ref()
-            .map_or(1.0, |xform| xform.preview_scale);
-
-        let base_size = transform_scale_factor * brush.spacing_px.get();
-        let size_factor = transform_scale_factor * brush.size_mul.get() - base_size;
-
-        // Calculate size for circular mouse cursor
-        let last_pos = builder.position.last().unwrap();
-        let last_size = if let Some(pressure) = builder.pressure.last() {
-            pressure * size_factor + base_size
-        } else {
-            brush.size_mul.get()
-        };
-
-        let brush_tip = crate::gizmos::Gizmo {
-            visual: crate::gizmos::Visual {
-                mesh: crate::gizmos::MeshMode::Shape(crate::gizmos::RenderShape::Ellipse {
-                    origin: ultraviolet::Vec2 {
-                        x: last_pos[0],
-                        y: last_pos[1],
-                    },
-                    radii: ultraviolet::Vec2 {
-                        x: last_size / 2.0,
-                        y: last_size / 2.0,
-                    },
-                    rotation: 0.0,
-                }),
-                texture: crate::gizmos::TextureMode::Solid([0, 0, 0, 200]),
-            },
-            ..Default::default()
-        };
-        render_output.cursor = Some(crate::gizmos::CursorOrInvisible::Invisible);
-        super::RenderAs::InlineGizmos(
-            [
-                make_trail(
-                    builder,
-                    base_size,
-                    size_factor,
-                    if is_eraser {
-                        None
-                    } else {
-                        // Todo: fetch if paletted.
-                        brush.color_modulate.get().left()
-                    },
-                ),
-                brush_tip,
-            ]
-            .into_iter()
-            .collect(),
-        )
-    }
-}
-fn make_trail(
-    stroke: &StrokeBuilder,
-    min_size: f32,
-    size_factor: f32,
-    color: Option<fuzzpaint_core::color::Color>,
-) -> crate::gizmos::Gizmo {
-    use crate::gizmos::{Gizmo, MeshMode, TextureMode, Visual, transform::Transform};
-
-    // Make trail:
-    let mut points = Vec::with_capacity(stroke.len());
-    // Fill in positions at 100% size
-    points.extend(
-        stroke
-            .position
-            .iter()
-            .map(|&pos| crate::gizmos::renderer::WideLineVertex {
-                pos,
-                // We use gizmo global color for this
-                color: [255; 4],
-                tex_coord: 0.0,
-                width: min_size + size_factor,
-            }),
-    );
-
-    // Go back to fill in sizes if known
-    if !stroke.pressure.is_empty() {
-        points
-            .iter_mut()
-            .zip(stroke.pressure.iter())
-            .for_each(|(point, pressure)| {
-                point.width = pressure.mul_add(size_factor, min_size);
-            });
-    }
-
-    let texture = match color.map(|c| c.as_array()) {
-        Some([r, g, b, a]) => {
-            // unmultiply
-            let color = if a.abs() > 0.001 {
-                [r / a, g / a, b / a, a]
-            } else {
-                // Avoid div by zero
-                [0.0; 4]
-            };
-            let color = [
-                (color[0].clamp(0.0, 1.0) * 255.9999) as u8,
-                (color[1].clamp(0.0, 1.0) * 255.9999) as u8,
-                (color[2].clamp(0.0, 1.0) * 255.9999) as u8,
-                (color[3].clamp(0.0, 1.0) * 255.9999) as u8,
-            ];
-            TextureMode::Solid(color)
-        }
-        None => TextureMode::AntTrail,
-    };
-
-    Gizmo {
-        visual: Visual {
-            mesh: MeshMode::WideLineStrip(points.into()),
-            texture,
-        },
-        transform: Transform::inherit_all(),
-        ..Default::default()
     }
 }
 
