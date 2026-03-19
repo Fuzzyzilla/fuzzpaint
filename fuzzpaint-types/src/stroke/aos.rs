@@ -1,18 +1,28 @@
 //! # Array-of-Structures representation.
 //!
-//! Most efficient for general use.
+//! Most efficient for rendering and as a dynamic collection.
 use super::{Archetype, Microseconds};
+
+/// Types which may be encoded as an AoS point list.
+pub trait Encode: Into<Stroke> + super::Stroke {
+    /// Encode as an Array-of-Structures into an uninitialized slice, returning
+    /// the now-initialized section.
+    fn encode_into<'mem>(
+        &'_ self,
+        into: &'mem mut [std::mem::MaybeUninit<u32>],
+    ) -> Result<&'mem mut [u32], super::EncodeError>;
+}
 
 /// A dynamic layout structure containing many packed points based on an archetype.
 #[derive(Clone, Copy)]
-pub struct StrokeSlice<'a> {
+pub struct Slice<'a> {
     elements: &'a [u32],
     archetype: Archetype,
     /// Number of points in this stroke.
     /// Invariant: `self.len * self.archetype.elements() == self.elements.len()`
     len: usize,
 }
-impl<'a> StrokeSlice<'a> {
+impl<'a> Slice<'a> {
     /// Create an empty borrow of the given archetype.
     #[must_use]
     pub const fn empty(archetype: Archetype) -> Self {
@@ -39,7 +49,7 @@ impl<'a> StrokeSlice<'a> {
         }
 
         // Ensure data len makes sense given the archetype:
-        if elements.len() % archetype.elements() != 0 {
+        if !elements.len().is_multiple_of(archetype.elements()) {
             return None;
         }
 
@@ -123,7 +133,7 @@ impl<'a> StrokeSlice<'a> {
         Some(BorrowedPoint::new(elements, self.archetype()).unwrap())
     }
 }
-impl std::fmt::Debug for StrokeSlice<'_> {
+impl std::fmt::Debug for Slice<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut d = f.debug_struct("StrokeSlice");
         // Redundant with values of `points`, HOWEVER points could be empty!

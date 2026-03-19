@@ -625,9 +625,9 @@ checksum = "5dd9dc738b7a8311c7ade152424974d8115f2cdad61e8dab8dac9f2362298510"
 
 [[package]]
 name = "bytemuck"
-version = "1.24.0"
+version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fbdf580320f38b612e485521afda1ee26d10cc9884efaaa750d383e13e3c5f4"
+checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
 dependencies = [
  "bytemuck_derive",
 ]
@@ -1566,6 +1566,7 @@ name = "fuzzpaint-connection"
 version = "0.1.0"
 dependencies = [
  "bitcode",
+ "bytemuck",
  "fuzzpaint-doc",
  "fuzzpaint-types",
  "log",
@@ -1578,13 +1579,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "az",
- "base64",
  "bitflags 2.10.0",
  "bitvec",
  "blake3",
  "bytemuck",
  "chrono",
- "crc",
  "dirs",
  "either",
  "fontdb",
@@ -1640,8 +1639,13 @@ dependencies = [
 name = "fuzzpaint-types"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bitflags 2.10.0",
  "bytemuck",
+ "crc",
+ "either",
+ "strum 0.27.2",
+ "thiserror 2.0.17",
  "ultraviolet",
 ]
 

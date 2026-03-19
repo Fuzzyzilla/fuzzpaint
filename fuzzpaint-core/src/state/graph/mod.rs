@@ -8,7 +8,7 @@ mod stable_id;
 pub mod writer;
 
 use super::transform;
-use crate::blend::Blend;
+use fuzzpaint_types::blend::Blend;
 // Re-export the various public ids
 // FuzzNodeID is NOT public!
 pub use stable_id::{AnyID, LeafID, NodeID};
@@ -25,7 +25,7 @@ pub enum LeafType {
     },
     SolidColor {
         blend: Blend,
-        source: crate::color::ColorOrPalette,
+        source: fuzzpaint_types::color::ColorOrPalette,
     },
     Text {
         blend: Blend,

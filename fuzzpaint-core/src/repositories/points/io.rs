@@ -408,10 +408,10 @@ impl super::Points {
                             // Make sure we didn't step back past the start
                             immutable
                                 .get(start_idx..past_the_end)
-                                .and_then(|slice| StrokeSlice::new(slice, meta.arch))
+                                .and_then(|slice| Slice::new(slice, meta.arch))
                         };
 
-                        super::summarize(stroke.unwrap_or(StrokeSlice::empty(meta.arch)))
+                        super::summarize(stroke.unwrap_or(Slice::empty(meta.arch)))
                     })
                     .collect();
 

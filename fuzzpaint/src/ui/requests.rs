@@ -18,7 +18,7 @@ pub enum NodeRequest {
     /// A partial change to the layer's blend. Reported during editting to give the user
     /// visual feedback, prior to finalizing the blend and sending it to the queue. Not all
     /// blend changes will be reported via this request!
-    InProgressBlend(fuzzpaint_core::blend::Blend),
+    InProgressBlend(fuzzpaint_types::blend::Blend),
 }
 #[derive(Debug, Clone, Copy)]
 /// View requests. None of these give a centerpoint - the viewport center

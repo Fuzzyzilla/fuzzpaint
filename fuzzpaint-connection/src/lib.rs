@@ -8,14 +8,12 @@
 pub mod channel;
 #[cfg(feature = "client")]
 pub mod client;
+pub mod id_wrapper;
 #[cfg(feature = "server")]
 pub mod server;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 
-/// An ID, in the server's namespace. Refers to the same object across clients
-/// and connections during the lifetime of the server.
-pub type ID = ();
 /// An ID, in a unique namespace for each direction of each client-server
 /// connection. Reusable after discarded
 pub type StreamID = ();
@@ -45,8 +43,25 @@ pub mod macro_use {
 }
 }
 
+pub mod bidi_msg {
+    use super::{StreamID, id_wrapper::ID};
+    #[derive(bitcode::Decode, bitcode::Encode)]
+    struct BeginStroke {
+        name: StreamID,
+        aspects: u16,
+    }
+    #[derive(bitcode::Decode, bitcode::Encode)]
+    struct InlineBlob {
+        name: StreamID,
+        // FIXME: Why doesn't byte slice work here? &str works...
+        data: Vec<u8>,
+        finish: bool,
+    }
+}
+
 pub mod client_msg {
-    use super::{ID, StreamID};
+    pub use super::bidi_msg::*;
+    use super::{StreamID, id_wrapper::ID};
 
     super::message_enum!(
         #[cfg_attr(feature = "client", derive(bitcode::Encode))]
@@ -73,30 +88,17 @@ pub mod client_msg {
     #[cfg_attr(feature = "client", derive(bitcode::Encode))]
     #[cfg_attr(feature = "server", derive(bitcode::Decode))]
     struct RequestDocument {
-        document: ID,
+        document: ID<()>,
     }
     #[cfg_attr(feature = "client", derive(bitcode::Encode))]
     #[cfg_attr(feature = "server", derive(bitcode::Decode))]
     struct Motion {
         position: Option<(f32, f32)>,
     }
-    #[cfg_attr(feature = "client", derive(bitcode::Encode))]
-    #[cfg_attr(feature = "server", derive(bitcode::Decode))]
-    struct BeginStroke {
-        name: StreamID,
-        aspects: u16,
-    }
-    #[cfg_attr(feature = "client", derive(bitcode::Encode))]
-    #[cfg_attr(feature = "server", derive(bitcode::Decode))]
-    struct InlineBlob {
-        name: StreamID,
-        // FIXME: Why doesn't byte slice work here? &str works...
-        data: Vec<u8>,
-        finish: bool,
-    }
 }
 pub mod server_msg {
-    use super::{ID, Serial, StreamID};
+    pub use super::bidi_msg::*;
+    use super::{Serial, StreamID, id_wrapper::ID};
 
     #[cfg_attr(feature = "server", derive(bitcode::Encode))]
     #[cfg_attr(feature = "client", derive(bitcode::Decode))]
@@ -117,7 +119,9 @@ pub mod server_msg {
     #[cfg_attr(feature = "server", derive(bitcode::Encode))]
     #[cfg_attr(feature = "client", derive(bitcode::Decode))]
     enum ErrorKind {
-        UnknownID(ID),
+        /// Unknown object ID. The type of the ID is erased and implicit from
+        /// the command type.
+        UnknownID(std::num::NonZero<u32>),
         UnknownStreamID(StreamID),
         PermissionDenied,
         EnhanceYourChill,
@@ -176,30 +180,35 @@ pub mod server_msg {
     #[cfg_attr(feature = "server", derive(bitcode::Encode))]
     #[cfg_attr(feature = "client", derive(bitcode::Decode))]
     pub struct ServerMessage<'a> {
-        pub user_id: Option<ID>,
+        pub user_id: Option<ID<()>>,
         pub message: &'a str,
     }
 
     #[cfg_attr(feature = "server", derive(bitcode::Encode))]
     #[cfg_attr(feature = "client", derive(bitcode::Decode))]
     pub struct AdvertiseOtherUser<'a> {
-        pub id: ID,
+        pub id: ID<()>,
         pub hello: super::client_msg::ClientHello<'a>,
     }
     #[cfg_attr(feature = "server", derive(bitcode::Encode))]
     #[cfg_attr(feature = "client", derive(bitcode::Decode))]
     pub struct OtherUserRemoved {
-        pub id: ID,
+        pub id: ID<()>,
     }
     #[cfg_attr(feature = "server", derive(bitcode::Encode))]
     #[cfg_attr(feature = "client", derive(bitcode::Decode))]
     pub struct AdvertiseDocument<'a> {
-        pub id: ID,
+        pub id: ID<()>,
         pub name: Option<&'a str>,
     }
     #[cfg_attr(feature = "server", derive(bitcode::Encode))]
     #[cfg_attr(feature = "client", derive(bitcode::Decode))]
     pub struct DocumentRemoved {
-        pub id: ID,
+        pub id: ID<()>,
+    }
+    #[cfg_attr(feature = "server", derive(bitcode::Encode))]
+    #[cfg_attr(feature = "client", derive(bitcode::Decode))]
+    pub struct AddShm {
+        name: String,
     }
 }

@@ -1,4 +1,5 @@
-use fuzzpaint_core::brush::{Brush, Texture, UniqueID};
+use fuzzpaint_core::brush::{Brush, Texture};
+use fuzzpaint_types::resource::UniqueID;
 use hashbrown::HashMap;
 
 use super::ResponseExt;

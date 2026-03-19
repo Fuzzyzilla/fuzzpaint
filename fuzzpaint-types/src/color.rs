@@ -1,6 +1,6 @@
 use either::Either;
 
-use crate::util::{FiniteF32, FiniteF32Error};
+use crate::float::{FiniteF32, FiniteF32Error};
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, bytemuck::Zeroable, Debug, Hash)]

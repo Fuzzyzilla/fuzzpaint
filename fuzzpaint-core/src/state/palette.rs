@@ -1,7 +1,5 @@
-use crate::{
-    color::{Color, PaletteIndex},
-    commands::{CommandConsumer, CommandError, DoUndo},
-};
+use crate::commands::{CommandConsumer, CommandError, DoUndo};
+use fuzzpaint_types::color::{Color, PaletteIndex};
 
 pub mod commands {
     use super::{Color, PaletteIndex};

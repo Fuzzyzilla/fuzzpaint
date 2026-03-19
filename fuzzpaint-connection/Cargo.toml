@@ -12,6 +12,7 @@ log = "0.4.29"
 # It has a worse (more-implicit, panick-y) API tho :V
 # Thas okay because we aggressively keep it compartmentalized.
 tokio = { version = "1.49.0", optional = true }
+bytemuck = { version = "1.25.0", features = ["derive"] }
 
 [features]
 default = ["client", "server", "tcp", "channel"]

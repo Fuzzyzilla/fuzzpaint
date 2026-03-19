@@ -370,7 +370,7 @@ impl Engines {
                     let color = source.get().left_or_else(|pal_idx| {
                         palette
                             .get(pal_idx)
-                            .unwrap_or(fuzzpaint_core::color::Color::TRANSPARENT)
+                            .unwrap_or(fuzzpaint_types::color::Color::TRANSPARENT)
                     });
                     builder.then_blend(blender::BlendImageSource::SolidColor(color), *blend)?;
                 }
@@ -574,7 +574,7 @@ impl Engines {
             let color_modulate = stroke.brush.color_modulate.get().left_or_else(|idx| {
                 palette
                     .get(idx)
-                    .unwrap_or(fuzzpaint_core::color::Color::BLACK)
+                    .unwrap_or(fuzzpaint_types::color::Color::BLACK)
             });
             fuzzpaint_core::state::stroke_collection::ImmutableStroke {
                 brush: state::StrokeBrushSettings {
@@ -728,7 +728,7 @@ impl Engines {
     fn clear(
         context: &crate::render_device::RenderContext,
         image: &LeafRenderData,
-        color: fuzzpaint_core::color::Color,
+        color: fuzzpaint_types::color::Color,
     ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn GpuFuture>>> {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             context.allocators().command_buffer(),
@@ -979,7 +979,8 @@ mod stroke_renderer {
 
     pub struct StrokeLayerRenderer {
         context: Arc<crate::render_device::RenderContext>,
-        texture_descriptors: fuzzpaint_core::brush::UniqueIDMap<Arc<vk::PersistentDescriptorSet>>,
+        texture_descriptors:
+            fuzzpaint_types::resource::UniqueIDMap<Arc<vk::PersistentDescriptorSet>>,
         gpu_tess: super::gpu_tess::GpuStampTess,
         pipeline: Arc<vk::GraphicsPipeline>,
         // Array of 1D R8 textures, used for brush curve LUTs.
@@ -1276,9 +1277,12 @@ mod stroke_renderer {
                 pipeline,
                 gpu_tess: tess,
                 texture_descriptors: [
-                    (fuzzpaint_core::brush::UniqueID([0; 32]), descriptor_set_a),
                     (
-                        fuzzpaint_core::brush::UniqueID([
+                        fuzzpaint_types::resource::UniqueID([0; 32]),
+                        descriptor_set_a,
+                    ),
+                    (
+                        fuzzpaint_types::resource::UniqueID([
                             1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                             0, 0, 0, 0, 0, 0, 0, 0,
                         ]),
@@ -1460,7 +1464,7 @@ mod stroke_renderer {
                 };
 
                 let mut sources = &sources[..];
-                let mut next_indirects_by_brush_id = || -> Option<(fuzzpaint_core::brush::UniqueID, vk::Subbuffer<[vulkano::command_buffer::DrawIndirectCommand]>)> {
+                let mut next_indirects_by_brush_id = || -> Option<(fuzzpaint_types::resource::UniqueID, vk::Subbuffer<[vulkano::command_buffer::DrawIndirectCommand]>)> {
                     let id = sources.first()?.brush.brush;
                     let first_differ = sources[1..].iter().position(|source| source.brush.brush != id);
 

@@ -1,4 +1,4 @@
-use fuzzpaint_types::stroke::{Archetype, aos::StrokeSlice};
+use fuzzpaint_types::stroke::{Archetype, aos::Slice};
 
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug)]
@@ -806,7 +806,7 @@ fn collect(
     poses: impl Iterator<Item = octotablet::axis::Pose>,
     mut base_archetype: Archetype,
     stage: &'_ mut Vec<u32>,
-) -> StrokeSlice<'_> {
+) -> Slice<'_> {
     stage.clear();
     for pose in poses {
         let archetype = archetype_of(&pose);
@@ -865,7 +865,7 @@ impl StrokeListener {
     /// error doesn't mean that the stroke *hasn't* already ended.
     ///
     /// *On error, this listener should be dropped soon.*
-    pub fn take_stroke(&'_ mut self) -> Result<StrokeSlice<'_>, Ended> {
+    pub fn take_stroke(&'_ mut self) -> Result<Slice<'_>, Ended> {
         let poses = self.stream.try_iter();
         Ok(collect(poses, self.archetype, &mut self.staging))
     }

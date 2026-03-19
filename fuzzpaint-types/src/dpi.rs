@@ -47,6 +47,11 @@ impl PhysicalUnit {
         }
     }
 }
+pub enum Unit {
+    Physical(PhysicalUnit),
+    LogicalPx,
+    PhysicalPx,
+}
 /// A type with a unit.
 #[derive(Clone, Copy, Debug)]
 pub enum Length<T> {

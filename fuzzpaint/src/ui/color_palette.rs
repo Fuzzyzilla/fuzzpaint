@@ -1,8 +1,7 @@
 use egui::Color32;
-use either::Either;
-use fuzzpaint_core::{
+use fuzzpaint_types::{
     color::{Color as FColor, ColorOrPalette, PaletteIndex},
-    util::FiniteF32,
+    float::FiniteF32,
 };
 
 const GROW_FACTOR: f32 = 1.25;
@@ -361,10 +360,8 @@ pub struct ColorPaletteResponse {
 }
 // Ewwwww.. Traits that make the undo/redo system tick, that usually need not be seen by mortal eyes, but alas here we are...
 impl<
-        Writer: fuzzpaint_core::queue::writer::CommandWrite<
-            fuzzpaint_core::state::palette::commands::Command,
-        >,
-    > ColorPalette<'_, '_, Writer>
+    Writer: fuzzpaint_core::queue::writer::CommandWrite<fuzzpaint_core::state::palette::commands::Command>,
+> ColorPalette<'_, '_, Writer>
 {
     pub fn show(self, ui: &mut egui::Ui) -> ColorPaletteResponse {
         const BTN_BASE_SIZE: f32 = 12.0;

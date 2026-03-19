@@ -1,48 +1,36 @@
 //! # Structure-of-Arrays representation.
 //!
 //! Most efficient for compression.
-use std::vec::Vec as StdVec;
-
 use super::{ArcLength, Archetype, Distance, Position, Pressure, Roll, Tilt, Time, Wheel};
 use core::ptr::NonNull;
 
+/// Types which may be encoded as an SoA point list.
+pub trait Encode: Into<Stroke> + super::Stroke {
+    /// Encode as an Structure-of-Arrays into an uninitialized slice, returning
+    /// the now-initialized section.
+    fn encode_into<'mem>(
+        &'_ self,
+        into: &'mem mut [std::mem::MaybeUninit<u32>],
+    ) -> Result<&'mem mut [u32], super::EncodeError>;
+}
+
 #[derive(Default, Clone)]
-pub struct Vec {
+pub struct Stroke {
     archetype: Archetype,
 
     // These can share a length and capacity. But that's evil IDC
-    position: StdVec<Position>,
-    time: StdVec<Time>,
-    arc_length: StdVec<ArcLength>,
-    pressure: StdVec<Pressure>,
-    tilt: StdVec<Tilt>,
-    distance: StdVec<Distance>,
-    roll: StdVec<Roll>,
-    wheel: StdVec<Wheel>,
+    position: Vec<Position>,
+    time: Vec<Time>,
+    arc_length: Vec<ArcLength>,
+    pressure: Vec<Pressure>,
+    tilt: Vec<Tilt>,
+    distance: Vec<Distance>,
+    roll: Vec<Roll>,
+    wheel: Vec<Wheel>,
 }
-impl Vec {
+impl Stroke {
     pub fn new() -> Self {
         Self::default()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    pub fn len(&self) -> usize {
-        /// All vecs that are populated have the same length. Choose one.
-        [
-            (Archetype::POSITION, self.position.len()),
-            (Archetype::TIME, self.time.len()),
-            (Archetype::ARC_LENGTH, self.arc_length.len()),
-            (Archetype::PRESSURE, self.pressure.len()),
-            (Archetype::TILT, self.tilt.len()),
-            (Archetype::DISTANCE, self.distance.len()),
-            (Archetype::ROLL, self.roll.len()),
-            (Archetype::WHEEL, self.wheel.len()),
-        ]
-        .into_iter()
-        .find_map(|(bit, len)| self.archetype.intersects(bit).then_some(len))
-        // No bits set, zero length.
-        .unwrap_or(0)
     }
     pub fn clear(&mut self) {
         self.archetype = Archetype::empty();
@@ -70,6 +58,28 @@ impl Vec {
     pub fn push_back(&mut self, point: super::Point) {
         let default = super::Point::default();
         todo!()
+    }
+}
+impl super::Stroke for Stroke {
+    fn archetype(&self) -> Archetype {
+        self.archetype
+    }
+    fn len(&self) -> usize {
+        // All vecs that are populated have the same length. Choose one.
+        [
+            (Archetype::POSITION, self.position.len()),
+            (Archetype::TIME, self.time.len()),
+            (Archetype::ARC_LENGTH, self.arc_length.len()),
+            (Archetype::PRESSURE, self.pressure.len()),
+            (Archetype::TILT, self.tilt.len()),
+            (Archetype::DISTANCE, self.distance.len()),
+            (Archetype::ROLL, self.roll.len()),
+            (Archetype::WHEEL, self.wheel.len()),
+        ]
+        .into_iter()
+        .find_map(|(bit, len)| self.archetype.intersects(bit).then_some(len))
+        // No bits set, zero length.
+        .unwrap_or(0)
     }
 }
 pub struct Slice<'a> {

@@ -12,11 +12,11 @@
 //! It is up to the editor to handle the fact that a single visually contiguous seleciton *can be up to three
 //! discontinuous spans* in a bidi context.
 
-use crate::{color::ColorOrPalette, util::FiniteF32};
+use fuzzpaint_types::{color::ColorOrPalette, float::FiniteF32};
 
 pub struct FullProperties {
     pub color: ColorOrPalette,
-    pub px_per_em: crate::util::FiniteF32,
+    pub px_per_em: FiniteF32,
     pub style: Style,
     pub face: Face,
 }
@@ -412,7 +412,7 @@ impl<'a> Iterator for RichTextParagraphSpans<'a> {
 
 #[cfg(test)]
 mod test {
-    use crate::color::ColorOrPalette;
+    use fuzzpaint_types::color::ColorOrPalette;
     #[test]
     fn iter_nostyles() {
         let rt = super::RichTextParagraph::new("Uwu!!".to_owned());

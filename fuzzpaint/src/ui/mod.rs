@@ -12,13 +12,14 @@ use modal::Modal;
 
 use egui::{RichText, Ui};
 use fuzzpaint_core::{
-    blend::{Blend, BlendMode},
-    brush,
-    color::{self as fcolor, PaletteIndex},
-    io,
+    brush, io,
     queue::{self, state_reader::CommandQueueStateReader},
     state,
-    util::FiniteF32,
+};
+use fuzzpaint_types::blend::{Blend, BlendMode};
+use fuzzpaint_types::{
+    color::{self as fcolor, PaletteIndex},
+    float::FiniteF32,
 };
 
 const STROKE_LAYER_ICON: &str = "✏";
@@ -478,7 +479,7 @@ impl MainUI {
             "Background".to_owned(),
             state::graph::LeafType::SolidColor {
                 blend: Blend::default(),
-                source: fuzzpaint_core::color::ColorOrPalette::WHITE,
+                source: fuzzpaint_types::color::ColorOrPalette::WHITE,
             },
         );
 
@@ -640,7 +641,7 @@ impl MainUI {
                         document: interface.id,
                         brush: old_brush.unwrap_or(state::StrokeBrushSettings {
                             is_eraser: false,
-                            brush: fuzzpaint_core::brush::UniqueID([0; 32]),
+                            brush: fuzzpaint_types::resource::UniqueID([0; 32]),
                             color_modulate: fcolor::ColorOrPalette::BLACK,
                             size_mul: FiniteF32::new(10.0).unwrap(),
                             spacing_px: FiniteF32::new(0.5).unwrap(),

@@ -1,8 +1,8 @@
 #[derive(Clone, Debug)]
 pub enum Command {
     BlendChanged {
-        from: crate::blend::Blend,
-        to: crate::blend::Blend,
+        from: fuzzpaint_types::blend::Blend,
+        to: fuzzpaint_types::blend::Blend,
         target: super::AnyID,
     },
     Reparent {

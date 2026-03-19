@@ -1,3 +1,5 @@
+//! Arrays of stylus data
+
 pub mod aos;
 pub mod archetype;
 pub mod soa;
@@ -19,10 +21,24 @@ type Distance = f32;
 type Roll = f32;
 type Wheel = f32;
 
+pub trait Stroke {
+    /// Get the axes contained in this stroke.
+    fn archetype(&self) -> Archetype;
+    /// Count the number of points in the stroke.
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+pub enum EncodeError {
+    /// The array was too small. In units of u32 words.
+    TooSmall { needed: usize, got: usize },
+}
+
 /// A single point.
 ///
 /// Arrays of this type should *not* collected, as it is unnecessarily large for
-/// that use. Prefer using one of the collections in [`soa`] or [`aos`] instead.
+/// that use. Prefer using one of [`soa::Stroke`] or [`aos::Stroke`] instead.
 #[derive(Default, Clone, Copy)]
 pub struct Point {
     archetype: Archetype,

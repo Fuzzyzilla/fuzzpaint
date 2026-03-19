@@ -1,7 +1,7 @@
 use crate::vulkano_prelude::*;
 use std::{fmt::Debug, sync::Arc};
 
-use fuzzpaint_core::blend::{Blend, BlendMode};
+use fuzzpaint_types::blend::{Blend, BlendMode};
 use vulkano::VulkanObject;
 
 /// Providing a "quoted" GLSL snippit, accepting premultiplied RGBA `vec4 c_src` and `vec4 c_dst`, `return` the new color.
@@ -210,7 +210,7 @@ mod shaders {
         is_solid: u32,
     }
     impl Constants {
-        pub fn new_solid(solid_color: fuzzpaint_core::color::Color) -> Self {
+        pub fn new_solid(solid_color: fuzzpaint_types::color::Color) -> Self {
             Self {
                 solid_color: solid_color.as_array(),
                 is_solid: true.into(),
@@ -311,7 +311,7 @@ pub enum BlendImageSource {
     /// The image comes from a previous blend operation.
     /// Synchronization and submission will be handled automatically.
     BlendInvocation(NestedBlendInvocation),
-    SolidColor(fuzzpaint_core::color::Color),
+    SolidColor(fuzzpaint_types::color::Color),
 }
 impl From<NestedBlendInvocation> for BlendImageSource {
     fn from(value: NestedBlendInvocation) -> Self {
@@ -817,7 +817,7 @@ impl BlendInvocation {
                 }
                 &BlendImageSource::SolidColor(color) => {
                     let constants = shaders::Constants::new_solid(color.alpha_multipy(
-                        fuzzpaint_core::util::FiniteF32::new(opacity).unwrap_or_default(),
+                        fuzzpaint_types::float::FiniteF32::new(opacity).unwrap_or_default(),
                     ));
 
                     if last_constants != Some(constants) {

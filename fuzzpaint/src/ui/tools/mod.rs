@@ -1,4 +1,5 @@
 mod gizmos;
+mod rulers;
 mod snapper;
 mod viewport_scrub;
 
@@ -61,7 +62,7 @@ impl ToolState {
         &mut self,
         ctx: &egui::Context,
         viewport: egui::Rect,
-        interface: &mut super::Interface<'_, '_>,
+        interface: &mut super::interface::Interface<'_, '_>,
     ) {
         // Draw mouse cursors:
         let layer = Self::gizmo_layer();
@@ -92,11 +93,11 @@ impl ToolState {
         // Doesn't detect CentralPanels :/
         if !ctx.is_using_pointer() && ctx.rect_contains_pointer(layer, viewport) {
             ctx.set_cursor_icon(egui::CursorIcon::None);
-            if let Some(hover) = interface.pointers.primary_hover() {
+            if let Some(hover) = interface.pointers().primary_hover() {
                 draw_pointer(hover);
             }
         }
-        for hover in interface.pointers.auxiliary_hovers() {
+        for hover in interface.pointers().auxiliary_hovers() {
             draw_pointer(hover);
         }
 
