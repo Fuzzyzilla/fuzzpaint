@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 fuzzpaint-types = { path = "../fuzzpaint-types" }
-ultraviolet = { version = "0.10.0", features = ["int"] }
+ultraviolet = { workspace = true }

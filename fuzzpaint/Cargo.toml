@@ -15,7 +15,6 @@ anyhow = "1.0.100"
 async-trait = "0.1.89"
 az = "1.2.1"
 bitflags = { version = "2.10.0", features = ["bytemuck"] }
-bytemuck = "1.24.0"
 cgmath = "0.18.0"
 crossbeam = "0.8.4"
 defer = "0.2.1"
@@ -37,7 +36,6 @@ rfd = "0.16.0"
 rustybuzz = "0.20.1"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 smallvec = { version = "1.15.1", features = ["serde", "union"] }
-thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = [
     "sync",
     "rt",
@@ -47,19 +45,22 @@ tokio = { version = "1.48.0", features = [
 ] }
 toml = "0.9.10"
 try-block = "0.1.0"
-ultraviolet = { version = "0.10.0", features = ["bytemuck"] }
 vulkano = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vulkano.git", branch = "backport-null-check"  }
 vulkano-shaders = { version = "0.34.0", git = "https://github.com/fuzzyzilla/vulkano.git", branch = "backport-null-check"  }
 # Can't inherit from egui_winit since it doesn't enable serde feature.
 # Also need legacy RWH version for `vulkano` + new version for `octotablet`
 winit = { version = "0.30.12", default-features = false, features = ["wayland", "wayland-dlopen", "serde", "rwh_05", "rwh_06"] }
-strum = { version = "0.27.2", features = ["derive"] }
 png = "0.18.0"
 # For low-level vulkan crimes, use the same version as vulkano.
 ash = "^0.37.3"
 oneshot = "0.1.11"
 futures-util = "0.3.32"
 material-icons = "0.3.0"
+
+bytemuck = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+ultraviolet = { workspace = true }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator = { version = "0.6.1", optional = true, default-features = false }

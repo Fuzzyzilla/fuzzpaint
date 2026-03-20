@@ -6,9 +6,10 @@ edition = "2024"
 [dependencies]
 base64 = {version = "0.22.1", default-features = false }
 bitflags = { version = "2.10.0", features = ["bytemuck"] }
-bytemuck = { version = "1.24.0", features = ["derive"] }
 crc = "3.4.0"
 either = "1.15.0"
-strum = { version = "0.27.2", features = ["derive"] }
-thiserror = "2.0.17"
-ultraviolet = "0.10.0"
+
+bytemuck = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+ultraviolet = { workspace = true }
