@@ -6,6 +6,7 @@ const ERROR: char = '❌';
 const CONNECTION: char = '🔌';
 
 const WINDOW_AUTO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const WINDOW_MARGIN: f32 = 2.0;
 
 struct Message {
     level: log::Level,
@@ -30,7 +31,6 @@ struct Window {
     record_idx: usize,
     id: egui::Id,
     expires: std::time::Instant,
-    bottom_spacing: f32,
     hovered: bool,
 }
 #[derive(Default)]
@@ -74,28 +74,34 @@ impl ErrorDisplay {
                 record_idx: i,
                 id: egui::Id::new(i),
                 expires: new_window_expiry,
-                bottom_spacing: 0.0,
                 hovered: false,
             });
         }
         let mut remove_windows = Vec::new();
+        let mut y = WINDOW_MARGIN;
         for (i, window) in self.windows.iter_mut().enumerate() {
             let hoveredness = ctx.animate_bool(window.id, window.hovered);
+            let mut frame =
+                egui::Frame::window(&ctx.style()).multiply_with_opacity(hoveredness * 0.5 + 0.5);
+            frame.corner_radius.se = 0;
+            // Ask the context to smooth out this value for us. That way, if a
+            // window closes beneath us, it is visually more coherent than just
+            // a jump.
+            let y_anim =
+                ctx.animate_value_with_time(window.id.with("pos_y"), y, ctx.style().animation_time);
             let response = egui::Window::new("")
                 .id(window.id)
-                .anchor(egui::Align2::RIGHT_BOTTOM, [0.0, -window.bottom_spacing])
+                .anchor(egui::Align2::RIGHT_BOTTOM, [-WINDOW_MARGIN, -y_anim])
                 .title_bar(false)
                 .constrain_to(ctx.available_rect())
                 .collapsible(false)
                 .fade_in(true)
+                // Cant fade out. :3
                 .default_height(0.0)
                 .max_width(250.0)
                 .resizable(false)
-                // Cant fade in. :3
-                .frame(
-                    egui::Frame::window(&ctx.style())
-                        .multiply_with_opacity(hoveredness * 0.5 + 0.5),
-                )
+                .frame(frame)
+                .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     // Time left / timout time
                     let time_left = window.expires - now;
@@ -106,7 +112,8 @@ impl ErrorDisplay {
                     }
                     let record = &self.records[window.record_idx];
 
-                    // Draw a progress bar by re
+                    // Draw a counting down progress bar by filling up the whole
+                    // window.
                     let painter = ui.painter();
                     let mut rect = ui.clip_rect();
                     rect.set_width(rect.width() * (1.0 - completion_ratio));
@@ -117,14 +124,23 @@ impl ErrorDisplay {
                     );
 
                     ui.horizontal_centered(|ui| {
-                        ui.label(WARN.to_string());
+                        ui.label(
+                            match record.level {
+                                log::Level::Debug => DEBUG,
+                                log::Level::Trace => TRACE,
+                                log::Level::Info => INFO,
+                                log::Level::Warn => WARN,
+                                log::Level::Error => ERROR,
+                            }
+                            .to_string(),
+                        );
                         ui.label(&record.text);
                     });
                 })
                 // Always some, since this window is not collapsible.
                 .unwrap()
                 .response;
-
+            y += response.rect.height() + WINDOW_MARGIN;
             // Response.hovered is false when the text is hovered. We instead
             // want if the pointer is anywhere on the window.
             window.hovered = ctx.rect_contains_pointer(response.layer_id, response.rect);
