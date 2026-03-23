@@ -432,6 +432,7 @@ impl PointerBridge {
     pub fn push_winit(
         &mut self,
         event: winit::event::WindowEvent,
+        scale_factor: f64,
     ) -> impl Iterator<Item = winit::event::WindowEvent> {
         use winit::event::{ElementState, WindowEvent as Event};
 
@@ -466,8 +467,9 @@ impl PointerBridge {
                 device_id,
                 position,
             } => {
+                let logical_position = position.to_logical::<f32>(scale_factor);
                 self.in_mice.entry(MouseID(device_id)).or_default().position =
-                    position.cast::<f32>().into();
+                    logical_position.into();
                 if self.is_egui_main(MouseID(device_id)) {
                     self.synthetic_events.push(Event::CursorMoved {
                         device_id: EMULATED_DEVICE_ID,

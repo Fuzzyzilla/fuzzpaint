@@ -1,4 +1,3 @@
-use crate::document_viewport_proxy::PreviewRenderProxy;
 use crate::egui_impl;
 use crate::render_device;
 use crate::vulkano_prelude::*;
@@ -116,7 +115,7 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
             event => {
                 let events = window_objects
                     .pointer_bridge
-                    .push_winit(event)
+                    .push_winit(event, window_objects.win.scale_factor())
                     .collect::<Vec<_>>();
                 for event in events {
                     window_objects.window_event(event);
@@ -205,8 +204,26 @@ impl WindowObjects {
 
         let render_surface =
             render_device::RenderSurface::new(render_context.clone(), win.clone())?;
-        let preview_renderer =
-            Arc::new(crate::document_viewport_proxy::Proxy::new(&render_surface)?);
+        let preview_renderer = Arc::new(crate::document_viewport_proxy::Proxy::new(
+            &render_surface,
+            crate::view_transform::ViewInfo {
+                transform: crate::view_transform::View::default(),
+                viewport: fuzzpaint_types::dpi::UnitlessRect {
+                    origin: ultraviolet::Vec2::zero(),
+                    size: ultraviolet::Vec2::new(
+                        win.inner_size().to_logical(win.scale_factor()).width,
+                        win.inner_size().to_logical(win.scale_factor()).height,
+                    ),
+                },
+                document: fuzzpaint_types::dpi::UnitlessRect {
+                    origin: ultraviolet::Vec2::zero(),
+                    size: ultraviolet::Vec2::new(
+                        crate::DOCUMENT_DIMENSION as f32,
+                        crate::DOCUMENT_DIMENSION as f32,
+                    ),
+                },
+            },
+        )?);
 
         let tablet_manager = octotablet::Builder::new()
             .emulate_tool_from_mouse(false)
@@ -467,33 +484,32 @@ impl WindowObjects {
     fn do_ui(&mut self, mut connections: crate::connections::ConnectionsLock) {
         self.ui.set_csd(!self.win.is_decorated());
 
-        let viewport = self.egui_ctx.update(self.win.as_ref(), |ctx| {
-            self.ui.ui(
-                ctx,
-                &mut (crate::ui::interface::InterfaceInner {
-                    pointers: &mut self.pointer_bridge,
-                    connections: &mut connections,
-                    preview: (),
-                }
-                .into()),
-            )
-        });
-        // Drop the lock ASAP.
-        drop(connections);
+        let mut interface = crate::ui::interface::InterfaceInner {
+            pointers: &mut self.pointer_bridge,
+            connections: &mut connections,
+            preview: (),
+            viewport: None,
+        }
+        .into();
+
+        self.egui_ctx
+            .update(self.win.as_ref(), |ctx| self.ui.ui(ctx, &mut interface));
+
+        let interface = interface.into_inner();
 
         // Todo: only change if... actually changed :P
-        if let Some(viewport) = viewport {
+        if let Some(mut viewport) = interface.viewport {
             self.enable_document_view = true;
-            self.preview_renderer.viewport_changed(
-                cgmath::Point2 {
-                    x: viewport.0.x,
-                    y: viewport.0.y,
-                },
-                cgmath::Vector2 {
-                    x: viewport.1.x,
-                    y: viewport.1.y,
-                },
-            );
+            // Viewport rect is in egui points, preview renderer expects
+            // physical pixel. Multiply through the zoom (points -> logical) and
+            // the scale factor (logical -> physical)
+            viewport.transform.view.viewport = viewport
+                .transform
+                .view
+                .viewport
+                .scale(self.win.scale_factor() as f32 * self.egui_ctx.context().zoom_factor());
+            self.preview_renderer
+                .insert_document_transform(viewport.transform.view);
         } else {
             self.enable_document_view = false;
         }

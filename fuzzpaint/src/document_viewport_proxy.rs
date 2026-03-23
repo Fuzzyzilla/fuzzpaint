@@ -1,29 +1,7 @@
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
 
-use crate::{AnyResult, pen_tools, render_device, view_transform};
-
-/// Proxy called into by the window renderer to perform the necessary synchronization and such to render the screen
-/// behind the Egui content.
-pub trait PreviewRenderProxy {
-    /// Create the render commands for this frame. Assume used resources are borrowed until a matching "`render_complete`" for this
-    /// frame idx is called.
-    /// # Safety
-    ///
-    /// the previous render should be finished before the return result is executed.
-    unsafe fn render(
-        &self,
-        swapchain_image: Arc<vk::Image>,
-        swapchain_image_idx: u32,
-    ) -> AnyResult<Arc<vk::PrimaryAutoCommandBuffer>>;
-    /// The window surface has been invalidated and remade.
-    fn surface_changed(&self, render_surface: &render_device::RenderSurface);
-    /// Is this proxy requesting a redraw?
-    fn has_update(&self) -> bool;
-    /// The area used for this viewport has changed. Not the same as the surface - rather, the central area
-    /// between UI elements where this proxy is visible. Proxies should still initialize the whole screen, however.
-    fn viewport_changed(&self, position: ultraviolet::Vec2, size: ultraviolet::Vec2);
-}
+use crate::{AnyResult, render_device, view_transform::ViewInfo};
 
 mod shaders {
     pub mod vertex {
@@ -155,10 +133,7 @@ struct SurfaceData {
     // Lazily recorded command buffers. Must be rebuilt on viewport size/document view change.
     // indexed by swapchain idx, then by image idx
     prerecorded_command_buffers: Vec<[std::sync::OnceLock<Arc<vk::PrimaryAutoCommandBuffer>>; 2]>,
-    cached_matrix: std::sync::OnceLock<[[f32; 4]; 4]>,
-    transform: crate::view_transform::DocumentTransform,
-    view_pos: cgmath::Point2<f32>,
-    view_size: cgmath::Vector2<f32>,
+    transform: ViewInfo,
     surface_dimensions: [u32; 2],
 }
 impl SurfaceData {
@@ -169,9 +144,7 @@ impl SurfaceData {
         pipeline: Arc<vk::GraphicsPipeline>,
         document_image_bindings: &[Arc<vk::PersistentDescriptorSet>; 2],
 
-        viewport_pos: cgmath::Point2<f32>,
-        viewport_size: cgmath::Vector2<f32>,
-        document_transform: crate::view_transform::DocumentTransform,
+        document_transform: ViewInfo,
     ) -> Self {
         let framebuffers: AnyResult<Vec<_>> = render_surface
             .swapchain_images()
@@ -214,9 +187,6 @@ impl SurfaceData {
             ],
 
             transform: document_transform,
-            view_pos: viewport_pos,
-            view_size: viewport_size,
-            cached_matrix: std::sync::OnceLock::new(),
         }
     }
     fn get_commands(
@@ -249,45 +219,30 @@ impl SurfaceData {
             vk::CommandBufferUsage::MultipleSubmit,
         )?;
 
-        let matrix = self
-            .cached_matrix
-            .get_or_try_init(|| -> anyhow::Result<_> {
-                let transform = match &self.transform {
-                    view_transform::DocumentTransform::Fit(f) => f
-                        .make_transform(
-                            cgmath::vec2(
-                                crate::DOCUMENT_DIMENSION as f32,
-                                crate::DOCUMENT_DIMENSION as f32,
-                            ),
-                            self.view_pos,
-                            self.view_size,
-                        )
-                        .ok_or_else(|| anyhow::anyhow!("Malformed document transform"))?,
-                    view_transform::DocumentTransform::Transform(t) => *t,
-                };
+        let matrix: [[f32; 4]; 4] = {
+            let transform = self.transform.into_pixel_perfect_similarity();
 
-                let base_xform = ultraviolet::Mat4::from_nonuniform_scale(ultraviolet::Vec3 {
-                    x: crate::DOCUMENT_DIMENSION as f32,
-                    y: crate::DOCUMENT_DIMENSION as f32,
-                    z: 1.0,
-                });
-                // convert cgmath to ultraviolet (todo, switch all to ultraviolet)
-                let mat4: cgmath::Matrix4<f32> = transform.into();
-                let mat4: [[f32; 4]; 4] = mat4.into();
-                let mat4: ultraviolet::Mat4 = mat4.into();
+            // Scale the 1x1 mesh up to the size of the document
+            let base_xform = ultraviolet::Mat4::from_nonuniform_scale(ultraviolet::Vec3 {
+                x: crate::DOCUMENT_DIMENSION as f32,
+                y: crate::DOCUMENT_DIMENSION as f32,
+                z: 1.0,
+            });
+            // Then position the document in screenspace according to the view transform
+            let mat4 = transform.into_mat4();
 
-                let proj = crate::vk::projection::orthographic_vk(
-                    0.0,
-                    self.surface_dimensions[0] as f32,
-                    0.0,
-                    self.surface_dimensions[1] as f32,
-                    -1.0,
-                    1.0,
-                );
-                let proj = proj * mat4 * base_xform;
-                let transform_matrix: [[f32; 4]; 4] = proj.into();
-                Ok(transform_matrix)
-            })?;
+            // Then project screenspace down to clipspace.
+            let proj = crate::vk::projection::orthographic_vk(
+                0.0,
+                self.surface_dimensions[0] as f32,
+                0.0,
+                self.surface_dimensions[1] as f32,
+                -1.0,
+                1.0,
+            );
+            let proj = proj * mat4 * base_xform;
+            proj.into()
+        };
         command_buffer
             .begin_render_pass(
                 vk::RenderPassBeginInfo {
@@ -320,7 +275,7 @@ impl SurfaceData {
             .push_constants(
                 self.pipeline.layout().clone(),
                 0,
-                shaders::vertex::Matrix { mat: *matrix },
+                shaders::vertex::Matrix { mat: matrix },
             )?
             .draw(4, 1, 0, 0)?
             .end_render_pass(vk::SubpassEndInfo::default())?;
@@ -344,19 +299,10 @@ impl SurfaceData {
             a.take();
             b.take();
         }
-        self.cached_matrix.take();
     }
-    fn set_transform(&mut self, transform: crate::view_transform::DocumentTransform) {
+    fn set_transform(&mut self, transform: ViewInfo) {
         self.transform = transform;
         self.clear_cache();
-    }
-    fn set_viewport_size(&mut self, pos: cgmath::Point2<f32>, size: cgmath::Vector2<f32>) {
-        self.view_pos = pos;
-        self.view_size = size;
-        // Only the fit transform needs to be recalc'd on viewport resize.
-        if let crate::view_transform::DocumentTransform::Fit(..) = self.transform {
-            self.clear_cache();
-        }
     }
 }
 
@@ -368,8 +314,7 @@ impl SurfaceData {
 pub struct Proxy {
     render_context: Arc<render_device::RenderContext>,
 
-    document_transform: tokio::sync::RwLock<crate::view_transform::DocumentTransform>,
-    viewport: parking_lot::RwLock<(cgmath::Point2<f32>, cgmath::Vector2<f32>)>,
+    document_transform: tokio::sync::RwLock<ViewInfo>,
 
     // Double buffer data =========
     document_images: [Arc<vk::ImageView>; 2],
@@ -393,7 +338,7 @@ pub struct Proxy {
 }
 
 impl Proxy {
-    pub fn new(render_surface: &render_device::RenderSurface) -> AnyResult<Self> {
+    pub fn new(render_surface: &render_device::RenderSurface, view: ViewInfo) -> AnyResult<Self> {
         // Only one frame-in-flight - Keep an additional buffer for writing to.
         const NUM_DOCUMENT_BUFFERS: u32 = 2;
 
@@ -596,23 +541,13 @@ impl Proxy {
             )?,
         ];
 
-        let viewport_pos = [0.0, 0.0].into();
-        let viewport_size = [
-            render_surface.extent()[0] as f32,
-            render_surface.extent()[1] as f32,
-        ]
-        .into();
-        let document_transform = crate::view_transform::DocumentTransform::default();
-
         let surface_data = SurfaceData::new(
             render_surface.context().clone(),
             render_surface,
             render_pass.clone(),
             pipeline.clone(),
             &document_image_bindings,
-            viewport_pos,
-            viewport_size,
-            document_transform,
+            view,
         );
 
         let notify = tokio::sync::Notify::new();
@@ -622,8 +557,7 @@ impl Proxy {
         Ok(Self {
             render_context: render_surface.context().clone(),
 
-            document_transform: document_transform.into(),
-            viewport: (viewport_pos, viewport_size).into(),
+            document_transform: view.into(),
 
             pipeline,
             render_pass,
@@ -695,55 +629,22 @@ impl Proxy {
             proxy: self,
         }
     }
-    /// The area of the screen where the document is visible has changed
-    pub fn viewport_changed(&self, position: cgmath::Point2<f32>, size: cgmath::Vector2<f32>) {
-        *self.viewport.write() = (position, size);
-        self.surface_data
-            .blocking_write()
-            .set_viewport_size(position, size);
+    pub fn insert_document_transform(&self, new: ViewInfo) {
+        *self.document_transform.blocking_write() = new;
+        let mut surface = self.surface_data.blocking_write();
+        surface.transform = new;
+        surface.clear_cache();
     }
-    pub async fn insert_document_transform(&self, new: crate::view_transform::DocumentTransform) {
-        *self.document_transform.write().await = new;
-        self.surface_data.write().await.set_transform(new);
+    pub fn get_view_transform(&self) -> ViewInfo {
+        *self.document_transform.blocking_read()
     }
-    pub async fn get_view_transform(&self) -> Option<crate::view_transform::ViewInfo> {
-        // lock, clone, release asap
-        let transform = *self.document_transform.read().await;
-        let (pos, size) = self.get_viewport();
-
-        Some(crate::view_transform::ViewInfo {
-            transform,
-            viewport_position: ultraviolet::Vec2 { x: pos.x, y: pos.y },
-            viewport_size: ultraviolet::Vec2 {
-                x: size.x,
-                y: size.y,
-            },
-        })
-    }
-    pub fn get_view_transform_sync(&self) -> Option<crate::view_transform::ViewTransform> {
-        // lock, clone, release asap
-        match *self.document_transform.blocking_read() {
-            crate::view_transform::DocumentTransform::Fit(f) => {
-                let (pos, size) = *self.viewport.read();
-                f.make_transform(
-                    cgmath::Vector2 {
-                        x: crate::DOCUMENT_DIMENSION as f32,
-                        y: crate::DOCUMENT_DIMENSION as f32,
-                    },
-                    pos,
-                    size,
-                )
-            }
-            crate::view_transform::DocumentTransform::Transform(t) => Some(t),
-        }
-    }
-    pub fn get_viewport(&self) -> (cgmath::Point2<f32>, cgmath::Vector2<f32>) {
-        *self.viewport.read()
+    pub async fn get_view_transform_async(&self) -> ViewInfo {
+        *self.document_transform.read().await
     }
 }
-impl PreviewRenderProxy for Proxy {
+impl Proxy {
     #[deny(unsafe_op_in_unsafe_fn)]
-    unsafe fn render(
+    pub unsafe fn render(
         &self,
         swapchain_image: Arc<vk::Image>,
         swapchain_idx: u32,
@@ -753,8 +654,7 @@ impl PreviewRenderProxy for Proxy {
         let read = self.surface_data.blocking_read();
         read.get_commands(swapchain_idx, image_idx)
     }
-    fn surface_changed(&self, render_surface: &render_device::RenderSurface) {
-        let viewport = *self.viewport.read();
+    pub fn surface_changed(&self, render_surface: &render_device::RenderSurface) {
         let transform = *self.document_transform.blocking_read();
 
         let new = SurfaceData::new(
@@ -763,30 +663,11 @@ impl PreviewRenderProxy for Proxy {
             self.render_pass.clone(),
             self.pipeline.clone(),
             &self.document_image_bindings,
-            viewport.0,
-            viewport.1,
             transform,
         );
         *self.surface_data.blocking_write() = new;
     }
-    fn viewport_changed(&self, position: ultraviolet::Vec2, size: ultraviolet::Vec2) {
-        let cg = (
-            cgmath::Point2 {
-                x: position.x,
-                y: position.y,
-            },
-            cgmath::Vector2 {
-                x: size.x,
-                y: size.y,
-            },
-        );
-
-        self.surface_data
-            .blocking_write()
-            .set_viewport_size(cg.0, cg.1);
-        *self.viewport.write() = cg;
-    }
-    fn has_update(&self) -> bool {
+    pub fn has_update(&self) -> bool {
         self.redraw_requested()
     }
 }

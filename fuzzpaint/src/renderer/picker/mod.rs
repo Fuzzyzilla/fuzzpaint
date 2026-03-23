@@ -19,6 +19,7 @@ fn calc_corners(
     // A probably not worth it opt would be to only transfer the region covered by the total display area,
     //  but that'd only matter at like 1000% zoom and yea.
 
+    /*
     let input_space_viewport = info
         .viewport
         .with_scale_factor(info.input_points_per_viewport_pixel)
@@ -48,7 +49,8 @@ fn calc_corners(
         bottom_right[1].saturating_sub(stage_dimension),
     ];
 
-    Some((top_left, bottom_right))
+    Some((top_left, bottom_right))*/
+    todo!()
 }
 
 mod stage;

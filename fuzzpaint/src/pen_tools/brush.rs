@@ -322,8 +322,6 @@ fn brush(
 
     view: &super::ViewInfo,
     stylus_input: crate::window::stylus_events::StylusEventFrame,
-
-    render_output: &mut super::ToolRenderOutput,
 ) {
     // destructure the selections. Otherwise, bail.
     let Some(crate::AdHocGlobals {
@@ -336,15 +334,10 @@ fn brush(
         builder.clear();
         return;
     };
-    let Some(view_transform) = view.calculate_transform() else {
-        return;
-    };
+    let view = view.into_pixel_perfect_similarity();
     for event in stylus_input.iter() {
         if event.pressed {
-            let Ok(pos) = view_transform.unproject(cgmath::point2(event.pos.0, event.pos.1)) else {
-                // If transform is ill-formed, we can't do work.
-                return;
-            };
+            let pos = view.unproject(ultraviolet::Vec2::new(event.pos.0, event.pos.1));
 
             transform_cache.get_or_insert_with(|| {
                 crate::global::provider()
@@ -530,7 +523,6 @@ impl super::PenTool for Brush {
         stylus_input: crate::window::stylus_events::StylusEventFrame,
         actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
-        render_output: &mut super::ToolRenderOutput,
     ) {
         brush(
             actions.is_action_held(crate::actions::Action::Erase),
@@ -538,7 +530,6 @@ impl super::PenTool for Brush {
             &mut self.transforms,
             view_info,
             stylus_input,
-            render_output,
         );
     }
 }
@@ -554,7 +545,6 @@ impl super::PenTool for Eraser {
         stylus_input: crate::window::stylus_events::StylusEventFrame,
         _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
-        render_output: &mut super::ToolRenderOutput,
     ) {
         brush(
             true,
@@ -562,7 +552,6 @@ impl super::PenTool for Eraser {
             &mut self.transforms,
             view_info,
             stylus_input,
-            render_output,
         );
     }
 }

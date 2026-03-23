@@ -961,7 +961,6 @@ mod stroke_renderer {
 
     use crate::{renderer::gpu_tess, vulkano_prelude::*};
     use anyhow::Result as AnyResult;
-    use cgmath::Zero;
     use fuzzpaint_core::state;
     use std::sync::Arc;
     mod vert {
@@ -1386,33 +1385,35 @@ mod stroke_renderer {
             mut clear: bool,
         ) -> AnyResult<()> {
             // Apply projection
-            let mut matrix = cgmath::Matrix4::from_scale(2.0 / crate::DOCUMENT_DIMENSION as f32);
-            matrix.y *= -1.0;
-            matrix.w.x -= 1.0;
-            matrix.w.y += 1.0;
+            let mut matrix = ultraviolet::Mat4::from_scale(2.0 / crate::DOCUMENT_DIMENSION as f32);
+            matrix.cols[1] *= -1.0;
+            matrix.cols[3].x -= 1.0;
+            matrix.cols[3].y += 1.0;
 
             // Apply outer transform
             matrix = matrix
-                * cgmath::Matrix4 {
-                    x: cgmath::Vector4 {
-                        x: outer_transform.elements[0][0],
-                        y: outer_transform.elements[0][1],
-                        z: 0.0,
-                        w: 0.0,
-                    },
-                    y: cgmath::Vector4 {
-                        x: outer_transform.elements[1][0],
-                        y: outer_transform.elements[1][1],
-                        z: 0.0,
-                        w: 0.0,
-                    },
-                    z: cgmath::Vector4::zero(),
-                    w: cgmath::Vector4 {
-                        x: outer_transform.elements[2][0],
-                        y: outer_transform.elements[2][1],
-                        z: 0.0,
-                        w: 1.0,
-                    },
+                * ultraviolet::Mat4 {
+                    cols: [
+                        ultraviolet::Vec4 {
+                            x: outer_transform.elements[0][0],
+                            y: outer_transform.elements[0][1],
+                            z: 0.0,
+                            w: 0.0,
+                        },
+                        ultraviolet::Vec4 {
+                            x: outer_transform.elements[1][0],
+                            y: outer_transform.elements[1][1],
+                            z: 0.0,
+                            w: 0.0,
+                        },
+                        ultraviolet::Vec4::zero(),
+                        ultraviolet::Vec4 {
+                            x: outer_transform.elements[2][0],
+                            y: outer_transform.elements[2][1],
+                            z: 0.0,
+                            w: 1.0,
+                        },
+                    ],
                 };
 
             let mut batch = super::stroke_batcher::StrokeBatcher::new(

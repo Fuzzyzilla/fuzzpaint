@@ -30,6 +30,33 @@ impl Similarity {
         rotation: 0.0,
         translation: ultraviolet::Vec2 { x: 0.0, y: 0.0 },
     };
+    /// Construct a new similarity transform from individual components of the
+    /// transform, in order:
+    /// * A horizontal flip across X=0.
+    /// * A uniform scale, possibly negative.
+    /// * A rotation in radians.
+    /// * A translation.
+    ///
+    /// The resulting transform will not necessarily return these exact values
+    /// from the appropriate getters.
+    ///
+    /// This cannot be a const function, sorry umu
+    pub fn from_parts(
+        flip_h: bool,
+        scale: f32,
+        rotation: f32,
+        translation: ultraviolet::Vec2,
+    ) -> Self {
+        Self {
+            scale: f32::from_bits(u32::from(flip_h) << 31 | scale.abs().to_bits()),
+            rotation: if scale.is_sign_negative() {
+                rotation - std::f32::consts::PI
+            } else {
+                rotation
+            },
+            translation,
+        }
+    }
     /// Returns true if the transform is well-defined.
     /// * The scale is non-zero (approx).
     /// * All fields are finite.
@@ -39,6 +66,68 @@ impl Similarity {
             && self.rotation.is_finite()
             && self.translation.x.is_finite()
             && self.translation.y.is_finite()
+    }
+    /// Take this point from input space to output space,  the inverse operation
+    /// of [`Self::unproject`].
+    ///
+    /// Equivalent to, modulo any floating point errors:
+    /// ```
+    /// # let transform = fuzzpaint_types::similarity::Similarity::IDENTITY;
+    /// # let point = ultraviolet::Vec2::zero();
+    /// let point = transform.into_mat3().transform_point2(point);
+    /// ```
+    /// For one-off calculations, this is more efficient than the above. For
+    /// bulk transformations, the above should be used (caching the matrix, of
+    /// course).
+    #[must_use = "returns the transformed point"]
+    pub fn project(&self, mut point: ultraviolet::Vec2) -> ultraviolet::Vec2 {
+        if self.flip_h() {
+            point.x = -point.x;
+        }
+        point *= self.scale();
+        point.rotate_by(ultraviolet::Rotor2::from_angle(self.rotation()));
+        point + self.translation()
+    }
+    /// Take this point from output space to input space, the inverse operation
+    /// of [`Self::project`].
+    ///
+    /// Equivalent to, modulo any floating point errors:
+    /// ```
+    /// # let transform = fuzzpaint_types::similarity::Similarity::IDENTITY;
+    /// # let point = ultraviolet::Vec2::zero();
+    /// let point = transform.inverse().into_mat3().transform_point2(point);
+    /// ```
+    /// For one-off calculations, this is more efficient than the above. For
+    /// bulk transformations, the above should be used (caching the matrix, of
+    /// course).
+    #[must_use = "returns the transformed point"]
+    pub fn unproject(&self, mut point: ultraviolet::Vec2) -> ultraviolet::Vec2 {
+        point -= self.translation;
+        point.rotate_by(ultraviolet::Rotor2::from_angle(-self.rotation()));
+        point /= self.scale();
+        if self.flip_h() {
+            point.x = -point.x;
+        }
+        point
+    }
+    /// Combine two transformations. The returned transform uses `self` to
+    /// transform from input space to an intermediate space, then using `other`
+    /// to transform from that intermediate space to output space.
+    ///
+    /// In mathematical notation, this is `other * self`.
+    #[must_use = "returns a new transform and does not modify `self` or `other`"]
+    pub fn then(&self, other: &Self) -> Self {
+        let mut this = *self;
+        // not the cleanest nor fastest nor most precise way to this. UwU
+        // I just need to inline these but i dont wanna. FIXME.
+        if other.flip_h() {
+            this.flip_h_around(0.0);
+        }
+        this.scale_around(other.scale(), ultraviolet::Vec2::zero());
+        this.rotate_around(other.rotation(), ultraviolet::Vec2::zero());
+        this.translate_by(other.translation());
+
+        this
     }
     /// Get the inverse of this transform.
     #[must_use = "returns a new transform and does not modify `self`"]
@@ -177,6 +266,23 @@ impl Similarity {
         mat3.cols[2] = self.translation.into_homogeneous_point();
 
         mat3
+    }
+    /// Convert into a homogenous transform matrix. Where possible, prefer doing
+    /// transformations on this type before converting to a matrix, as they will
+    /// be faster and more precise prior to matrixification.
+    pub fn into_mat4(&self) -> ultraviolet::Mat4 {
+        let mat3 = self.into_mat3();
+
+        ultraviolet::Mat4 {
+            cols: [
+                // X, Y, 0, 0
+                mat3.cols[0].into_homogeneous_vector(),
+                mat3.cols[1].into_homogeneous_vector(),
+                ultraviolet::Vec4::new(0.0, 0.0, 1.0, 0.0),
+                // X, Y, 0 , 1
+                mat3.cols[2].xy().xyz().into_homogeneous_point(),
+            ],
+        }
     }
     /// Convert into a basis transform, which is missing the translation.
     pub fn into_basis2(&self) -> ultraviolet::Mat2 {

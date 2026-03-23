@@ -83,10 +83,7 @@ async fn stylus_event_collector(
     loop {
         match event_stream.recv().await {
             Ok(stylus_frame) => {
-                // We need a transform in order to do any of our work!
-                let Some(transform) = document_preview.get_view_transform().await else {
-                    continue;
-                };
+                let transform = document_preview.get_view_transform_async().await;
 
                 // Get the actions, returning if stream closed.
                 let action_frame = match action_listener.frame() {
@@ -98,13 +95,9 @@ async fn stylus_event_collector(
                     },
                 };
 
-                let render = tools
+                tools
                     .process(&transform, stylus_frame, &action_frame, &ui_requests)
                     .await;
-
-                if let Some(transform) = render.set_view {
-                    document_preview.insert_document_transform(transform).await;
-                }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
                 log::warn!("Lost {num} stylus frames!");
@@ -120,7 +113,7 @@ struct InitialConnection {
     ty: InitialConnectionType,
 }
 enum InitialConnectionType {
-    Tcp(std::net::SocketAddr),
+    Tcp(String),
     // IPC(),
     // Inprocess,
 }
@@ -128,8 +121,8 @@ enum InitialConnectionType {
 fn client(connection: InitialConnection) -> AnyResult<()> {
     let mut application = window::Application::new()?;
     match connection.ty {
-        InitialConnectionType::Tcp(addr) => {
-            application.connections().connect_tcp(addr);
+        InitialConnectionType::Tcp(address) => {
+            application.connections().connect_tcp(address);
         }
     }
 
@@ -358,7 +351,7 @@ fn main() -> AnyResult<()> {
         && let Some(addr) = args.next()
     {
         client(InitialConnection {
-            ty: InitialConnectionType::Tcp(addr.parse()?),
+            ty: InitialConnectionType::Tcp(addr),
         })
     } else if std::env::args().count() == 1 {
         server()

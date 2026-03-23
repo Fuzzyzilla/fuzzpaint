@@ -2,17 +2,17 @@
 
 /// A viewport, a rectangular punchout of the UI inside of which a document is
 /// shown and interacted through.
-pub struct Viewport {
+pub struct ViewportInner {
     /// The document that is shown.
-    document: (),
-
-    /// The rectangle the document is shown in, in logical px.
-    logical_rect: egui::Rect,
-
+    pub document: fuzzpaint_core::state::document::ID,
     /// Keyboard hotkey input for this viewport
     pub actions: (),
     /// The transform that the document is shown in.
-    transform: (),
+    pub transform: ViewportTransform,
+}
+pub struct ViewportTransform {
+    pub view: crate::view_transform::ViewInfo,
+    pub changed: bool,
 }
 /// The interface between the UI and the outside world. (the renderer, active
 /// connections, etc).
@@ -25,8 +25,8 @@ pub struct InterfaceInner<'a, 'b: 'a> {
     /// in the process of drawing, etc.), optionally forwarding them to the
     /// renderer and the remote for realtime visual updates.
     pub preview: (),
-    // The state of all viewports. For now, there is exactly one.
-    // pub viewports: Viewport,
+    // The state of all viewports. For now, there is only zero or one.
+    pub viewport: Option<ViewportInner>,
 }
 // Seal the fields.
 pub struct Interface<'a, 'b: 'a>(InterfaceInner<'a, 'b>);
@@ -40,16 +40,22 @@ impl<'a, 'b: 'a> From<Interface<'a, 'b>> for InterfaceInner<'a, 'b> {
         value.0
     }
 }
-impl Interface<'_, '_> {
+impl<'a, 'b: 'a> Interface<'a, 'b> {
+    pub fn into_inner(self) -> InterfaceInner<'a, 'b> {
+        self.0
+    }
     pub fn iter_connections(
-        &mut self,
+        &'_ mut self,
     ) -> impl Iterator<
         Item = (
             crate::connections::ConnectionID,
-            crate::connections::ConnectionLock,
+            crate::connections::ConnectionLock<'_>,
         ),
     > {
         self.0.connections.iter_connections()
+    }
+    pub fn connect(&self, address: String) -> crate::connections::NewConnectionStatus {
+        self.0.connections.connect(address)
     }
     pub fn pointers(&mut self) -> &mut crate::window::stylus_events::PointerBridge {
         &mut self.0.pointers

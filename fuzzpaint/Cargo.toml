@@ -15,7 +15,6 @@ anyhow = "1.0.100"
 async-trait = "0.1.89"
 az = "1.2.1"
 bitflags = { version = "2.10.0", features = ["bytemuck"] }
-cgmath = "0.18.0"
 crossbeam = "0.8.4"
 defer = "0.2.1"
 dhat = { version = "0.3.3", optional = true }

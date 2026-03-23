@@ -539,13 +539,13 @@ impl Render {
             .expect("Present image out-of-bounds.")
             .clone();
 
-        let matrix = cgmath::ortho(
+        let matrix = vk::projection::orthographic_vk(
             0.0,
             framebuffer.extent()[0] as f32 / scale_factor,
             0.0,
             framebuffer.extent()[1] as f32 / scale_factor,
             -1.0,
-            1.0,
+            0.0,
         );
 
         let (texture_set_idx, _) = self.texture_set_layout();
