@@ -1,3 +1,5 @@
+/// Utterly arbitrary :3
+const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 pub enum LogScope {
     /// A message from the remote server.
     /// # Warning
@@ -54,7 +56,7 @@ mod inner {
         /// Doesn't do anything, but wakes the thread.
         Poke,
         Exit,
-        ConnectTcp(std::net::SocketAddr),
+        ConnectTcp(String, super::NewConnectionStatus),
     }
 
     pub struct Inner {
@@ -68,16 +70,22 @@ mod inner {
             mut requests: tokio::sync::mpsc::UnboundedReceiver<Request>,
             mut waker: Box<dyn Waker + Send>,
         ) -> anyhow::Result<()> {
-            let rt = {
-                let mut builder = tokio::runtime::Builder::new_current_thread();
-                // Implant a killchip into it's brain that sets off a small embedded
-                // explosive should it think naughty thoughts:
-                #[cfg(debug_assertions)]
-                builder.thread_name_fn(|| {
-                    panic!("connection-poller tokio instance should not spawn extra threads")
-                });
-                builder.enable_io().build()?
-            };
+            let rt = tokio::runtime::Builder::new_current_thread()
+                // We dont do any blocking in the tokio RT, except that DNS
+                // lookup is implemented as blocking internally. If more than
+                // one DNS lookup is enqueued, they'll just happen sequentially.
+                // This is fine uwu. Preferably we wouldn't have any auxiliary
+                // threads...
+                .max_blocking_threads(1)
+                .thread_name_fn(|| {
+                    #[cfg(debug_assertions)]
+                    log::info!("tokio spawned an auxiliary thread");
+                    "[rt] connection-poller".to_owned()
+                })
+                .enable_io()
+                // Needed for connection timeout
+                .enable_time()
+                .build()?;
             let block = async {
                 loop {
                     // Allows the controller thread to block the daemon at will.
@@ -138,23 +146,47 @@ mod inner {
                             waker.wake(crate::connections::ConnectionID(0));
                         },
                     };
+                    drop(lock);
                     if let Some(request) = request {
                         match request {
                             Request::Poke => (),
                             Request::Exit => return Ok(()),
-                            Request::ConnectTcp(addr) => {
-                                match client::Client::connect(addr).await {
-                                    Ok(client) => lock.push(Client {
-                                        name: format!("{addr}"),
-                                        conn: client,
-                                        messages: Vec::new(),
-                                        needs_flush: false,
-                                    }),
-                                    Err(e) => waker.log(
-                                        crate::connections::LogScope::Internal,
-                                        log::Level::Error,
-                                        &format!("failed to connect to {addr}: {e}"),
-                                    ),
+                            Request::ConnectTcp(addr, mut status) => {
+                                // Cancel if it takes too long. Client::connect
+                                // is not cancel safe, but this is ok.
+                                match tokio::time::timeout(
+                                    super::TIMEOUT,
+                                    client::Client::connect(&addr),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(client)) => {
+                                        self.clients.lock().await.push(Client {
+                                            name: addr,
+                                            conn: client,
+                                            messages: Vec::new(),
+                                            needs_flush: false,
+                                        });
+                                        status.set_status(super::Pending::Success);
+                                    }
+                                    Ok(Err(e)) => {
+                                        status.set_status(super::Pending::Fail);
+                                        waker.log(
+                                            crate::connections::LogScope::Internal,
+                                            log::Level::Error,
+                                            &format!("failed to connect to {addr}: {e}"),
+                                        );
+                                    }
+                                    Err(_) => {
+                                        status.set_status(super::Pending::Fail);
+                                        waker.log(
+                                            crate::connections::LogScope::Internal,
+                                            log::Level::Error,
+                                            &format!(
+                                                "failed to connect to {addr}: connection timed out"
+                                            ),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -193,8 +225,9 @@ impl ClientConnectionsManager {
             requests: send,
         })
     }
-    pub fn connect_tcp(&self, addr: std::net::SocketAddr) {
-        self.requests.send(Request::ConnectTcp(addr));
+    pub fn connect_tcp(&self, address: String) {
+        self.requests
+            .send(Request::ConnectTcp(address, NewConnectionStatus::new()));
     }
     /// Kills the daemon, returning its result.
     /// # Panics
@@ -213,13 +246,15 @@ impl ClientConnectionsManager {
         let _ = self.requests.send(Request::Poke);
         ConnectionsLock {
             clients: self.inner.clients.blocking_lock(),
+            requests: self.requests.clone(),
         }
     }
 }
 pub struct ConnectionsLock<'a> {
     clients: tokio::sync::MutexGuard<'a, Vec<inner::Client>>,
+    requests: tokio::sync::mpsc::UnboundedSender<Request>,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ConnectionID(usize);
 pub struct ConnectionLock<'a> {
     client: &'a mut inner::Client,
@@ -232,6 +267,17 @@ impl ConnectionsLock<'_> {
             .iter_mut()
             .enumerate()
             .map(|(idx, client)| (ConnectionID(idx), ConnectionLock { client }))
+    }
+    pub fn connect(&self, address: String) -> NewConnectionStatus {
+        let mut status = NewConnectionStatus::new();
+        if self
+            .requests
+            .send(Request::ConnectTcp(address, status.private_clone()))
+            .is_err()
+        {
+            status.set_status(Pending::Fail);
+        }
+        status
     }
 }
 impl ConnectionLock<'_> {
@@ -247,5 +293,50 @@ impl ConnectionLock<'_> {
     }
     pub fn messages(&self) -> impl Iterator<Item = &str> {
         self.client.messages.iter().map(std::ops::Deref::deref)
+    }
+}
+#[derive(PartialEq, Eq)]
+#[repr(u8)]
+enum Pending {
+    Pending = 0,
+    Success = 1,
+    Fail = 2,
+}
+pub struct NewConnectionStatus {
+    status: std::sync::Arc<std::sync::atomic::AtomicU8>,
+}
+impl NewConnectionStatus {
+    fn new() -> Self {
+        Self {
+            status: std::sync::Arc::new((Pending::Pending as u8).into()),
+        }
+    }
+    fn private_clone(&self) -> Self {
+        Self {
+            status: self.status.clone(),
+        }
+    }
+    fn set_status(&mut self, status: Pending) {
+        self.status
+            .store(status as _, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn get_status(&self) -> Pending {
+        match self.status.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => Pending::Pending,
+            1 => Pending::Success,
+            _ => Pending::Fail,
+        }
+    }
+    /// True if the connection succeeded. False if still pending.
+    pub fn has_succeeded(&self) -> bool {
+        self.get_status() == Pending::Success
+    }
+    /// True if the connection failed. False if still pending.
+    pub fn has_failed(&self) -> bool {
+        self.get_status() == Pending::Fail
+    }
+    /// Still waiting.
+    pub fn is_pending(&self) -> bool {
+        self.get_status() == Pending::Pending
     }
 }

@@ -13,6 +13,20 @@ pub struct UnitlessRect {
     pub origin: ultraviolet::Vec2,
     pub size: ultraviolet::Vec2,
 }
+impl UnitlessRect {
+    pub fn center(&self) -> ultraviolet::Vec2 {
+        self.origin + self.size / 2.0
+    }
+    /// Multiply the origin and size by the given scalar.
+    /// Useful for change-of-DPI.
+    #[must_use = "returns a new rect with the result and does not modify `self`"]
+    pub fn scale(self, by: f32) -> Self {
+        Self {
+            origin: self.origin * by,
+            size: self.size * by,
+        }
+    }
+}
 
 /// A rectangle with a dynamic unit.
 #[derive(Clone, Copy, Debug)]
@@ -22,11 +36,20 @@ pub struct Rect {
 }
 
 /// A physical unit of length.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PhysicalUnit {
     Centimeter,
     Inch,
     Point,
+}
+impl std::fmt::Display for PhysicalUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Centimeter => write!(f, "cm"),
+            Self::Inch => write!(f, "in"),
+            Self::Point => write!(f, "pt"),
+        }
+    }
 }
 impl PhysicalUnit {
     /// Get the scale factor from this unit to another.
@@ -47,12 +70,25 @@ impl PhysicalUnit {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Unit {
     Physical(PhysicalUnit),
     LogicalPx,
     PhysicalPx,
 }
+impl std::fmt::Display for Unit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Physical(unit) => write!(f, "{unit}"),
+            Self::LogicalPx => write!(f, "px"),
+            Self::PhysicalPx => write!(f, "ppx"),
+        }
+    }
+}
 /// A type with a unit.
+///
+/// Does not impliment `*Ord` or `*Eq`, as a DPI aware conversion needs to take
+/// place to compare values of different dimension.
 #[derive(Clone, Copy, Debug)]
 pub enum Length<T> {
     /// Physical measurements, dependent on the DPI (physical pixels per
@@ -66,12 +102,53 @@ pub enum Length<T> {
     PhysicalPx(PhysicalPx<T>),
 }
 impl<T> Length<T> {
+    pub const fn logical_px(t: T) -> Self {
+        Self::LogicalPx(LogicalPx(t))
+    }
+    pub const fn physical_px(t: T) -> Self {
+        Self::PhysicalPx(PhysicalPx(t))
+    }
+    pub const fn physical(t: T, unit: PhysicalUnit) -> Self {
+        Self::Physical(Physical { value: t, unit })
+    }
+    pub fn value_mut(&mut self) -> &mut T {
+        match self {
+            Self::Physical(t) => &mut t.value,
+            Self::LogicalPx(LogicalPx(t)) => t,
+            Self::PhysicalPx(PhysicalPx(t)) => t,
+        }
+    }
+    pub fn into_value(self) -> T {
+        match self {
+            Self::Physical(t) => t.value,
+            Self::LogicalPx(LogicalPx(t)) => t,
+            Self::PhysicalPx(PhysicalPx(t)) => t,
+        }
+    }
     /// Apply the given transformation function, regardless of the unit.
     pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Length<U> {
         match self {
             Self::Physical(t) => Length::Physical(t.map(f)),
             Self::LogicalPx(t) => Length::LogicalPx(t.map(f)),
             Self::PhysicalPx(t) => Length::PhysicalPx(t.map(f)),
+        }
+    }
+    pub fn unit(&self) -> Unit {
+        match self {
+            Self::LogicalPx(_) => Unit::LogicalPx,
+            Self::PhysicalPx(_) => Unit::PhysicalPx,
+            Self::Physical(u) => Unit::Physical(u.unit),
+        }
+    }
+    pub fn into_value_unit(self) -> (T, Unit) {
+        let unit = self.unit();
+        (self.into_value(), unit)
+    }
+    pub fn from_value_unit(t: T, unit: Unit) -> Self {
+        match unit {
+            Unit::LogicalPx => Self::logical_px(t),
+            Unit::PhysicalPx => Self::physical_px(t),
+            Unit::Physical(unit) => Self::physical(t, unit),
         }
     }
 }
@@ -115,6 +192,9 @@ where
         todo!()
     }
 }
+// TODO: impl `*Ord` with a unit conversion. I dont think we can reasonably
+// implement PartialEq in any meaningful way due to the floating point
+// imprecision in the conversion.
 #[derive(Clone, Copy, Debug)]
 pub struct Physical<T> {
     unit: PhysicalUnit,
@@ -145,7 +225,7 @@ impl<T> Physical<T> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogicalPx<T>(pub T);
 impl<T> LogicalPx<T> {
     /// Apply the given transformation function, regardless of the unit.
@@ -157,7 +237,7 @@ impl<T> LogicalPx<T> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysicalPx<T>(pub T);
 impl<T> PhysicalPx<T> {
     /// Apply the given transformation function, regardless of the unit.

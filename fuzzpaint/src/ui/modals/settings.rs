@@ -1,4 +1,4 @@
-pub struct Settings {
+pub struct Modal {
     // LoadBlockError is !Clone (and can't be, oopsie) so use a string.
     hotkeys_error: Option<String>,
     hotkeys: crate::actions::hotkeys::ActionsToKeys,
@@ -6,7 +6,7 @@ pub struct Settings {
     new_hotkey: Option<NewHotkeyState>,
     pane: Pane,
 }
-impl Default for Settings {
+impl Default for Modal {
     fn default() -> Self {
         let hotkeys = crate::global::hotkeys::Hotkeys::read();
         Self {
@@ -18,7 +18,7 @@ impl Default for Settings {
     }
 }
 
-impl Settings {
+impl Modal {
     /// Request the settings to reload from disk, and re-sync UI state with it.
     fn hard_reload(&mut self) {
         let mut write = crate::global::hotkeys::Hotkeys::write();
@@ -40,10 +40,7 @@ impl Settings {
             self.hotkeys_error = Some(e);
         }
     }
-    fn hotkey_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-    ) -> super::modal::Response<(), (), std::convert::Infallible> {
+    fn hotkey_ui(&mut self, ui: &mut egui::Ui) -> super::Response {
         // Show an error banner.
         if let Some(error) = self.hotkeys_error.clone() {
             ui.with_layout(
@@ -143,13 +140,13 @@ impl Settings {
                                         }
                                     } else {
                                         // Show button to initiate new addition.
-                                        if ui.button(super::PLUS_ICON.to_string()).clicked() {
+                                        if ui.button(crate::ui::PLUS_ICON.to_string()).clicked() {
                                             // Start adding a new hotkey at the end.
                                             self.new_hotkey = Some(NewHotkeyState {
                                                 action,
                                                 index: after_end_idx,
                                             });
-                                        };
+                                        }
                                     }
                                     // Add an extra item worth of space, for hrule.
                                     ui.add_space(0.0);
@@ -183,26 +180,25 @@ impl Settings {
             {
                 // No error, safe to save!
                 self.save();
-                return super::modal::Response::Confirm(());
+                return super::Response::Close;
             }
             if ui.button("Close").clicked() {
-                return super::modal::Response::Cancel(());
+                return super::Response::Close;
             }
-            super::modal::Response::Continue
+            super::Response::Retain
         })
         .inner
     }
 }
 
-impl super::Modal for Settings {
-    const NAME: &'static str = "Settings";
-    type Cancel = ();
-    type Confirm = ();
-    type Error = std::convert::Infallible;
+impl super::Modal for Modal {
     fn do_ui(
         &mut self,
+        _id: egui::Id,
         ui: &mut egui::Ui,
-    ) -> super::modal::Response<Self::Cancel, Self::Confirm, Self::Error> {
+        _state: &mut crate::ui::MainUI,
+        _interface: &mut crate::ui::interface::Interface,
+    ) -> super::Response {
         match self.pane {
             Pane::Hotkeys => self.hotkey_ui(ui),
         }
@@ -332,9 +328,7 @@ fn egui_key_to_winit_key(key: egui::Key) -> Option<winit::keyboard::KeyCode> {
         EKey::BrowserBack => WKey::BrowserBack,
         EKey::Quote => WKey::Quote,
 
-        EKey::CloseCurlyBracket => return None,
-        EKey::Exclamationmark => return None,
-        EKey::OpenCurlyBracket => return None,
+        EKey::CloseCurlyBracket | EKey::Exclamationmark | EKey::OpenCurlyBracket => return None,
     })
 }
 
@@ -383,7 +377,7 @@ fn clicked_hotkey(ui: &mut egui::Ui) -> ClickedHotkeyResponse {
         // Show a button to indicate listening. If clicked, stop the operation.
         if ui.button("press a hotkey...").clicked() {
             return ClickedHotkeyResponse::Cancel;
-        };
+        }
     }
     response
 }

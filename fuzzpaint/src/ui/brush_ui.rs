@@ -576,6 +576,7 @@ impl Default for CreationModal {
         }
     }
 }
+/*
 impl super::Modal for CreationModal {
     type Cancel = ();
     type Confirm = CreationOutput;
@@ -584,7 +585,7 @@ impl super::Modal for CreationModal {
     fn do_ui(
         &mut self,
         ui: &mut egui::Ui,
-    ) -> super::modal::Response<Self::Cancel, Self::Confirm, Self::Error> {
+    ) -> super::modals::Response<Self::Cancel, Self::Confirm, Self::Error> {
         ui.horizontal(|ui| {
             for tab in <CreationTab as strum::IntoEnumIterator>::iter() {
                 // Can't use selectable label here, as it incorrectly checks the
@@ -606,13 +607,13 @@ impl super::Modal for CreationModal {
         )
         .show_inside(ui, |ui| {
             if ui.button("Cancel").clicked_or_escape() {
-                super::modal::Response::Cancel(())
+                super::modals::Response::Cancel(())
             } else {
-                super::modal::Response::Continue
+                super::modals::Response::Continue
             }
         })
         .inner;
-        if !matches!(cancel_response, super::modal::Response::Continue) {
+        if !matches!(cancel_response, super::modals::Response::Continue) {
             return cancel_response;
         }
 
@@ -662,9 +663,10 @@ impl super::Modal for CreationModal {
             painter.rect_filled(response.rect, 0.0, egui::Color32::BLACK);
             painter.add(egui::Shape::mesh(mesh));
         }*/
-        super::modal::Response::Continue
+        super::modals::Response::Continue
     }
 }
+    */
 
 enum RGBAChannel {
     R,

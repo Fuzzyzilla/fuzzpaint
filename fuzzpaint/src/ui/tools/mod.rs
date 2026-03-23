@@ -159,12 +159,7 @@ impl ToolState {
     pub fn tool(&self) -> Tool {
         self.tool
     }
-    pub fn show_toolbox_column(
-        &mut self,
-        ctx: &egui::Context,
-        side: egui::panel::Side,
-        enabled: bool,
-    ) {
+    pub fn show_toolbox_column(&mut self, ctx: &egui::Context, side: egui::panel::Side) {
         // Min size, expanding.
         const TOOLBOX_BUTTON_SIZE: f32 = 30.0;
         const ICON_SIZE_RATIO: f32 = 0.9;
@@ -178,9 +173,6 @@ impl ToolState {
                 ..egui::Frame::side_top_panel(&ctx.style())
             })
             .show(ctx, |ui| {
-                if !enabled {
-                    ui.disable();
-                }
                 egui::ScrollArea::vertical()
                     // Very narrow bar, the scrollbar is quite large relative to it lol.
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)

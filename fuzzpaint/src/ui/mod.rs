@@ -3,12 +3,9 @@ mod color_palette;
 mod drag;
 mod error_display;
 pub mod interface;
-mod modal;
+mod modals;
 pub mod requests;
-mod settings;
 mod tools;
-
-use modal::Modal;
 
 use egui::{RichText, Ui};
 use fuzzpaint_core::{
@@ -116,15 +113,6 @@ impl ResponseExt for egui::Response {
     }
 }
 
-enum CurrentModal {
-    BrushCreation(brush_ui::CreationModal),
-    Settings(settings::Settings),
-}
-
-enum CloseState {
-    None,
-    Modal,
-}
 const CSD_RESIZE_WIDTH_LOGICAL_PX: f32 = 5.0;
 #[derive(Clone, Copy)]
 pub enum WindowAction {
@@ -148,16 +136,11 @@ struct PerDocumentData {
     name: String,
 }
 pub struct MainUI {
-    // Modal layers, in order. (There is no better way to represent this state, I have considered greatly!)
-
-    // On top of everything, a "do you want to exit" dialog.
-    close_state: CloseState,
+    app_close_modal_shown: bool,
     window_action: Option<WindowAction>,
     // Whether or not to render Client-Side Decorations.
     csd: bool,
     hovered_csd: Option<HoveredCSD>,
-    // A Ui-defined modal (creating brushes, application settings, etc)
-    modal: Option<CurrentModal>,
     // Active document viewport
     // + Implicit layer: welcome screen if no active document.
     cur_document: Option<state::document::ID>,
@@ -189,14 +172,13 @@ impl MainUI {
 
         let (requests_send, requests_recv) = crossbeam::channel::unbounded();
         Self {
-            close_state: CloseState::None,
+            app_close_modal_shown: false,
             window_action: None,
             hovered_csd: None,
             csd: false,
             documents,
             cur_document,
 
-            modal: None,
             picker_color: egui::ecolor::HsvaGamma {
                 h: 0.0,
                 s: 0.0,
@@ -223,10 +205,11 @@ impl MainUI {
         // * A close was requested again even though the modal is up.
         //   (Either we crashed and the modal isn't seen or the user *really* wants us to close lol)
         // * No open documents to save anyway.
-        if matches!(self.close_state, CloseState::Modal) || self.documents.is_empty() {
+        if self.app_close_modal_shown || self.documents.is_empty() {
             self.window_action = Some(WindowAction::Close);
         } else {
-            self.close_state = CloseState::Modal
+            self.app_close_modal_shown = true;
+            modals::spawn(modals::exit::Modal);
         }
     }
     /// Returns true if the app should close.
@@ -240,47 +223,54 @@ impl MainUI {
     pub fn hovered_csd_element(&self) -> Option<HoveredCSD> {
         self.hovered_csd
     }
-    /// Returns true if a top-level modal exists asking whether to close the app.
-    #[must_use]
-    fn modal_enable(&self) -> bool {
-        matches!(self.close_state, CloseState::Modal)
-    }
-    /// Returns true if any modal is open.
-    #[must_use]
-    fn background_enable(&self) -> bool {
-        self.modal_enable() || self.modal.is_some()
-    }
     #[must_use]
     pub fn listen_requests(&self) -> crossbeam::channel::Receiver<requests::UiRequest> {
         self.requests_recv.clone()
     }
-    /// Main UI and any modals, with the top bar, layers, brushes, color, etc. To be displayed in front of the document and it's gizmos.
-    /// Returns the size of the document's viewport space - that is, the size of the rect not covered by any side/top/bottom panels.
-    /// None if a full-screen menu is shown.
-    pub fn ui(
-        &mut self,
-        ctx: &egui::Context,
-        interface: &mut interface::Interface,
-    ) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
-        // Close modal, on top of everything.
-        if self.modal_enable() {
-            self.do_close_modal(ctx);
+    /// Main UI and any modals, with the top bar, layers, brushes, color, etc.
+    /// To be displayed in front of the document and it's gizmos.
+    pub fn ui(&mut self, ctx: &egui::Context, interface: &mut interface::Interface) {
+        modals::show(self, ctx, interface);
+
+        self.main_ui(ctx);
+
+        self.do_connection_windows(ctx, interface);
+
+        if self.cur_document.is_some() {
+            self.tool_state.gizmos(ctx, ctx.available_rect(), interface);
         }
-        // Show main viewport stuff. Open document, or splash, and document modals.
-        // Display modals before main. Egui will place the windows without regard for free area.
-        self.do_modal(ctx, !self.modal_enable());
 
-        // Show, but disable if modal exists.
-        let res = self.main_ui(ctx, !self.background_enable());
+        self.error_display.show(ctx, crate::log_collector());
 
-        for (_id, mut connection) in interface.iter_connections() {
-            egui::Window::new(connection.name())
+        self.do_csd_edges(ctx);
+    }
+    fn do_connection_windows(&mut self, ctx: &egui::Context, interface: &mut interface::Interface) {
+        let style = ctx.style();
+        // Dock the boxes to the bottom left of the viewport, stacking next to
+        // each other.
+        let mut window_frame = egui::Frame::window(&style);
+        // Visually connect to the bottom of the viewport.
+        window_frame.corner_radius.se = 0;
+        window_frame.corner_radius.sw = 0;
+        window_frame.stroke = egui::Stroke::NONE;
+        let margin = style.spacing.window_margin.leftf();
+        // Left-edge of the windows, bumping over as we add more.
+        let mut x = margin;
+        for (id, mut connection) in interface.iter_connections() {
+            let window_response = egui::Window::new(connection.name())
+                .id(egui::Id::new("connection-window").with(id))
                 .default_open(false)
+                .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::new(x, 0.0))
+                .constrain_to(ctx.available_rect())
+                // These combine to form "shrink to fit pretty please"
+                .min_width(0.0)
+                .default_width(0.0)
+                .frame(window_frame)
                 .show(ctx, |ui| {
                     egui::TopBottomPanel::bottom(ui.id().with("text-input")).show_inside(
                         ui,
                         |ui| {
-                            latch::latch(ui, "text", String::new(), |ui, string| {
+                            latch::latch(ui, ui.id().with("text"), String::new(), |ui, string| {
                                 let response = ui.text_edit_singleline(string);
                                 if response.lost_focus()
                                     && ui.input(|i| i.key_pressed(egui::Key::Enter))
@@ -299,27 +289,21 @@ impl MainUI {
                             .on_finish(|string| connection.message(&string));
                         },
                     );
-                    egui::Grid::new("text")
-                        .striped(true)
-                        .num_columns(1)
+                    egui::ScrollArea::vertical()
+                        // Take available space
+                        .auto_shrink(false)
                         .show(ui, |ui| {
                             for message in connection.messages() {
                                 ui.label(message);
                                 ui.end_row();
                             }
                         });
-                });
+                })
+                // Not closable
+                .unwrap();
+
+            x += window_response.response.rect.width() + margin;
         }
-
-        if self.cur_document.is_some() {
-            self.tool_state.gizmos(ctx, ctx.available_rect(), interface);
-        }
-
-        self.error_display.show(ctx, crate::log_collector());
-
-        self.do_csd_edges(ctx);
-
-        res
     }
     fn do_csd_edges(&mut self, ctx: &egui::Context) {
         if !self.csd {
@@ -416,58 +400,6 @@ impl MainUI {
             self.cur_document = None;
             *crate::AdHocGlobals::get().write() = None;
             None
-        }
-    }
-    fn do_close_modal(&mut self, ctx: &egui::Context) {
-        let clicked_elsewhere = egui::Window::new("Exit")
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.label("There are unsaved documents. Do you really want to exit?");
-                ui.horizontal(|ui| {
-                    // On first run-thru it would be nice for this cancel button to auto-focus itself.
-                    if ui.button("Cancel").clicked_or_escape() {
-                        self.close_state = CloseState::None;
-                    }
-                    if ui.button("Exit").clicked() {
-                        self.window_action = Some(WindowAction::Close);
-                    }
-                });
-            })
-            .is_some_and(|resp| resp.response.clicked_elsewhere());
-
-        // If the user clicks away from the window assume they cancelled.
-        if clicked_elsewhere {
-            self.close_state = CloseState::None;
-        }
-    }
-    /// Execute the current modal's logic and window.
-    fn do_modal(&mut self, ctx: &egui::Context, enabled: bool) {
-        let Some(modal) = self.modal.as_mut() else {
-            return;
-        };
-
-        let title = match modal {
-            CurrentModal::BrushCreation(_) => brush_ui::CreationModal::NAME,
-            CurrentModal::Settings(_) => settings::Settings::NAME,
-        };
-
-        let mut is_open = true;
-
-        let cancelled = egui::Window::new(title)
-            .collapsible(false)
-            .enabled(enabled)
-            .open(&mut is_open)
-            .show(ctx, |ui| match modal {
-                CurrentModal::BrushCreation(b) => b.do_ui(ui).closed(),
-                CurrentModal::Settings(s) => s.do_ui(ui).closed(),
-            })
-            .and_then(|resp| resp.inner)
-            .unwrap_or(false);
-
-        // Closed :3
-        if !is_open || cancelled {
-            self.modal = None;
         }
     }
     fn new_document(&mut self) {
@@ -569,32 +501,15 @@ impl MainUI {
             }
         }
     }
-    /// Render just self. Modals and insets handled separately.
-    fn main_ui(
-        &mut self,
-        ctx: &egui::Context,
-        enabled: bool,
-    ) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
+    fn main_ui(&mut self, ctx: &egui::Context) {
         self.hovered_csd = None;
 
         let Ok(action_frame) = self.action_listener.frame() else {
-            let viewport = ctx.available_rect();
-            let pos = viewport.left_top();
-            let size = viewport.size();
-            return Some((
-                ultraviolet::Vec2 { x: pos.x, y: pos.y },
-                ultraviolet::Vec2 {
-                    x: size.x,
-                    y: size.y,
-                },
-            ));
+            return;
         };
         let interface = self.get_cur_interface().cloned();
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            if !enabled {
-                ui.disable();
-            }
             self.menu_bar(ui);
         });
 
@@ -603,30 +518,18 @@ impl MainUI {
             // Don't show the bar if it has nothing to say!
             if !self.documents.is_empty() {
                 egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
-                    if !enabled {
-                        ui.disable();
-                    }
                     self.document_bar(ui);
                 });
             }
             self.welcome_screen(ctx);
-
-            // When the welcome screen is shown, there is no space for the document view.
-            None
         } else {
             // A document is open, show the main view.
             egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
-                if !enabled {
-                    ui.disable();
-                }
                 if let Some(interface) = interface {
                     Self::nav_bar(ui, interface.id, &self.requests_send, &action_frame);
                 }
             });
             egui::SidePanel::right("layers").show(ctx, |ui| {
-                if !enabled {
-                    ui.disable();
-                }
                 egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
                 self.colors_panel(ui, self.cur_document, &action_frame);
                 ui.separator();
@@ -652,11 +555,8 @@ impl MainUI {
             });
 
             self.tool_state
-                .show_toolbox_column(ctx, egui::panel::Side::Left, enabled);
+                .show_toolbox_column(ctx, egui::panel::Side::Left);
             egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
-                if !enabled {
-                    ui.disable();
-                }
                 self.document_bar(ui);
             });
 
@@ -665,17 +565,6 @@ impl MainUI {
                 self.picker_changed = response.response.changed();
                 self.picker_in_flux = response.in_flux;
             }
-
-            let viewport = ctx.available_rect();
-            let pos = viewport.left_top();
-            let size = viewport.size();
-            Some((
-                ultraviolet::Vec2 { x: pos.x, y: pos.y },
-                ultraviolet::Vec2 {
-                    x: size.x,
-                    y: size.y,
-                },
-            ))
         }
     }
     /// File, Edit, ect. `csd` adds client-side-decorations (Close, maximize,
@@ -739,6 +628,7 @@ impl MainUI {
                             ui.add(button)
                         };
                         if add_button(ui, "New", Some("Ctrl+N")).clicked() {
+                            modals::spawn(modals::new_doc::Modal::default());
                             self.new_document();
                         }
                         if add_button(ui, "Save", Some("Ctrl+S")).clicked() {
@@ -794,13 +684,15 @@ impl MainUI {
                     });
                     ui.menu_button("Edit", |ui| {
                         if ui.button("Settings").clicked() {
-                            self.modal =
-                                Some(CurrentModal::Settings(settings::Settings::default()));
+                            modals::spawn(modals::settings::Modal::default());
                             ui.close();
                         }
                     });
                     ui.menu_button("Remote", |ui| {
-                        ui.button("Connect...");
+                        if ui.button("Connect...").clicked() {
+                            modals::spawn(modals::connect::Modal::default());
+                            ui.close();
+                        }
                     });
                     ui.menu_button("Info", |ui| {
                         if ui.button("View Log").clicked() {
@@ -923,6 +815,7 @@ impl MainUI {
                     };
 
                     if big_button(ui, a, "➕ New").clicked() {
+                        modals::spawn(modals::new_doc::Modal::default());
                         self.new_document();
                     }
                     if big_button(ui, b, "🗀 Open").clicked() {
@@ -1177,9 +1070,7 @@ impl MainUI {
                 ui.label("Brush");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(PLUS_ICON.to_string()).clicked() {
-                        self.modal = Some(CurrentModal::BrushCreation(
-                            brush_ui::CreationModal::default(),
-                        ));
+                        log::warn!("Unimplemented");
                     }
                 })
             });
