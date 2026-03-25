@@ -51,12 +51,15 @@ mod inner {
             self.needs_flush = true;
             Ok(())
         }
+        pub fn session_id(&self) -> String {
+            self.conn.session_id()
+        }
     }
     pub enum Request {
         /// Doesn't do anything, but wakes the thread.
         Poke,
         Exit,
-        ConnectTcp(String, super::NewConnectionStatus),
+        ConnectTcp(String, super::NewConnectionStatusSender),
     }
 
     pub struct Inner {
@@ -161,31 +164,38 @@ mod inner {
                                 .await
                                 {
                                     Ok(Ok(client)) => {
+                                        let session_id = client.session_id().to_owned();
                                         self.clients.lock().await.push(Client {
                                             name: addr,
                                             conn: client,
                                             messages: Vec::new(),
                                             needs_flush: false,
                                         });
-                                        status.set_status(super::Pending::Success);
+                                        // Dont care if no one's listening.
+                                        let _ = status
+                                            .send
+                                            .send(Ok(super::NewConnectionInfo { session_id }));
                                     }
                                     Ok(Err(e)) => {
-                                        status.set_status(super::Pending::Fail);
-                                        waker.log(
-                                            crate::connections::LogScope::Internal,
-                                            log::Level::Error,
-                                            &format!("failed to connect to {addr}: {e}"),
-                                        );
+                                        if let Err(err) = status.try_send_err(e) {
+                                            waker.log(
+                                                crate::connections::LogScope::Internal,
+                                                log::Level::Error,
+                                                &format!("failed to connect to {addr}: {err}",),
+                                            );
+                                        }
                                     }
                                     Err(_) => {
-                                        status.set_status(super::Pending::Fail);
-                                        waker.log(
-                                            crate::connections::LogScope::Internal,
-                                            log::Level::Error,
-                                            &format!(
-                                                "failed to connect to {addr}: connection timed out"
-                                            ),
-                                        );
+                                        if let Err(err) = status.try_send_err(std::io::Error::new(
+                                            std::io::ErrorKind::TimedOut,
+                                            "connection timed out",
+                                        )) {
+                                            waker.log(
+                                                crate::connections::LogScope::Internal,
+                                                log::Level::Error,
+                                                &format!("failed to connect to {addr}: {err}",),
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -226,8 +236,11 @@ impl ClientConnectionsManager {
         })
     }
     pub fn connect_tcp(&self, address: String) {
-        self.requests
-            .send(Request::ConnectTcp(address, NewConnectionStatus::new()));
+        let (send, _) = oneshot::channel();
+        self.requests.send(Request::ConnectTcp(
+            address,
+            NewConnectionStatusSender { send },
+        ));
     }
     /// Kills the daemon, returning its result.
     /// # Panics
@@ -268,21 +281,27 @@ impl ConnectionsLock<'_> {
             .enumerate()
             .map(|(idx, client)| (ConnectionID(idx), ConnectionLock { client }))
     }
-    pub fn connect(&self, address: String) -> NewConnectionStatus {
-        let mut status = NewConnectionStatus::new();
-        if self
-            .requests
-            .send(Request::ConnectTcp(address, status.private_clone()))
-            .is_err()
-        {
-            status.set_status(Pending::Fail);
+    pub fn connect(&self, address: String) -> NewConnectionStatusReciever {
+        let (send, recv) = oneshot::channel();
+        if let Err(e) = self.requests.send(Request::ConnectTcp(
+            address,
+            NewConnectionStatusSender { send },
+        )) {
+            // Unwrap the stuff we tried to send
+            let Request::ConnectTcp(_, NewConnectionStatusSender { send }) = e.0 else {
+                unreachable!()
+            };
+            let _ = send.send(Err(std::io::Error::other("connection daemon not running")));
         }
-        status
+        NewConnectionStatusReciever { recv }
     }
 }
 impl ConnectionLock<'_> {
     pub fn name(&self) -> &str {
         &self.client.name
+    }
+    pub fn session_id(&self) -> String {
+        self.client.session_id()
     }
     pub fn message<'m>(&'_ mut self, message: &'m str) -> std::io::Result<&'_ mut Self> {
         self.client
@@ -295,48 +314,30 @@ impl ConnectionLock<'_> {
         self.client.messages.iter().map(std::ops::Deref::deref)
     }
 }
-#[derive(PartialEq, Eq)]
-#[repr(u8)]
-enum Pending {
-    Pending = 0,
-    Success = 1,
-    Fail = 2,
+pub struct NewConnectionInfo {
+    pub session_id: String,
 }
-pub struct NewConnectionStatus {
-    status: std::sync::Arc<std::sync::atomic::AtomicU8>,
+struct NewConnectionStatusSender {
+    send: oneshot::Sender<Result<NewConnectionInfo, std::io::Error>>,
 }
-impl NewConnectionStatus {
-    fn new() -> Self {
-        Self {
-            status: std::sync::Arc::new((Pending::Pending as u8).into()),
+impl NewConnectionStatusSender {
+    fn try_send_err(self, err: std::io::Error) -> Result<(), std::io::Error> {
+        if let Err(e) = self.send.send(Err(err)) {
+            e.into_inner().map(|_| ())
+        } else {
+            Ok(())
         }
     }
-    fn private_clone(&self) -> Self {
-        Self {
-            status: self.status.clone(),
-        }
-    }
-    fn set_status(&mut self, status: Pending) {
-        self.status
-            .store(status as _, std::sync::atomic::Ordering::Relaxed);
-    }
-    fn get_status(&self) -> Pending {
-        match self.status.load(std::sync::atomic::Ordering::Relaxed) {
-            0 => Pending::Pending,
-            1 => Pending::Success,
-            _ => Pending::Fail,
-        }
-    }
-    /// True if the connection succeeded. False if still pending.
-    pub fn has_succeeded(&self) -> bool {
-        self.get_status() == Pending::Success
-    }
-    /// True if the connection failed. False if still pending.
-    pub fn has_failed(&self) -> bool {
-        self.get_status() == Pending::Fail
-    }
-    /// Still waiting.
-    pub fn is_pending(&self) -> bool {
-        self.get_status() == Pending::Pending
+}
+pub struct NewConnectionStatusReciever {
+    recv: oneshot::Receiver<Result<NewConnectionInfo, std::io::Error>>,
+}
+impl NewConnectionStatusReciever {
+    /// Check the status of the connection, or returns Err(self) for you to poll
+    /// again later.
+    ///
+    /// A wait form is not implemented cuz i don't need it. :3
+    pub fn poll(self) -> Result<Result<NewConnectionInfo, std::io::Error>, Self> {
+        self.recv.try_recv().map_err(|_| self)
     }
 }

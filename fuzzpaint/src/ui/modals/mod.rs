@@ -132,7 +132,7 @@ pub enum Response {
     Retain,
     Close,
 }
-pub trait Modal: Send + Sync {
+pub trait Modal: Send {
     /// Show the modal.
     fn do_ui(
         &mut self,

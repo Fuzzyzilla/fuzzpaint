@@ -79,20 +79,16 @@ impl crate::server::Connection for Server {
         if self.allow_loopback_nodelay && address.ip().is_loopback() {
             let _ = stream.set_nodelay(true);
         }
-        // "Negotiate" a protocol version.
-        // Tell the client, so that they may adjust to our maximum version.
-        stream.write_all(super::PROTOCOL_VERSION).await?;
-        // Read the client's preferred version. May respond be an older version.
-        let mut client_protocol_version = [0; super::PROTOCOL_VERSION.len()];
-        stream.read_exact(&mut client_protocol_version).await?;
-        // Check if we can support this protocol version (trivial single-version
-        // logic for now).
-        if client_protocol_version != *super::PROTOCOL_VERSION {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "client connected with unsupported protocol",
-            ));
-        }
+
+        let handshake = snow::Builder::new(super::noise_params())
+            .prologue(super::PROTOCOL_VERSION)
+            .unwrap()
+            .build_responder()
+            .map_err(Error::other)?;
+
+        let (transport, session_id) =
+            super::run_handshake(&mut stream, &mut Vec::new(), handshake).await?;
+
         if self.oneshot {
             // Successfully connected and one-shot mode, set the flag
             // disallowing further clients. May have changed since first check.
@@ -105,6 +101,8 @@ impl crate::server::Connection for Server {
         }
         Ok(Client {
             stream,
+            transport,
+            session_id,
             address,
             buffer: bitcode::Buffer::new(),
             recv_staging: Vec::new(),
@@ -114,16 +112,30 @@ impl crate::server::Connection for Server {
 }
 pub struct Client {
     stream: net::TcpStream,
+    transport: snow::TransportState,
+    session_id: Vec<u8>,
     address: SocketAddr,
     buffer: bitcode::Buffer,
     recv_staging: Vec<u8>,
     send_staging: Vec<u8>,
 }
 impl Client {
-    /// Push a message to be sent on the next call to [`Connection::send`]
+    /// Push a message to be sent on the next call to [`crate::server::ClientConnection::send`]
     pub fn defer_send(&mut self, message: &crate::server_msg::Message<'_>) -> Result<&mut Self> {
-        super::encode_append(&mut self.buffer, &mut self.send_staging, message)?;
+        super::encode_append(
+            &mut self.buffer,
+            &mut self.send_staging,
+            &mut self.transport,
+            message,
+        )?;
         Ok(self)
+    }
+    /// Get the session ID. This is a cryptographic signature unique to this
+    /// specific connection, and must be compared **out-of-band** with the
+    /// server to ensure there is not a man-in-the-middle. This is not sensitive
+    /// information.
+    pub fn session_id(&self) -> String {
+        super::long_hex_string(&self.session_id)
     }
 }
 impl crate::server::ClientConnection for Client {
@@ -135,8 +147,9 @@ impl crate::server::ClientConnection for Client {
     ) -> std::result::Result<&mut Self, Self::Error> {
         super::streaming_write(
             &mut self.stream,
-            &mut self.buffer,
             &mut self.send_staging,
+            &mut self.transport,
+            &mut self.buffer,
             message,
         )
         .await?;
@@ -151,6 +164,12 @@ impl crate::server::ClientConnection for Client {
     }
     /// Cancel-safe.
     async fn recv(&mut self) -> std::result::Result<crate::client_msg::Message<'_>, Self::Error> {
-        super::streaming_read(&mut self.stream, &mut self.buffer, &mut self.recv_staging).await
+        super::streaming_read(
+            &mut self.stream,
+            &mut self.recv_staging,
+            &mut self.transport,
+            &mut self.buffer,
+        )
+        .await
     }
 }

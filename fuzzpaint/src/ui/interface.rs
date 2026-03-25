@@ -54,7 +54,7 @@ impl<'a, 'b: 'a> Interface<'a, 'b> {
     > {
         self.0.connections.iter_connections()
     }
-    pub fn connect(&self, address: String) -> crate::connections::NewConnectionStatus {
+    pub fn connect(&self, address: String) -> crate::connections::NewConnectionStatusReciever {
         self.0.connections.connect(address)
     }
     pub fn pointers(&mut self) -> &mut crate::window::stylus_events::PointerBridge {

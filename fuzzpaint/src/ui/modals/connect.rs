@@ -1,8 +1,10 @@
-const DISCLAIMER: &str =
-    "Warning: Neither the identity of the server nor the users on that server \
-are verified. Communication with the server is not encrypted.
+const DISCLAIMER: &str = "\
+Warning: Neither the identity nor authenticity of the server, the users \
+on that server, nor the contents of resources retrieved from that server are \
+verified. Encryption is performed on a best-effort basis and the security \
+thereof is not guaranteed.
 
-The following may be shared, unencrypted:
+The following will be shared to the network, and may not be secured:
 • Your IP address and port.
 • The server's address and port.
 • Your user details including name, profile image, etc.
@@ -20,22 +22,22 @@ sue me.";
 enum State {
     #[default]
     Input,
-    Waiting(crate::connections::NewConnectionStatus),
+    Waiting(crate::connections::NewConnectionStatusReciever),
+    CompareHash(String),
 }
 #[derive(Default)]
 pub struct Modal {
     // Validation of this locally (within the modal) seems extremely complex,
     // considering it could be a DNS lookup, so we don't bother.
     address_text: String,
+    last_err: Option<String>,
     state: State,
     agree: bool,
 }
-impl super::Modal for Modal {
-    fn do_ui(
+impl Modal {
+    fn input_ui(
         &mut self,
-        _id: egui::Id,
         ui: &mut egui::Ui,
-        _state: &mut crate::ui::MainUI,
         interface: &mut crate::ui::interface::Interface,
     ) -> super::Response {
         let enable_input = matches!(&self.state, State::Input);
@@ -50,13 +52,23 @@ impl super::Modal for Modal {
                 "Enter the address and port of the remote server. The port \
                 will need to be forwarded manually by the remote.",
             );
-            let response = egui::text_edit::TextEdit::singleline(&mut self.address_text)
-                .hint_text("example.com:1234, 127.0.0.1:1234, [::1]:1234...")
-                .show(ui)
-                .response;
+            let text_response = ui
+                .horizontal(|ui| {
+                    let text_response =
+                        egui::text_edit::TextEdit::singleline(&mut self.address_text)
+                            .hint_text("example.com:1234, 127.0.0.1:1234, [::1]:1234...")
+                            .show(ui)
+                            .response;
+                    if let Some(err) = self.last_err.as_deref() {
+                        ui.separator();
+                        ui.label(egui::RichText::new(err).strong());
+                    }
+                    text_response
+                })
+                .inner;
 
             let enter_pressed_on_text =
-                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                text_response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
 
             ui.label(DISCLAIMER);
             ui.label(egui::RichText::new("Connect at your own risk!").strong());
@@ -87,23 +99,123 @@ impl super::Modal for Modal {
 
             if connect {
                 self.state = State::Waiting(interface.connect(self.address_text.clone()));
+                self.last_err = None;
             }
 
-            if let State::Waiting(waiting) = &self.state {
+            if let State::Waiting(waiting) = std::mem::take(&mut self.state) {
                 ui.add(egui::Spinner::new());
-                // Finished?
-                if !waiting.is_pending() {
-                    // Try again!
-                    if waiting.has_failed() {
+                match waiting.poll() {
+                    Ok(Ok(success)) => {
+                        self.state = State::CompareHash(success.session_id);
+                    }
+                    Ok(Err(failed)) => {
                         self.state = State::Input;
-                    } else {
-                        // Succeeded, close.
-                        return super::Response::Close;
+                        self.last_err = Some(failed.to_string());
+                    }
+                    Err(not_ready) => {
+                        self.state = State::Waiting(not_ready);
                     }
                 }
             }
             super::Response::Retain
         })
         .inner
+    }
+    fn compare_hash_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _interface: &mut crate::ui::interface::Interface,
+    ) -> super::Response {
+        super::title(ui, "Verify");
+        // Gaurded externally
+        let State::CompareHash(hash) = &self.state else {
+            unreachable!();
+        };
+        let hash = hash.clone();
+
+        ui.label(
+            egui::RichText::new("Compare the code below with the host of the server.").strong(),
+        );
+        ui.label(
+            "If the code differs, the integrity and confidentiality of the \
+        the connection may be broken and should not be trusted.",
+        );
+        ui.label(
+            "As there is no central authority, the identity of the server \
+        cannot be verified automatically. Use an external, trusted \
+        communication channel to compare this with the code the server \
+        recieved when you joined. You must do this every time you connect.",
+        );
+        ui.label(
+            egui::RichText::new("Do not accept codes communicated through Fuzzpaint.").strong(),
+        );
+        ui.label("This code is not sensitive information and may be shared publicly.");
+        ui.separator();
+        ui.vertical_centered(|ui| {
+            let len_4 = hash.len() / 4;
+            #[allow(clippy::erasing_op)]
+            #[allow(clippy::identity_op)]
+            for section in [
+                &hash[0 * len_4..1 * len_4],
+                &hash[1 * len_4..2 * len_4],
+                &hash[2 * len_4..3 * len_4],
+                // Might not be divisible by four, so take the rest.
+                &hash[3 * len_4..],
+            ] {
+                let response = ui
+                    .label(egui::RichText::new(section).monospace())
+                    .on_hover_text("Click to copy");
+                if response.clicked() {
+                    ui.ctx().copy_text(hash.clone());
+                    // FIXME: A popup would be nicer.
+                    log::info!("Verification code copied to clipboard.");
+                }
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                let response = if ui.button("Looks good!").clicked() {
+                    super::Response::Close
+                } else {
+                    super::Response::Retain
+                };
+                if ui.button("That's not right...").clicked() {
+                    // Disconnect.
+                    // FIXME
+                    log::error!("unimplimented! you gotta disconnect manually! Sorry!!");
+                    self.state = State::Input;
+                }
+                response
+            })
+            .inner
+        })
+        .inner
+    }
+}
+impl super::Modal for Modal {
+    fn do_ui(
+        &mut self,
+        _id: egui::Id,
+        ui: &mut egui::Ui,
+        _state: &mut crate::ui::MainUI,
+        interface: &mut crate::ui::interface::Interface,
+    ) -> super::Response {
+        match &self.state {
+            State::Input | State::Waiting(_) => self.input_ui(ui, interface),
+            State::CompareHash(_) => self.compare_hash_ui(ui, interface),
+        }
+    }
+    fn close_requested(
+        &mut self,
+        _id: egui::Id,
+        _ctx: &egui::Context,
+        _state: &mut crate::ui::MainUI,
+        _interface: &mut crate::ui::interface::Interface,
+    ) -> super::Response {
+        match &self.state {
+            // Simple cancel
+            State::Input => super::Response::Close,
+            // We need a yes or no, not a "cancel". Reject the request.
+            State::Waiting(_) | State::CompareHash(_) => super::Response::Retain,
+        }
     }
 }

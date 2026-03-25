@@ -209,6 +209,7 @@ fn server() -> AnyResult<()> {
         loop {
             match server.wait_client().await {
                 Ok(client) => {
+                    log::info!("client joined with session id {}", client.session_id());
                     if new_connections.send(client).await.is_err() {
                         break Ok(());
                     }
