@@ -38,6 +38,33 @@ fn rotate_cursor_from_angle(angle: f32) -> egui::CursorIcon {
     resize_cursor_from_angle(angle + std::f32::consts::FRAC_PI_2)
 }
 
+/// Get the signed rotation angle from a drag interaction, given the center of
+/// rotation.
+/// # Panics
+/// if the reponse is not being dragged.
+fn signed_delta_rotation_around(response: &egui::Response, center: egui::Pos2) -> f32 {
+    // This accumulates error real quick lol. Oh well~
+    let delta = response.drag_delta();
+    let original_mouse_pos = response.interact_pointer_pos().unwrap() - delta;
+
+    let center_to_pointer = original_mouse_pos - center;
+    let center_to_pointer_length = center_to_pointer.length();
+    let center_to_pointer_norm = center_to_pointer / center_to_pointer_length;
+
+    let dot = delta.dot(center_to_pointer_norm);
+    let projection = dot * center_to_pointer_norm; // (divided by one)
+    let rejection = delta - projection;
+
+    let angle = rejection.length().atan2(center_to_pointer_length);
+
+    // Angle is unsigned, figure out if cw or ccw.
+    if rejection.rot90().dot(center_to_pointer) > 0.0 {
+        angle
+    } else {
+        -angle
+    }
+}
+
 #[derive(Default)]
 enum InnerState {
     #[default]
@@ -50,10 +77,30 @@ enum InnerState {
     Typography(typography::Typography),
 }
 
-#[derive(Default)]
 pub struct ToolState {
     tool: Tool,
     state: InnerState,
+    view_info: crate::view_transform::ViewInfo,
+}
+impl Default for ToolState {
+    fn default() -> Self {
+        Self {
+            tool: Tool::default(),
+            state: InnerState::default(),
+            view_info: crate::view_transform::ViewInfo {
+                transform: crate::view_transform::View::default(),
+                // These get overridden on first run.
+                viewport: fuzzpaint_types::dpi::UnitlessRect {
+                    origin: ultraviolet::Vec2::zero(),
+                    size: ultraviolet::Vec2::zero(),
+                },
+                document: fuzzpaint_types::dpi::UnitlessRect {
+                    origin: ultraviolet::Vec2::zero(),
+                    size: ultraviolet::Vec2::zero(),
+                },
+            },
+        }
+    }
 }
 impl ToolState {
     pub fn gizmo_layer() -> egui::LayerId {
@@ -63,9 +110,21 @@ impl ToolState {
     pub fn gizmos(
         &mut self,
         ctx: &egui::Context,
-        viewport: egui::Rect,
+        document: super::state::document::ID,
         interface: &mut super::interface::Interface<'_, '_>,
     ) {
+        let viewport = ctx.available_rect();
+        self.view_info.viewport = fuzzpaint_types::dpi::UnitlessRect {
+            origin: cast_vec(viewport.left_top()),
+            size: cast_vec(viewport.size()),
+        };
+        self.view_info.document = fuzzpaint_types::dpi::UnitlessRect {
+            origin: ultraviolet::Vec2::zero(),
+            size: ultraviolet::Vec2 {
+                x: crate::DOCUMENT_DIMENSION as _,
+                y: crate::DOCUMENT_DIMENSION as _,
+            },
+        };
         // Draw mouse cursors:
         let layer = Self::gizmo_layer();
         let scale_factor = ctx.zoom_factor();
@@ -111,6 +170,12 @@ impl ToolState {
             );
             self.do_tool(&mut ui);
         }
+
+        // Tell the renderer to place the document here.
+        interface.insert_document_viewport(super::interface::Viewport {
+            document,
+            transform: self.view_info,
+        });
     }
     fn do_tool(&mut self, ui: &mut egui::Ui) {
         match self.tool {
@@ -150,10 +215,27 @@ impl ToolState {
                 let InnerState::Scrub { state, .. } = &mut self.state else {
                     unreachable!()
                 };
-                state.show(
-                    ui,
-                    &mut fuzzpaint_types::similarity::Similarity::IDENTITY.clone(),
-                );
+                let original_transform = self.view_info.into_pixel_perfect_similarity();
+                let mut new_transform = original_transform;
+                state.show(ui, &mut new_transform);
+
+                // If anything changed, update. That way, Fit stays Fit if not
+                // changed, otherwise becomes PixelPerfect.
+                let scaled_by = (new_transform.scale() - original_transform.scale()).abs();
+                let rotated_by = (new_transform.rotation() - original_transform.rotation()).abs();
+                let moved_by =
+                    (new_transform.translation() - original_transform.translation()).abs();
+
+                if scaled_by > 0.001
+                    || rotated_by > 0.001
+                    || moved_by.as_array().iter().any(|&x| x > 0.001)
+                {
+                    self.view_info.transform = crate::view_transform::View::PixelPerfect(
+                        crate::view_transform::PixelPerfect {
+                            similarity: new_transform,
+                        },
+                    );
+                }
             }
             Tool::Typography => {
                 if !matches!(&self.state, InnerState::Typography(_)) {

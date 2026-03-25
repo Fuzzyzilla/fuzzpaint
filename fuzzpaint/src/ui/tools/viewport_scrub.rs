@@ -7,9 +7,9 @@ const ZOOM_IN_DIRECTION_NORMALIZED: egui::Vec2 = egui::Vec2 {
     y: -std::f32::consts::FRAC_1_SQRT_2,
 };
 const ZOOM_IN_DIRECTION_CURSOR: egui::CursorIcon = egui::CursorIcon::ResizeNeSw;
-/// (Approx) the 500th root of two, such that dragging 500 pixels results in a
-/// doubling or halving of the size.
-const ZOOM_SPEED_RATIO_PER_PX: f32 = 0.0013;
+/// (Approx) the 175th root of two, such that dragging 175 logical pixels
+/// results in a doubling or halving of the size.
+const ZOOM_SPEED_RATIO_PER_PX: f32 = 1.004;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Tool {
@@ -34,9 +34,10 @@ impl Scrub {
         ui: &mut egui::Ui,
         view_transform: &mut fuzzpaint_types::similarity::Similarity,
     ) {
+        let will_discard = ui.ctx().will_discard();
         let rect = ui.max_rect();
         let center = rect.center();
-        let response = ui.allocate_rect(rect, egui::Sense::drag());
+        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let hover_or_zero = response.hover_pos().unwrap_or(egui::Pos2::ZERO);
 
         let cursor = match self.tool {
@@ -58,7 +59,28 @@ impl Scrub {
         };
         let response = response.on_hover_and_drag_cursor(cursor);
 
-        if !response.dragged() {
+        // Provide a context menu to flip the canvas
+        if response.clicked_by(egui::PointerButton::Secondary) {
+            self.drag_start = response.interact_pointer_pos().unwrap();
+        }
+        response.context_menu(|ui| {
+            if ui.button("Flip Horizontally").clicked() {
+                view_transform.flip_h_around(self.drag_start.x);
+            }
+            if ui.button("Flip Vertically").clicked() {
+                view_transform.flip_v_around(self.drag_start.y);
+            }
+        });
+
+        // Draw the center of rotation.
+        if response.hovered() && matches!(self.tool, Tool::Rotate) && !will_discard {
+            ui.painter()
+                .circle_stroke(center, 5.0, egui::Stroke::new(1.0, egui::Color32::BLACK));
+        }
+
+        // dragged(), but without the latency.
+        if !response.is_pointer_button_down_on() {
+            // If you remove this bail it'll panic in the rotation logic :3
             return;
         }
         if response.drag_started() {
@@ -69,7 +91,7 @@ impl Scrub {
                 view_transform.translate_by(cast_vec(response.drag_delta()));
             }
             Tool::Rotate => {
-                if !ui.ctx().will_discard() {
+                if !will_discard {
                     let painter = ui.painter();
                     painter.line_segment(
                         [response.interact_pointer_pos().unwrap(), center],
@@ -81,6 +103,11 @@ impl Scrub {
                         egui::Stroke::new(1.0, egui::Color32::BLACK),
                     );
                 }
+                view_transform.rotate_around(
+                    // Panics if not dragged. Checked above.
+                    super::signed_delta_rotation_around(&response, center),
+                    super::cast_vec(center),
+                );
             }
             Tool::Zoom => {
                 // + if zooming in, - if out.

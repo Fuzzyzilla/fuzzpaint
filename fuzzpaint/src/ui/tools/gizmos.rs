@@ -180,27 +180,9 @@ impl Transform {
                     (center - point).angle(),
                 ));
             if response.dragged() {
-                // This accumulates error real quick lol. Oh well~
-                let delta = response.drag_delta();
-                let original_mouse_pos = response.interact_pointer_pos().unwrap() - delta;
-
-                let center_to_pointer = original_mouse_pos - center;
-                let center_to_pointer_length = center_to_pointer.length();
-                let center_to_pointer_norm = center_to_pointer / center_to_pointer_length;
-
-                let dot = delta.dot(center_to_pointer_norm);
-                let projection = dot * center_to_pointer_norm; // (divided by one)
-                let rejection = delta - projection;
-
-                let angle = rejection.length().atan2(center_to_pointer_length);
-
                 self.transform.rotate_around(
                     // Angle is unsigned, figure out if cw or ccw.
-                    if rejection.rot90().dot(center_to_pointer) > 0.0 {
-                        angle
-                    } else {
-                        -angle
-                    },
+                    super::signed_delta_rotation_around(&response, center),
                     cast_vec(center),
                 );
             }

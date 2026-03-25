@@ -485,10 +485,11 @@ impl WindowObjects {
         self.ui.set_csd(!self.win.is_decorated());
 
         let mut interface = crate::ui::interface::InterfaceInner {
+            actions: (),
             pointers: &mut self.pointer_bridge,
             connections: &mut connections,
             preview: (),
-            viewport: None,
+            document_viewport: None,
         }
         .into();
 
@@ -498,18 +499,17 @@ impl WindowObjects {
         let interface = interface.into_inner();
 
         // Todo: only change if... actually changed :P
-        if let Some(mut viewport) = interface.viewport {
+        if let Some(mut viewport) = interface.document_viewport {
             self.enable_document_view = true;
             // Viewport rect is in egui points, preview renderer expects
             // physical pixel. Multiply through the zoom (points -> logical) and
             // the scale factor (logical -> physical)
-            viewport.transform.view.viewport = viewport
+            viewport.transform.viewport = viewport
                 .transform
-                .view
                 .viewport
                 .scale(self.win.scale_factor() as f32 * self.egui_ctx.context().zoom_factor());
             self.preview_renderer
-                .insert_document_transform(viewport.transform.view);
+                .insert_document_transform(viewport.transform);
         } else {
             self.enable_document_view = false;
         }

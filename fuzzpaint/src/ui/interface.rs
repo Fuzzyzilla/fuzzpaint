@@ -2,21 +2,17 @@
 
 /// A viewport, a rectangular punchout of the UI inside of which a document is
 /// shown and interacted through.
-pub struct ViewportInner {
+pub struct Viewport {
     /// The document that is shown.
     pub document: fuzzpaint_core::state::document::ID,
-    /// Keyboard hotkey input for this viewport
-    pub actions: (),
     /// The transform that the document is shown in.
-    pub transform: ViewportTransform,
-}
-pub struct ViewportTransform {
-    pub view: crate::view_transform::ViewInfo,
-    pub changed: bool,
+    pub transform: crate::view_transform::ViewInfo,
 }
 /// The interface between the UI and the outside world. (the renderer, active
 /// connections, etc).
 pub struct InterfaceInner<'a, 'b: 'a> {
+    /// Keyboard hotkey input for this viewport
+    pub actions: (),
     /// Rich pointer input.
     pub pointers: &'a mut crate::window::stylus_events::PointerBridge,
     /// Remote and local connections.
@@ -25,8 +21,8 @@ pub struct InterfaceInner<'a, 'b: 'a> {
     /// in the process of drawing, etc.), optionally forwarding them to the
     /// renderer and the remote for realtime visual updates.
     pub preview: (),
-    // The state of all viewports. For now, there is only zero or one.
-    pub viewport: Option<ViewportInner>,
+    // The state of all document viewports. For now, there is only zero or one.
+    pub document_viewport: Option<Viewport>,
 }
 // Seal the fields.
 pub struct Interface<'a, 'b: 'a>(InterfaceInner<'a, 'b>);
@@ -58,6 +54,9 @@ impl<'a, 'b: 'a> Interface<'a, 'b> {
         self.0.connections.connect(address)
     }
     pub fn pointers(&mut self) -> &mut crate::window::stylus_events::PointerBridge {
-        &mut self.0.pointers
+        self.0.pointers
+    }
+    pub fn insert_document_viewport(&mut self, viewport: Viewport) {
+        self.0.document_viewport = Some(viewport);
     }
 }

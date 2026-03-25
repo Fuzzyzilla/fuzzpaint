@@ -236,8 +236,8 @@ impl MainUI {
 
         self.do_connection_windows(ctx, interface);
 
-        if self.cur_document.is_some() {
-            self.tool_state.gizmos(ctx, ctx.available_rect(), interface);
+        if let Some(document) = self.cur_document {
+            self.tool_state.gizmos(ctx, document, interface);
         }
 
         self.error_display.show(ctx, crate::log_collector());
