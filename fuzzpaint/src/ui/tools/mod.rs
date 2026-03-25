@@ -1,6 +1,7 @@
 mod gizmos;
 mod rulers;
 mod snapper;
+mod typography;
 mod viewport_scrub;
 
 /// Cursed generic :3 Makes egui Vec or Pos from/into ultraviolet vecs.
@@ -46,6 +47,7 @@ enum InnerState {
         tool: viewport_scrub::Tool,
         state: viewport_scrub::Scrub,
     },
+    Typography(typography::Typography),
 }
 
 #[derive(Default)]
@@ -153,6 +155,15 @@ impl ToolState {
                     &mut fuzzpaint_types::similarity::Similarity::IDENTITY.clone(),
                 );
             }
+            Tool::Typography => {
+                if !matches!(&self.state, InnerState::Typography(_)) {
+                    self.state = InnerState::Typography(typography::Typography::new());
+                }
+                let InnerState::Typography(state) = &mut self.state else {
+                    unreachable!()
+                };
+                state.show(ui);
+            }
             _ => unimplemented!(),
         }
     }
@@ -244,6 +255,7 @@ impl ToolState {
                 | Tool::ViewScrubZoom
                 | Tool::ViewRotate
                 | Tool::Transform
+                | Tool::Typography
         )
     }
 }

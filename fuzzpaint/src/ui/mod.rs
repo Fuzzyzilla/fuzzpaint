@@ -33,7 +33,7 @@ const PIN_ICON: char = '📌';
 const ALPHA_ICON: &str = "α";
 const RESET_ICON: &str = "⟲";
 
-pub const GOOGLE_MATERIAL_ICONS_FAMILY: std::sync::LazyLock<egui::epaint::text::FontFamily> =
+pub static GOOGLE_MATERIAL_ICONS_FAMILY: std::sync::LazyLock<egui::epaint::text::FontFamily> =
     std::sync::LazyLock::new(|| {
         egui::epaint::text::FontFamily::Name("Google Material Icons".into())
     });

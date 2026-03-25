@@ -6,3 +6,4 @@ pub mod id;
 pub mod resource;
 pub mod similarity;
 pub mod stroke;
+pub mod text;

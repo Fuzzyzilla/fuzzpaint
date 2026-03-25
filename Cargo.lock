@@ -1205,6 +1205,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-editable-combobox"
+version = "0.1.0-rc.2"
+source = "git+https://github.com/SOF3/egui-editable-combobox.git#eece00f287a42dad379592a6a84c3e09f0ff9103"
+dependencies = [
+ "egui",
+]
+
+[[package]]
 name = "egui-winit"
 version = "0.33.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1629,9 +1637,11 @@ dependencies = [
  "dhat",
  "dirs",
  "egui",
+ "egui-editable-combobox",
  "egui-winit",
  "either",
  "env_logger",
+ "fontdb",
  "futures-util",
  "fuzzpaint-connection",
  "fuzzpaint-core",

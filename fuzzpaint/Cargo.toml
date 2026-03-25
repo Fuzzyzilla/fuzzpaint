@@ -54,6 +54,8 @@ bytemuck = { workspace = true }
 strum = { workspace = true }
 thiserror = { workspace = true }
 ultraviolet = { workspace = true }
+fontdb = "0.23.0"
+egui-editable-combobox = { version = "0.1.0-rc.2", git = "https://github.com/SOF3/egui-editable-combobox.git", commit = "eece00f287a42dad379592a6a84c3e09f0ff9103" }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator = { version = "0.6.1", optional = true, default-features = false }
