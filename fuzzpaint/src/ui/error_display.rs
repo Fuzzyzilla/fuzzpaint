@@ -54,15 +54,10 @@ impl ErrorDisplay {
         // It is very important that nothing related to this logs, otherwise we
         // could end up in a death spiral!
         let len_before = self.records.len();
-        self.records.extend(
-            collector
-                .take()
-                .into_iter()
-                .filter(|item| item.level <= log::Level::Info),
-        );
+        self.records.extend(collector.take());
         let len_after = self.records.len();
         if !self.has_run {
-            // Skip creating new popups on the first run through,
+            // Skip creating new popups on the first run through.
             self.has_run = true;
             return;
         }
@@ -170,22 +165,49 @@ impl ErrorDisplay {
         if self.show_which_record_idx.is_some() {
             self.show_list = true;
         }
-        let max_width = ctx.available_rect().width();
-        egui::Window::new("log-list")
+        egui::Window::new("Log")
             .open(&mut self.show_list)
             .fade_in(true)
             .fade_out(true)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let highlight = self.show_which_record_idx.take();
-                    for (i, item) in self.records.iter().enumerate() {
-                        let response = ui.label(&item.text);
-                        if highlight == Some(i) {
-                            // Fixme: visual highlight?
-                            response.scroll_to_me(None);
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    // FIXME: Use show_viewport and cache the sizes of things so
+                    // we know which lines to show instead of showing all
+                    // (potentially a LOT).
+                    .show(ui, |ui| {
+                        let highlight = self.show_which_record_idx.take();
+                        for (i, item) in self.records.iter().enumerate() {
+                            let response = ui
+                                .horizontal(|ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            match item.level {
+                                                log::Level::Debug => DEBUG,
+                                                log::Level::Trace => TRACE,
+                                                log::Level::Info => INFO,
+                                                log::Level::Warn => WARN,
+                                                log::Level::Error => ERROR,
+                                            }
+                                            .to_string(),
+                                        )
+                                        .selectable(false),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&item.text).monospace(),
+                                        )
+                                        .wrap(),
+                                    );
+                                })
+                                .response;
+                            if highlight == Some(i) {
+                                // Fixme: visual highlight?
+                                response.scroll_to_me(None);
+                            }
+                            ui.separator();
                         }
-                    }
-                })
+                    })
             });
     }
 }

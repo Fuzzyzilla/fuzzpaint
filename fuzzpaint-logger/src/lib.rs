@@ -46,6 +46,8 @@ impl CollectLogger {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Forward messages to this other logger. The other logger's filters will
+    /// dictate this logger's filtering.
     pub fn with_tee(self, tee: &'static dyn log::Log) -> Self {
         Self {
             tee: Some(tee),
@@ -77,6 +79,10 @@ impl log::Log for CollectLogger {
     fn log(&self, record: &log::Record) {
         if let Some(tee) = self.tee {
             tee.log(record);
+            // Inherit Filters from the tee.
+            if !tee.enabled(record.metadata()) {
+                return;
+            }
         }
         let record = Record::from_log(record);
         self.inner.lock().vec.push(record);

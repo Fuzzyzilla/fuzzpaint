@@ -317,6 +317,10 @@ fn log_collector() -> &'static fuzzpaint_logger::CollectLogger {
             let logger = env_logger::Builder::new()
                 .filter_level(default_log_level)
                 .parse_default_env()
+                // Winit spams this at DEBUG level, rfd spams it at INFO level,
+                // making debug and lower literally unusable. GROG NOT CAARE
+                .filter_module("tracing::span", log::LevelFilter::Warn)
+                .filter_module("winit::window", log::LevelFilter::Info)
                 .build();
             let level = logger.filter();
             let logger = Box::leak(Box::new(logger)) as &dyn log::Log;
