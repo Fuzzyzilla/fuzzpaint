@@ -17,7 +17,6 @@ impl super::PenTool for Picker {
         &mut self,
         view_info: &super::ViewInfo,
         _stylus_input: crate::window::stylus_events::StylusEventFrame,
-        _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
     ) {
         // Someone got bored and frustrated halfway through writing this...

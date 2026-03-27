@@ -1,14 +1,32 @@
-use super::super::Action;
-use super::KeyboardHotkey;
+use super::{super::Action, KeyboardHotkey, Modifiers};
 use winit::keyboard::KeyCode;
 
 pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
     (
+        Action::New,
+        &[KeyboardHotkey {
+            modifiers: Modifiers::CTRL,
+            key: KeyCode::KeyN,
+        }],
+    ),
+    (
+        Action::NewFromClipboard,
+        &[KeyboardHotkey {
+            modifiers: Modifiers::CTRL_SHIFT,
+            key: KeyCode::KeyN,
+        }],
+    ),
+    (
+        Action::Close,
+        &[KeyboardHotkey {
+            modifiers: Modifiers::CTRL,
+            key: KeyCode::KeyW,
+        }],
+    ),
+    (
         Action::Undo,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: true,
-            shift: false,
+            modifiers: Modifiers::CTRL,
             key: KeyCode::KeyZ,
         }],
     ),
@@ -16,15 +34,11 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
         Action::Redo,
         &[
             KeyboardHotkey {
-                alt: false,
-                ctrl: true,
-                shift: false,
+                modifiers: Modifiers::CTRL,
                 key: KeyCode::KeyY,
             },
             KeyboardHotkey {
-                alt: false,
-                ctrl: true,
-                shift: true,
+                modifiers: Modifiers::CTRL_SHIFT,
                 key: KeyCode::KeyZ,
             },
         ],
@@ -32,183 +46,150 @@ pub const KEYBOARD: &[(Action, &[KeyboardHotkey])] = &[
     (
         Action::ViewportPan,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: false,
-            shift: false,
+            modifiers: Modifiers::empty(),
             key: KeyCode::Space,
         }],
     ),
     (
         Action::ViewportScrub,
-        &[
-            KeyboardHotkey {
-                alt: false,
-                ctrl: true,
-                shift: false,
-                key: KeyCode::Space,
-            },
-            // FIXME: shadowing bug means the true hotkey^^^ is unusable :V
-            KeyboardHotkey {
-                alt: false,
-                ctrl: false,
-                shift: false,
-                key: KeyCode::KeyS,
-            },
-        ],
+        &[KeyboardHotkey {
+            modifiers: Modifiers::CTRL,
+            key: KeyCode::Space,
+        }],
     ),
     (
         Action::ViewportRotate,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: false,
-            shift: false,
-            key: KeyCode::KeyR,
+            modifiers: Modifiers::SHIFT,
+            key: KeyCode::Space,
         }],
     ),
     (
         Action::ViewportFlipHorizontal,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: false,
-            shift: false,
+            modifiers: Modifiers::empty(),
             key: KeyCode::KeyM,
         }],
     ),
     (
         Action::ZoomIn,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: true,
-            shift: false,
+            modifiers: Modifiers::CTRL,
             key: KeyCode::Equal,
         }],
     ),
     (
         Action::ZoomOut,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: true,
-            shift: false,
+            modifiers: Modifiers::CTRL,
             key: KeyCode::Minus,
         }],
     ),
     (
         Action::Picker,
-        &[KeyboardHotkey {
-            // FIXME: Should be just ctrl, but not possible yet.
-            alt: false,
-            ctrl: false,
-            shift: false,
-            key: KeyCode::KeyI,
-        }],
-    ),
-    (
-        Action::Gizmo,
-        &[KeyboardHotkey {
-            // FIXME: Should be just ctrl, but not possible yet.
-            alt: false,
-            ctrl: false,
-            shift: false,
-            key: KeyCode::KeyG,
-        }],
+        &[
+            KeyboardHotkey {
+                // Just left control. This looks weird~. putting CTRL in the
+                // modifiers would work, but then it would give it a higher
+                // priority than we want.
+                modifiers: Modifiers::empty(),
+                key: KeyCode::ControlLeft,
+            },
+            KeyboardHotkey {
+                modifiers: Modifiers::empty(),
+                key: KeyCode::KeyI,
+            },
+        ],
     ),
     (
         Action::Brush,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: false,
-            shift: false,
+            modifiers: Modifiers::empty(),
             key: KeyCode::KeyB,
         }],
     ),
     (
         Action::Erase,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: false,
-            shift: false,
+            modifiers: Modifiers::empty(),
             key: KeyCode::KeyE,
         }],
     ),
     (
         Action::Lasso,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: false,
-            shift: false,
+            modifiers: Modifiers::empty(),
             key: KeyCode::KeyL,
         }],
     ),
     (
         Action::BrushSizeDown,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: false,
-            shift: false,
+            modifiers: Modifiers::empty(),
             key: KeyCode::BracketLeft,
         }],
     ),
     (
         Action::BrushSizeUp,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: false,
-            shift: false,
+            modifiers: Modifiers::empty(),
             key: KeyCode::BracketRight,
         }],
     ),
     (
         Action::ColorSwap,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: false,
-            shift: false,
+            modifiers: Modifiers::empty(),
             key: KeyCode::KeyX,
         }],
     ),
     (
-        Action::Lasso,
+        Action::Marquee,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: false,
-            shift: false,
-            key: KeyCode::KeyL,
-        }],
-    ),
-    (
-        Action::LayerNew,
-        &[KeyboardHotkey {
-            alt: false,
-            ctrl: true,
-            shift: false,
-            key: KeyCode::KeyT,
+            modifiers: Modifiers::CTRL,
+            key: KeyCode::KeyR,
         }],
     ),
     (
         Action::LayerDelete,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: false,
-            shift: false,
+            modifiers: Modifiers::empty(),
             key: KeyCode::Delete,
         }],
     ),
     (
         Action::LayerUp,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: true,
-            shift: false,
+            modifiers: Modifiers::CTRL,
             key: KeyCode::ArrowUp,
         }],
     ),
     (
         Action::LayerDown,
         &[KeyboardHotkey {
-            alt: false,
-            ctrl: true,
-            shift: false,
+            modifiers: Modifiers::CTRL,
             key: KeyCode::ArrowDown,
+        }],
+    ),
+    (
+        Action::Text,
+        &[KeyboardHotkey {
+            modifiers: Modifiers::empty(),
+            key: KeyCode::KeyT,
+        }],
+    ),
+    (
+        Action::Transform,
+        &[KeyboardHotkey {
+            modifiers: Modifiers::CTRL,
+            key: KeyCode::KeyT,
+        }],
+    ),
+    (
+        Action::FreeTranform,
+        &[KeyboardHotkey {
+            modifiers: Modifiers::CTRL_SHIFT,
+            key: KeyCode::KeyT,
         }],
     ),
 ];

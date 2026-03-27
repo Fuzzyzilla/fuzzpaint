@@ -4,7 +4,6 @@ mod drag;
 mod error_display;
 pub mod interface;
 mod modals;
-pub mod requests;
 mod tools;
 
 use egui::{RichText, Ui};
@@ -82,19 +81,12 @@ fn justify_mut(ui: &mut Ui, axis: JustifyAxis, base_size: f32, base_margin: f32)
 }
 trait ResponseExt {
     /// Emulate a primary click whenever this action is triggered.
-    fn or_action_clicked(
-        self,
-        frame: &crate::actions::ActionFrame,
-        action: crate::actions::Action,
-    ) -> bool;
+    fn or_action_clicked(self, action: crate::actions::Action) -> bool;
     fn clicked_or_escape(self) -> bool;
 }
 impl ResponseExt for egui::Response {
-    fn or_action_clicked(
-        self,
-        frame: &crate::actions::ActionFrame,
-        action: crate::actions::Action,
-    ) -> bool {
+    fn or_action_clicked(self, action: crate::actions::Action) -> bool {
+        /*
         if !self.enabled() || !self.sense.senses_click() {
             return false;
         }
@@ -104,7 +96,8 @@ impl ResponseExt for egui::Response {
         if held {
             self.highlight();
         }
-        clicked || triggered
+        clicked || triggered*/
+        self.clicked()
     }
     /// Returns true if [`egui::Response::clicked`] or `Escape` key is pressed, useful for cancel buttons.
     /// This does not take into account focus.
@@ -150,15 +143,11 @@ pub struct MainUI {
     picker_changed: bool,
     tool_state: tools::ToolState,
 
-    requests_send: crossbeam::channel::Sender<requests::UiRequest>,
-    requests_recv: crossbeam::channel::Receiver<requests::UiRequest>,
-    action_listener: crate::actions::ActionListener,
-
     error_display: error_display::ErrorDisplay,
 }
 impl MainUI {
     #[must_use]
-    pub fn new(action_listener: crate::actions::ActionListener) -> Self {
+    pub fn new() -> Self {
         let documents = crate::global::provider().document_iter();
         let documents: Vec<_> = documents
             .map(|id| PerDocumentData {
@@ -170,7 +159,6 @@ impl MainUI {
             .collect();
         let cur_document = documents.last().map(|doc| doc.id);
 
-        let (requests_send, requests_recv) = crossbeam::channel::unbounded();
         Self {
             app_close_modal_shown: false,
             window_action: None,
@@ -188,10 +176,6 @@ impl MainUI {
             picker_in_flux: false,
             picker_changed: false,
             tool_state: tools::ToolState::default(),
-
-            requests_send,
-            requests_recv,
-            action_listener,
 
             error_display: Default::default(),
         }
@@ -222,10 +206,6 @@ impl MainUI {
     #[must_use]
     pub fn hovered_csd_element(&self) -> Option<HoveredCSD> {
         self.hovered_csd
-    }
-    #[must_use]
-    pub fn listen_requests(&self) -> crossbeam::channel::Receiver<requests::UiRequest> {
-        self.requests_recv.clone()
     }
     /// Main UI and any modals, with the top bar, layers, brushes, color, etc.
     /// To be displayed in front of the document and it's gizmos.
@@ -463,10 +443,6 @@ impl MainUI {
             graph_selection: stroke_layer.map(Into::into),
             name,
         };
-        let _ = self.requests_send.send(requests::UiRequest::Document {
-            target: new_id,
-            request: requests::DocumentRequest::Opened,
-        });
         self.cur_document = Some(new_id);
         self.documents.push(interface);
     }
@@ -504,9 +480,6 @@ impl MainUI {
     fn main_ui(&mut self, ctx: &egui::Context) {
         self.hovered_csd = None;
 
-        let Ok(action_frame) = self.action_listener.frame() else {
-            return;
-        };
         let interface = self.get_cur_interface().cloned();
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -526,12 +499,12 @@ impl MainUI {
             // A document is open, show the main view.
             egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
                 if let Some(interface) = interface {
-                    Self::nav_bar(ui, interface.id, &self.requests_send, &action_frame);
+                    Self::nav_bar(ui, interface.id);
                 }
             });
             egui::SidePanel::right("layers").show(ctx, |ui| {
                 egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
-                self.colors_panel(ui, self.cur_document, &action_frame);
+                self.colors_panel(ui, self.cur_document);
                 ui.separator();
                 ui.label("Layers");
                 if let Some(interface) = self.get_cur_interface() {
@@ -890,12 +863,7 @@ impl MainUI {
         });
     }
     /// Bottom trim showing view controls.
-    fn nav_bar(
-        ui: &mut Ui,
-        document: state::document::ID,
-        requests: &crossbeam::channel::Sender<requests::UiRequest>,
-        frame: &crate::actions::ActionFrame,
-    ) {
+    fn nav_bar(ui: &mut Ui, document: state::document::ID) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Everything here is shown in reverse order!
 
@@ -907,12 +875,7 @@ impl MainUI {
             // as the rest of the world has no way to communicate into the UI (so, no reporting of current transform)
 
             //Zoom controls
-            if ui.small_button(RESET_ICON).clicked() {
-                let _ = requests.send(requests::UiRequest::Document {
-                    target: document,
-                    request: requests::DocumentRequest::View(requests::DocumentViewRequest::Fit),
-                });
-            }
+            let _ = ui.small_button(RESET_ICON);
             let mut zoom = None::<f32>;
             egui::ComboBox::new("Zoom", "Zoom")
                 // We don't actually know the current zoom, mwehehehe so sneaky
@@ -924,39 +887,11 @@ impl MainUI {
                     ui.selectable_value(&mut zoom, Some(2.0), "200%");
                     ui.selectable_value(&mut zoom, Some(4.0), "400%");
                 });
-            // An option was chosen! Emit the command to scale
-            if let Some(zoom) = zoom {
-                let _ = requests.send(requests::UiRequest::Document {
-                    target: document,
-                    request: requests::DocumentRequest::View(
-                        requests::DocumentViewRequest::RealSize(zoom),
-                    ),
-                });
-            }
-            // Handle Scroll wheel
-            // future: configurable scroll direction and speed.
-            // FIXME: respect cursor position.
-            let scroll_zoom_cmds = frame.action_trigger_count(crate::actions::Action::ZoomIn)
-                as f32
-                - frame.action_trigger_count(crate::actions::Action::ZoomOut) as f32;
-            let _ = requests.send(requests::UiRequest::Document {
-                target: document,
-                request: requests::DocumentRequest::View(requests::DocumentViewRequest::ZoomBy(
-                    1.25f32.powf(scroll_zoom_cmds),
-                )),
-            });
 
             ui.add(egui::Separator::default().vertical());
 
             //Rotate controls
-            if ui.small_button(RESET_ICON).clicked() {
-                let _ = requests.send(requests::UiRequest::Document {
-                    target: document,
-                    request: requests::DocumentRequest::View(
-                        requests::DocumentViewRequest::RotateTo(0.0),
-                    ),
-                });
-            }
+            let _ = ui.small_button(RESET_ICON);
             latch::latch(ui, (document, "rotation"), 0.0, |ui, rotation: &mut f32| {
                 let before = *rotation;
                 let rotation_response = ui.add(
@@ -968,12 +903,6 @@ impl MainUI {
                 if rotation_response.changed() {
                     // Use a delta angle request
                     let delta = *rotation - before;
-                    let _ = requests.send(requests::UiRequest::Document {
-                        target: document,
-                        request: requests::DocumentRequest::View(
-                            requests::DocumentViewRequest::RotateBy(delta.to_radians()),
-                        ),
-                    });
                 }
                 if rotation_response.dragged() {
                     latch::Latch::Continue
@@ -987,33 +916,17 @@ impl MainUI {
             let undo = egui::Button::new("⮪");
             let redo = egui::Button::new("⮫");
 
-            // Accept undo/redo actions
-            let mut undos = frame.action_trigger_count(crate::actions::Action::Undo);
-            let mut redos = frame.action_trigger_count(crate::actions::Action::Redo);
-
             // RTL - add in reverse :P
             if ui.add(redo).clicked() {
-                redos += 1;
+                crate::global::provider().inspect(document, |document| document.redo_n(1));
             }
             if ui.add(undo).clicked() {
-                undos += 1;
-            }
-            // Submit undo/redos as requested.
-            if redos != 0 {
-                crate::global::provider().inspect(document, |document| document.redo_n(redos));
-            }
-            if undos != 0 {
-                crate::global::provider().inspect(document, |document| document.undo_n(undos));
+                crate::global::provider().inspect(document, |document| document.undo_n(1));
             }
         });
     }
 
-    fn colors_panel(
-        &mut self,
-        ui: &mut Ui,
-        current_doc: Option<state::document::ID>,
-        actions: &crate::actions::ActionFrame,
-    ) {
+    fn colors_panel(&mut self, ui: &mut Ui, current_doc: Option<state::document::ID>) {
         use az::SaturatingAs;
 
         let mut globals = crate::AdHocGlobals::get().write();
@@ -1043,11 +956,7 @@ impl MainUI {
                         .scope(color_palette::HistoryScope::Local)
                         .in_flux(self.picker_in_flux)
                         .id_source(current_doc)
-                        .swap(
-                            // Swap top colors if requested.
-                            actions.action_trigger_count(crate::actions::Action::ColorSwap) % 2
-                                == 1,
-                        )
+                        .swap(false)
                         .max_history(64)
                         .show(ui);
 
@@ -1083,14 +992,7 @@ impl MainUI {
             // Apply size up/down actions
             // - for down, + for up
             'size_steps: {
-                let size_steps = actions
-                    .action_trigger_count(crate::actions::Action::BrushSizeUp)
-                    .saturating_as::<i32>()
-                    .saturating_sub(
-                        actions
-                            .action_trigger_count(crate::actions::Action::BrushSizeDown)
-                            .saturating_as(),
-                    );
+                let size_steps = 0;
                 if size_steps == 0 {
                     break 'size_steps;
                 }

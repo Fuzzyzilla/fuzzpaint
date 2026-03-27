@@ -156,8 +156,6 @@ impl winit::application::ApplicationHandler<UserEvent> for Application {
     }
 }
 pub struct Receivers {
-    pub actions: crate::actions::ActionListener,
-    pub ui_actions: crossbeam::channel::Receiver<crate::ui::requests::UiRequest>,
     pub stylus_events: tokio::sync::broadcast::Receiver<stylus_events::StylusEventFrame>,
     pub document_view: Arc<crate::document_viewport_proxy::Proxy>,
 }
@@ -170,8 +168,7 @@ pub struct WindowObjects {
 
     enable_document_view: bool,
 
-    action_collector: action_collector::WinitKeyboardActionCollector,
-    action_stream: crate::actions::ActionStream,
+    action_collector: action_collector::ActionCollector,
     // May be None on unsupported platforms.
     tablet_manager: Option<octotablet::Manager>,
     pointer_bridge: stylus_events::PointerBridge,
@@ -230,8 +227,6 @@ impl WindowObjects {
             .build_shared(&win)
             .ok();
 
-        let (send, stream) = crate::actions::create_action_stream();
-
         let egui_ctx = egui_impl::Ctx::new(win.as_ref(), &render_surface)?;
         win.request_redraw();
 
@@ -243,11 +238,10 @@ impl WindowObjects {
             last_frame_fence: None,
             egui_ctx,
             tablet_manager,
-            ui: crate::ui::MainUI::new(stream.listen()),
+            ui: crate::ui::MainUI::new(),
             enable_document_view: true,
             preview_renderer,
-            action_collector: action_collector::WinitKeyboardActionCollector::new(send),
-            action_stream: stream,
+            action_collector: action_collector::ActionCollector::default(),
             stylus_events: stylus_events::WinitStylusEventCollector::default(),
             pointer_bridge: stylus_events::PointerBridge::default(),
         })
@@ -257,8 +251,6 @@ impl WindowObjects {
     }
     fn receivers(&self) -> Receivers {
         Receivers {
-            actions: self.action_stream.listen(),
-            ui_actions: self.ui.listen_requests(),
             stylus_events: self.stylus_events.frame_receiver(),
             document_view: self.preview_renderer.clone(),
         }

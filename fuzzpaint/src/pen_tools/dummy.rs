@@ -13,7 +13,6 @@ impl super::PenTool for Dummy {
         &mut self,
         _view_transform: &super::ViewInfo,
         _stylus_input: crate::window::stylus_events::StylusEventFrame,
-        _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
     ) {
         // Do nothing.

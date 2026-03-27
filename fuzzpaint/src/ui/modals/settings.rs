@@ -362,9 +362,12 @@ fn clicked_hotkey(ui: &mut egui::Ui) -> ClickedHotkeyResponse {
                 return ClickedHotkeyResponse::Cancel;
             };
             ClickedHotkeyResponse::Finished(crate::actions::hotkeys::KeyboardHotkey {
-                alt: modifiers.alt,
-                ctrl: modifiers.ctrl,
-                shift: modifiers.shift,
+                modifiers: crate::actions::hotkeys::Modifiers::ctrl_alt_shift(
+                    // Cross-platform notion of "control"
+                    modifiers.command,
+                    modifiers.alt,
+                    modifiers.shift,
+                ),
                 key,
             })
         } else {

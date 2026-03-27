@@ -29,7 +29,6 @@ trait PenTool {
         &mut self,
         view_info: &ViewInfo,
         stylus_input: crate::window::stylus_events::StylusEventFrame,
-        actions: &crate::actions::ActionFrame,
         tool_output: &mut ToolStateOutput,
     );
     /// Called when the state is transitioning away from this tool.
@@ -52,12 +51,6 @@ impl ToolStateOutput {
     #[allow(dead_code)]
     pub fn with_transition(&mut self, transition: Transition) {
         self.transition = Some(transition);
-    }
-    /// Compute default transition for the given actions.
-    /// Does not have access to the current state on purpose, as custom
-    /// behavior per-state should be implemented in the tool itself.
-    fn do_default(_actions: &crate::actions::ActionFrame) -> Transition {
-        Transition::ToBase
     }
 }
 #[derive(Copy, Clone, strum::EnumIter, Hash, PartialEq, Eq, Debug)]
@@ -101,36 +94,19 @@ impl ToolState {
         &mut self,
         view_info: &ViewInfo,
         stylus_input: crate::window::stylus_events::StylusEventFrame,
-        actions: &crate::actions::ActionFrame,
-        ui_requests: &crossbeam::channel::Receiver<crate::ui::requests::UiRequest>,
     ) {
-        use crate::ui::requests::{DocumentRequest, UiRequest};
         // Prepare output structs
         let mut tool_output = ToolStateOutput { transition: None };
-
-        // Handle ui requests
-        for request in ui_requests.try_iter() {
-            match request {
-                UiRequest::Document {
-                    request: DocumentRequest::View(view_request),
-                    ..
-                } => (),
-                UiRequest::SetBaseTool { tool } => self.set_base_state(tool),
-                UiRequest::Document { .. } => (),
-            }
-        }
 
         // Get current tool and run
         let cur_state = self.get_current_state();
         let tool = self.tool_for_state(cur_state);
 
-        tool.process(view_info, stylus_input, actions, &mut tool_output)
+        tool.process(view_info, stylus_input, &mut tool_output)
             .await;
 
         // Apply output structs
-        let transition = tool_output
-            .transition
-            .unwrap_or_else(|| ToolStateOutput::do_default(actions));
+        let transition = tool_output.transition.unwrap_or_else(|| Transition::ToBase);
         self.apply_state_transition(transition);
 
         let new_state = self.get_current_state();

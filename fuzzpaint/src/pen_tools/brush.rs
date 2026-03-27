@@ -521,11 +521,10 @@ impl super::PenTool for Brush {
         &mut self,
         view_info: &super::ViewInfo,
         stylus_input: crate::window::stylus_events::StylusEventFrame,
-        actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
     ) {
         brush(
-            actions.is_action_held(crate::actions::Action::Erase),
+            false,
             &mut self.stroke,
             &mut self.transforms,
             view_info,
@@ -543,7 +542,6 @@ impl super::PenTool for Eraser {
         &mut self,
         view_info: &super::ViewInfo,
         stylus_input: crate::window::stylus_events::StylusEventFrame,
-        _actions: &crate::actions::ActionFrame,
         _tool_output: &mut super::ToolStateOutput,
     ) {
         brush(

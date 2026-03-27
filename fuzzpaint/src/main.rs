@@ -74,9 +74,6 @@ impl AdHocGlobals {
 
 async fn stylus_event_collector(
     mut event_stream: tokio::sync::broadcast::Receiver<window::stylus_events::StylusEventFrame>,
-    ui_requests: crossbeam::channel::Receiver<ui::requests::UiRequest>,
-    _: tokio::sync::mpsc::Sender<renderer::requests::RenderRequest>,
-    mut action_listener: actions::ActionListener,
     mut tools: pen_tools::ToolState,
     document_preview: Arc<document_viewport_proxy::Proxy>,
 ) -> AnyResult<()> {
@@ -85,19 +82,7 @@ async fn stylus_event_collector(
             Ok(stylus_frame) => {
                 let transform = document_preview.get_view_transform_async().await;
 
-                // Get the actions, returning if stream closed.
-                let action_frame = match action_listener.frame() {
-                    Ok(frame) => frame,
-                    Err(e) => match e {
-                        actions::ListenError::Closed => return Ok(()),
-                        // Todo: this is recoverable!
-                        actions::ListenError::Poisoned => todo!(),
-                    },
-                };
-
-                tools
-                    .process(&transform, stylus_frame, &action_frame, &ui_requests)
-                    .await;
+                tools.process(&transform, stylus_frame).await;
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(num)) => {
                 log::warn!("Lost {num} stylus frames!");
@@ -143,8 +128,6 @@ fn client(connection: InitialConnection) -> AnyResult<()> {
                     Err(e) => break 'block Err(e),
                 };
 
-                let (send, recv) = tokio::sync::mpsc::channel(4);
-
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .build()
                     .unwrap();
@@ -153,16 +136,9 @@ fn client(connection: InitialConnection) -> AnyResult<()> {
                 // for now, just a note for future self UwU
                 runtime.block_on(async {
                     tokio::try_join!(
-                        renderer::render_worker(
-                            render_context,
-                            recv,
-                            receivers.document_view.clone(),
-                        ),
+                        renderer::render_worker(render_context, receivers.document_view.clone(),),
                         stylus_event_collector(
                             receivers.stylus_events,
-                            receivers.ui_actions,
-                            send,
-                            receivers.actions,
                             tools,
                             receivers.document_view,
                         ),

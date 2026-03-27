@@ -934,17 +934,9 @@ async fn render_changes(
 }
 pub async fn render_worker(
     renderer: Arc<crate::render_device::RenderContext>,
-    request_reciever: tokio::sync::mpsc::Receiver<requests::RenderRequest>,
     document_preview: Arc<crate::document_viewport_proxy::Proxy>,
 ) -> anyhow::Result<()> {
-    tokio::try_join!(
-        async {
-            requests::handler(request_reciever).await;
-            Ok(())
-        },
-        render_changes(renderer, document_preview),
-    )
-    .map(|_| ())
+    render_changes(renderer, document_preview).await
 }
 
 /// Data managed by the renderer for a layer leaf, e.g. Stroke layers, text layers, ect.
