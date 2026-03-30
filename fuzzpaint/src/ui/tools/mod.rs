@@ -109,11 +109,11 @@ impl ToolState {
     /// Draw background graphics. Only call if there is as document viewport open.
     pub fn gizmos(
         &mut self,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         document: super::state::document::ID,
         interface: &mut super::interface::Interface<'_, '_>,
     ) {
-        let viewport = ctx.available_rect();
+        let viewport = ui.available_rect_before_wrap();
         self.view_info.viewport = fuzzpaint_types::dpi::UnitlessRect {
             origin: cast_vec(viewport.left_top()),
             size: cast_vec(viewport.size()),
@@ -127,9 +127,9 @@ impl ToolState {
         };
         // Draw mouse cursors:
         let layer = Self::gizmo_layer();
-        let scale_factor = ctx.zoom_factor();
+        let scale_factor = ui.zoom_factor();
 
-        let painter = ctx.layer_painter(layer);
+        let painter = ui.layer_painter(layer);
         let draw_pointer = |hover: crate::window::stylus_events::Hover| {
             let position = egui::Pos2::from(*hover.position().as_array()) / scale_factor;
 
@@ -152,8 +152,8 @@ impl ToolState {
         };
 
         // Doesn't detect CentralPanels :/
-        if !ctx.is_using_pointer() && ctx.rect_contains_pointer(layer, viewport) {
-            ctx.set_cursor_icon(egui::CursorIcon::None);
+        if !ui.egui_wants_pointer_input() && ui.rect_contains_pointer(viewport) {
+            ui.set_cursor_icon(egui::CursorIcon::None);
             if let Some(hover) = interface.pointers().primary_hover() {
                 draw_pointer(hover);
             }
@@ -164,7 +164,7 @@ impl ToolState {
 
         {
             let mut ui = egui::Ui::new(
-                ctx.clone(),
+                ui.clone(),
                 egui::Id::new("gizmos"),
                 egui::UiBuilder::new().max_rect(viewport).layer_id(layer),
             );
@@ -252,20 +252,20 @@ impl ToolState {
     pub fn tool(&self) -> Tool {
         self.tool
     }
-    pub fn show_toolbox_column(&mut self, ctx: &egui::Context, side: egui::panel::Side) {
+    pub fn show_toolbox_column_inside(&mut self, ui: &mut egui::Ui, side: super::Side) {
         // Min size, expanding.
         const TOOLBOX_BUTTON_SIZE: f32 = 30.0;
         const ICON_SIZE_RATIO: f32 = 0.9;
-        egui::SidePanel::new(side, "toolbox")
+        side.panel("toolbox")
             .resizable(true)
-            .default_width(TOOLBOX_BUTTON_SIZE)
+            .default_size(TOOLBOX_BUTTON_SIZE)
             // Order is important, default_width overrides range.
-            .width_range(TOOLBOX_BUTTON_SIZE..)
+            .size_range(TOOLBOX_BUTTON_SIZE..)
             .frame(egui::Frame {
                 inner_margin: egui::Margin::ZERO,
-                ..egui::Frame::side_top_panel(&ctx.style())
+                ..egui::Frame::side_top_panel(&ui.style())
             })
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 egui::ScrollArea::vertical()
                     // Very narrow bar, the scrollbar is quite large relative to it lol.
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)

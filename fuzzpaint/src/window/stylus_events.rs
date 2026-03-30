@@ -304,7 +304,9 @@ impl PointerBridge {
     fn mouse_or_default(&mut self, id: MouseID) -> &mut MouseState {
         let prev_main = self.get_egui_main();
         let _ = self.in_mice.entry(id.clone()).or_default();
-        if self.get_egui_main() == Some(DeviceID::Mouse(id.clone())) {
+        if self.get_egui_main() == Some(DeviceID::Mouse(id.clone()))
+            && prev_main != Some(DeviceID::Mouse(id.clone()))
+        {
             // This just became the main, so transition away from the old main.
             if let Some(prev_main) = prev_main {
                 self.transition_away(prev_main);
@@ -320,7 +322,9 @@ impl PointerBridge {
     fn touch_or_default(&mut self, id: TouchID) -> &mut TouchState {
         let prev_main = self.get_egui_main();
         let _ = self.active_touches.entry(id.clone()).or_default();
-        if self.get_egui_main() == Some(DeviceID::Touch(id.clone())) {
+        if self.get_egui_main() == Some(DeviceID::Touch(id.clone()))
+            && prev_main != Some(DeviceID::Touch(id.clone()))
+        {
             // This just became the main, so transition away from the old main.
             if let Some(prev_main) = prev_main {
                 self.transition_away(prev_main);
@@ -337,7 +341,9 @@ impl PointerBridge {
     fn insert_tool(&mut self, id: ToolID, state: ToolState) -> &mut ToolState {
         let prev_main = self.get_egui_main();
         let _ = self.in_tools.insert(id.clone(), state);
-        if self.get_egui_main() == Some(DeviceID::Tool(id.clone())) {
+        if self.get_egui_main() == Some(DeviceID::Tool(id.clone()))
+            && prev_main != Some(DeviceID::Tool(id.clone()))
+        {
             // This just became the main, so transition away from the old main.
             if let Some(prev_main) = prev_main {
                 self.transition_away(prev_main);

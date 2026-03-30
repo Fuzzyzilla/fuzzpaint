@@ -50,7 +50,7 @@ impl ErrorDisplay {
     ///
     /// This should be called at the end of the frame, to catch potential logs
     /// made earlier in the UI stack.
-    pub fn show(&mut self, ctx: &egui::Context, collector: &fuzzpaint_logger::CollectLogger) {
+    pub fn show(&mut self, ui: &mut egui::Ui, collector: &fuzzpaint_logger::CollectLogger) {
         // It is very important that nothing related to this logs, otherwise we
         // could end up in a death spiral!
         let len_before = self.records.len();
@@ -75,20 +75,20 @@ impl ErrorDisplay {
         let mut remove_windows = Vec::new();
         let mut y = WINDOW_MARGIN;
         for (i, window) in self.windows.iter_mut().enumerate() {
-            let hoveredness = ctx.animate_bool(window.id, window.hovered);
+            let hoveredness = ui.animate_bool(window.id, window.hovered);
             let mut frame =
-                egui::Frame::window(&ctx.style()).multiply_with_opacity(hoveredness * 0.5 + 0.5);
+                egui::Frame::window(ui.style()).multiply_with_opacity(hoveredness * 0.5 + 0.5);
             frame.corner_radius.se = 0;
             // Ask the context to smooth out this value for us. That way, if a
             // window closes beneath us, it is visually more coherent than just
             // a jump.
             let y_anim =
-                ctx.animate_value_with_time(window.id.with("pos_y"), y, ctx.style().animation_time);
+                ui.animate_value_with_time(window.id.with("pos_y"), y, ui.style().animation_time);
             let response = egui::Window::new("")
                 .id(window.id)
                 .anchor(egui::Align2::RIGHT_BOTTOM, [-WINDOW_MARGIN, -y_anim])
                 .title_bar(false)
-                .constrain_to(ctx.available_rect())
+                .constrain_to(ui.available_rect_before_wrap())
                 .collapsible(false)
                 .fade_in(true)
                 // Cant fade out. :3
@@ -97,7 +97,7 @@ impl ErrorDisplay {
                 .resizable(false)
                 .frame(frame)
                 .order(egui::Order::Foreground)
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     // Time left / timout time
                     let time_left = window.expires - now;
                     let completion_ratio =
@@ -138,12 +138,12 @@ impl ErrorDisplay {
             y += response.rect.height() + WINDOW_MARGIN;
             // Response.hovered is false when the text is hovered. We instead
             // want if the pointer is anywhere on the window.
-            window.hovered = ctx.rect_contains_pointer(response.layer_id, response.rect);
+            window.hovered = ui.rect_contains_pointer(response.rect);
             if window.hovered {
                 window.expires = new_window_expiry;
             } else {
                 // We animate while not hovered :3
-                ctx.request_repaint();
+                ui.request_repaint();
             }
 
             // This sucks in the same way as above, but unlike that I can't
@@ -169,7 +169,7 @@ impl ErrorDisplay {
             .open(&mut self.show_list)
             .fade_in(true)
             .fade_out(true)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
                     // FIXME: Use show_viewport and cache the sizes of things so

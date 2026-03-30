@@ -34,7 +34,7 @@ impl Scrub {
         ui: &mut egui::Ui,
         view_transform: &mut fuzzpaint_types::similarity::Similarity,
     ) {
-        let will_discard = ui.ctx().will_discard();
+        let will_discard = ui.will_discard();
         let rect = ui.max_rect();
         let center = rect.center();
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());

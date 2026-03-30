@@ -29,17 +29,17 @@ pub fn spawn(modal: impl Modal + 'static) {
             id: this.last_used_id,
             inner: modal,
         });
-    })
+    });
 }
 /// Show the modals.
 // When the clippy yaps at me for something that's SEMANTICALLY CORRECT >:O
 #[allow(clippy::semicolon_if_nothing_returned)]
 pub fn show(
     state: &mut super::MainUI,
-    ctx: &egui::Context,
+    ui: &mut egui::Ui,
     interface: &mut super::interface::Interface,
 ) {
-    ModalContainer::with_mut(|this| this.show_inner(state, ctx, interface))
+    ModalContainer::with_mut(|this| this.show_inner(state, ui, interface))
 }
 
 /// Maintains and polls all modals. A singleton instance of this is kept
@@ -75,28 +75,28 @@ impl ModalContainer {
     /// Show the modals.
     pub fn show(
         state: &mut super::MainUI,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         interface: &mut super::interface::Interface,
     ) {
-        Self::with_mut(|this| this.show_inner(state, ctx, interface))
+        Self::with_mut(|this| this.show_inner(state, ui, interface))
     }
     fn show_inner(
         &mut self,
         state: &mut super::MainUI,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         interface: &mut super::interface::Interface,
     ) {
         let mut close_indices = smallvec::SmallVec::<[usize; 1]>::new();
         for (i, modal) in self.modals.iter_mut().enumerate() {
             let response = egui::Modal::new(modal.id)
-                .show(ctx, |ui| modal.inner.do_ui(modal.id, ui, state, interface));
+                .show(ui, |ui| modal.inner.do_ui(modal.id, ui, state, interface));
 
             let mut manually_requested_close = response.inner == Response::Close;
             // Only if externally closed (esc or clicked outside) we ask the
             // modal if it's allowed.
             if !manually_requested_close && response.should_close() {
                 manually_requested_close =
-                    modal.inner.close_requested(modal.id, ctx, state, interface) == Response::Close;
+                    modal.inner.close_requested(modal.id, ui, state, interface) == Response::Close;
             }
             // Close only if the modal requested it or agreed to the external
             // request.
@@ -116,7 +116,7 @@ impl ModalContainer {
                 // not closed, do retain
                 return true;
             }
-            modal.inner.close(modal.id, ctx, state, interface);
+            modal.inner.close(modal.id, ui, state, interface);
             // Delete.
             false
         });
@@ -148,7 +148,7 @@ pub trait Modal: Send {
     fn close_requested(
         &mut self,
         id: egui::Id,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         state: &mut super::MainUI,
         interface: &mut super::interface::Interface,
     ) -> Response {
@@ -162,7 +162,7 @@ pub trait Modal: Send {
     fn close(
         &mut self,
         id: egui::Id,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         state: &mut super::MainUI,
         interface: &mut super::interface::Interface,
     ) {

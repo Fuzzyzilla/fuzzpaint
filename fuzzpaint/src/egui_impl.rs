@@ -83,9 +83,6 @@ impl Ctx {
     pub fn context(&self) -> &egui::Context {
         self.state.egui_ctx()
     }
-    pub fn wants_pointer_input(&self) -> bool {
-        self.state.egui_ctx().wants_pointer_input()
-    }
     pub fn replace_surface(&mut self, surface: &RenderSurface) -> anyhow::Result<()> {
         self.renderer.gen_framebuffers(surface)
     }
@@ -104,7 +101,7 @@ impl Ctx {
     pub fn update<T>(
         &'_ mut self,
         window: &winit::window::Window,
-        mut f: impl FnMut(&'_ egui::Context) -> T,
+        mut f: impl FnMut(&'_ mut egui::Ui) -> T,
     ) -> T {
         let input = self.state.take_egui_input(window);
 
@@ -113,7 +110,7 @@ impl Ctx {
         let mut output = self
             .state
             .egui_ctx()
-            .run(input, |ctx| user_output = Some(f(ctx)));
+            .run_ui(input, |ui| user_output = Some(f(ui)));
 
         // Schedule repaints. This doesn't handle multi-view.
         let now = std::time::Instant::now();

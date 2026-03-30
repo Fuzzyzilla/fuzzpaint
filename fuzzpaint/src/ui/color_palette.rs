@@ -114,7 +114,7 @@ impl egui::Widget for ColorSquare {
             text_selection: None,
             hint_text: None,
         });
-        if ui.ctx().will_discard() {
+        if ui.will_discard() {
             return this;
         }
 
@@ -160,9 +160,7 @@ impl egui::Widget for ColorSquare {
             // No grow, same layer
             (0.0, ui.layer_id())
         };
-        let expansion =
-            ui.ctx()
-                .animate_value_with_time(this.id, expansion, ui.style().animation_time);
+        let expansion = ui.animate_value_with_time(this.id, expansion, ui.style().animation_time);
         let painter = ui.painter().clone().with_layer_id(layer);
         painter.rect(
             rect.expand(expansion),
@@ -603,14 +601,14 @@ pub struct PickerResponse {
 }
 
 /// Show a collapsing color picker in the top left of the free area.
-pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> PickerResponse {
+pub fn picker_dock(ui: &egui::Ui, hsva: &mut egui::ecolor::HsvaGamma) -> PickerResponse {
     egui::containers::Area::new(egui::Id::new("color-picker"))
         .anchor(
             egui::Align2::LEFT_TOP,
-            ctx.available_rect().left_top().to_vec2(),
+            ui.available_rect_before_wrap().left_top().to_vec2(),
         )
         .order(egui::Order::Background)
-        .show(ctx, |ui| {
+        .show(ui, |ui| {
             /// number of edge "rays" from the center of the picker arc to the edge.
             const MAIN_RAYS: usize = 16;
             /// Number of steps along each ray from the center to the edge.
@@ -651,8 +649,8 @@ pub fn picker_dock(ctx: &egui::Context, hsva: &mut egui::ecolor::HsvaGamma) -> P
                 egui::Sense::click_and_drag(),
             );
 
-            let expanded_proportion = ctx.animate_bool(response.id, last_target.is_some());
-            let skip_mesh = expanded_proportion < 0.01 || ui.ctx().will_discard();
+            let expanded_proportion = ui.animate_bool(response.id, last_target.is_some());
+            let skip_mesh = expanded_proportion < 0.01 || ui.will_discard();
             let radius = egui::lerp(CONTRACTED_RADIUS..=EXPANDED_RADIUS, expanded_proportion);
             let origin_offset = egui::lerp(CONTRACTED_OFFSET..=0.0, expanded_proportion);
             let origin = rect.left_top() + [origin_offset; 2].into();

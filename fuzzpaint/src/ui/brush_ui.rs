@@ -255,7 +255,7 @@ impl CurveNormalized {
         } else {
             self.dragged_idx = None;
         }
-        if ui.ctx().will_discard() {
+        if ui.will_discard() {
             // Skip drawing, we've already done all the layout egui needs :3
             return response;
         }
@@ -356,30 +356,27 @@ pub struct CurveSetNormalized {
 }
 impl CurveSetNormalized {
     fn show(&mut self, selected_source: &mut DynamicSourceNormalized, ui: &mut egui::Ui) {
-        egui::SidePanel::new(
-            egui::panel::Side::Left,
-            egui::Id::new("dynamic_sources_panel"),
-        )
-        .resizable(false)
-        .show_inside(ui, |ui| {
-            for source in <DynamicSourceNormalized as strum::IntoEnumIterator>::iter() {
-                ui.horizontal(|ui| {
-                    let exists = self.curves.contains_key(&source);
-                    let mut checked = exists;
-                    ui.checkbox(&mut checked, ());
-                    if checked != exists {
-                        if checked {
-                            self.curves.insert(source, CurveNormalized::new(0.0, 1.0));
-                            *selected_source = source;
-                        } else {
-                            self.curves.remove(&source);
+        egui::Panel::left("dynamic_sources_panel")
+            .resizable(false)
+            .show_inside(ui, |ui| {
+                for source in <DynamicSourceNormalized as strum::IntoEnumIterator>::iter() {
+                    ui.horizontal(|ui| {
+                        let exists = self.curves.contains_key(&source);
+                        let mut checked = exists;
+                        ui.checkbox(&mut checked, ());
+                        if checked != exists {
+                            if checked {
+                                self.curves.insert(source, CurveNormalized::new(0.0, 1.0));
+                                *selected_source = source;
+                            } else {
+                                self.curves.remove(&source);
+                            }
                         }
-                    }
-                    ui.selectable_value(selected_source, source, <&'static str>::from(source))
-                        .on_hover_text(source.description());
-                });
-            }
-        });
+                        ui.selectable_value(selected_source, source, <&'static str>::from(source))
+                            .on_hover_text(source.description());
+                    });
+                }
+            });
 
         ui.label(selected_source.description());
         if let Some(curve) = self.curves.get_mut(selected_source) {
@@ -464,7 +461,7 @@ impl TextureStamp {
                     // `image` crate is probably not the choice here. It sweeps
                     // a lot of details under the rug, like colorspaces.
                     let image = image::open(file)?.to_rgba8();
-                    let manager = ui.ctx().tex_manager();
+                    let manager = ui.tex_manager();
                     let mut write = manager.write();
 
                     let size = [image.width() as usize, image.height() as usize];

@@ -20,8 +20,8 @@ defer = "0.2.1"
 dhat = { version = "0.3.3", optional = true }
 dirs = "6.0.0"
 # To enable default-font within egui-winit
-egui = "0.33.3"
-egui-winit = { version = "=0.33.3", default-features = false, features = ["bytemuck", "clipboard", "links", "wayland"] }
+egui = "0.34.0"
+egui-winit = { version = "0.34.0", default-features = false, features = ["bytemuck", "clipboard", "links", "wayland"] }
 either = "1.15.0"
 env_logger = "0.11.8"
 hashbrown = { version = "0.16.1", features = ["serde"] }
@@ -55,7 +55,7 @@ strum = { workspace = true }
 thiserror = { workspace = true }
 ultraviolet = { workspace = true }
 fontdb = "0.23.0"
-egui-editable-combobox = { version = "0.1.0-rc.2", git = "https://github.com/SOF3/egui-editable-combobox.git", commit = "eece00f287a42dad379592a6a84c3e09f0ff9103" }
+egui-editable-combobox = { version = "0.1.0-rc.2", git = "https://github.com/Fuzzyzilla/egui-editable-combobox.git", branch = "backport" }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator = { version = "0.6.1", optional = true, default-features = false }

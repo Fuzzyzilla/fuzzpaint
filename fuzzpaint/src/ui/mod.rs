@@ -58,6 +58,19 @@ fn justify(available_size: f32, base_size: f32, base_margin: f32) -> (f32, f32) 
     (just_size, base_margin)
 }
 
+enum Side {
+    Left,
+    Right,
+}
+impl Side {
+    fn panel(self, id: impl Into<egui::Id>) -> egui::Panel {
+        match self {
+            Self::Left => egui::Panel::left(id),
+            Self::Right => egui::Panel::right(id),
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 enum JustifyAxis {
@@ -209,31 +222,30 @@ impl MainUI {
     }
     /// Main UI and any modals, with the top bar, layers, brushes, color, etc.
     /// To be displayed in front of the document and it's gizmos.
-    pub fn ui(&mut self, ctx: &egui::Context, interface: &mut interface::Interface) {
-        modals::show(self, ctx, interface);
+    pub fn ui(&mut self, ui: &mut egui::Ui, interface: &mut interface::Interface) {
+        modals::show(self, ui, interface);
 
-        self.main_ui(ctx);
+        self.main_ui(ui);
 
-        self.do_connection_windows(ctx, interface);
+        self.do_connection_windows(ui, interface);
 
         if let Some(document) = self.cur_document {
-            self.tool_state.gizmos(ctx, document, interface);
+            self.tool_state.gizmos(ui, document, interface);
         }
 
-        self.error_display.show(ctx, crate::log_collector());
+        self.error_display.show(ui, crate::log_collector());
 
-        self.do_csd_edges(ctx);
+        self.do_csd_edges(ui);
     }
-    fn do_connection_windows(&mut self, ctx: &egui::Context, interface: &mut interface::Interface) {
-        let style = ctx.style();
+    fn do_connection_windows(&mut self, ui: &mut egui::Ui, interface: &mut interface::Interface) {
         // Dock the boxes to the bottom left of the viewport, stacking next to
         // each other.
-        let mut window_frame = egui::Frame::window(&style);
+        let mut window_frame = egui::Frame::window(&ui.style());
         // Visually connect to the bottom of the viewport.
         window_frame.corner_radius.se = 0;
         window_frame.corner_radius.sw = 0;
         window_frame.stroke = egui::Stroke::NONE;
-        let margin = style.spacing.window_margin.leftf();
+        let margin = ui.style().spacing.window_margin.leftf();
         // Left-edge of the windows, bumping over as we add more.
         let mut x = margin;
         for (id, mut connection) in interface.iter_connections() {
@@ -241,34 +253,31 @@ impl MainUI {
                 .id(egui::Id::new("connection-window").with(id))
                 .default_open(false)
                 .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::new(x, 0.0))
-                .constrain_to(ctx.available_rect())
+                .constrain_to(ui.available_rect_before_wrap())
                 // These combine to form "shrink to fit pretty please"
                 .min_width(0.0)
                 .default_width(0.0)
                 .frame(window_frame)
-                .show(ctx, |ui| {
-                    egui::TopBottomPanel::bottom(ui.id().with("text-input")).show_inside(
-                        ui,
-                        |ui| {
-                            latch::latch(ui, ui.id().with("text"), String::new(), |ui, string| {
-                                let response = ui.text_edit_singleline(string);
-                                if response.lost_focus()
-                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                {
-                                    response.request_focus();
-                                    // Entered, return the text.
-                                    latch::Latch::Finish
-                                } else if string.is_empty() {
-                                    // Nothing to store
-                                    latch::Latch::None
-                                } else {
-                                    // Retain typing progress
-                                    latch::Latch::Continue
-                                }
-                            })
-                            .on_finish(|string| connection.message(&string));
-                        },
-                    );
+                .show(ui, |ui| {
+                    egui::Panel::bottom(ui.id().with("text-input")).show_inside(ui, |ui| {
+                        latch::latch(ui, ui.id().with("text"), String::new(), |ui, string| {
+                            let response = ui.text_edit_singleline(string);
+                            if response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            {
+                                response.request_focus();
+                                // Entered, return the text.
+                                latch::Latch::Finish
+                            } else if string.is_empty() {
+                                // Nothing to store
+                                latch::Latch::None
+                            } else {
+                                // Retain typing progress
+                                latch::Latch::Continue
+                            }
+                        })
+                        .on_finish(|string| connection.message(&string));
+                    });
                     egui::ScrollArea::vertical()
                         // Take available space
                         .auto_shrink(false)
@@ -285,7 +294,7 @@ impl MainUI {
             x += window_response.response.rect.width() + margin;
         }
     }
-    fn do_csd_edges(&mut self, ctx: &egui::Context) {
+    fn do_csd_edges(&mut self, ui: &mut egui::Ui) {
         if !self.csd {
             return;
         }
@@ -295,12 +304,12 @@ impl MainUI {
             const MARGIN_PX: f32 = 1.0;
             const SPACING_PX: f32 = 3.0;
 
-            let painter = ctx.layer_painter(egui::LayerId {
+            let painter = ui.layer_painter(egui::LayerId {
                 order: egui::Order::Foreground,
                 id: egui::Id::new("csd-resize"),
             });
-            let color = ctx.style().visuals.weak_text_color();
-            let bottom_right = ctx.viewport_rect().right_bottom() - egui::Vec2::splat(MARGIN_PX);
+            let color = ui.style().visuals.weak_text_color();
+            let bottom_right = ui.viewport_rect().right_bottom() - egui::Vec2::splat(MARGIN_PX);
 
             for row in 0..3u8 {
                 for column in 0..(3u8 - row) {
@@ -315,7 +324,7 @@ impl MainUI {
 
         // FIXME: only if no widget is listening to the mouse. Seems impossible?
         // Weird :3
-        if let Some(pos) = ctx.pointer_latest_pos() {
+        if let Some(pos) = ui.pointer_latest_pos() {
             use egui::CursorIcon as Icon;
             use winit::window::ResizeDirection as Resize;
             enum Dir {
@@ -324,16 +333,16 @@ impl MainUI {
                 Plus,
             }
 
-            let x_dir = if pos.x <= ctx.viewport_rect().left() + CSD_RESIZE_WIDTH_LOGICAL_PX {
+            let x_dir = if pos.x <= ui.viewport_rect().left() + CSD_RESIZE_WIDTH_LOGICAL_PX {
                 Dir::Minus
-            } else if pos.x >= ctx.viewport_rect().right() - CSD_RESIZE_WIDTH_LOGICAL_PX {
+            } else if pos.x >= ui.viewport_rect().right() - CSD_RESIZE_WIDTH_LOGICAL_PX {
                 Dir::Plus
             } else {
                 Dir::Zero
             };
-            let y_dir = if pos.y <= ctx.viewport_rect().top() + CSD_RESIZE_WIDTH_LOGICAL_PX {
+            let y_dir = if pos.y <= ui.viewport_rect().top() + CSD_RESIZE_WIDTH_LOGICAL_PX {
                 Dir::Minus
-            } else if pos.y >= ctx.viewport_rect().bottom() - CSD_RESIZE_WIDTH_LOGICAL_PX {
+            } else if pos.y >= ui.viewport_rect().bottom() - CSD_RESIZE_WIDTH_LOGICAL_PX {
                 Dir::Plus
             } else {
                 Dir::Zero
@@ -353,7 +362,7 @@ impl MainUI {
                 (Dir::Plus, Dir::Plus) => Resize::SouthEast,
             };
 
-            ctx.set_cursor_icon(match resize_dir {
+            ui.set_cursor_icon(match resize_dir {
                 Resize::East => Icon::ResizeEast,
                 Resize::North => Icon::ResizeNorth,
                 Resize::NorthEast => Icon::ResizeNorthEast,
@@ -477,12 +486,12 @@ impl MainUI {
             }
         }
     }
-    fn main_ui(&mut self, ctx: &egui::Context) {
+    fn main_ui(&mut self, ui: &mut egui::Ui) {
         self.hovered_csd = None;
 
         let interface = self.get_cur_interface().cloned();
 
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        egui::Panel::top("menu_bar").show_inside(ui, |ui| {
             self.menu_bar(ui);
         });
 
@@ -490,20 +499,20 @@ impl MainUI {
             // No document view open, show a splash.
             // Don't show the bar if it has nothing to say!
             if !self.documents.is_empty() {
-                egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
+                egui::Panel::top("document-bar").show_inside(ui, |ui| {
                     self.document_bar(ui);
                 });
             }
-            self.welcome_screen(ctx);
+            self.welcome_screen(ui);
         } else {
             // A document is open, show the main view.
-            egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
+            egui::Panel::bottom("nav_bar").show_inside(ui, |ui| {
                 if let Some(interface) = interface {
                     Self::nav_bar(ui, interface.id);
                 }
             });
-            egui::SidePanel::right("layers").show(ctx, |ui| {
-                egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
+            egui::Panel::right("layers").show_inside(ui, |ui| {
+                egui::Panel::bottom("stats-panel").show_inside(ui, stats_panel);
                 self.colors_panel(ui, self.cur_document);
                 ui.separator();
                 ui.label("Layers");
@@ -527,14 +536,13 @@ impl MainUI {
                 }
             });
 
-            self.tool_state
-                .show_toolbox_column(ctx, egui::panel::Side::Left);
-            egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
+            self.tool_state.show_toolbox_column_inside(ui, Side::Left);
+            egui::Panel::top("document-bar").show_inside(ui, |ui| {
                 self.document_bar(ui);
             });
 
             {
-                let response = color_palette::picker_dock(ctx, &mut self.picker_color);
+                let response = color_palette::picker_dock(ui, &mut self.picker_color);
                 self.picker_changed = response.response.changed();
                 self.picker_in_flux = response.in_flux;
             }
@@ -588,7 +596,7 @@ impl MainUI {
                 }
 
                 // Random debug stuf :V
-                ui.label(format!("{}", ui.ctx().cumulative_frame_nr()));
+                ui.label(format!("{}", ui.cumulative_frame_nr()));
 
                 // Menu from left to right, taking up the middle space.
                 egui::MenuBar::new().ui(ui, |ui| {
@@ -690,8 +698,8 @@ impl MainUI {
         }
     }
     /// Show a center welcome/"home" panel when no document is selected.
-    fn welcome_screen(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn welcome_screen(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.vertical_centered(|ui| {
                 const BIG_BUTTON_MAX_SIZE: f32 = 125.0;
                 const BIG_BUTTON_MIN_SIZE: f32 = 75.0;
@@ -898,7 +906,7 @@ impl MainUI {
                     egui::DragValue::new(rotation)
                         .speed(0.5)
                         .fixed_decimals(0)
-                        .suffix('°'),
+                        .suffix("°"),
                 );
                 if rotation_response.changed() {
                     // Use a delta angle request
@@ -927,8 +935,6 @@ impl MainUI {
     }
 
     fn colors_panel(&mut self, ui: &mut Ui, current_doc: Option<state::document::ID>) {
-        use az::SaturatingAs;
-
         let mut globals = crate::AdHocGlobals::get().write();
         if let Some(brush) = globals.as_mut().map(|globals| &mut globals.brush) {
             if let Some(current_doc) = current_doc {
@@ -1510,7 +1516,7 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                 .and_then(|node| graph.get(node))
                 .cloned();
 
-            egui::TopBottomPanel::bottom("LayerProperties").show_animated_inside(
+            egui::Panel::bottom("LayerProperties").show_animated_inside(
                 ui,
                 node_props.is_some(),
                 |ui| {
@@ -1976,8 +1982,16 @@ fn graph_edit_recurse<
 
             // Fetch from last frame - are we hovered?
             let name_hovered_key = egui::Id::new((id, "name-hovered"));
-            let hovered: Option<bool> = ui.data(|data| data.get_temp(name_hovered_key));
-            let edit = egui::TextEdit::singleline(name).frame(hovered.unwrap_or(false));
+            let hovered: bool = ui
+                .data(|data| data.get_temp(name_hovered_key))
+                .unwrap_or(false);
+            let edit = egui::TextEdit::singleline(name);
+            // Remove the visual frame if not hovered
+            let edit = if !hovered {
+                edit.frame(egui::Frame::NONE)
+            } else {
+                edit
+            };
             let name_response = ui.add(edit);
 
             // Send data to next frame, to tell that we're hovered or not.

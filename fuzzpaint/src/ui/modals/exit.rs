@@ -25,7 +25,7 @@ impl super::Modal for Modal {
     fn close(
         &mut self,
         _: egui::Id,
-        _: &egui::Context,
+        _: &mut egui::Ui,
         state: &mut crate::ui::MainUI,
         _: &mut crate::ui::interface::Interface,
     ) {

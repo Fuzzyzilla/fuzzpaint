@@ -30,12 +30,11 @@ impl Transform {
             let id = ui.id().with("lerp");
             if !self.started_animating {
                 // Instantly jump to 0.0
-                ui.ctx().animate_value_with_time(id, 0.0, 0.0);
+                ui.animate_value_with_time(id, 0.0, 0.0);
             }
             self.started_animating = true;
             // Animate up to 1.0
             let t = ui
-                .ctx()
                 .animate_value_with_time(id, 1.0, ui.style().animation_time);
 
             animating_from.translate_by(cast_vec(-self.rect.center().to_vec2()));
@@ -60,7 +59,7 @@ impl Transform {
         let holding_alt = ui.input(|i| i.modifiers.alt);
 
         // Locks a mutex, so cache it instead.
-        let do_paint = !ui.ctx().will_discard();
+        let do_paint = !ui.will_discard();
 
         if do_paint {
             // Egui does not support rotated shapes.

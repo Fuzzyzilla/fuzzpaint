@@ -486,7 +486,7 @@ impl WindowObjects {
         .into();
 
         self.egui_ctx
-            .update(self.win.as_ref(), |ctx| self.ui.ui(ctx, &mut interface));
+            .update(self.win.as_ref(), |ui| self.ui.ui(ui, &mut interface));
 
         let interface = interface.into_inner();
 

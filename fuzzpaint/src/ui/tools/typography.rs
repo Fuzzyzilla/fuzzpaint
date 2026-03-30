@@ -100,7 +100,7 @@ impl Typography {
             .anchor(egui::Align2::CENTER_TOP, [0.0, 16.0])
             .default_size([0.0, 0.0])
             .resizable(false)
-            .show(ui.ctx(), |ui| {
+            .show(ui, |ui| {
                 // Horizontal-fill, with wrap if too large to fit. Normal
                 // horizontal_wrapped doesn't re-expand after the space gets
                 // larger.

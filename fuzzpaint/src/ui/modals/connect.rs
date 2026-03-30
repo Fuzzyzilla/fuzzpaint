@@ -166,7 +166,7 @@ impl Modal {
                     .label(egui::RichText::new(section).monospace())
                     .on_hover_text("Click to copy");
                 if response.clicked() {
-                    ui.ctx().copy_text(hash.clone());
+                    ui.copy_text(hash.clone());
                     // FIXME: A popup would be nicer.
                     log::info!("Verification code copied to clipboard.");
                 }
@@ -207,7 +207,7 @@ impl super::Modal for Modal {
     fn close_requested(
         &mut self,
         _id: egui::Id,
-        _ctx: &egui::Context,
+        _ui: &mut egui::Ui,
         _state: &mut crate::ui::MainUI,
         _interface: &mut crate::ui::interface::Interface,
     ) -> super::Response {
