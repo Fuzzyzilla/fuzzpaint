@@ -1,4 +1,4 @@
-use fuzzpaint_core::stroke::Archetype;
+use fuzzpaint_types::stroke::Archetype;
 
 use crate::vulkano_prelude::*;
 use std::sync::Arc;
@@ -173,10 +173,12 @@ impl GpuStampTess {
             },
             batch.allocs.iter().map(|alloc| {
                 // Can't handle archetypes without Pos or Arclen
-                assert!(alloc
-                    .summary
-                    .archetype
-                    .contains(Archetype::POSITION | Archetype::ARC_LENGTH));
+                assert!(
+                    alloc
+                        .summary
+                        .archetype
+                        .contains(Archetype::POSITION | Archetype::ARC_LENGTH)
+                );
 
                 let density = alloc.src.brush.spacing_px.get();
                 // If not found, ignore by claiming 0 stamps.

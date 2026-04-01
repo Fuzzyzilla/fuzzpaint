@@ -4,7 +4,7 @@
 
 use std::io::{Read, Result as IOResult, Write};
 
-use crate::brush::UniqueID;
+use fuzzpaint_types::resource::UniqueID;
 
 use super::common::{MyTake, SoftSeek};
 

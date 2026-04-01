@@ -5,6 +5,9 @@ impl egui::Widget for Handle {
         let interact_height = ui.style().spacing.interact_size.y;
         let size = egui::vec2(interact_height * 2.0 / 3.0, interact_height);
         let response = ui.allocate_response(size, egui::Sense::drag());
+        if ui.will_discard() {
+            return response;
+        }
 
         // Paint six dots, a somewhat universal drag icon.
         let painter = ui.painter();

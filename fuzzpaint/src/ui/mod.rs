@@ -1,21 +1,21 @@
 mod brush_ui;
 mod color_palette;
 mod drag;
-mod modal;
-pub mod requests;
-mod settings;
-
-use modal::Modal;
+mod error_display;
+pub mod interface;
+mod modals;
+mod tools;
 
 use egui::{RichText, Ui};
 use fuzzpaint_core::{
-    blend::{Blend, BlendMode},
-    brush,
-    color::{self as fcolor, PaletteIndex},
-    io,
+    brush, io,
     queue::{self, state_reader::CommandQueueStateReader},
     state,
-    util::FiniteF32,
+};
+use fuzzpaint_types::blend::{Blend, BlendMode};
+use fuzzpaint_types::{
+    color::{self as fcolor, PaletteIndex},
+    float::FiniteF32,
 };
 
 const STROKE_LAYER_ICON: &str = "✏";
@@ -31,6 +31,11 @@ const HOME_ICON: char = '🏠';
 const PIN_ICON: char = '📌';
 const ALPHA_ICON: &str = "α";
 const RESET_ICON: &str = "⟲";
+
+pub static GOOGLE_MATERIAL_ICONS_FAMILY: std::sync::LazyLock<egui::epaint::text::FontFamily> =
+    std::sync::LazyLock::new(|| {
+        egui::epaint::text::FontFamily::Name("Google Material Icons".into())
+    });
 
 /// Justify `(available_size, size, margin)` -> `(size', margin')`, such that `count` elements
 /// will fill available space completely.
@@ -51,6 +56,19 @@ fn justify(available_size: f32, base_size: f32, base_margin: f32) -> (f32, f32) 
     let just_size = (available_size - (num_buttons * base_margin)) / num_buttons;
 
     (just_size, base_margin)
+}
+
+enum Side {
+    Left,
+    Right,
+}
+impl Side {
+    fn panel(self, id: impl Into<egui::Id>) -> egui::Panel {
+        match self {
+            Self::Left => egui::Panel::left(id),
+            Self::Right => egui::Panel::right(id),
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -76,19 +94,12 @@ fn justify_mut(ui: &mut Ui, axis: JustifyAxis, base_size: f32, base_margin: f32)
 }
 trait ResponseExt {
     /// Emulate a primary click whenever this action is triggered.
-    fn or_action_clicked(
-        self,
-        frame: &crate::actions::ActionFrame,
-        action: crate::actions::Action,
-    ) -> bool;
+    fn or_action_clicked(self, action: crate::actions::Action) -> bool;
     fn clicked_or_escape(self) -> bool;
 }
 impl ResponseExt for egui::Response {
-    fn or_action_clicked(
-        self,
-        frame: &crate::actions::ActionFrame,
-        action: crate::actions::Action,
-    ) -> bool {
+    fn or_action_clicked(self, action: crate::actions::Action) -> bool {
+        /*
         if !self.enabled() || !self.sense.senses_click() {
             return false;
         }
@@ -98,7 +109,8 @@ impl ResponseExt for egui::Response {
         if held {
             self.highlight();
         }
-        clicked || triggered
+        clicked || triggered*/
+        self.clicked()
     }
     /// Returns true if [`egui::Response::clicked`] or `Escape` key is pressed, useful for cancel buttons.
     /// This does not take into account focus.
@@ -107,15 +119,19 @@ impl ResponseExt for egui::Response {
     }
 }
 
-enum CurrentModal {
-    BrushCreation(brush_ui::CreationModal),
-    Settings(settings::Settings),
+const CSD_RESIZE_WIDTH_LOGICAL_PX: f32 = 5.0;
+#[derive(Clone, Copy)]
+pub enum WindowAction {
+    Close,
+    Minimize,
+    Maximize,
 }
-
-enum CloseState {
-    None,
-    Modal,
-    Confirmed,
+#[derive(Clone, Copy)]
+pub enum HoveredCSD {
+    /// The titlebar, but not any menu button on that bar. Contains the position.
+    Title(winit::dpi::LogicalPosition<f32>),
+    /// The edge or corner of the window.
+    Edge(winit::window::ResizeDirection),
 }
 
 #[derive(Clone)]
@@ -126,12 +142,11 @@ struct PerDocumentData {
     name: String,
 }
 pub struct MainUI {
-    // Modal layers, in order. (There is no better way to represent this state, I have considered greatly!)
-
-    // On top of everything, a "do you want to exit" dialog.
-    close_state: CloseState,
-    // A Ui-defined modal (creating brushes, application settings, etc)
-    modal: Option<CurrentModal>,
+    app_close_modal_shown: bool,
+    window_action: Option<WindowAction>,
+    // Whether or not to render Client-Side Decorations.
+    csd: bool,
+    hovered_csd: Option<HoveredCSD>,
     // Active document viewport
     // + Implicit layer: welcome screen if no active document.
     cur_document: Option<state::document::ID>,
@@ -139,14 +154,13 @@ pub struct MainUI {
     picker_color: egui::ecolor::HsvaGamma,
     picker_in_flux: bool,
     picker_changed: bool,
+    tool_state: tools::ToolState,
 
-    requests_send: crossbeam::channel::Sender<requests::UiRequest>,
-    requests_recv: crossbeam::channel::Receiver<requests::UiRequest>,
-    action_listener: crate::actions::ActionListener,
+    error_display: error_display::ErrorDisplay,
 }
 impl MainUI {
     #[must_use]
-    pub fn new(action_listener: crate::actions::ActionListener) -> Self {
+    pub fn new() -> Self {
         let documents = crate::global::provider().document_iter();
         let documents: Vec<_> = documents
             .map(|id| PerDocumentData {
@@ -158,13 +172,14 @@ impl MainUI {
             .collect();
         let cur_document = documents.last().map(|doc| doc.id);
 
-        let (requests_send, requests_recv) = crossbeam::channel::unbounded();
         Self {
-            close_state: CloseState::None,
+            app_close_modal_shown: false,
+            window_action: None,
+            hovered_csd: None,
+            csd: false,
             documents,
             cur_document,
 
-            modal: None,
             picker_color: egui::ecolor::HsvaGamma {
                 h: 0.0,
                 s: 0.0,
@@ -173,11 +188,13 @@ impl MainUI {
             },
             picker_in_flux: false,
             picker_changed: false,
+            tool_state: tools::ToolState::default(),
 
-            requests_send,
-            requests_recv,
-            action_listener,
+            error_display: Default::default(),
         }
+    }
+    pub fn set_csd(&mut self, csd: bool) {
+        self.csd = csd;
     }
     /// Marks that a close has been requested by the windower
     pub fn close_requested(&mut self) {
@@ -185,47 +202,179 @@ impl MainUI {
         // * A close was requested again even though the modal is up.
         //   (Either we crashed and the modal isn't seen or the user *really* wants us to close lol)
         // * No open documents to save anyway.
-        self.close_state =
-            if matches!(self.close_state, CloseState::Modal) || self.documents.is_empty() {
-                CloseState::Confirmed
-            } else {
-                // There are open docs, prompt
-                CloseState::Modal
-            }
+        if self.app_close_modal_shown || self.documents.is_empty() {
+            self.window_action = Some(WindowAction::Close);
+        } else {
+            self.app_close_modal_shown = true;
+            modals::spawn(modals::exit::Modal);
+        }
     }
     /// Returns true if the app should close.
     #[must_use]
-    pub fn should_close(&self) -> bool {
-        matches!(self.close_state, CloseState::Confirmed)
+    pub fn take_window_action(&mut self) -> Option<WindowAction> {
+        self.window_action.take()
     }
-    /// Returns true if a top-level modal exists asking whether to close the app.
+    /// Returns the Client-Side window Decoration the mouse is currently over, if any.
+    /// None if CSD is not in use.
     #[must_use]
-    fn modal_enable(&self) -> bool {
-        matches!(self.close_state, CloseState::Modal)
+    pub fn hovered_csd_element(&self) -> Option<HoveredCSD> {
+        self.hovered_csd
     }
-    /// Returns true if any modal is open.
-    #[must_use]
-    fn background_enable(&self) -> bool {
-        self.modal_enable() || self.modal.is_some()
-    }
-    #[must_use]
-    pub fn listen_requests(&self) -> crossbeam::channel::Receiver<requests::UiRequest> {
-        self.requests_recv.clone()
-    }
-    /// Main UI and any modals, with the top bar, layers, brushes, color, etc. To be displayed in front of the document and it's gizmos.
-    /// Returns the size of the document's viewport space - that is, the size of the rect not covered by any side/top/bottom panels.
-    /// None if a full-screen menu is shown.
-    pub fn ui(&mut self, ctx: &egui::Context) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
-        // Close modal, on top of everything.
-        if self.modal_enable() {
-            self.do_close_modal(ctx);
-        }
-        // Show main viewport stuff. Open document, or splash, and document modals.
-        // Display modals before main. Egui will place the windows without regard for free area.
-        self.do_modal(ctx, !self.modal_enable());
+    /// Main UI and any modals, with the top bar, layers, brushes, color, etc.
+    /// To be displayed in front of the document and it's gizmos.
+    pub fn ui(&mut self, ui: &mut egui::Ui, interface: &mut interface::Interface) {
+        modals::show(self, ui, interface);
 
-        // Show, but disable if modal exists.
-        self.main_ui(ctx, !self.background_enable())
+        self.main_ui(ui);
+
+        self.do_connection_windows(ui, interface);
+
+        if let Some(document) = self.cur_document {
+            self.tool_state.gizmos(ui, document, interface);
+        }
+
+        self.error_display.show(ui, crate::log_collector());
+
+        self.do_csd_edges(ui);
+    }
+    fn do_connection_windows(&mut self, ui: &mut egui::Ui, interface: &mut interface::Interface) {
+        // Dock the boxes to the bottom left of the viewport, stacking next to
+        // each other.
+        let mut window_frame = egui::Frame::window(&ui.style());
+        // Visually connect to the bottom of the viewport.
+        window_frame.corner_radius.se = 0;
+        window_frame.corner_radius.sw = 0;
+        window_frame.stroke = egui::Stroke::NONE;
+        let margin = ui.style().spacing.window_margin.leftf();
+        // Left-edge of the windows, bumping over as we add more.
+        let mut x = margin;
+        for (id, mut connection) in interface.iter_connections() {
+            let window_response = egui::Window::new(connection.name())
+                .id(egui::Id::new("connection-window").with(id))
+                .default_open(false)
+                .anchor(egui::Align2::LEFT_BOTTOM, egui::Vec2::new(x, 0.0))
+                .constrain_to(ui.available_rect_before_wrap())
+                // These combine to form "shrink to fit pretty please"
+                .min_width(0.0)
+                .default_width(0.0)
+                .frame(window_frame)
+                .show(ui, |ui| {
+                    egui::Panel::bottom(ui.id().with("text-input")).show_inside(ui, |ui| {
+                        latch::latch(ui, ui.id().with("text"), String::new(), |ui, string| {
+                            let response = ui.text_edit_singleline(string);
+                            if response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            {
+                                response.request_focus();
+                                // Entered, return the text.
+                                latch::Latch::Finish
+                            } else if string.is_empty() {
+                                // Nothing to store
+                                latch::Latch::None
+                            } else {
+                                // Retain typing progress
+                                latch::Latch::Continue
+                            }
+                        })
+                        .on_finish(|string| connection.message(&string));
+                    });
+                    egui::ScrollArea::vertical()
+                        // Take available space
+                        .auto_shrink(false)
+                        .show(ui, |ui| {
+                            for message in connection.messages() {
+                                ui.label(message);
+                                ui.end_row();
+                            }
+                        });
+                })
+                // Not closable
+                .unwrap();
+
+            x += window_response.response.rect.width() + margin;
+        }
+    }
+    fn do_csd_edges(&mut self, ui: &mut egui::Ui) {
+        if !self.csd {
+            return;
+        }
+        {
+            // Draw a visual resize handle in the bottom right, always, cuz i wanna.
+            const CIRCLE_RADIUS_PX: f32 = 1.0;
+            const MARGIN_PX: f32 = 1.0;
+            const SPACING_PX: f32 = 3.0;
+
+            let painter = ui.layer_painter(egui::LayerId {
+                order: egui::Order::Foreground,
+                id: egui::Id::new("csd-resize"),
+            });
+            let color = ui.style().visuals.weak_text_color();
+            let bottom_right = ui.viewport_rect().right_bottom() - egui::Vec2::splat(MARGIN_PX);
+
+            for row in 0..3u8 {
+                for column in 0..(3u8 - row) {
+                    painter.circle_filled(
+                        bottom_right - egui::vec2(column.into(), row.into()) * SPACING_PX,
+                        CIRCLE_RADIUS_PX,
+                        color,
+                    );
+                }
+            }
+        }
+
+        // FIXME: only if no widget is listening to the mouse. Seems impossible?
+        // Weird :3
+        if let Some(pos) = ui.pointer_latest_pos() {
+            use egui::CursorIcon as Icon;
+            use winit::window::ResizeDirection as Resize;
+            enum Dir {
+                Minus,
+                Zero,
+                Plus,
+            }
+
+            let x_dir = if pos.x <= ui.viewport_rect().left() + CSD_RESIZE_WIDTH_LOGICAL_PX {
+                Dir::Minus
+            } else if pos.x >= ui.viewport_rect().right() - CSD_RESIZE_WIDTH_LOGICAL_PX {
+                Dir::Plus
+            } else {
+                Dir::Zero
+            };
+            let y_dir = if pos.y <= ui.viewport_rect().top() + CSD_RESIZE_WIDTH_LOGICAL_PX {
+                Dir::Minus
+            } else if pos.y >= ui.viewport_rect().bottom() - CSD_RESIZE_WIDTH_LOGICAL_PX {
+                Dir::Plus
+            } else {
+                Dir::Zero
+            };
+
+            let resize_dir = match (x_dir, y_dir) {
+                (Dir::Minus, Dir::Minus) => Resize::NorthWest,
+                (Dir::Minus, Dir::Zero) => Resize::West,
+                (Dir::Minus, Dir::Plus) => Resize::SouthWest,
+
+                (Dir::Zero, Dir::Minus) => Resize::North,
+                (Dir::Zero, Dir::Zero) => return,
+                (Dir::Zero, Dir::Plus) => Resize::South,
+
+                (Dir::Plus, Dir::Minus) => Resize::NorthEast,
+                (Dir::Plus, Dir::Zero) => Resize::East,
+                (Dir::Plus, Dir::Plus) => Resize::SouthEast,
+            };
+
+            ui.set_cursor_icon(match resize_dir {
+                Resize::East => Icon::ResizeEast,
+                Resize::North => Icon::ResizeNorth,
+                Resize::NorthEast => Icon::ResizeNorthEast,
+                Resize::NorthWest => Icon::ResizeNorthWest,
+                Resize::South => Icon::ResizeSouth,
+                Resize::SouthEast => Icon::ResizeSouthEast,
+                Resize::SouthWest => Icon::ResizeSouthWest,
+                Resize::West => Icon::ResizeWest,
+            });
+
+            self.hovered_csd = Some(HoveredCSD::Edge(resize_dir));
+        }
     }
     fn get_cur_interface(&mut self) -> Option<&mut PerDocumentData> {
         // Get the document's interface, or reset to none if not found.
@@ -242,58 +391,6 @@ impl MainUI {
             None
         }
     }
-    fn do_close_modal(&mut self, ctx: &egui::Context) {
-        let clicked_elsewhere = egui::Window::new("Exit")
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.label("There are unsaved documents. Do you really want to exit?");
-                ui.horizontal(|ui| {
-                    // On first run-thru it would be nice for this cancel button to auto-focus itself.
-                    if ui.button("Cancel").clicked_or_escape() {
-                        self.close_state = CloseState::None;
-                    }
-                    if ui.button("Exit").clicked() {
-                        self.close_state = CloseState::Confirmed;
-                    }
-                });
-            })
-            .is_some_and(|resp| resp.response.clicked_elsewhere());
-
-        // If the user clicks away from the window assume they cancelled.
-        if clicked_elsewhere {
-            self.close_state = CloseState::None;
-        }
-    }
-    /// Execute the current modal's logic and window.
-    fn do_modal(&mut self, ctx: &egui::Context, enabled: bool) {
-        let Some(modal) = self.modal.as_mut() else {
-            return;
-        };
-
-        let title = match modal {
-            CurrentModal::BrushCreation(_) => brush_ui::CreationModal::NAME,
-            CurrentModal::Settings(_) => settings::Settings::NAME,
-        };
-
-        let mut is_open = true;
-
-        let cancelled = egui::Window::new(title)
-            .collapsible(false)
-            .enabled(enabled)
-            .open(&mut is_open)
-            .show(ctx, |ui| match modal {
-                CurrentModal::BrushCreation(b) => b.do_ui(ui).closed(),
-                CurrentModal::Settings(s) => s.do_ui(ui).closed(),
-            })
-            .and_then(|resp| resp.inner)
-            .unwrap_or(false);
-
-        // Closed :3
-        if !is_open || cancelled {
-            self.modal = None;
-        }
-    }
     fn new_document(&mut self) {
         // When making a new document, start out with a white bg and stroke layer.
         // (These additions are not included in the history, but that's Okay!)
@@ -303,7 +400,7 @@ impl MainUI {
             "Background".to_owned(),
             state::graph::LeafType::SolidColor {
                 blend: Blend::default(),
-                source: fuzzpaint_core::color::ColorOrPalette::WHITE,
+                source: fuzzpaint_types::color::ColorOrPalette::WHITE,
             },
         );
 
@@ -355,10 +452,6 @@ impl MainUI {
             graph_selection: stroke_layer.map(Into::into),
             name,
         };
-        let _ = self.requests_send.send(requests::UiRequest::Document {
-            target: new_id,
-            request: requests::DocumentRequest::Opened,
-        });
         self.cur_document = Some(new_id);
         self.documents.push(interface);
     }
@@ -393,30 +486,12 @@ impl MainUI {
             }
         }
     }
-    /// Render just self. Modals and insets handled separately.
-    fn main_ui(
-        &mut self,
-        ctx: &egui::Context,
-        enabled: bool,
-    ) -> Option<(ultraviolet::Vec2, ultraviolet::Vec2)> {
-        let Ok(action_frame) = self.action_listener.frame() else {
-            let viewport = ctx.available_rect();
-            let pos = viewport.left_top();
-            let size = viewport.size();
-            return Some((
-                ultraviolet::Vec2 { x: pos.x, y: pos.y },
-                ultraviolet::Vec2 {
-                    x: size.x,
-                    y: size.y,
-                },
-            ));
-        };
+    fn main_ui(&mut self, ui: &mut egui::Ui) {
+        self.hovered_csd = None;
+
         let interface = self.get_cur_interface().cloned();
 
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            if !enabled {
-                ui.disable();
-            }
+        egui::Panel::top("menu_bar").show_inside(ui, |ui| {
             self.menu_bar(ui);
         });
 
@@ -424,33 +499,23 @@ impl MainUI {
             // No document view open, show a splash.
             // Don't show the bar if it has nothing to say!
             if !self.documents.is_empty() {
-                egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
-                    if !enabled {
-                        ui.disable();
-                    }
+                egui::Panel::top("document-bar").show_inside(ui, |ui| {
                     self.document_bar(ui);
                 });
             }
-            self.welcome_screen(ctx);
-
-            // When the welcome screen is shown, there is no space for the document view.
-            None
+            self.welcome_screen(ui);
         } else {
             // A document is open, show the main view.
-            egui::TopBottomPanel::bottom("nav_bar").show(ctx, |ui| {
-                if !enabled {
-                    ui.disable();
-                }
+            egui::Panel::bottom("nav_bar").show_inside(ui, |ui| {
                 if let Some(interface) = interface {
-                    Self::nav_bar(ui, interface.id, &self.requests_send, &action_frame);
+                    Self::nav_bar(ui, interface.id);
                 }
             });
-            egui::SidePanel::right("layers").show(ctx, |ui| {
-                if !enabled {
-                    ui.disable();
-                }
-                ui.label("Layers");
+            egui::Panel::right("layers").show_inside(ui, |ui| {
+                egui::Panel::bottom("stats-panel").show_inside(ui, stats_panel);
+                self.colors_panel(ui, self.cur_document);
                 ui.separator();
+                ui.label("Layers");
                 if let Some(interface) = self.get_cur_interface() {
                     layers_panel(ui, interface);
 
@@ -461,7 +526,7 @@ impl MainUI {
                         document: interface.id,
                         brush: old_brush.unwrap_or(state::StrokeBrushSettings {
                             is_eraser: false,
-                            brush: fuzzpaint_core::brush::UniqueID([0; 32]),
+                            brush: fuzzpaint_types::resource::UniqueID([0; 32]),
                             color_modulate: fcolor::ColorOrPalette::BLACK,
                             size_mul: FiniteF32::new(10.0).unwrap(),
                             spacing_px: FiniteF32::new(0.5).unwrap(),
@@ -471,124 +536,170 @@ impl MainUI {
                 }
             });
 
-            egui::SidePanel::left("inspector")
-                .resizable(true)
-                .show(ctx, |ui| {
-                    if !enabled {
-                        ui.disable();
-                    }
-                    // Stats at bottom
-                    egui::TopBottomPanel::bottom("stats-panel").show_inside(ui, stats_panel);
-                    // Toolbox above that
-                    egui::TopBottomPanel::bottom("tools-panel")
-                        .show_inside(ui, |ui| tools_panel(ui, &action_frame, &self.requests_send));
-                    // Brush panel takes the rest
-                    self.colors_panel(ui, self.cur_document, &action_frame);
-                });
-            egui::TopBottomPanel::top("document-bar").show(ctx, |ui| {
-                if !enabled {
-                    ui.disable();
-                }
+            self.tool_state.show_toolbox_column_inside(ui, Side::Left);
+            egui::Panel::top("document-bar").show_inside(ui, |ui| {
                 self.document_bar(ui);
             });
 
             {
-                let response = color_palette::picker_dock(ctx, &mut self.picker_color);
+                let response = color_palette::picker_dock(ui, &mut self.picker_color);
                 self.picker_changed = response.response.changed();
                 self.picker_in_flux = response.in_flux;
             }
-
-            let viewport = ctx.available_rect();
-            let pos = viewport.left_top();
-            let size = viewport.size();
-            Some((
-                ultraviolet::Vec2 { x: pos.x, y: pos.y },
-                ultraviolet::Vec2 {
-                    x: size.x,
-                    y: size.y,
-                },
-            ))
         }
     }
-    /// File, Edit, ect
+    /// File, Edit, ect. `csd` adds client-side-decorations (Close, maximize,
+    /// minimize).
     fn menu_bar(&mut self, ui: &mut Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)))
+        let bar = ui.horizontal_wrapped(|ui| {
+            // Logo on the left.
+            if self.csd {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("🐑").font(egui::FontId::proportional(20.0)),
+                    )
+                    .selectable(false),
+                )
                 .on_hover_text("Baa");
-            egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    let add_button = |ui: &mut Ui, label, shortcut| -> egui::Response {
-                        let mut button = egui::Button::new(label);
-                        if let Some(shortcut) = shortcut {
-                            button = button.shortcut_text(shortcut);
-                        }
-                        ui.add(button)
-                    };
-                    if add_button(ui, "New", Some("Ctrl+N")).clicked() {
-                        self.new_document();
+
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Fuzzpaint").font(egui::FontId::proportional(15.0)),
+                    )
+                    .selectable(false),
+                )
+                .on_hover_text(crate::VERSION.unwrap_or("Unknown version"));
+            }
+            // CSD buttons on the right.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.csd {
+                    if ui
+                        .add(egui::Button::new("🗙").frame_when_inactive(false))
+                        .clicked()
+                    {
+                        self.close_requested();
                     }
-                    if add_button(ui, "Save", Some("Ctrl+S")).clicked() {
-                        // Dirty testing implementation!
-                        if let Some(current) = self.cur_document {
-                            std::thread::spawn(move || {
-                                if let Some(reader) = crate::global::provider()
-                                    .inspect(current, queue::DocumentCommandQueue::peek_clone_state)
-                                {
-                                    let repo = crate::global::points();
+                    if ui
+                        .add(egui::Button::new("🗖").frame_when_inactive(false))
+                        .clicked()
+                    {
+                        self.window_action =
+                            Some(self.window_action.unwrap_or(WindowAction::Maximize));
+                    }
+                    if ui
+                        .add(egui::Button::new("🗕").frame_when_inactive(false))
+                        .clicked()
+                    {
+                        self.window_action =
+                            Some(self.window_action.unwrap_or(WindowAction::Minimize));
+                    }
+                }
 
-                                    let try_block = || -> anyhow::Result<()> {
-                                        let mut path = dirs::document_dir().unwrap();
-                                        path.push("temp.fzp");
-                                        let file = std::fs::File::create(path)?;
+                // Random debug stuf :V
+                ui.label(format!("{}", ui.cumulative_frame_nr()));
 
-                                        let start = std::time::Instant::now();
-                                        io::write_into(&reader, repo, &file)?;
-                                        let duration = start.elapsed();
+                // Menu from left to right, taking up the middle space.
+                egui::MenuBar::new().ui(ui, |ui| {
+                    ui.menu_button("File", |ui| {
+                        let add_button = |ui: &mut Ui, label, shortcut| -> egui::Response {
+                            let mut button = egui::Button::new(label);
+                            if let Some(shortcut) = shortcut {
+                                button = button.shortcut_text(shortcut);
+                            }
+                            ui.add(button)
+                        };
+                        if add_button(ui, "New", Some("Ctrl+N")).clicked() {
+                            modals::spawn(modals::new_doc::Modal::default());
+                            self.new_document();
+                        }
+                        if add_button(ui, "Save", Some("Ctrl+S")).clicked() {
+                            // Dirty testing implementation!
+                            if let Some(current) = self.cur_document {
+                                std::thread::spawn(move || {
+                                    if let Some(reader) = crate::global::provider().inspect(
+                                        current,
+                                        queue::DocumentCommandQueue::peek_clone_state,
+                                    ) {
+                                        let repo = crate::global::points();
 
-                                        file.sync_all()?;
-                                        if let Some(size) =
-                                            file.metadata().ok().map(|meta| meta.len())
-                                        {
-                                            let size = size as f64;
-                                            let speed = size / duration.as_secs_f64();
-                                            log::info!(
-                                                "Wrote {} in {}us ({}/s)",
-                                                human_bytes::human_bytes(size),
-                                                duration.as_micros(),
-                                                human_bytes::human_bytes(speed)
-                                            );
-                                        } else {
-                                            log::info!("Wrote in {}us", duration.as_micros());
+                                        let try_block = || -> anyhow::Result<()> {
+                                            let mut path = dirs::document_dir().unwrap();
+                                            path.push("temp.fzp");
+                                            let file = std::fs::File::create(path)?;
+
+                                            let start = std::time::Instant::now();
+                                            io::write_into(&reader, repo, &file)?;
+                                            let duration = start.elapsed();
+
+                                            file.sync_all()?;
+                                            if let Some(size) =
+                                                file.metadata().ok().map(|meta| meta.len())
+                                            {
+                                                let size = size as f64;
+                                                let speed = size / duration.as_secs_f64();
+                                                log::info!(
+                                                    "Wrote {} in {}us ({}/s)",
+                                                    human_bytes::human_bytes(size),
+                                                    duration.as_micros(),
+                                                    human_bytes::human_bytes(speed)
+                                                );
+                                            } else {
+                                                log::info!("Wrote in {}us", duration.as_micros());
+                                            }
+                                            Ok(())
+                                        };
+
+                                        if let Err(e) = try_block() {
+                                            log::error!("Failed to write document: {e:?}");
                                         }
-                                        Ok(())
-                                    };
-
-                                    if let Err(e) = try_block() {
-                                        log::error!("Failed to write document: {e:?}");
                                     }
-                                }
-                            });
+                                });
+                            }
                         }
-                    }
-                    // let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
-                    if add_button(ui, "Open", Some("Ctrl+O")).clicked() {
-                        self.open_documents();
-                    }
-                    //let _ = add_button(ui, "Open as new", None);
-                    //let _ = add_button(ui, "Export", None);
-                });
-                ui.menu_button("Edit", |ui| {
-                    if ui.button("Settings").clicked() {
-                        self.modal = Some(CurrentModal::Settings(settings::Settings::default()));
-                        ui.close();
-                    }
+                        // let _ = add_button(ui, "Save as", Some("Ctrl+Shift+S"));
+                        if add_button(ui, "Open", Some("Ctrl+O")).clicked() {
+                            self.open_documents();
+                        }
+                        //let _ = add_button(ui, "Open as new", None);
+                        //let _ = add_button(ui, "Export", None);
+                    });
+                    ui.menu_button("Edit", |ui| {
+                        if ui.button("Settings").clicked() {
+                            modals::spawn(modals::settings::Modal::default());
+                            ui.close();
+                        }
+                    });
+                    ui.menu_button("Remote", |ui| {
+                        if ui.button("Connect...").clicked() {
+                            modals::spawn(modals::connect::Modal::default());
+                            ui.close();
+                        }
+                    });
+                    ui.menu_button("Info", |ui| {
+                        if ui.button("View Log").clicked() {
+                            self.error_display.show_list();
+                        }
+                        if ui.button("Print a log!").clicked() {
+                            log::warn!("User triggered log.");
+                        }
+                    });
                 });
             });
         });
+        // Report hovers over the title bar, for window dragging. False if a
+        // sub-object (menu button) is hovered. Neat!
+        if self.csd
+            && let Some(hover) = bar.response.hover_pos()
+        {
+            self.hovered_csd = Some(HoveredCSD::Title(winit::dpi::LogicalPosition {
+                x: hover.x,
+                y: hover.y,
+            }));
+        }
     }
     /// Show a center welcome/"home" panel when no document is selected.
-    fn welcome_screen(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn welcome_screen(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.vertical_centered(|ui| {
                 const BIG_BUTTON_MAX_SIZE: f32 = 125.0;
                 const BIG_BUTTON_MIN_SIZE: f32 = 75.0;
@@ -685,6 +796,7 @@ impl MainUI {
                     };
 
                     if big_button(ui, a, "➕ New").clicked() {
+                        modals::spawn(modals::new_doc::Modal::default());
                         self.new_document();
                     }
                     if big_button(ui, b, "🗀 Open").clicked() {
@@ -759,12 +871,7 @@ impl MainUI {
         });
     }
     /// Bottom trim showing view controls.
-    fn nav_bar(
-        ui: &mut Ui,
-        document: state::document::ID,
-        requests: &crossbeam::channel::Sender<requests::UiRequest>,
-        frame: &crate::actions::ActionFrame,
-    ) {
+    fn nav_bar(ui: &mut Ui, document: state::document::ID) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Everything here is shown in reverse order!
 
@@ -776,12 +883,7 @@ impl MainUI {
             // as the rest of the world has no way to communicate into the UI (so, no reporting of current transform)
 
             //Zoom controls
-            if ui.small_button(RESET_ICON).clicked() {
-                let _ = requests.send(requests::UiRequest::Document {
-                    target: document,
-                    request: requests::DocumentRequest::View(requests::DocumentViewRequest::Fit),
-                });
-            }
+            let _ = ui.small_button(RESET_ICON);
             let mut zoom = None::<f32>;
             egui::ComboBox::new("Zoom", "Zoom")
                 // We don't actually know the current zoom, mwehehehe so sneaky
@@ -793,56 +895,22 @@ impl MainUI {
                     ui.selectable_value(&mut zoom, Some(2.0), "200%");
                     ui.selectable_value(&mut zoom, Some(4.0), "400%");
                 });
-            // An option was chosen! Emit the command to scale
-            if let Some(zoom) = zoom {
-                let _ = requests.send(requests::UiRequest::Document {
-                    target: document,
-                    request: requests::DocumentRequest::View(
-                        requests::DocumentViewRequest::RealSize(zoom),
-                    ),
-                });
-            }
-            // Handle Scroll wheel
-            // future: configurable scroll direction and speed.
-            // FIXME: respect cursor position.
-            let scroll_zoom_cmds = frame.action_trigger_count(crate::actions::Action::ZoomIn)
-                as f32
-                - frame.action_trigger_count(crate::actions::Action::ZoomOut) as f32;
-            let _ = requests.send(requests::UiRequest::Document {
-                target: document,
-                request: requests::DocumentRequest::View(requests::DocumentViewRequest::ZoomBy(
-                    1.25f32.powf(scroll_zoom_cmds),
-                )),
-            });
 
             ui.add(egui::Separator::default().vertical());
 
             //Rotate controls
-            if ui.small_button(RESET_ICON).clicked() {
-                let _ = requests.send(requests::UiRequest::Document {
-                    target: document,
-                    request: requests::DocumentRequest::View(
-                        requests::DocumentViewRequest::RotateTo(0.0),
-                    ),
-                });
-            }
+            let _ = ui.small_button(RESET_ICON);
             latch::latch(ui, (document, "rotation"), 0.0, |ui, rotation: &mut f32| {
                 let before = *rotation;
                 let rotation_response = ui.add(
                     egui::DragValue::new(rotation)
                         .speed(0.5)
                         .fixed_decimals(0)
-                        .suffix('°'),
+                        .suffix("°"),
                 );
                 if rotation_response.changed() {
                     // Use a delta angle request
                     let delta = *rotation - before;
-                    let _ = requests.send(requests::UiRequest::Document {
-                        target: document,
-                        request: requests::DocumentRequest::View(
-                            requests::DocumentViewRequest::RotateBy(delta.to_radians()),
-                        ),
-                    });
                 }
                 if rotation_response.dragged() {
                     latch::Latch::Continue
@@ -856,35 +924,17 @@ impl MainUI {
             let undo = egui::Button::new("⮪");
             let redo = egui::Button::new("⮫");
 
-            // Accept undo/redo actions
-            let mut undos = frame.action_trigger_count(crate::actions::Action::Undo);
-            let mut redos = frame.action_trigger_count(crate::actions::Action::Redo);
-
             // RTL - add in reverse :P
             if ui.add(redo).clicked() {
-                redos += 1;
+                crate::global::provider().inspect(document, |document| document.redo_n(1));
             }
             if ui.add(undo).clicked() {
-                undos += 1;
-            }
-            // Submit undo/redos as requested.
-            if redos != 0 {
-                crate::global::provider().inspect(document, |document| document.redo_n(redos));
-            }
-            if undos != 0 {
-                crate::global::provider().inspect(document, |document| document.undo_n(undos));
+                crate::global::provider().inspect(document, |document| document.undo_n(1));
             }
         });
     }
 
-    fn colors_panel(
-        &mut self,
-        ui: &mut Ui,
-        current_doc: Option<state::document::ID>,
-        actions: &crate::actions::ActionFrame,
-    ) {
-        use az::SaturatingAs;
-
+    fn colors_panel(&mut self, ui: &mut Ui, current_doc: Option<state::document::ID>) {
         let mut globals = crate::AdHocGlobals::get().write();
         if let Some(brush) = globals.as_mut().map(|globals| &mut globals.brush) {
             if let Some(current_doc) = current_doc {
@@ -912,11 +962,7 @@ impl MainUI {
                         .scope(color_palette::HistoryScope::Local)
                         .in_flux(self.picker_in_flux)
                         .id_source(current_doc)
-                        .swap(
-                            // Swap top colors if requested.
-                            actions.action_trigger_count(crate::actions::Action::ColorSwap) % 2
-                                == 1,
-                        )
+                        .swap(false)
                         .max_history(64)
                         .show(ui);
 
@@ -939,9 +985,7 @@ impl MainUI {
                 ui.label("Brush");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(PLUS_ICON.to_string()).clicked() {
-                        self.modal = Some(CurrentModal::BrushCreation(
-                            brush_ui::CreationModal::default(),
-                        ));
+                        log::warn!("Unimplemented");
                     }
                 })
             });
@@ -954,14 +998,7 @@ impl MainUI {
             // Apply size up/down actions
             // - for down, + for up
             'size_steps: {
-                let size_steps = actions
-                    .action_trigger_count(crate::actions::Action::BrushSizeUp)
-                    .saturating_as::<i32>()
-                    .saturating_sub(
-                        actions
-                            .action_trigger_count(crate::actions::Action::BrushSizeDown)
-                            .saturating_as(),
-                    );
+                let size_steps = 0;
                 if size_steps == 0 {
                     break 'size_steps;
                 }
@@ -997,75 +1034,6 @@ impl MainUI {
                 brush.spacing_px = spacing_px;
             }
         }
-    }
-}
-/// For any tool, `(icon string, tooltip, opt_hotkey)`
-fn tool_button_for(
-    tool: crate::pen_tools::StateLayer,
-) -> (&'static str, &'static str, Option<crate::actions::Action>) {
-    use crate::{actions::Action, pen_tools::StateLayer};
-    match tool {
-        StateLayer::Brush => (STROKE_LAYER_ICON, "Brush", Some(Action::Brush)),
-        StateLayer::Picker => ("✒", "Picker", Some(Action::Picker)),
-        StateLayer::Gizmos => ("⌖", "Gizmos", Some(Action::Gizmo)),
-        StateLayer::Lasso => ("?", "Lasso", Some(Action::Lasso)),
-        // NO action for these! pen_tools takes care of it without latching.
-        // TODO: that's a weird mixing of roles lol
-        StateLayer::Eraser => ("?", "Eraser", None),
-        StateLayer::ViewportPan => ("✋", "Pan View", None),
-        StateLayer::ViewportRotate => ("🔃", "Rotate View", None),
-        StateLayer::ViewportScrub => ("🔍", "Scrub View", None),
-    }
-}
-fn tools_panel(
-    ui: &mut Ui,
-    action_frame: &crate::actions::ActionFrame,
-    requests: &crossbeam::channel::Sender<requests::UiRequest>,
-) {
-    use crate::pen_tools::StateLayer;
-    const TOOL_GROUPS: [&[StateLayer]; 3] = [
-        &[StateLayer::Brush, StateLayer::Eraser, StateLayer::Picker],
-        &[StateLayer::Lasso, StateLayer::Gizmos],
-        &[
-            StateLayer::ViewportPan,
-            StateLayer::ViewportRotate,
-            StateLayer::ViewportScrub,
-        ],
-    ];
-    // size, grows to justify
-    const BTN_BASE_SIZE: f32 = 20.0;
-    const ICON_SIZE: f32 = 15.0;
-    // Margin
-    const BTN_BASE_MARGIN: f32 = 5.0;
-
-    let button_size = justify_mut(ui, JustifyAxis::Horizontal, BTN_BASE_SIZE, BTN_BASE_MARGIN);
-
-    let spacing = ui.spacing_mut();
-    spacing.interact_size = egui::Vec2::splat(button_size);
-    spacing.button_padding = egui::Vec2::ZERO;
-
-    let font_height = ICON_SIZE / ui.ctx().pixels_per_point();
-    let font = egui::FontId::monospace(font_height);
-
-    for tool_group in TOOL_GROUPS {
-        ui.horizontal_wrapped(|ui| {
-            for &tool in tool_group {
-                let (icon, tooltip, opt_action) = tool_button_for(tool);
-
-                let button = egui::Button::new(egui::RichText::new(icon).font(font.clone()))
-                    .min_size(egui::Vec2::splat(button_size));
-                // Add button. Trigger if button clicked or action occured.
-                let response = ui.add(button).on_hover_text(tooltip);
-                let clicked = if let Some(action) = opt_action {
-                    response.or_action_clicked(action_frame, action)
-                } else {
-                    response.clicked()
-                };
-                if clicked {
-                    let _ = requests.send(requests::UiRequest::SetBaseTool { tool });
-                }
-            }
-        });
     }
 }
 /// Edit a leaf layer's data. If modifications were made that should be pushed to the queue,
@@ -1548,7 +1516,7 @@ fn layers_panel(ui: &mut Ui, interface: &mut PerDocumentData) {
                 .and_then(|node| graph.get(node))
                 .cloned();
 
-            egui::TopBottomPanel::bottom("LayerProperties").show_animated_inside(
+            egui::Panel::bottom("LayerProperties").show_animated_inside(
                 ui,
                 node_props.is_some(),
                 |ui| {
@@ -1973,8 +1941,8 @@ fn graph_edit_recurse<
         let header_response = ui.horizontal(|ui| {
             let data = graph.get(id).unwrap();
 
-            // Disable everything if dragging a layer around.
-            if dnd_state.is_none() {
+            // Disable everything else if dragging a layer.
+            if dnd_state.is_some_and(|state| state.drag_target != id) {
                 ui.disable();
             }
 
@@ -2014,8 +1982,16 @@ fn graph_edit_recurse<
 
             // Fetch from last frame - are we hovered?
             let name_hovered_key = egui::Id::new((id, "name-hovered"));
-            let hovered: Option<bool> = ui.data(|data| data.get_temp(name_hovered_key));
-            let edit = egui::TextEdit::singleline(name).frame(hovered.unwrap_or(false));
+            let hovered: bool = ui
+                .data(|data| data.get_temp(name_hovered_key))
+                .unwrap_or(false);
+            let edit = egui::TextEdit::singleline(name);
+            // Remove the visual frame if not hovered
+            let edit = if !hovered {
+                edit.frame(egui::Frame::NONE)
+            } else {
+                edit
+            };
             let name_response = ui.add(edit);
 
             // Send data to next frame, to tell that we're hovered or not.

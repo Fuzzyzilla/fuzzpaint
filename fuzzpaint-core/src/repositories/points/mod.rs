@@ -10,9 +10,9 @@ pub mod io;
 mod slab;
 use slab::Slab;
 
-use crate::stroke::{Archetype, StrokeSlice};
+use fuzzpaint_types::stroke::{aos::Slice, Archetype};
 
-fn summarize(stroke: StrokeSlice) -> CollectionSummary {
+fn summarize(stroke: Slice) -> CollectionSummary {
     // Funny `try`
     // Calc arc length by observing arc length at end minus start.
     let arc_length = || -> Option<f32> {
@@ -53,12 +53,12 @@ pub type PointCollectionID = crate::FuzzID<PointCollectionIDMarker>;
 /// to be reclaimed by the repository for the duration of the lock's lifetime.
 #[derive(Clone)]
 pub struct BorrowedStrokeReadLock {
-    stroke: StrokeSlice<'static>,
+    stroke: Slice<'static>,
 }
 impl BorrowedStrokeReadLock {
     // we want to seal the fact that this is 'static. Can't be done with deref!
     #[must_use]
-    pub fn get<'a>(&'a self) -> StrokeSlice<'a> {
+    pub fn get<'a>(&'a self) -> Slice<'a> {
         self.stroke
     }
 }
@@ -112,7 +112,7 @@ impl Points {
     /// Insert the collection into the repository, yielding a unique ID.
     /// Fails if the length of the collection caintains > [`SLAB_ELEMENT_COUNT`] f32 elements
     #[must_use = "the returned ID is needed to fetch the data in the future"]
-    pub fn insert(&self, collection: StrokeSlice) -> Option<PointCollectionID> {
+    pub fn insert(&self, collection: Slice) -> Option<PointCollectionID> {
         let elements = collection.elements();
         if elements.len() > SLAB_ELEMENT_COUNT {
             // Too long to ever fit!
@@ -203,7 +203,7 @@ impl Points {
             return Err(super::TryRepositoryError::NotFound);
         };
         Ok(BorrowedStrokeReadLock {
-            stroke: StrokeSlice::new(slice, alloc.summary.archetype).unwrap(),
+            stroke: Slice::new(slice, alloc.summary.archetype).unwrap(),
         })
     }
 }

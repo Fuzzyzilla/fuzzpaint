@@ -7,20 +7,48 @@
 mod defaults;
 pub mod enum_smuggler;
 
-pub trait HotkeyShadow {
-    type Other;
-    /// Returns true if this event is "more specific" than the other.
-    /// i.e., uses the same key but has stricter modifiers, or same pad different key.
-    /// *Not assymetric* - a.shadows(b) and b.shadows(a) are both allowed to return true.
-    /// In that case, it makes sense to shadow the older one and favor the new.
-    fn shadows(&self, other: &Self::Other) -> bool;
-}
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+    pub struct Modifiers: u8 {
+        const CTRL = 1;
 
-#[derive(Hash, PartialEq, Eq, Clone, Debug, Copy, PartialOrd, Ord)]
+        const ALT = 2;
+        const CTRL_ALT = Modifiers::CTRL.bits() | Modifiers::ALT.bits();
+
+        const SHIFT = 4;
+        const CTRL_SHIFT = Modifiers::CTRL.bits() | Modifiers::SHIFT.bits();
+        const ALT_SHIFT = Modifiers::ALT.bits() | Modifiers::SHIFT.bits();
+
+        const CTRL_ALT_SHIFT = Modifiers::CTRL.bits() | Modifiers::ALT.bits() | Modifiers::SHIFT.bits();
+    }
+}
+impl Modifiers {
+    pub const fn ctrl_alt_shift(ctrl: bool, alt: bool, shift: bool) -> Self {
+        let mut inner = 0;
+        if ctrl {
+            inner |= Self::CTRL.bits();
+        }
+        if alt {
+            inner |= Self::ALT.bits();
+        }
+        if shift {
+            inner |= Self::SHIFT.bits();
+        }
+        Self::from_bits_retain(inner)
+    }
+    pub fn ctrl(self) -> bool {
+        self.intersects(Self::CTRL)
+    }
+    pub fn alt(self) -> bool {
+        self.intersects(Self::ALT)
+    }
+    pub fn shift(self) -> bool {
+        self.intersects(Self::SHIFT)
+    }
+}
+#[derive(Hash, PartialEq, Eq, Clone, Debug, Copy)]
 pub struct KeyboardHotkey {
-    pub ctrl: bool,
-    pub alt: bool,
-    pub shift: bool,
+    pub modifiers: Modifiers,
     pub key: winit::keyboard::KeyCode,
 }
 impl serde::Serialize for KeyboardHotkey {
@@ -47,24 +75,18 @@ impl<'de> serde::Deserialize<'de> for KeyboardHotkey {
     }
 }
 impl KeyboardHotkey {
-    /// Get an arbitrary score of how specific this key is -
-    /// Hotkeys with higher specificity shadow those with lower.
-    #[must_use]
-    pub fn specificity(&self) -> u8 {
-        u8::from(self.ctrl) + u8::from(self.alt) + u8::from(self.shift)
-    }
     /// Get a human-readable string. This string is formatted correctly for [`std::str::FromStr`].
     #[must_use]
     pub fn to_string(&self) -> String {
         let key_name = enum_smuggler::smuggle_out(self.key).unwrap().variant;
         let mut components = smallvec::SmallVec::<[&'static str; 4]>::new();
-        if self.ctrl {
+        if self.modifiers.ctrl() {
             components.push("ctrl");
         }
-        if self.alt {
+        if self.modifiers.alt() {
             components.push("alt");
         }
-        if self.shift {
+        if self.modifiers.shift() {
             components.push("shift");
         };
         components.push(key_name);
@@ -89,25 +111,21 @@ impl std::str::FromStr for KeyboardHotkey {
                 false
             }
         };
-        let ctrl = take_if_has("ctrl+");
-        let alt = take_if_has("alt+");
-        let shift = take_if_has("shift+");
+        let mut modifiers = Modifiers::empty();
+        if take_if_has("ctrl+") {
+            modifiers |= Modifiers::CTRL
+        };
+        if take_if_has("alt+") {
+            modifiers |= Modifiers::ALT
+        };
+        if take_if_has("shift+") {
+            modifiers |= Modifiers::SHIFT
+        };
         // str now contains only the key name.
         let key = enum_smuggler::smuggle_in(str)
             .map_err(|_| KeyboardHotkeyFromStrError::InvalidKeyName)?;
 
-        Ok(Self {
-            ctrl,
-            alt,
-            shift,
-            key,
-        })
-    }
-}
-impl HotkeyShadow for KeyboardHotkey {
-    type Other = Self;
-    fn shadows(&self, other: &Self::Other) -> bool {
-        other.key == self.key && (other.specificity() <= self.specificity())
+        Ok(Self { modifiers, key })
     }
 }
 /// Todo: how to identify a pad across program invocations?
@@ -132,12 +150,6 @@ pub struct PadHotkey {
     /// Which key index?
     pub key: u32,
 }
-impl HotkeyShadow for PadHotkey {
-    type Other = Self;
-    fn shadows(&self, other: &Self::Other) -> bool {
-        other.pad == self.pad && other.layer == self.layer
-    }
-}
 /// Pens are not yet implemented, but looking forward:
 /// Allows many pens, and different functionality per-pen
 /// depending on which pad it is interacting with. (wacom functionality)
@@ -151,12 +163,6 @@ pub struct PenHotkey {
     pub pen: PenID,
     /// Which button index?
     pub key: u32,
-}
-impl HotkeyShadow for PenHotkey {
-    type Other = Self;
-    fn shadows(&self, other: &Self::Other) -> bool {
-        other.pad == self.pad && other.pen == self.pen
-    }
 }
 /// A collection of many various hotkeys. Contained as Arc'd slices,
 /// as it is not intended to change frequently.
@@ -179,23 +185,11 @@ impl HotkeyCollection {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Debug, Copy, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Hash, Clone, Debug, Copy)]
 pub enum AnyHotkey {
     Key(KeyboardHotkey),
     Pad(PadHotkey),
     Pen(PenHotkey),
-}
-impl HotkeyShadow for AnyHotkey {
-    type Other = Self;
-    fn shadows(&self, other: &Self::Other) -> bool {
-        match (self, other) {
-            (AnyHotkey::Key(k1), AnyHotkey::Key(k2)) => k1.shadows(k2),
-            (AnyHotkey::Pad(k1), AnyHotkey::Pad(k2)) => k1.shadows(k2),
-            (AnyHotkey::Pen(k1), AnyHotkey::Pen(k2)) => k1.shadows(k2),
-            // Different types do not shadow each other
-            _ => false,
-        }
-    }
 }
 impl From<KeyboardHotkey> for AnyHotkey {
     fn from(value: KeyboardHotkey) -> Self {
@@ -245,7 +239,7 @@ impl ActionsToKeys {
 
 /// Derived from [`ActionsToKeys`], maps each hotkey onto at most one action.
 #[derive(Clone)]
-pub struct KeysToActions(std::collections::BTreeMap<AnyHotkey, super::Action>);
+pub struct KeysToActions(hashbrown::HashMap<AnyHotkey, super::Action>);
 #[derive(thiserror::Error, Debug)]
 pub enum KeysToActionsError {
     /// A single key was bound to multiple actions.
@@ -259,7 +253,7 @@ pub enum KeysToActionsError {
 impl TryFrom<&ActionsToKeys> for KeysToActions {
     type Error = KeysToActionsError;
     fn try_from(value: &ActionsToKeys) -> Result<Self, Self::Error> {
-        let mut new = KeysToActions(std::collections::BTreeMap::new());
+        let mut new = KeysToActions(hashbrown::HashMap::new());
 
         for (action, keys) in &value.0 {
             for key in keys.iter() {

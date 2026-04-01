@@ -1,0 +1,8 @@
+[package]
+name = "fuzzpaint-doc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fuzzpaint-types = { path = "../fuzzpaint-types" }
+ultraviolet = { workspace = true }

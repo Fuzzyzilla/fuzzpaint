@@ -12,7 +12,7 @@ struct PerDocument {
 }
 /// A provider that keeps documents in-memory.
 pub struct Local {
-    on_change: parking_lot::Mutex<bus::Bus<ChangeMessage>>,
+    on_change: tokio::sync::broadcast::Sender<ChangeMessage>,
     // We don't expect high contention - will only be locked for writing when a new queue is inserted.
     documents: parking_lot::RwLock<hashbrown::HashMap<ID, PerDocument>>,
 }
@@ -28,9 +28,7 @@ impl Local {
         };
         self.documents.write().insert(new_id, new_document);
 
-        self.on_change
-            .lock()
-            .broadcast(ChangeMessage::Opened(new_id));
+        let _ = self.on_change.send(ChangeMessage::Opened(new_id));
 
         new_id
     }
@@ -47,7 +45,7 @@ impl Local {
             }
         }
 
-        self.on_change.lock().broadcast(ChangeMessage::Opened(id));
+        let _ = self.on_change.send(ChangeMessage::Opened(id));
 
         Ok(())
     }
@@ -67,7 +65,7 @@ impl Local {
         drop(read);
 
         if let Ok(true) = cursor.forward() {
-            self.on_change.lock().broadcast(ChangeMessage::Modified(id));
+            let _ = self.on_change.send(ChangeMessage::Modified(id));
         }
 
         Some(result)
@@ -81,21 +79,21 @@ impl Local {
     /// Ensures the ID is valid before sending.
     pub fn touch(&self, id: ID) {
         if self.documents.read().contains_key(&id) {
-            self.on_change.lock().broadcast(ChangeMessage::Modified(id));
+            let _ = self.on_change.send(ChangeMessage::Modified(id));
         }
     }
     /// Get a reciever of messages describing changes to the provider or it's documents.
     /// Does not recieve old messages, use [`Self::document_iter`] to get up-to-date!
-    pub fn change_listener(&self) -> bus::BusReader<ChangeMessage> {
-        self.on_change.lock().add_rx()
+    pub fn change_listener(&self) -> tokio::sync::broadcast::Receiver<ChangeMessage> {
+        self.on_change.subscribe()
     }
 }
 impl Default for Local {
     fn default() -> Self {
         // Blocks on full, so choose a large number to avoid blocking user thread.
-        let on_change = bus::Bus::new(256);
+        let on_change = tokio::sync::broadcast::Sender::new(64);
         Self {
-            on_change: on_change.into(),
+            on_change,
             documents: parking_lot::RwLock::default(),
         }
     }

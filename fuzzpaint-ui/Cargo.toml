@@ -1,0 +1,9 @@
+[package]
+name = "fuzzpaint-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+egui = "0.34.0"
+fuzzpaint-doc = { path = "../fuzzpaint-doc" }
+fuzzpaint-types = { path = "../fuzzpaint-types" }

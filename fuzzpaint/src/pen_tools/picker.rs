@@ -16,10 +16,8 @@ impl super::PenTool for Picker {
     async fn process(
         &mut self,
         view_info: &super::ViewInfo,
-        _stylus_input: crate::stylus_events::StylusEventFrame,
-        _actions: &crate::actions::ActionFrame,
+        _stylus_input: crate::window::stylus_events::StylusEventFrame,
         _tool_output: &mut super::ToolStateOutput,
-        _render_output: &mut super::ToolRenderOutput,
     ) {
         // Someone got bored and frustrated halfway through writing this...
         let _requests: &mut tokio::sync::mpsc::Sender<crate::renderer::requests::RenderRequest> =

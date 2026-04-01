@@ -228,10 +228,10 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
                     id: crate::FuzzID::default(),
                     brush: crate::state::StrokeBrushSettings {
                         is_eraser: false,
-                        brush: crate::brush::UniqueID([0; 32]),
-                        color_modulate: crate::color::ColorOrPalette::BLACK,
-                        size_mul: crate::util::FiniteF32::new(10.0).unwrap(),
-                        spacing_px: crate::util::FiniteF32::new(0.5).unwrap(),
+                        brush: fuzzpaint_types::resource::UniqueID([0; 32]),
+                        color_modulate: fuzzpaint_types::color::ColorOrPalette::BLACK,
+                        size_mul: fuzzpaint_types::float::FiniteF32::new(10.0).unwrap(),
+                        spacing_px: fuzzpaint_types::float::FiniteF32::new(0.5).unwrap(),
                     },
                 },
             )
@@ -250,7 +250,7 @@ pub fn read_path<Path: Into<std::path::PathBuf>>(
         },
     );
     let my_node = crate::state::graph::LeafType::StrokeLayer {
-        blend: crate::blend::Blend::default(),
+        blend: fuzzpaint_types::blend::Blend::default(),
         inner_transform: crate::state::transform::Similarity::default(),
         outer_transform: crate::state::transform::Matrix::default(),
         collection: my_collection,

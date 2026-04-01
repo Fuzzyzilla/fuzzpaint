@@ -1,4 +1,6 @@
-use fuzzpaint_core::brush::{Brush, Texture, UniqueID};
+use fuzzpaint_core::brush::{Brush, Texture};
+use fuzzpaint_types::resource::UniqueID;
+use hashbrown::HashMap;
 
 use super::ResponseExt;
 
@@ -7,11 +9,548 @@ const FULL_UV: egui::Rect = egui::Rect {
     max: egui::Pos2 { x: 1.0, y: 1.0 },
 };
 
-#[derive(Copy, Clone, Default, PartialEq, Eq)]
+#[derive(strum::IntoStaticStr, strum::EnumIter, Copy, Clone, Default, PartialEq, Eq)]
 enum CreationTab {
     #[default]
     Settings,
     Texture,
+    Dynamics(DynamicDestination, DynamicSourceNormalized),
+}
+#[derive(strum::IntoStaticStr, strum::EnumIter, Debug, PartialEq, Eq, Clone, Copy, Default)]
+enum DynamicDestination {
+    #[default]
+    Size,
+    Rotation,
+    Offset,
+    Flow,
+    Spacing,
+    // Hue,
+    // Lightness,
+}
+/// Sources with a constant min an max, mapped to [0, 1].
+#[derive(
+    strum::IntoStaticStr, strum::EnumIter, Debug, PartialEq, Eq, Clone, Copy, Default, Hash,
+)]
+enum DynamicSourceNormalized {
+    #[default]
+    Pressure,
+    Roll,
+    TiltX,
+    TiltY,
+    Altitude,
+    Azimuth,
+    Direction,
+    StampRandom,
+    StrokeRandom,
+}
+impl DynamicSourceNormalized {
+    fn domain_labels(self) -> &'static [&'static str] {
+        match self {
+            // Unitless, [0, 1]
+            Self::Pressure | Self::StampRandom | Self::StrokeRandom => &["Min", "Max"],
+            Self::Roll => &["0deg", "360deg"],
+            // [-90, 90deg], but more descriptive of their directions. Negative
+            // is towards top/left.
+            Self::TiltX => &["Left", "Center", "Right"],
+            Self::TiltY => &["Forward", "Center", "Back"],
+            // [0, 90deg], but more descriptive of the directions:
+            Self::Altitude => &["Horizontal", "Vertical"],
+            // any angle, in canvas space. 0 = Right, increasing clockwise.
+            // (This is a consequence of the y axis increasing downwards!)
+            Self::Azimuth | Self::Direction => &["Right", "Down", "Left", "Up", "Right"],
+        }
+    }
+    fn range(self) -> [f32; 2] {
+        match self {
+            Self::Pressure | Self::StampRandom | Self::StrokeRandom => [0.0, 1.0],
+            Self::Roll | Self::Azimuth | Self::Direction => [0.0, 360.0],
+            Self::TiltX | Self::TiltY => [-90.0, 90.0],
+            Self::Altitude => [0.0, 90.0],
+        }
+    }
+    fn description(self) -> &'static str {
+        match self {
+            DynamicSourceNormalized::Pressure => "How hard the stylus is pressed into the surface.",
+            DynamicSourceNormalized::Roll => "Rotation of the stylus along it's own axis",
+            DynamicSourceNormalized::TiltX => "Left-right tilt from vertical.",
+            DynamicSourceNormalized::TiltY => "Forward-backward tilt from vertical.",
+            DynamicSourceNormalized::Altitude => "Verticality of the pen relative to the surface.",
+            DynamicSourceNormalized::Azimuth => "Direction of tilt.",
+            DynamicSourceNormalized::Direction => "Stroke movement direction.",
+            DynamicSourceNormalized::StampRandom => "A random value per-stamp.",
+            DynamicSourceNormalized::StrokeRandom => "A random value per-stroke.",
+        }
+    }
+}
+/// Unnormalized Units of `[length] * [something]`, including where `something =
+/// 1`. These are separated because the different kinds of DPI relations
+/// influence how these are calculated depending on which length unit is used.
+#[derive(strum::IntoStaticStr, strum::EnumIter, Debug, PartialEq, Eq, Clone, Copy)]
+enum DynamicSourceUnnormalizedLengthNumerator {
+    Speed,
+    Distance,
+}
+impl DynamicSourceUnnormalizedLengthNumerator {
+    /// Just the end of the unit, without the `length` part.
+    fn unit_suffix(self) -> &'static str {
+        match self {
+            Self::Speed => "/s",
+            Self::Distance => "",
+        }
+    }
+}
+#[derive(Clone, Copy, strum::EnumIter, Default)]
+pub enum PhysicalUnit {
+    #[default]
+    Centimeter,
+    Inch,
+    Point,
+}
+impl PhysicalUnit {
+    fn per_centimeter(self) -> f32 {
+        match self {
+            Self::Point => 28.346_457,
+            Self::Inch => 2.54,
+            Self::Centimeter => 1.0,
+        }
+    }
+    fn unit(self) -> &'static str {
+        match self {
+            Self::Point => "pt",
+            Self::Inch => "in",
+            Self::Centimeter => "cm",
+        }
+    }
+}
+#[derive(Clone, Copy, strum::EnumIter)]
+pub enum LengthUnit {
+    /// Logical pixels, scale-factor aware. (e.g., if you render at twice the
+    /// scale factor, this will scale up 2x.)
+    LogicalPx,
+    /// Screen pixels, non-scale-factor aware. (e.g., if you render at twice the
+    /// scale factor, this will not scale up, thus becoming proportionally
+    /// smaller)
+    PhysicalPx,
+    /// Depends on the DPI of the document. Just centimeters times a constant.
+    Physical(PhysicalUnit),
+}
+impl LengthUnit {
+    fn unit(self) -> &'static str {
+        match self {
+            Self::LogicalPx => "px",
+            Self::PhysicalPx => "ppx",
+            Self::Physical(unit) => unit.unit(),
+        }
+    }
+}
+/// Unnormalized Units that do not involve length.
+#[derive(strum::IntoStaticStr, strum::EnumIter, Debug, PartialEq, Eq, Clone, Copy)]
+enum DynamicSourceUnnormalized {
+    Time,
+}
+impl DynamicSourceUnnormalized {
+    fn unit(self) -> &'static str {
+        match self {
+            Self::Time => "s",
+        }
+    }
+}
+struct CurveWithMax {
+    max: f32,
+    curve: CurveNormalized,
+}
+
+#[derive(Clone, Copy)]
+struct CurvePoint {
+    norm_x: f32,
+    norm_y: f32,
+}
+struct CurveNormalized {
+    min_y: f32,
+    max_y: f32,
+    // Always ordered by norm_x, always at least two elements. The first element
+    // will have norm_x = 0.0, the last will have norm_x = 1.0.
+    points: Vec<CurvePoint>,
+    dragged_idx: Option<usize>,
+}
+impl CurveNormalized {
+    const POINT_RADIUS_PX: f32 = 7.0;
+    fn new(min: f32, max: f32) -> Self {
+        Self {
+            min_y: min,
+            max_y: max,
+            points: vec![
+                CurvePoint {
+                    norm_x: 0.0,
+                    norm_y: 0.0,
+                },
+                CurvePoint {
+                    norm_x: 1.0,
+                    norm_y: 1.0,
+                },
+            ],
+            dragged_idx: None,
+        }
+    }
+    fn insert_and_drag(&mut self, norm_x: f32, norm_y: f32) {
+        match self
+            .points
+            .binary_search_by(|point| point.norm_x.total_cmp(&norm_x))
+        {
+            Ok(found_idx) => {
+                self.points[found_idx].norm_y = norm_y;
+                self.dragged_idx = Some(found_idx);
+            }
+            Err(would_be_idx) => {
+                self.points
+                    .insert(would_be_idx, CurvePoint { norm_x, norm_y });
+                self.dragged_idx = Some(would_be_idx);
+            }
+        }
+        let dragged_idx = self.dragged_idx.unwrap();
+        if dragged_idx == 0 {
+            self.points[dragged_idx].norm_x = 0.0;
+        } else if dragged_idx == self.points.len() - 1 {
+            self.points[dragged_idx].norm_x = 1.0;
+        }
+    }
+    fn show(
+        &mut self,
+        x_unit: DynamicSourceNormalized,
+        y_unit: &str,
+        ui: &mut egui::Ui,
+    ) -> egui::Response {
+        let width = ui.available_width();
+        let (rect, mut response) =
+            ui.allocate_at_least(egui::Vec2::splat(width), egui::Sense::click_and_drag());
+        if response.is_pointer_button_down_on() {
+            let pos = response.interact_pointer_pos().unwrap();
+            let mut norm_pos = (pos - rect.min) / rect.size();
+            norm_pos = norm_pos.clamp(egui::Vec2::ZERO, egui::Vec2::ONE);
+            norm_pos.y = 1.0 - norm_pos.y;
+
+            if let Some(dragged_idx) = self.dragged_idx {
+                // Remove, update, then re-insert. This way, the slice remains
+                // sorted.
+                let _ = self.points.remove(dragged_idx);
+                self.insert_and_drag(norm_pos.x, norm_pos.y);
+            } else {
+                // New click! Find which is grabbed.
+                for (i, point) in self.points.iter().enumerate() {
+                    let delta = egui::Vec2::new(point.norm_x, point.norm_y) - norm_pos;
+                    if (delta * rect.size()).length_sq()
+                        < Self::POINT_RADIUS_PX * Self::POINT_RADIUS_PX
+                    {
+                        // Grabbed this one!
+                        self.dragged_idx = Some(i);
+                        break;
+                    }
+                }
+                if self.dragged_idx.is_none() {
+                    // Didn't grab any, add one!
+                    self.insert_and_drag(norm_pos.x, norm_pos.y);
+                }
+            }
+            response.mark_changed();
+        } else {
+            self.dragged_idx = None;
+        }
+        if ui.will_discard() {
+            // Skip drawing, we've already done all the layout egui needs :3
+            return response;
+        }
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
+        for (i, point) in self.points.iter().enumerate() {
+            let pos = rect.min + egui::Vec2::new(point.norm_x, 1.0 - point.norm_y) * rect.size();
+            let is_dragged = self.dragged_idx == Some(i);
+            let color = ui.visuals().text_color();
+            if is_dragged {
+                painter.circle_filled(pos, Self::POINT_RADIUS_PX, color);
+            } else {
+                painter.circle_stroke(pos, Self::POINT_RADIUS_PX, egui::Stroke::new(2.0, color));
+            }
+        }
+        {
+            let text_height = ui.text_style_height(&egui::TextStyle::Small);
+            let font_id = egui::FontId::monospace(text_height);
+            let text_color = ui.visuals().weak_text_color();
+            painter.text(
+                rect.right_top(),
+                egui::Align2::RIGHT_TOP,
+                format!("{}{y_unit}", self.max_y),
+                font_id.clone(),
+                text_color,
+            );
+            painter.text(
+                rect.right_bottom(),
+                egui::Align2::RIGHT_BOTTOM,
+                format!("{}{y_unit}", self.min_y),
+                font_id.clone(),
+                text_color,
+            );
+            let labels = x_unit.domain_labels();
+            for (i, label) in labels.iter().enumerate() {
+                let norm_x = i as f32 / (labels.len() - 1) as f32;
+                let pos = egui::Pos2::new(norm_x * rect.width() + rect.min.x, rect.bottom());
+                let anchor = if i == 0 {
+                    egui::Align2::LEFT_BOTTOM
+                } else if i == labels.len() - 1 {
+                    egui::Align2::RIGHT_BOTTOM
+                } else {
+                    painter.line_segment(
+                        [
+                            egui::Pos2::new(pos.x, rect.bottom()),
+                            egui::Pos2::new(pos.x, rect.top()),
+                        ],
+                        // more semantically correct would be weak_bg, but
+                        // for some reason it's invisible on extreme_bg
+                        egui::Stroke::new(1.0, ui.visuals().window_fill),
+                    );
+                    egui::Align2::CENTER_BOTTOM
+                };
+                painter.text(pos, anchor, label, font_id.clone(), text_color);
+            }
+            if let Some(hover) = response.hover_pos() {
+                let norm_pos = if let Some(dragged_idx) = self.dragged_idx {
+                    let dragged = self.points[dragged_idx];
+                    egui::Vec2::new(dragged.norm_x, dragged.norm_y)
+                } else {
+                    (hover - rect.min) / rect.size()
+                };
+                let [min, max] = x_unit.range();
+                let human_readable_x_value = norm_pos.x * (max - min) + min;
+                painter.text(
+                    rect.left_top(),
+                    egui::Align2::LEFT_TOP,
+                    format!("{human_readable_x_value}"),
+                    font_id.clone(),
+                    text_color,
+                );
+            }
+        }
+        let points = self
+            .points
+            .iter()
+            .map(|point| rect.min + egui::Vec2::new(point.norm_x, 1.0 - point.norm_y) * rect.size())
+            .collect::<Vec<_>>();
+        painter.line(points, egui::Stroke::new(2.0, ui.visuals().text_color()));
+
+        response
+    }
+}
+
+#[derive(Copy, Clone, strum::EnumIter, Default)]
+pub enum DynamicCombinator {
+    #[default]
+    Multipy,
+    Add,
+    Min,
+    Max,
+    Width,
+    Average,
+}
+#[derive(Default)]
+pub struct CurveSetNormalized {
+    curves: HashMap<DynamicSourceNormalized, CurveNormalized>,
+}
+impl CurveSetNormalized {
+    fn show(&mut self, selected_source: &mut DynamicSourceNormalized, ui: &mut egui::Ui) {
+        egui::Panel::left("dynamic_sources_panel")
+            .resizable(false)
+            .show_inside(ui, |ui| {
+                for source in <DynamicSourceNormalized as strum::IntoEnumIterator>::iter() {
+                    ui.horizontal(|ui| {
+                        let exists = self.curves.contains_key(&source);
+                        let mut checked = exists;
+                        ui.checkbox(&mut checked, ());
+                        if checked != exists {
+                            if checked {
+                                self.curves.insert(source, CurveNormalized::new(0.0, 1.0));
+                                *selected_source = source;
+                            } else {
+                                self.curves.remove(&source);
+                            }
+                        }
+                        ui.selectable_value(selected_source, source, <&'static str>::from(source))
+                            .on_hover_text(source.description());
+                    });
+                }
+            });
+
+        ui.label(selected_source.description());
+        if let Some(curve) = self.curves.get_mut(selected_source) {
+            curve.show(*selected_source, "", ui);
+        }
+    }
+}
+pub struct NormalizedDynamic {
+    base: f32,
+    combinator: DynamicCombinator,
+    curves: CurveSetNormalized,
+}
+pub struct LengthDynamic {
+    unit: LengthUnit,
+    base: f32,
+    combinator: DynamicCombinator,
+}
+pub enum SpacingMode {
+    /// Expressed as a ratio of the resulting `size` after dynamics.
+    /// i.e. 1.0 = stamps perfectly side-by-side, 0.5 = 50% overlap, etc.
+    Ratio(f32),
+    /// Expressed as a regular dynamic.
+    Custom(LengthDynamic),
+}
+pub struct Dynamics {
+    size: LengthDynamic,
+    rotation: NormalizedDynamic,
+    offset: LengthDynamic,
+    flow: NormalizedDynamic,
+    spacing: SpacingMode,
+}
+pub enum StampKind {
+    Circle(CircleStamp),
+    Texture(TextureStamp),
+}
+impl Default for StampKind {
+    fn default() -> Self {
+        Self::Circle(CircleStamp::default())
+    }
+}
+impl StampKind {
+    fn show(&mut self, ui: &mut egui::Ui) {
+        egui::ComboBox::from_id_salt(ui.id())
+            .selected_text(match self {
+                StampKind::Circle(_) => "Circle",
+                StampKind::Texture(_) => "Texture",
+            })
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(matches!(self, StampKind::Circle(_)), "Circle")
+                    .clicked()
+                {
+                    *self = StampKind::Circle(CircleStamp::default());
+                }
+                if ui
+                    .selectable_label(matches!(self, StampKind::Texture(_)), "Texture")
+                    .clicked()
+                {
+                    *self = StampKind::Texture(TextureStamp::default());
+                }
+            });
+        match self {
+            StampKind::Circle(circle) => {
+                circle.show(ui);
+            }
+            StampKind::Texture(texture) => {
+                texture.show(ui);
+            }
+        }
+    }
+}
+pub struct TextureStamp {
+    // Imported texture handle, frees on drop!
+    texture: Option<egui::TextureHandle>,
+    uv_rect: egui::Rect,
+}
+impl TextureStamp {
+    fn show(&mut self, ui: &mut egui::Ui) {
+        if ui.button(super::GROUP_ICON).clicked() {
+            if let Some(file) = rfd::FileDialog::default().pick_file() {
+                let try_load = || -> anyhow::Result<egui::TextureHandle> {
+                    // `image` crate is probably not the choice here. It sweeps
+                    // a lot of details under the rug, like colorspaces.
+                    let image = image::open(file)?.to_rgba8();
+                    let manager = ui.tex_manager();
+                    let mut write = manager.write();
+
+                    let size = [image.width() as usize, image.height() as usize];
+
+                    // Create a reference-counted image out of it, refs = 1
+                    let texture_id = write.alloc(
+                        "Preview brush texture".to_owned(),
+                        egui::ImageData::Color(
+                            egui::ColorImage {
+                                pixels: image
+                                    .pixels()
+                                    .map(|rgba| {
+                                        egui::Color32::from_rgba_unmultiplied(
+                                            rgba.0[0], rgba.0[1], rgba.0[2], rgba.0[3],
+                                        )
+                                    })
+                                    .collect(),
+                                size,
+                                source_size: egui::Vec2 {
+                                    x: size[0] as f32,
+                                    y: size[1] as f32,
+                                },
+                            }
+                            .into(),
+                        ),
+                        egui::TextureOptions {
+                            magnification: egui::TextureFilter::Nearest,
+                            minification: egui::TextureFilter::Linear,
+                            wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                            mipmap_mode: None,
+                        },
+                    );
+
+                    drop(write);
+
+                    // This handle takes the only existing ref, dropping it destroys the image.
+                    Ok(egui::TextureHandle::new(manager, texture_id))
+                };
+
+                match try_load() {
+                    Ok(image) => self.texture = Some(image),
+                    Err(err) => log::error!("Failed to load image: {err}"),
+                }
+            }
+        }
+
+        if let Some(texture) = self.texture.as_ref() {
+            let width = ui.available_width();
+
+            uv_picker(
+                ui,
+                egui::Vec2::splat(width),
+                &mut self.uv_rect,
+                FULL_UV,
+                texture.id(),
+            );
+        }
+    }
+}
+impl Default for TextureStamp {
+    fn default() -> Self {
+        Self {
+            texture: None,
+            uv_rect: FULL_UV,
+        }
+    }
+}
+#[derive(Default)]
+pub struct CircleStamp {
+    smoothness: Option<f32>,
+}
+impl CircleStamp {
+    const DEFUALT_SMOOTHNESS: f32 = 1.0;
+    fn show(&mut self, ui: &mut egui::Ui) -> () {
+        let mut smoothed = self.smoothness.is_some();
+        ui.checkbox(&mut smoothed, "Smooth");
+        if smoothed {
+            self.smoothness = self.smoothness.or(Some(Self::DEFUALT_SMOOTHNESS));
+        } else {
+            self.smoothness = None;
+        }
+
+        let mut dont_care = Self::DEFUALT_SMOOTHNESS;
+        let smoothness_mut = self.smoothness.as_mut().unwrap_or(&mut dont_care);
+        ui.add_enabled(
+            smoothed,
+            egui::Slider::new(smoothness_mut, 0.0..=10.0).clamping(egui::SliderClamping::Never),
+        );
+    }
 }
 
 pub struct CreationOutput {
@@ -20,23 +559,21 @@ pub struct CreationOutput {
 }
 pub struct CreationModal {
     tab: CreationTab,
-    // Imported texture handle, frees on drop!
-    texture: Option<egui::TextureHandle>,
-    uv_rect: egui::Rect,
     name: String,
-    spacing_proportion: f32,
+    stamp: StampKind,
+    test_curves: CurveSetNormalized,
 }
 impl Default for CreationModal {
     fn default() -> Self {
         Self {
             tab: CreationTab::default(),
-            texture: None,
-            uv_rect: FULL_UV,
             name: "New Brush".to_owned(),
-            spacing_proportion: 5.0,
+            stamp: StampKind::default(),
+            test_curves: CurveSetNormalized::default(),
         }
     }
 }
+/*
 impl super::Modal for CreationModal {
     type Cancel = ();
     type Confirm = CreationOutput;
@@ -45,90 +582,66 @@ impl super::Modal for CreationModal {
     fn do_ui(
         &mut self,
         ui: &mut egui::Ui,
-    ) -> super::modal::Response<Self::Cancel, Self::Confirm, Self::Error> {
+    ) -> super::modals::Response<Self::Cancel, Self::Confirm, Self::Error> {
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, CreationTab::Settings, "Settings");
-            ui.selectable_value(&mut self.tab, CreationTab::Texture, "Texture");
+            for tab in <CreationTab as strum::IntoEnumIterator>::iter() {
+                // Can't use selectable label here, as it incorrectly checks the
+                // fields of the enum for equality too!
+                let same_discriminant =
+                    std::mem::discriminant(&tab) == std::mem::discriminant(&self.tab);
+                if ui
+                    .selectable_label(same_discriminant, <&'static str>::from(tab))
+                    .clicked()
+                {
+                    self.tab = tab;
+                }
+            }
         });
         ui.separator();
+        let cancel_response = egui::panel::TopBottomPanel::new(
+            egui::panel::TopBottomSide::Bottom,
+            egui::Id::new("brush-cancel-panel"),
+        )
+        .show_inside(ui, |ui| {
+            if ui.button("Cancel").clicked_or_escape() {
+                super::modals::Response::Cancel(())
+            } else {
+                super::modals::Response::Continue
+            }
+        })
+        .inner;
+        if !matches!(cancel_response, super::modals::Response::Continue) {
+            return cancel_response;
+        }
 
         match self.tab {
             CreationTab::Settings => {
                 ui.text_edit_singleline(&mut self.name);
-                ui.add(
-                    egui::Slider::new(&mut self.spacing_proportion, 2.0..=100.0)
-                        .text("Spacing")
-                        .clamping(egui::SliderClamping::Edits)
-                        .suffix("%"),
-                );
             }
             CreationTab::Texture => {
-                if ui.button(super::GROUP_ICON).clicked() {
-                    if let Some(file) = rfd::FileDialog::default().pick_file() {
-                        let try_load = || -> anyhow::Result<egui::TextureHandle> {
-                            // `image` crate is probably not the choice here. It sweeps a lot of details under the rug and doesn't
-                            // exactly do those details justice lol (colorspaces are wayy off)
-                            let image = image::open(file)?.to_rgba8();
-                            let manager = ui.ctx().tex_manager();
-                            let mut write = manager.write();
-
-                            let size = [image.width() as usize, image.height() as usize];
-
-                            // Create a reference-counted image out of it, refs = 1
-                            let texture_id = write.alloc(
-                                "Preview brush texture".to_owned(),
-                                egui::ImageData::Color(
-                                    egui::ColorImage {
-                                        pixels: image
-                                            .pixels()
-                                            .map(|rgba| {
-                                                egui::Color32::from_rgba_unmultiplied(
-                                                    rgba.0[0], rgba.0[1], rgba.0[2], rgba.0[3],
-                                                )
-                                            })
-                                            .collect(),
-                                        size,
-                                        source_size: egui::Vec2 {
-                                            x: size[0] as f32,
-                                            y: size[1] as f32,
-                                        },
-                                    }
-                                    .into(),
-                                ),
-                                egui::TextureOptions {
-                                    magnification: egui::TextureFilter::Nearest,
-                                    minification: egui::TextureFilter::Linear,
-                                    wrap_mode: egui::TextureWrapMode::ClampToEdge,
-                                    mipmap_mode: None,
-                                },
-                            );
-
-                            drop(write);
-
-                            // This handle takes the only existing ref, dropping it destroys the image.
-                            Ok(egui::TextureHandle::new(manager, texture_id))
-                        };
-
-                        match try_load() {
-                            Ok(image) => self.texture = Some(image),
-                            Err(err) => log::error!("Failed to load image: {err}"),
-                        }
+                self.stamp.show(ui);
+            }
+            CreationTab::Dynamics(mut selected_dynamic, mut selected_source) => {
+                egui::SidePanel::new(
+                    egui::panel::Side::Left,
+                    egui::Id::new("selected_dynamic_panel"),
+                )
+                .frame(egui::Frame::new().fill(ui.visuals().extreme_bg_color))
+                .resizable(false)
+                .show_inside(ui, |ui| {
+                    for dynamic in <DynamicDestination as strum::IntoEnumIterator>::iter() {
+                        ui.selectable_value(
+                            &mut selected_dynamic,
+                            dynamic,
+                            <&'static str>::from(dynamic),
+                        );
                     }
-                }
-
-                if let Some(texture) = self.texture.as_ref() {
-                    let width = ui.available_width();
-
-                    uv_picker(
-                        ui,
-                        egui::Vec2::splat(width),
-                        &mut self.uv_rect,
-                        FULL_UV,
-                        texture.id(),
-                    );
-                }
+                });
+                self.test_curves.show(&mut selected_source, ui);
+                self.tab = CreationTab::Dynamics(selected_dynamic, selected_source);
             }
         }
+        /*
         if let Some(texture) = self.texture.as_ref() {
             let width = ui.available_width();
             let height = width / 3.0;
@@ -146,15 +659,11 @@ impl super::Modal for CreationModal {
             );
             painter.rect_filled(response.rect, 0.0, egui::Color32::BLACK);
             painter.add(egui::Shape::mesh(mesh));
-        }
-        ui.separator();
-        if ui.button("Cancel").clicked_or_escape() {
-            super::modal::Response::Cancel(())
-        } else {
-            super::modal::Response::Continue
-        }
+        }*/
+        super::modals::Response::Continue
     }
 }
+    */
 
 enum RGBAChannel {
     R,

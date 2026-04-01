@@ -2,8 +2,21 @@
 resolver = "2"
 members = [
     "fuzzpaint",
-    "fuzzpaint-core"
+    "fuzzpaint-connection",
+    "fuzzpaint-core",
+    "fuzzpaint-doc",
+    "fuzzpaint-io",
+    "fuzzpaint-logger",
+    "fuzzpaint-render",
+    "fuzzpaint-types",
+    "fuzzpaint-ui",
 ]
+
+[workspace.dependencies]
+bytemuck = { version = "1.24.0", features = ["derive"] }
+strum = { version = "0.27.2", features = ["derive"] }
+thiserror = "2.0.17"
+ultraviolet = { version = "0.10.0", features = ["bytemuck", "int"] }
 
 [profile.profiling]
 inherits = "release"

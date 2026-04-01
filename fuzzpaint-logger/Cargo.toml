@@ -1,0 +1,9 @@
+[package]
+name = "fuzzpaint-logger"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = "0.4.29"
+parking_lot = "0.12.5"
+time = { version = "0.3.47", default-features = false, features = ["std"] }

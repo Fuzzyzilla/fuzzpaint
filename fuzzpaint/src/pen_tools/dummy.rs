@@ -12,10 +12,8 @@ impl super::PenTool for Dummy {
     async fn process(
         &mut self,
         _view_transform: &super::ViewInfo,
-        _stylus_input: crate::stylus_events::StylusEventFrame,
-        _actions: &crate::actions::ActionFrame,
+        _stylus_input: crate::window::stylus_events::StylusEventFrame,
         _tool_output: &mut super::ToolStateOutput,
-        _render_output: &mut super::ToolRenderOutput,
     ) {
         // Do nothing.
         // Default behavior of tool_output should handle default action transitions.

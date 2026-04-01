@@ -212,22 +212,21 @@ impl Renderer {
         }
 
         for (collection, stroke_changes) in stroke_changes {
-            let (graph_id, leaf) = changes
-                .graph()
-                .iter()
-                .find_map(|(id, data)| {
-                    // If this node is a stroke layer with our same collection ID, then we found it!
-                    let this_leaf = data.leaf().filter(|leaf| match leaf {
-                        graph::LeafType::StrokeLayer {
-                            collection: this_leaf,
-                            ..
-                        } => collection == *this_leaf,
-                        _ => false,
-                    });
+            // Find the leaf that uses this stroke collection: (May be none if
+            // it was deleted)
+            let Some((graph_id, leaf)) = changes.graph().iter().find_map(|(id, data)| {
+                let this_leaf = data.leaf().filter(|leaf| match leaf {
+                    graph::LeafType::StrokeLayer {
+                        collection: this_leaf,
+                        ..
+                    } => collection == *this_leaf,
+                    _ => false,
+                });
 
-                    this_leaf.map(|leaf| (id, leaf))
-                })
-                .ok_or_else(|| anyhow::anyhow!("delta references non-existent node"))?;
+                this_leaf.map(|leaf| (id, leaf))
+            }) else {
+                continue;
+            };
 
             let graph::LeafType::StrokeLayer {
                 blend,
@@ -371,7 +370,7 @@ impl Engines {
                     let color = source.get().left_or_else(|pal_idx| {
                         palette
                             .get(pal_idx)
-                            .unwrap_or(fuzzpaint_core::color::Color::TRANSPARENT)
+                            .unwrap_or(fuzzpaint_types::color::Color::TRANSPARENT)
                     });
                     builder.then_blend(blender::BlendImageSource::SolidColor(color), *blend)?;
                 }
@@ -549,10 +548,10 @@ impl Engines {
             Which(B),
         }
         impl<
-                'a,
-                A: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
-                B: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
-            > Iterator for EitherIter<'a, A, B>
+            'a,
+            A: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
+            B: Iterator<Item = &'a state::stroke_collection::ImmutableStroke>,
+        > Iterator for EitherIter<'a, A, B>
         {
             type Item = &'a state::stroke_collection::ImmutableStroke;
             fn next(&mut self) -> Option<Self::Item> {
@@ -575,7 +574,7 @@ impl Engines {
             let color_modulate = stroke.brush.color_modulate.get().left_or_else(|idx| {
                 palette
                     .get(idx)
-                    .unwrap_or(fuzzpaint_core::color::Color::BLACK)
+                    .unwrap_or(fuzzpaint_types::color::Color::BLACK)
             });
             fuzzpaint_core::state::stroke_collection::ImmutableStroke {
                 brush: state::StrokeBrushSettings {
@@ -674,16 +673,13 @@ impl Engines {
                     outer_transform,
                     ..
                 }) => {
-                    let data =
-                        document_data
-                            .graph_render_data
-                            .leaves
-                            .get(&id)
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
+                    let data = document_data.graph_render_data.leaves.get(&id).ok_or_else(
+                        || {
+                            anyhow::anyhow!(
                                 "Expected image to be created by allocate_prune_graph for {id:?}"
                             )
-                            })?;
+                        },
+                    )?;
                     let strokes =
                         reader
                             .stroke_collections()
@@ -706,16 +702,13 @@ impl Engines {
                 Some(LeafType::Text {
                     text, px_per_em, ..
                 }) => {
-                    let data =
-                        document_data
-                            .graph_render_data
-                            .leaves
-                            .get(&id)
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
+                    let data = document_data.graph_render_data.leaves.get(&id).ok_or_else(
+                        || {
+                            anyhow::anyhow!(
                                 "Expected image to be created by allocate_prune_graph for {id:?}"
                             )
-                            })?;
+                        },
+                    )?;
                     fences.push(self.text_layer(text, *px_per_em, data)?);
                 }
                 // No rendering or lazily rendered.
@@ -735,7 +728,7 @@ impl Engines {
     fn clear(
         context: &crate::render_device::RenderContext,
         image: &LeafRenderData,
-        color: fuzzpaint_core::color::Color,
+        color: fuzzpaint_types::color::Color,
     ) -> anyhow::Result<vk::FenceSignalFuture<Box<dyn GpuFuture>>> {
         let mut command_buffer = vk::AutoCommandBufferBuilder::primary(
             context.allocators().command_buffer(),
@@ -891,62 +884,35 @@ async fn render_changes(
     renderer: Arc<crate::render_device::RenderContext>,
     document_preview: Arc<crate::document_viewport_proxy::Proxy>,
 ) -> anyhow::Result<()> {
-    // Sync -> Async bridge for change notification. Bleh..
-    let (send, mut changes_recv) = tokio::sync::mpsc::unbounded_channel();
-    let exit_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let exit_flag_move = exit_flag.clone();
-    let _thread = std::thread::spawn(move || {
-        let mut change_listener = crate::global::provider().change_listener();
-        loop {
-            // Parent requested child exit.
-            if exit_flag_move.load(std::sync::atomic::Ordering::Relaxed) {
-                return;
-            }
-            // Poll every so often, so an assertion of the exit flag is not missed.
-            match change_listener.recv_timeout(std::time::Duration::from_millis(250)) {
-                Ok(change) => {
-                    // Got a change. Broadcast this one (and all others that are ready now)
-                    if send.send(change.id()).is_err() {
-                        // Disconnected!
-                        return;
-                    }
-                    while let Ok(change) = change_listener.try_recv() {
-                        if send.send(change.id()).is_err() {
-                            // Disconnected!
-                            return;
-                        }
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-            }
-        }
-    });
-    // Drop order - this will run before thread is joined, otherwise deadlock occurs!
-    defer::defer!(exit_flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    let mut change_listener = crate::global::provider().change_listener();
 
     let mut changes: Vec<_> = crate::global::provider().document_iter().collect();
     let mut renderer = Renderer::new(renderer)?;
 
     loop {
-        let changes = async {
-            // Already has some! Report immediately.
-            if !changes.is_empty() {
-                return Some(&mut changes);
+        if changes.is_empty() {
+            match change_listener.recv().await {
+                Ok(change) => {
+                    changes.push(change.id());
+                    while let Ok(change) = change_listener.try_recv() {
+                        changes.push(change.id());
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // We lost a change!
+                    // Clear out all messages
+                    while change_listener.try_recv().is_ok() {}
+                    // Mark all as changed.
+                    changes.clear();
+                    // Important to do this *after* draining the
+                    // change_listener, otherwise there's a logical race (new
+                    // doc could be added between this extend and the channel
+                    // drain)
+                    changes.extend(crate::global::provider().document_iter());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
             }
-            let first = changes_recv.recv().await?;
-            changes.push(first);
-            // Collect all others that are available without blocking as well:
-            while let Ok(next) = changes_recv.try_recv() {
-                changes.push(next);
-            }
-            Some(&mut changes)
-        };
-
-        let Some(changes) = changes.await else {
-            // Channel closed
-            return Ok(());
-        };
+        }
         // Implicitly handles deletion - when the renderer goes to fetch changes,
         // it will see that the document has closed.
         //renderer.render(&changed)?;
@@ -968,17 +934,9 @@ async fn render_changes(
 }
 pub async fn render_worker(
     renderer: Arc<crate::render_device::RenderContext>,
-    request_reciever: tokio::sync::mpsc::Receiver<requests::RenderRequest>,
     document_preview: Arc<crate::document_viewport_proxy::Proxy>,
 ) -> anyhow::Result<()> {
-    tokio::try_join!(
-        async {
-            requests::handler(request_reciever).await;
-            Ok(())
-        },
-        render_changes(renderer, document_preview),
-    )
-    .map(|_| ())
+    render_changes(renderer, document_preview).await
 }
 
 /// Data managed by the renderer for a layer leaf, e.g. Stroke layers, text layers, ect.
@@ -995,7 +953,6 @@ mod stroke_renderer {
 
     use crate::{renderer::gpu_tess, vulkano_prelude::*};
     use anyhow::Result as AnyResult;
-    use cgmath::Zero;
     use fuzzpaint_core::state;
     use std::sync::Arc;
     mod vert {
@@ -1013,9 +970,12 @@ mod stroke_renderer {
 
     pub struct StrokeLayerRenderer {
         context: Arc<crate::render_device::RenderContext>,
-        texture_descriptors: fuzzpaint_core::brush::UniqueIDMap<Arc<vk::PersistentDescriptorSet>>,
+        texture_descriptors:
+            fuzzpaint_types::resource::UniqueIDMap<Arc<vk::PersistentDescriptorSet>>,
         gpu_tess: super::gpu_tess::GpuStampTess,
         pipeline: Arc<vk::GraphicsPipeline>,
+        // Array of 1D R8 textures, used for brush curve LUTs.
+        // curve_luts: Arc<vk::Image>,
     }
     impl StrokeLayerRenderer {
         pub fn new(context: Arc<crate::render_device::RenderContext>) -> AnyResult<Self> {
@@ -1308,9 +1268,12 @@ mod stroke_renderer {
                 pipeline,
                 gpu_tess: tess,
                 texture_descriptors: [
-                    (fuzzpaint_core::brush::UniqueID([0; 32]), descriptor_set_a),
                     (
-                        fuzzpaint_core::brush::UniqueID([
+                        fuzzpaint_types::resource::UniqueID([0; 32]),
+                        descriptor_set_a,
+                    ),
+                    (
+                        fuzzpaint_types::resource::UniqueID([
                             1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                             0, 0, 0, 0, 0, 0, 0, 0,
                         ]),
@@ -1414,33 +1377,35 @@ mod stroke_renderer {
             mut clear: bool,
         ) -> AnyResult<()> {
             // Apply projection
-            let mut matrix = cgmath::Matrix4::from_scale(2.0 / crate::DOCUMENT_DIMENSION as f32);
-            matrix.y *= -1.0;
-            matrix.w.x -= 1.0;
-            matrix.w.y += 1.0;
+            let mut matrix = ultraviolet::Mat4::from_scale(2.0 / crate::DOCUMENT_DIMENSION as f32);
+            matrix.cols[1] *= -1.0;
+            matrix.cols[3].x -= 1.0;
+            matrix.cols[3].y += 1.0;
 
             // Apply outer transform
             matrix = matrix
-                * cgmath::Matrix4 {
-                    x: cgmath::Vector4 {
-                        x: outer_transform.elements[0][0],
-                        y: outer_transform.elements[0][1],
-                        z: 0.0,
-                        w: 0.0,
-                    },
-                    y: cgmath::Vector4 {
-                        x: outer_transform.elements[1][0],
-                        y: outer_transform.elements[1][1],
-                        z: 0.0,
-                        w: 0.0,
-                    },
-                    z: cgmath::Vector4::zero(),
-                    w: cgmath::Vector4 {
-                        x: outer_transform.elements[2][0],
-                        y: outer_transform.elements[2][1],
-                        z: 0.0,
-                        w: 1.0,
-                    },
+                * ultraviolet::Mat4 {
+                    cols: [
+                        ultraviolet::Vec4 {
+                            x: outer_transform.elements[0][0],
+                            y: outer_transform.elements[0][1],
+                            z: 0.0,
+                            w: 0.0,
+                        },
+                        ultraviolet::Vec4 {
+                            x: outer_transform.elements[1][0],
+                            y: outer_transform.elements[1][1],
+                            z: 0.0,
+                            w: 0.0,
+                        },
+                        ultraviolet::Vec4::zero(),
+                        ultraviolet::Vec4 {
+                            x: outer_transform.elements[2][0],
+                            y: outer_transform.elements[2][1],
+                            z: 0.0,
+                            w: 1.0,
+                        },
+                    ],
                 };
 
             let mut batch = super::stroke_batcher::StrokeBatcher::new(
@@ -1492,7 +1457,7 @@ mod stroke_renderer {
                 };
 
                 let mut sources = &sources[..];
-                let mut next_indirects_by_brush_id = || -> Option<(fuzzpaint_core::brush::UniqueID, vk::Subbuffer<[vulkano::command_buffer::DrawIndirectCommand]>)> {
+                let mut next_indirects_by_brush_id = || -> Option<(fuzzpaint_types::resource::UniqueID, vk::Subbuffer<[vulkano::command_buffer::DrawIndirectCommand]>)> {
                     let id = sources.first()?.brush.brush;
                     let first_differ = sources[1..].iter().position(|source| source.brush.brush != id);
 

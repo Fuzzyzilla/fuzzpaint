@@ -1,0 +1,45 @@
+[package]
+name = "fuzzpaint-connection"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fuzzpaint-doc = { path = "../fuzzpaint-doc" }
+fuzzpaint-types = { path = "../fuzzpaint-types" }
+bitcode = "0.6.9"
+log = "0.4.29"
+# Tokio is smoller than smol (probably cuz more eyes on it to optimize)
+# It has a worse (more-implicit, panick-y) API tho :V
+# Thas okay because we aggressively keep it compartmentalized.
+tokio = { version = "1.49.0", optional = true }
+snow = {
+    version = "0.10.0",
+    optional = true,
+    default-features = false,
+    # FIXME: "std" feature is usable but accidentally implies `ring` dependency.
+    # This is fixed in the current main branch, but not published.
+    features = [
+        "use-blake2", "use-curve25519", "use-getrandom", "use-chacha20poly1305"
+    ],
+}
+
+bytemuck = { workspace = true }
+
+[features]
+default = ["client", "server", "tcp", "channel"]
+client = []
+server = []
+
+# TCP-based connection.
+tcp = ["dep:tokio", "tokio/net", "tokio/io-util", "dep:snow"]
+
+# A channel-based connection for a server and client within the same process.
+channel = ["dep:tokio", "tokio/sync"]
+
+# An interprocess-channel-based connection, using unidirectional shared mem to
+# share blobs in an insulated manner.
+# ipc-shm = []
+
+[dev-dependencies]
+# Needs a runtime and `join` for some tests.
+tokio = { version = "1.49.0", features = ["rt", "macros"] }

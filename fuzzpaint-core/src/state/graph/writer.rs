@@ -39,7 +39,7 @@ impl<'a, Write: CommandWrite<Command>> GraphWriter<'a, Write> {
     pub fn change_blend(
         &mut self,
         target: super::AnyID,
-        to: crate::blend::Blend,
+        to: fuzzpaint_types::blend::Blend,
     ) -> Result<(), TargetError> {
         // Get node, check it's not deleted
         let node = self

@@ -1,6 +1,6 @@
 //! # Brushes and Brush textures
 
-use crate::brush::{self, UniqueID, UniqueIDMap};
+use fuzzpaint_types::resource::{UniqueID, UniqueIDMap};
 
 /// Metadata about *this installation* of a brush/texture resource.
 pub struct RetainedMetadata {
@@ -43,7 +43,9 @@ impl Brushes {
         let id = blake3::hash(DEFAULT);
 
         let mut this = Self::empty();
-        this.primary.textures.insert(id.into(), DEFAULT);
+        this.primary
+            .textures
+            .insert(UniqueID(*id.as_bytes()), DEFAULT);
 
         this
     }
